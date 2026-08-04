@@ -16,7 +16,9 @@ use gbuild_core::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(20);
+// Empirical PTY trials found 0-1ms always coalesced the Enter byte with short
+// content and 2ms was flaky; 3ms+ was reliable. Keep a small safety margin.
+const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(5);
 
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
@@ -802,7 +804,7 @@ impl ProcessRegistry {
         self.require(process_id)
     }
 
-    /// Type content and press Enter as distinct PTY writes.
+    /// Queue content and Enter as distinct, ordered PTY writes.
     ///
     /// Raw-mode TUIs use burst boundaries to distinguish pasted content from
     /// key presses. Keeping CR out of the content write prevents a short prompt
@@ -812,17 +814,22 @@ impl ProcessRegistry {
         process_id: ProcessId,
         content: &[u8],
     ) -> RegistryResult<Process> {
+        self.submit_input_with_delay(process_id, content, SUBMIT_KEY_DELAY)
+    }
+
+    fn submit_input_with_delay(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+        key_delay: Duration,
+    ) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let hosted = self
             .running
-            .get_mut(&process_id)
+            .get(&process_id)
             .ok_or(RegistryError::NotRunning(process_id))?;
         hosted
-            .write_all(content)
-            .and_then(|()| {
-                std::thread::sleep(SUBMIT_KEY_DELAY);
-                hosted.write_all(b"\r")
-            })
+            .submit_input(content, key_delay)
             .map_err(|error| RegistryError::Pty {
                 process_id,
                 message: error.to_string(),
@@ -1114,7 +1121,7 @@ fn ascii_case_insensitive_matches(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::thread;
+    use std::{thread, time::Instant};
 
     use gbuild_core::{AgentTool, ProcessSource, Project, attention::AttentionState};
 
@@ -1169,6 +1176,61 @@ mod tests {
         assert_eq!(signal_number("Terminated: 15"), Some(15));
         assert_eq!(signal_number("Killed"), Some(9));
         assert_eq!(signal_number("unknown"), None);
+    }
+
+    #[test]
+    fn submit_input_does_not_wait_for_the_pty_key_boundary() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/submit-registry-test".into(),
+                name: "submit".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
+            .expect("create process registry");
+        registry
+            .create(Process {
+                id: 20,
+                project_id: 1,
+                kind: ProcessKind::Terminal,
+                name: "input-target".into(),
+                command: Some("sleep 30".into()),
+                working_dir: "/tmp".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+            })
+            .unwrap();
+        registry.start(20).unwrap();
+
+        let started = Instant::now();
+        registry
+            .submit_input_with_delay(20, b"queued", Duration::from_millis(250))
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(125),
+            "registry remained blocked for {:?}",
+            started.elapsed()
+        );
+        // A second registry operation is immediately available while the
+        // process-local worker waits to write Enter.
+        assert_eq!(registry.get(20).unwrap().status, ProcessStatus::Running);
+        registry.stop(20).unwrap();
     }
 
     #[test]

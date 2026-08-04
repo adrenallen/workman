@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -324,13 +324,20 @@ pub struct PtyProcess {
     gbuild_process_id: i64,
     pid: u32,
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
+    writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
+    submission_tx: Option<mpsc::Sender<PtySubmission>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     exit_status: Option<ExitStatus>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
     attention: AttentionTracker,
     reader_thread: Option<JoinHandle<()>>,
+    submission_thread: Option<JoinHandle<()>>,
+}
+
+struct PtySubmission {
+    content: Vec<u8>,
+    key_delay: Duration,
 }
 
 impl PtyProcess {
@@ -396,18 +403,35 @@ impl PtyProcess {
                 return Err(error).context("spawn PTY output reader");
             }
         };
+        let writer = Arc::new(Mutex::new(writer));
+        let submission_writer = Arc::clone(&writer);
+        let (submission_tx, submission_rx) = mpsc::channel();
+        let submission_thread = match thread::Builder::new()
+            .name(format!("gbuild-pty-{}-input", options.process_id))
+            .spawn(move || process_submissions(submission_writer, submission_rx))
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("spawn PTY input worker");
+            }
+        };
 
         Ok(Self {
             gbuild_process_id: options.process_id,
             pid,
             master: Some(pair.master),
             writer: Some(writer),
+            submission_tx: Some(submission_tx),
             child: Some(child),
             exit_status: None,
             raw_output,
             terminal_output,
             attention,
             reader_thread: Some(reader_thread),
+            submission_thread: Some(submission_thread),
         })
     }
 
@@ -445,10 +469,34 @@ impl PtyProcess {
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         let writer = self
             .writer
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer is closed"))?;
+        let mut writer = writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         writer.write_all(bytes)?;
         writer.flush()
+    }
+
+    /// Queue content followed by Enter as one ordered per-process submission.
+    ///
+    /// The input worker owns the boundary delay, so callers do not block while
+    /// the terminal distinguishes pasted content from the Enter keypress.
+    pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
+        if self.writer.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "PTY writer is closed",
+            ));
+        }
+        self.submission_tx
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))?
+            .send(PtySubmission {
+                content: content.to_vec(),
+                key_delay,
+            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
     }
 
     /// Resize the PTY, causing the kernel to deliver SIGWINCH as appropriate.
@@ -575,9 +623,33 @@ impl Drop for PtyProcess {
 
         // Closing these handles releases the PTY. The reader owns a cloned fd;
         // detaching avoids a potentially unbounded join if a child escaped.
+        drop(self.submission_tx.take());
         drop(self.writer.take());
         drop(self.master.take());
         drop(self.reader_thread.take());
+        drop(self.submission_thread.take());
+    }
+}
+
+fn process_submissions(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    submissions: mpsc::Receiver<PtySubmission>,
+) {
+    for submission in submissions {
+        let mut writer = writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = writer
+            .write_all(&submission.content)
+            .and_then(|()| writer.flush())
+            .and_then(|()| {
+                thread::sleep(submission.key_delay);
+                writer.write_all(b"\r")
+            })
+            .and_then(|()| writer.flush());
+        if result.is_err() {
+            break;
+        }
     }
 }
 
@@ -753,6 +825,40 @@ mod tests {
             "TERM trap should exit cleanly: {status:?}"
         );
         wait_for_output(&process, b"cleanup-complete");
+    }
+
+    #[test]
+    fn submission_queue_is_nonblocking_and_preserves_per_process_order() {
+        let command = r#"stty raw -echo; printf 'READY\r\n'; exec perl -e '$|=1; my $message=""; while (1) { my $count = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($count) && $count > 0; for my $character (split //, $chunk) { if ($character eq "\r") { print "MSG:$message\r\n"; exit 0 if $message eq "second"; $message = ""; } else { $message .= $character; } } }'"#;
+        let mut process = PtyProcess::spawn(PtySpawnOptions::new(77, "token", command)).unwrap();
+        wait_for_output(&process, b"READY");
+
+        // A deliberately large boundary makes a synchronous implementation
+        // obvious while keeping the test fast. Both submissions must enqueue
+        // immediately and the process-local worker must serialize them.
+        let started = Instant::now();
+        process
+            .submit_input(b"first", Duration::from_millis(250))
+            .unwrap();
+        process
+            .submit_input(b"second", Duration::from_millis(250))
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(125),
+            "submission enqueue unexpectedly blocked for {:?}",
+            started.elapsed()
+        );
+
+        let output = wait_for_output(&process, b"MSG:second");
+        let output = String::from_utf8_lossy(&output);
+        let first = output.find("MSG:first").expect("first submission output");
+        let second = output.find("MSG:second").expect("second submission output");
+        assert!(first < second, "submissions were reordered: {output}");
+        assert!(
+            !output.contains("MSG:firstsecond"),
+            "submissions interleaved"
+        );
+        process.terminate(Duration::from_millis(50)).unwrap();
     }
 
     #[test]
