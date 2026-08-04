@@ -164,9 +164,19 @@ async fn all_cli_commands_drive_a_real_daemon() {
 
     let setup = daemon.output(&["mcp-setup"]).await;
     let setup = String::from_utf8_lossy(&setup.stdout);
-    assert!(setup.starts_with("claude mcp add --transport http gbuild "));
+    assert!(setup.starts_with("Claude Code\n-----------\nclaude mcp add --transport http gbuild "));
+    assert!(setup.contains("Codex\n-----\n"));
+    assert!(setup.contains("Gemini CLI\n----------\n"));
+    assert!(setup.contains("OpenCode\n--------\n"));
+    assert!(setup.contains("Generic\n-------\n"));
     assert!(setup.contains(&format!("http://127.0.0.1:{}/mcp", daemon.discovery.port)));
     assert!(setup.contains(&daemon.discovery.token));
+
+    let codex_setup = daemon.output(&["mcp-setup", "--client", "codex"]).await;
+    let codex_setup = String::from_utf8_lossy(&codex_setup.stdout);
+    assert!(codex_setup.contains("[mcp_servers.gbuild]"));
+    assert!(codex_setup.contains("env_http_headers"));
+    assert!(!codex_setup.contains("Claude Code\n"));
 
     let up = daemon.output(&["up"]).await;
     assert!(String::from_utf8_lossy(&up.stdout).contains("Started 1 command"));

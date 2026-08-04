@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { McpConnectionInfo } from '../settings';
+  import type { McpClientId, McpConnectionInfo } from '../settings';
   import CopyField from './CopyField.svelte';
 
   interface Props {
@@ -7,6 +7,10 @@
   }
 
   let { connection }: Props = $props();
+  let selected = $state<McpClientId>('claude');
+  let activeSetup = $derived(
+    connection.setups.find((setup) => setup.client === selected) ?? connection.setups[0]
+  );
   let maskedToken = $derived(maskToken(connection.token));
 
   function maskToken(token: string): string {
@@ -20,52 +24,84 @@
     <div class="card-icon" aria-hidden="true">M</div>
     <div>
       <span class="eyebrow">Model context protocol</span>
-      <h2 id="mcp-card-title">Connect Claude Code</h2>
-      <p>One authenticated local endpoint gives agents access to this gbuild daemon.</p>
+      <h2 id="mcp-card-title">Connect your agent</h2>
+      <p>Choose a client and copy the setup it understands. Every recipe targets this local daemon.</p>
     </div>
-    <span class="availability"><i aria-hidden="true"></i>Local only</span>
+    <span class="availability"><i aria-hidden="true"></i>Streamable HTTP</span>
   </header>
 
-  <div class="handshake" aria-label="Connection path">
-    <span>Claude Code</span><i aria-hidden="true"></i><span>127.0.0.1</span><i aria-hidden="true"></i><span>gbuild MCP</span>
-  </div>
+  {#if activeSetup}
+    <div class="handshake" aria-label="Connection path">
+      <strong>{activeSetup.label}</strong><i aria-hidden="true"></i><span>127.0.0.1</span><i aria-hidden="true"></i><span>gbuild MCP</span>
+    </div>
 
-  <div class="connection-fields">
-    <CopyField label="Endpoint" value={connection.endpoint} />
-    <CopyField
-      label="Bearer token"
-      value={connection.token}
-      displayValue={maskedToken}
-      sensitive
-    />
-    <div class="command-field">
+    <div class="client-switch" aria-label="MCP client">
+      {#each connection.setups as setup (setup.client)}
+        <button
+          type="button"
+          class:active={selected === setup.client}
+          aria-pressed={selected === setup.client}
+          onclick={() => (selected = setup.client)}
+        >
+          {setup.label}
+        </button>
+      {/each}
+    </div>
+
+    <div class="connection-overview">
+      <CopyField label="Endpoint" value={connection.endpoint} />
       <CopyField
-        label="Ready-to-paste command"
-        value={connection.claude_command}
-        multiline
+        label="Bearer token"
+        value={connection.token}
+        displayValue={maskedToken}
         sensitive
       />
-      <p>Paste this command into a shell once. It registers the endpoint and authorization header together.</p>
     </div>
-  </div>
+
+    <div class="recipe">
+      <header>
+        <div>
+          <span class="recipe-kicker">Setup for</span>
+          <h3>{activeSetup.label}</h3>
+        </div>
+        <p>{activeSetup.description}</p>
+      </header>
+      <div class="recipe-fields">
+        {#each activeSetup.fields as field (`${activeSetup.client}-${field.label}`)}
+          <div
+            class:wide={field.format !== 'text' ||
+              (activeSetup.client === 'generic' && field.label === 'Header value')}
+            class="recipe-field"
+          >
+            <CopyField
+              label={field.label}
+              value={field.value}
+              multiline={field.format !== 'text' || field.value.includes('\n')}
+              sensitive={field.sensitive}
+            />
+          </div>
+        {/each}
+      </div>
+    </div>
+  {:else}
+    <p class="missing">No MCP client recipes were returned by the daemon.</p>
+  {/if}
 </section>
 
 <style>
   .card {
-    border: 1px solid #2a4652;
+    overflow: hidden;
+    border: 1px solid var(--border, #30343a);
     border-radius: 5px;
-    background: linear-gradient(145deg, rgb(15 37 47 / 96%), rgb(8 24 31 / 96%));
-    box-shadow: 0 18px 45px rgb(0 0 0 / 13%);
+    background: var(--surface, #17191c);
   }
-
-  .mcp-card { overflow: hidden; }
 
   .card-heading {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 13px;
-    padding: 18px 20px;
+    gap: 10px;
+    padding: 14px;
   }
 
   .card-icon {
@@ -73,9 +109,9 @@
     width: 38px;
     height: 38px;
     place-items: center;
-    border: 1px solid #3e716f;
-    background: rgb(99 215 197 / 9%);
-    color: var(--signal);
+    border: 1px solid var(--border-strong, #42474f);
+    background: #25282d;
+    color: var(--text-soft, #b3b8c0);
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 15px;
     font-weight: 720;
@@ -83,29 +119,30 @@
 
   .eyebrow,
   .availability,
-  .handshake {
+  .handshake,
+  .client-switch,
+  .recipe-kicker {
     font-family: 'JetBrains Mono Variable', monospace;
-    text-transform: uppercase;
   }
 
   .eyebrow {
-    color: var(--signal);
+    color: var(--muted, #7d848e);
     font-size: 7px;
     font-weight: 650;
     letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   h2 {
     margin: 3px 0 0;
-    color: #e4edef;
+    color: var(--text, #e5e7eb);
     font-size: 18px;
     font-weight: 630;
   }
 
-  .card-heading p,
-  .command-field p {
+  .card-heading p {
     margin: 4px 0 0;
-    color: #78909a;
+    color: var(--muted, #7d848e);
     font-size: 10px;
     line-height: 1.5;
   }
@@ -114,17 +151,17 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    color: #76909a;
+    color: var(--muted, #7d848e);
     font-size: 7px;
     letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
   .availability i {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--signal);
-    box-shadow: 0 0 9px rgb(99 215 197 / 55%);
+    background: #8a929d;
   }
 
   .handshake {
@@ -132,32 +169,70 @@
     grid-template-columns: auto minmax(24px, 1fr) auto minmax(24px, 1fr) auto;
     align-items: center;
     gap: 9px;
-    border-block: 1px solid #27434e;
-    padding: 9px 20px;
-    background: rgb(7 22 29 / 56%);
-    color: #76919a;
+    border-block: 1px solid var(--border, #30343a);
+    padding: 7px 14px;
+    background: var(--surface, #17191c);
+    color: var(--muted, #7d848e);
     font-size: 7px;
     letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
-  .handshake i {
-    height: 1px;
-    background: linear-gradient(90deg, #31545d, var(--signal), #31545d);
+  .handshake strong { color: var(--text-soft, #b3b8c0); font-weight: 650; }
+  .handshake i { height: 1px; background: var(--border-strong, #42474f); }
+
+  .client-switch {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 3px;
+    border-bottom: 1px solid var(--border, #30343a);
+    padding: 6px 14px;
+    background: var(--surface, #17191c);
   }
 
-  .connection-fields {
+  .client-switch button {
+    min-height: 32px;
+    overflow: hidden;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    padding: 7px 8px;
+    background: transparent;
+    color: var(--muted, #7d848e);
+    font: inherit;
+    font-size: 8px;
+    font-weight: 620;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .client-switch button:hover { background: #22252a; color: var(--text-soft, #b3b8c0); }
+  .client-switch button:focus-visible { outline: 2px solid #8a929d; outline-offset: 1px; }
+  .client-switch button.active { border-color: var(--border-strong, #42474f); background: #292c31; color: var(--text, #e5e7eb); }
+
+  .connection-overview {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 14px;
-    padding: 18px 20px 20px;
+    gap: 10px;
+    padding: 12px 14px;
   }
 
-  .command-field { grid-column: 1 / -1; }
+  .recipe { border-top: 1px solid var(--border, #30343a); background: var(--surface, #17191c); }
+  .recipe > header { display: flex; align-items: end; justify-content: space-between; gap: 10px; padding: 10px 14px 8px; }
+  .recipe-kicker { color: var(--muted, #7d848e); font-size: 7px; letter-spacing: 0.08em; text-transform: uppercase; }
+  h3 { margin: 2px 0 0; color: var(--text-soft, #b3b8c0); font-size: 13px; }
+  .recipe > header p { max-width: 520px; margin: 0; color: var(--muted, #7d848e); font-size: 9px; line-height: 1.45; text-align: right; }
+  .recipe-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 0 14px 14px; }
+  .recipe-field.wide { grid-column: 1 / -1; }
+  .missing { margin: 0; padding: 14px; color: var(--muted, #7d848e); font-size: 10px; }
 
-  @media (max-width: 720px) {
+  @media (max-width: 760px) {
     .card-heading { grid-template-columns: auto minmax(0, 1fr); }
     .availability { grid-column: 2; }
-    .connection-fields { grid-template-columns: 1fr; }
-    .command-field { grid-column: auto; }
+    .client-switch { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .connection-overview, .recipe-fields { grid-template-columns: 1fr; }
+    .recipe-field.wide { grid-column: auto; }
+    .recipe > header { align-items: flex-start; flex-direction: column; gap: 5px; }
+    .recipe > header p { text-align: left; }
   }
 </style>

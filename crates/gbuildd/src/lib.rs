@@ -62,7 +62,10 @@ pub use readiness::{
     ReadinessError, ReadinessService, ReadinessState, Service, ServiceProtocol,
     SystemPortDetector, WaitForBoundPortResult,
 };
-pub use settings::{DaemonSettingsInfo, McpConnectionInfo, mcp_connection_info};
+pub use settings::{
+    DaemonSettingsInfo, McpClient, McpClientSetup, McpConnectionInfo, McpSetupField,
+    McpSetupFormat, mcp_connection_info,
+};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
 

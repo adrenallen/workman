@@ -89,18 +89,36 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
         format!("http://127.0.0.1:{}/mcp", server.discovery.port)
     );
     assert_eq!(info["mcp"]["token"], server.discovery.token);
+    let setups = info["mcp"]["setups"].as_array().unwrap();
+    assert_eq!(setups.len(), 5);
+    let claude = setups
+        .iter()
+        .find(|setup| setup["client"] == "claude")
+        .unwrap();
     assert!(
-        info["mcp"]["claude_command"]
+        claude["fields"][0]["value"]
             .as_str()
             .unwrap()
             .contains("claude mcp add --transport http gbuild")
     );
+    let codex = setups
+        .iter()
+        .find(|setup| setup["client"] == "codex")
+        .unwrap();
     assert!(
-        info["mcp"]["claude_command"]
+        codex["fields"][1]["value"]
             .as_str()
             .unwrap()
-            .contains(&server.discovery.token)
+            .contains("env_http_headers")
     );
+    assert!(setups.iter().all(|setup| {
+        setup["fields"].as_array().unwrap().iter().any(|field| {
+            field["value"]
+                .as_str()
+                .unwrap()
+                .contains(&server.discovery.token)
+        })
+    }));
 
     let restarted = rpc(&mut socket, "restart", "daemon.restart").await;
     assert_eq!(restarted["restarting"], true);

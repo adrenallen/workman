@@ -59,7 +59,7 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 6px;
-    color: #78919c;
+    color: var(--muted, #7d848e);
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 8px;
     font-weight: 650;
@@ -68,16 +68,16 @@
   }
 
   .field-label small {
-    color: #526b76;
+    color: #737a83;
     font-size: 7px;
     font-weight: 500;
   }
 
   .value-row {
     min-width: 0;
-    border: 1px solid #2a4652;
+    border: 1px solid var(--border, #30343a);
     border-radius: 3px;
-    background: #08171e;
+    background: #121416;
   }
 
   code {
@@ -85,7 +85,7 @@
     flex: 1;
     overflow: hidden;
     padding: 10px 11px;
-    color: #c0d0d5;
+    color: var(--text-soft, #b3b8c0);
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 9px;
     line-height: 1.45;
@@ -96,31 +96,31 @@
   .multiline code {
     overflow-x: auto;
     padding-block: 12px;
-    color: #9fded4;
+    color: #c8ccd1;
     scrollbar-width: thin;
     text-overflow: clip;
+    white-space: pre;
   }
 
   .sensitive code {
-    color: #e0b875;
-    letter-spacing: 0.08em;
+    color: #d5d8dc;
   }
 
   button {
     align-self: stretch;
     gap: 5px;
     border: 0;
-    border-left: 1px solid #2a4652;
+    border-left: 1px solid var(--border, #30343a);
     padding: 0 11px;
-    background: #102832;
-    color: #9eb1b8;
+    background: #202328;
+    color: var(--text-soft, #b3b8c0);
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 8px;
     font-weight: 650;
     cursor: pointer;
   }
 
-  button:hover { background: #16333e; color: #e0ebed; }
-  button.copied { color: var(--signal); }
-  button span { color: var(--signal); font-size: 12px; }
+  button:hover { background: #292d32; color: var(--text, #e5e7eb); }
+  button.copied { color: var(--text, #e5e7eb); }
+  button span { color: #a7adb5; font-size: 12px; }
 </style>

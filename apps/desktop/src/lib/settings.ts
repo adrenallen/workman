@@ -1,9 +1,26 @@
 import type { DaemonClient } from './daemon';
 
+export type McpClientId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'generic';
+export type McpSetupFormat = 'shell' | 'toml' | 'json' | 'text';
+
+export interface McpSetupField {
+  label: string;
+  value: string;
+  format: McpSetupFormat;
+  sensitive: boolean;
+}
+
+export interface McpClientSetup {
+  client: McpClientId;
+  label: string;
+  description: string;
+  fields: McpSetupField[];
+}
+
 export interface McpConnectionInfo {
   endpoint: string;
   token: string;
-  claude_command: string;
+  setups: McpClientSetup[];
 }
 
 export interface DaemonSettingsInfo {

@@ -14,7 +14,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use gbuild_core::{Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId};
-use gbuildd::{Discovery, Service};
+use gbuildd::{Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,8 +44,9 @@ Commands:\n\
       Stop trusted command processes for the current project.\n\
   app\n\
       Launch the gbuild desktop app.\n\
-  mcp-setup [--run]\n\
-      Print, or execute, the Claude MCP registration command.\n\
+  mcp-setup [--client claude|codex|gemini|opencode|generic] [--run]\n\
+      Print setup for one MCP client, or all supported clients by default.\n\
+      --run executes the Claude setup command.\n\
   run [--project ID] [--name NAME] [--cwd PATH] -- <command...>\n\
       Create and start a durable command process. The current project or\n\
       GBUILD_PROJECT_ID is used when --project is absent.\n\
@@ -72,8 +73,8 @@ pub async fn run_env() -> Result<()> {
     if matches!(&cli.command, Command::App) {
         return launch_app();
     }
-    if let Command::McpSetup { run } = &cli.command {
-        return mcp_setup(&data_dir, &daemon, *run).await;
+    if let Command::McpSetup { run, client } = &cli.command {
+        return mcp_setup(&data_dir, &daemon, *client, *run).await;
     }
 
     let mut client = Client::connect(&data_dir, &daemon).await?;
@@ -106,7 +107,10 @@ enum Command {
     Up { project_id: Option<ProjectId> },
     Down { project_id: Option<ProjectId> },
     App,
-    McpSetup { run: bool },
+    McpSetup {
+        run: bool,
+        client: Option<McpClient>,
+    },
     Run(RunOptions),
     Ps { project_id: Option<ProjectId> },
     Logs { process_id: i64, follow: bool },
@@ -203,13 +207,25 @@ fn parse_project_action(mut args: impl Iterator<Item = String>, start: bool) -> 
 
 fn parse_mcp_setup(mut args: impl Iterator<Item = String>) -> Result<Command> {
     let mut run = false;
-    for arg in args.by_ref() {
+    let mut client = None;
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--run" => run = true,
+            "--client" => {
+                if client.is_some() {
+                    return Err(cli_error("--client may only be specified once"));
+                }
+                let value = next_value(&mut args, &arg)?;
+                client = Some(McpClient::parse(&value).ok_or_else(|| {
+                    cli_error(format!(
+                        "unknown MCP client {value:?}; expected claude, codex, gemini, opencode, or generic"
+                    ))
+                })?);
+            }
             _ => return Err(cli_error(format!("unknown mcp-setup option {arg:?}"))),
         }
     }
-    Ok(Command::McpSetup { run })
+    Ok(Command::McpSetup { run, client })
 }
 
 fn require_no_args(mut args: impl Iterator<Item = String>, command: &str) -> Result<()> {
@@ -842,32 +858,81 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-async fn mcp_setup(data_dir: &Path, daemon: &Path, run: bool) -> Result<()> {
+fn render_mcp_setup(connection: &McpConnectionInfo, client: Option<McpClient>) -> String {
+    if let Some(client) = client {
+        return render_mcp_client_setup(
+            connection
+                .setup(client)
+                .expect("every supported MCP client has a setup"),
+        );
+    }
+
+    let sections = connection
+        .setups
+        .iter()
+        .map(|setup| {
+            format!(
+                "{}\n{}\n{}",
+                setup.label,
+                "-".repeat(setup.label.len()),
+                render_mcp_client_setup(setup).trim_end()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{sections}\n")
+}
+
+fn render_mcp_client_setup(setup: &McpClientSetup) -> String {
+    if setup.fields.len() == 1 {
+        return format!("{}\n", setup.fields[0].value);
+    }
+    let fields = setup
+        .fields
+        .iter()
+        .map(|field| format!("{}:\n{}", field.label, field.value))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{fields}\n")
+}
+
+async fn mcp_setup(
+    data_dir: &Path,
+    daemon: &Path,
+    client: Option<McpClient>,
+    run: bool,
+) -> Result<()> {
+    if run && client.is_some_and(|client| client != McpClient::Claude) {
+        return Err(cli_error(
+            "--run is only available with --client claude (or with the default all-client output)",
+        ));
+    }
     let discovery = gbuildd::discover_or_spawn(data_dir, daemon, DAEMON_WAIT).await?;
     let connection = gbuildd::mcp_connection_info(&discovery);
-    let url = connection.endpoint;
-    let authorization = format!("Authorization: Bearer {}", discovery.token);
+    print!("{}", render_mcp_setup(&connection, client));
+    if !run {
+        return Ok(());
+    }
+
+    let authorization = format!("Authorization: Bearer {}", connection.token);
     let args = [
         "mcp",
         "add",
         "--transport",
         "http",
         "gbuild",
-        url.as_str(),
+        connection.endpoint.as_str(),
         "--header",
         authorization.as_str(),
     ];
-    println!("{}", connection.claude_command);
-    if run {
-        let status = ProcessCommand::new("claude")
-            .args(args)
-            .status()
-            .map_err(|error| cli_error(format!("could not run Claude CLI MCP setup: {error}")))?;
-        if !status.success() {
-            return Err(cli_error(format!(
-                "Claude CLI MCP setup exited with {status}"
-            )));
-        }
+    let status = ProcessCommand::new("claude")
+        .args(args)
+        .status()
+        .map_err(|error| cli_error(format!("could not run Claude CLI MCP setup: {error}")))?;
+    if !status.success() {
+        return Err(cli_error(format!(
+            "Claude CLI MCP setup exited with {status}"
+        )));
     }
     Ok(())
 }
@@ -1123,8 +1188,28 @@ mod tests {
             }
         ));
 
+        let cli =
+            Cli::parse(["gbuild", "mcp-setup", "--client", "codex"].map(OsString::from)).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::McpSetup {
+                run: false,
+                client: Some(McpClient::Codex)
+            }
+        ));
+
         let cli = Cli::parse(["gbuild", "mcp-setup", "--run"].map(OsString::from)).unwrap();
-        assert!(matches!(cli.command, Command::McpSetup { run: true }));
+        assert!(matches!(
+            cli.command,
+            Command::McpSetup {
+                run: true,
+                client: None
+            }
+        ));
+        assert!(
+            Cli::parse(["gbuild", "mcp-setup", "--client", "unknown"].map(OsString::from))
+                .is_err()
+        );
 
         let cli = Cli::parse(["gbuild", "logs", "--follow", "42"].map(OsString::from)).unwrap();
         assert!(matches!(
@@ -1144,5 +1229,35 @@ mod tests {
         };
         assert_eq!(run.project_id, Some(7));
         assert_eq!(run.command, ["npm", "run", "dev"]);
+    }
+
+    #[test]
+    fn renders_all_or_one_mcp_client_setup() {
+        let connection = gbuildd::mcp_connection_info(&Discovery {
+            port: 41731,
+            token: "test-token".into(),
+            pid: 42,
+        });
+
+        let all = render_mcp_setup(&connection, None);
+        for label in ["Claude Code", "Codex", "Gemini CLI", "OpenCode", "Generic"] {
+            assert!(all.contains(label), "missing {label} section:\n{all}");
+        }
+        assert!(all.contains("mcpServers"));
+        assert!(all.contains("env_http_headers"));
+        assert!(all.contains("Header value:\nBearer test-token"));
+
+        let claude = render_mcp_setup(&connection, Some(McpClient::Claude));
+        assert!(claude.starts_with("claude mcp add --transport http gbuild "));
+        assert!(!claude.contains("Codex\n"));
+
+        let codex = render_mcp_setup(&connection, Some(McpClient::Codex));
+        assert!(codex.contains("export GBUILD_MCP_AUTHORIZATION='Bearer test-token'"));
+        assert!(codex.contains("[mcp_servers.gbuild]"));
+        assert!(
+            codex.contains(
+                "env_http_headers = { \"Authorization\" = \"GBUILD_MCP_AUTHORIZATION\" }"
+            )
+        );
     }
 }
