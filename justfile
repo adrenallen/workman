@@ -11,6 +11,9 @@ check:
 test:
     cargo test --workspace
 
+install:
+    ./install.sh
+
 fmt:
     cargo fmt --all
 
