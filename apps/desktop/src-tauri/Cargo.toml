@@ -1,0 +1,24 @@
+[package]
+name = "gbuild-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gbuild_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+futures-util = "0.3.31"
+gbuildd = { path = "../../../crates/gbuildd" }
+serde = { version = "1.0.228", features = ["derive"] }
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.6.0"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = "0.29.0"
+
+[dev-dependencies]
+tempfile = "3.21.0"

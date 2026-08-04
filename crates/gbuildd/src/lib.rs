@@ -677,6 +677,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_control_requests_register_list_select_and_rename() {
+        let server = TestServer::start().await;
+        let first_path = server.data_dir.join("first-project");
+        let second_path = server.data_dir.join("second-project");
+        std::fs::create_dir(&first_path).unwrap();
+        std::fs::create_dir(&second_path).unwrap();
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "register-first",
+                    "method": "projects.register",
+                    "params": { "path": first_path }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"][0]["selected"], true);
+        assert_eq!(response["result"][0]["status"], "idle");
+        let first_id = response["result"][0]["id"].as_i64().unwrap();
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "rename-first",
+                    "method": "projects.rename",
+                    "params": { "project_id": first_id, "name": "Frontend lab" }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["display_name"], "Frontend lab");
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "register-second",
+                    "method": "projects.register",
+                    "params": { "path": second_path }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        let second_id = response["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == "second-project")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "select-second",
+                    "method": "projects.select",
+                    "params": { "project_id": second_id }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["id"], second_id);
+        assert_eq!(response["result"][0]["selected"], true);
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "list",
+                    "method": "projects.list",
+                    "params": {}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"].as_array().unwrap().len(), 2);
+
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn websocket_drives_full_process_lifecycle_and_bulk_commands() {
         let server = TestServer::start().await;
         server
@@ -914,5 +1013,17 @@ mod tests {
             panic!("expected HTTP handshake error, got {error}");
         };
         assert_eq!(response.status(), expected);
+    }
+
+    async fn receive_json(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected text response, got {message:?}");
+        };
+        serde_json::from_str(&text).unwrap()
     }
 }

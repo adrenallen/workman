@@ -1,8 +1,10 @@
 //! JSON request dispatch for the authenticated WebSocket control channel.
 
+use std::path::Path;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use gbuild_core::{Process, ProcessId, ProjectId};
-use serde::Deserialize;
+use gbuild_core::{Process, ProcessId, ProcessStatus, Project, ProjectId, Store};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{RegistryError, SharedProcessRegistry};
@@ -35,6 +37,24 @@ struct RenameParams {
 #[derive(Debug, Deserialize)]
 struct ProjectParams {
     project_id: ProjectId,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterProjectParams {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RenameProjectParams {
+    project_id: ProjectId,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectSummary {
+    #[serde(flatten)]
+    project: Project,
+    status: &'static str,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -90,6 +110,24 @@ async fn dispatch(
 ) -> Result<Value, (&'static str, String)> {
     let mut registry = registry.lock().await;
     match method {
+        "projects.list" => {
+            return project_result(list_projects(registry.store()));
+        }
+        "projects.register" => {
+            let params: RegisterProjectParams = params_as(params)?;
+            register_project(registry.store(), &params.path)?;
+            return project_result(list_projects(registry.store()));
+        }
+        "projects.select" => {
+            let params: ProjectParams = params_as(params)?;
+            select_project(registry.store(), params.project_id)?;
+            return project_result(list_projects(registry.store()));
+        }
+        "projects.rename" => {
+            let params: RenameProjectParams = params_as(params)?;
+            rename_project(registry.store(), params.project_id, &params.name)?;
+            return project_result(list_projects(registry.store()));
+        }
         "process.raw_output" => {
             let params: OutputParams = params_as(params)?;
             let mut chunk = registry
@@ -222,4 +260,151 @@ fn json_value(value: impl serde::Serialize) -> Value {
 
 fn registry_error(error: RegistryError) -> (&'static str, String) {
     (error.code(), error.to_string())
+}
+
+fn project_result(
+    result: Result<Vec<ProjectSummary>, (&'static str, String)>,
+) -> Result<Value, (&'static str, String)> {
+    result.map(json_value)
+}
+
+fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, String)> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        (
+            "invalid_project_path",
+            format!("could not open project directory: {error}"),
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err((
+            "invalid_project_path",
+            "project path must be a directory".to_owned(),
+        ));
+    }
+    let canonical = canonical.to_string_lossy().into_owned();
+    let name = Path::new(&canonical)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Project")
+        .to_owned();
+    let connection = store.connection();
+    connection
+        .execute(
+            "INSERT INTO projects (path, name) VALUES (?1, ?2)
+             ON CONFLICT(path) DO NOTHING",
+            (&canonical, &name),
+        )
+        .map_err(project_store_error)?;
+    connection
+        .execute(
+            "UPDATE projects SET selected = 1
+             WHERE path = ?1 AND NOT EXISTS (
+                SELECT 1 FROM projects WHERE selected = 1 AND path <> ?1
+             )",
+            [&canonical],
+        )
+        .map_err(project_store_error)?;
+    Ok(())
+}
+
+fn select_project(store: &Store, project_id: ProjectId) -> Result<(), (&'static str, String)> {
+    let exists = store
+        .connection()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [project_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(project_store_error)?;
+    if !exists {
+        return Err(("project_not_found", "project not found".to_owned()));
+    }
+    store
+        .connection()
+        .execute(
+            "UPDATE projects SET selected = CASE WHEN id = ?1 THEN 1 ELSE 0 END",
+            [project_id],
+        )
+        .map_err(project_store_error)?;
+    Ok(())
+}
+
+fn rename_project(
+    store: &Store,
+    project_id: ProjectId,
+    name: &str,
+) -> Result<(), (&'static str, String)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err((
+            "invalid_project_name",
+            "project name cannot be empty".to_owned(),
+        ));
+    }
+    let changed = store
+        .connection()
+        .execute(
+            "UPDATE projects SET display_name = ?1 WHERE id = ?2",
+            (name, project_id),
+        )
+        .map_err(project_store_error)?;
+    if changed == 0 {
+        return Err(("project_not_found", "project not found".to_owned()));
+    }
+    Ok(())
+}
+
+fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, String)> {
+    let mut statement = store
+        .connection()
+        .prepare(
+            "SELECT id, path, name, display_name, icon, selected
+             FROM projects
+             ORDER BY selected DESC, COALESCE(display_name, name) COLLATE NOCASE",
+        )
+        .map_err(project_store_error)?;
+    let projects = statement
+        .query_map([], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                display_name: row.get(3)?,
+                icon: row.get(4)?,
+                selected: row.get(5)?,
+            })
+        })
+        .map_err(project_store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(project_store_error)?;
+
+    projects
+        .into_iter()
+        .map(|project| {
+            let processes = store
+                .list_processes(Some(project.id))
+                .map_err(|error| ("store_error", error.to_string()))?;
+            let status = if processes
+                .iter()
+                .any(|process| process.status == ProcessStatus::Crashed)
+            {
+                "error"
+            } else if processes.iter().any(|process| {
+                matches!(
+                    process.status,
+                    ProcessStatus::Running | ProcessStatus::Starting
+                )
+            }) {
+                "running"
+            } else {
+                "idle"
+            };
+            Ok(ProjectSummary { project, status })
+        })
+        .collect()
+}
+
+fn project_store_error(error: impl std::fmt::Display) -> (&'static str, String) {
+    ("store_error", error.to_string())
 }
