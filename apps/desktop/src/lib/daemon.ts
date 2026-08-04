@@ -18,6 +18,11 @@ import type {
   SpawnAgentInput,
   SpawnAgentResult
 } from './agentTools';
+import {
+  resetLiveStats,
+  updateLiveStats,
+  type LiveStatsSnapshot
+} from './liveStats';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -125,6 +130,7 @@ interface DaemonResponse {
 interface ProcessStatusesEvent {
   event: 'process.statuses';
   processes: ProcessView[];
+  stats?: LiveStatsSnapshot;
 }
 
 interface PendingRequest {
@@ -333,6 +339,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     this.pending.clear();
     this.terminalListeners.clear();
     this.processListeners.clear();
+    resetLiveStats();
   }
 
   /** Typed escape hatch for small control-channel surfaces owned by feature modules. */
@@ -378,6 +385,9 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     }
     const event = response as ProcessStatusesEvent;
     if (event.event === 'process.statuses' && Array.isArray(event.processes)) {
+      if (event.stats && typeof event.stats.sampled_at === 'number') {
+        updateLiveStats(event.stats);
+      }
       for (const listener of this.processListeners) listener(event.processes);
       return;
     }

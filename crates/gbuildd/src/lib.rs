@@ -39,6 +39,7 @@ mod coordination;
 pub mod lifecycle;
 mod mcp;
 mod process_registry;
+pub mod process_stats;
 pub mod readiness;
 mod settings;
 mod timers;
@@ -57,6 +58,10 @@ pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
     BulkFailure, BulkProcessResult, ProcessRegistry, ProcessStatusView, RegistryError,
     RegistryResult,
+};
+pub use process_stats::{
+    DescendantProcessStats, LiveStatsSnapshot, ProcessRuntimeStats, ProjectCounts,
+    ProjectRuntimeStats, inspect_process_tree, inspect_process_tree_in,
 };
 pub use readiness::{
     BoundListener, DEFAULT_PORT_WAIT, DetectedListener, MAX_PORT_WAIT, PortDetector,
@@ -203,6 +208,12 @@ impl DaemonServer {
         let lifecycle_task =
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
         let timer_task = timers::spawn_timer_scheduler(self.registry.clone(), shutdown_rx.clone());
+        let live_stats = process_stats::LiveStatsHub::new();
+        let live_stats_task = process_stats::spawn_live_stats_sampler(
+            live_stats.clone(),
+            self.registry.clone(),
+            shutdown_rx.clone(),
+        );
         let lifecycle_shutdown = shutdown_tx.clone();
         let runtime_settings = settings::DaemonRuntimeSettings::new(
             self.data_dir,
@@ -216,6 +227,7 @@ impl DaemonServer {
             shutdown_request: shutdown_tx.clone(),
             settings: runtime_settings,
             registry: self.registry,
+            live_stats,
         };
         let app = router(state);
         let listener = self.listener;
@@ -237,6 +249,7 @@ impl DaemonServer {
         let _ = lifecycle_shutdown.send(true);
         let _ = lifecycle_task.await;
         let _ = timer_task.await;
+        let _ = live_stats_task.await;
         result
     }
 }
@@ -249,6 +262,7 @@ struct AppState {
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    live_stats: process_stats::LiveStatsHub,
 }
 
 fn router(state: AppState) -> Router {
@@ -281,6 +295,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
             state.shutdown_request,
             state.settings,
             state.registry,
+            state.live_stats,
         )
     })
 }
@@ -291,7 +306,9 @@ async fn control_session(
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    live_stats: process_stats::LiveStatsHub,
 ) {
+    let _live_stats_client = live_stats.client_connected();
     let mut terminal = TerminalSubscription::default();
     let mut status_subscribed = false;
     let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
@@ -375,9 +392,11 @@ async fn control_session(
             _ = status_tick.tick(), if status_subscribed => {
                 let statuses = registry.lock().await.list_statuses(None);
                 if let Ok(processes) = statuses {
+                    let stats = live_stats.snapshot().await;
                     let event = json!({
                         "event": "process.statuses",
                         "processes": processes,
+                        "stats": stats,
                     });
                     if socket.send(Message::Text(event.to_string().into())).await.is_err() {
                         break;
