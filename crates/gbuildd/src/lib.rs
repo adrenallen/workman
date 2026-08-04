@@ -269,7 +269,8 @@ struct AppState {
 }
 
 fn router(state: AppState) -> Router {
-    let (mcp_service, mcp_sessions) = mcp::streamable_http_service(state.registry.clone());
+    let mcp_url = format!("http://127.0.0.1:{}/mcp", state.port);
+    let (mcp_service, mcp_sessions) = mcp::streamable_http_service(state.registry.clone(), mcp_url);
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
@@ -316,6 +317,7 @@ async fn control_session(
     registry: SharedProcessRegistry,
     live_stats: process_stats::LiveStatsHub,
 ) {
+    let mcp_url = settings.info().mcp.endpoint;
     let _live_stats_client = live_stats.client_connected();
     let mut terminal = TerminalSubscription::default();
     let mut status_subscribed = false;
@@ -352,7 +354,7 @@ async fn control_session(
                                 &mut status_subscribed,
                             ).await {
                                 Some(response) => response,
-                                None => control::handle_text(&text, &registry).await,
+                                None => control::handle_text(&text, &registry, &mcp_url).await,
                             };
                             Message::Text(response.into())
                         } else {

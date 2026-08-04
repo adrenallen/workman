@@ -91,7 +91,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             "tool": {
                 "name": "Scripted agent",
                 "command": fake_agent,
-                "tool_type": "claude_code",
+                "tool_type": "scripted",
                 "enabled": true
             }
         }),
@@ -109,7 +109,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
                 "id": tool_id,
                 "name": "Scripted agent",
                 "command": fake_agent,
-                "tool_type": "claude_code",
+                "tool_type": "scripted",
                 "enabled": false
             }
         }),
@@ -134,7 +134,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
                 "id": tool_id,
                 "name": "Scripted agent",
                 "command": fake_agent,
-                "tool_type": "claude_code",
+                "tool_type": "scripted",
                 "enabled": true
             }
         }),
@@ -161,7 +161,16 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         spawned["result"]["agent_instructions"]
             .as_str()
             .unwrap()
-            .contains("call whoami() first")
+            .contains("Call whoami() through gbuild first")
+    );
+    assert!(
+        spawned["result"]["agent_instructions"]
+            .as_str()
+            .unwrap()
+            .contains(&format!(
+                "GBUILD_MCP_URL=http://127.0.0.1:{}/mcp",
+                discovery.port
+            ))
     );
     let process_id = spawned["result"]["process_id"].as_i64().unwrap();
 

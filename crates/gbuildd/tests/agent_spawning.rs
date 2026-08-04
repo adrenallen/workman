@@ -36,14 +36,16 @@ async fn call(
         .unwrap_or_else(|| panic!("{name} returned no structured content"))
 }
 
-async fn wait_for_fake_agent_context(path: &Path) -> Result<(i64, String), Box<dyn Error>> {
+async fn wait_for_fake_agent_context(path: &Path) -> Result<(i64, String, String), Box<dyn Error>> {
     for _ in 0..200 {
         if let Ok(contents) = std::fs::read_to_string(path) {
             let mut lines = contents.lines();
-            if let (Some(process_id), Some(token)) = (lines.next(), lines.next())
+            if let (Some(process_id), Some(token), Some(url)) =
+                (lines.next(), lines.next(), lines.next())
                 && !token.is_empty()
+                && !url.is_empty()
             {
-                return Ok((process_id.parse()?, token.to_owned()));
+                return Ok((process_id.parse()?, token.to_owned(), url.to_owned()));
             }
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -62,7 +64,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     std::fs::write(
         &fake_agent,
         "#!/bin/sh\n\
-         printf '%s\\n%s\\n' \"$GBUILD_PROCESS_ID\" \"$GBUILD_MCP_TOKEN\" > \"$1\"\n\
+         printf '%s\\n%s\\n%s\\n' \"$GBUILD_PROCESS_ID\" \"$GBUILD_MCP_TOKEN\" \"$GBUILD_MCP_URL\" > \"$1\"\n\
          printf 'ready:%s\\n' \"$GBUILD_PROCESS_ID\"\n\
          IFS= read -r prompt\n\
          printf 'answer:%s\\n' \"$prompt\"\n\
@@ -93,7 +95,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             id: 99,
             name: "Scripted Claude".into(),
             command: fake_agent.to_string_lossy().into_owned(),
-            tool_type: "claude_code".into(),
+            tool_type: "scripted".into(),
             enabled: true,
             source: AgentToolSource::Local,
         })?;
@@ -155,11 +157,15 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let process_id = spawned["process_id"].as_i64().unwrap();
     let instructions = spawned["agent_instructions"].as_str().unwrap();
     assert!(instructions.contains(&format!("GBUILD_PROCESS_ID={process_id}")));
+    assert!(instructions.contains(&format!("GBUILD_MCP_URL={endpoint}")));
     assert!(instructions.contains("${GBUILD_MCP_TOKEN}"));
-    assert!(instructions.contains("call whoami() first"));
+    assert!(instructions.contains("configure one from GBUILD_MCP_URL and GBUILD_MCP_TOKEN"));
+    assert!(instructions.contains("Call whoami() through gbuild first"));
 
-    let (injected_process_id, injected_token) = wait_for_fake_agent_context(&context_file).await?;
+    let (injected_process_id, injected_token, injected_url) =
+        wait_for_fake_agent_context(&context_file).await?;
     assert_eq!(injected_process_id, process_id);
+    assert_eq!(injected_url, endpoint);
     let agent_headers = HashMap::from([(
         HeaderName::from_static(GBUILD_MCP_TOKEN_HEADER),
         HeaderValue::from_str(&injected_token)?,

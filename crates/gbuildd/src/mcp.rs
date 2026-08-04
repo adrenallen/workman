@@ -42,11 +42,12 @@ pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
 #[derive(Clone)]
 pub struct GbuildMcp {
     registry: SharedProcessRegistry,
+    mcp_url: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl GbuildMcp {
-    pub fn new(registry: SharedProcessRegistry) -> Self {
+    pub fn new(registry: SharedProcessRegistry, mcp_url: String) -> Self {
         let mut tool_router = Self::tool_router();
         tool_router.merge(Self::process_tool_router());
         tool_router.merge(Self::readiness_tool_router());
@@ -57,6 +58,7 @@ impl GbuildMcp {
         tool_router.merge(Self::timer_tool_router());
         Self {
             registry,
+            mcp_url,
             tool_router,
         }
     }
@@ -64,6 +66,7 @@ impl GbuildMcp {
 
 pub fn streamable_http_service(
     registry: SharedProcessRegistry,
+    mcp_url: String,
 ) -> (
     StreamableHttpService<GbuildMcp, LocalSessionManager>,
     Arc<LocalSessionManager>,
@@ -71,7 +74,7 @@ pub fn streamable_http_service(
     let config = StreamableHttpServerConfig::default().with_json_response(true);
     let sessions = Arc::new(LocalSessionManager::default());
     let service = StreamableHttpService::new(
-        move || Ok(GbuildMcp::new(registry.clone())),
+        move || Ok(GbuildMcp::new(registry.clone(), mcp_url.clone())),
         sessions.clone(),
         config,
     );

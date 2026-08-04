@@ -13,9 +13,12 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::{GbuildMcp, failure, scoped_project, success};
 use crate::ProcessRegistry;
+
+const GBUILD_MCP_URL_ENV: &str = "GBUILD_MCP_URL";
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +114,8 @@ impl GbuildMcp {
                         name,
                         default_shell(),
                         None,
+                        None,
+                        BTreeMap::new(),
                     )
                 })
             }
@@ -127,6 +132,7 @@ impl GbuildMcp {
                     agent_tool_id,
                     args.name,
                     args.extra_args,
+                    &self.mcp_url,
                 )
             }
         };
@@ -155,6 +161,7 @@ impl GbuildMcp {
             args.agent_tool_id,
             args.name,
             args.extra_args,
+            &self.mcp_url,
         ) {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
@@ -281,6 +288,7 @@ pub(crate) fn spawn_registered_agent(
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
+    mcp_url: &str,
 ) -> Result<SpawnResult, String> {
     let tool = load_agent_tool(registry, agent_tool_id)?;
     if !tool.enabled {
@@ -295,8 +303,9 @@ pub(crate) fn spawn_registered_agent(
             tool.id, tool.name
         ));
     }
-    let command = command_with_args(&tool.command, &extra_args)?;
+    let command = command_with_mcp_wiring(&tool.command, &tool.tool_type, mcp_url, &extra_args)?;
     let name = process_name(registry, project.id, name, &tool.name)?;
+    let env = BTreeMap::from([(GBUILD_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
     spawn(
         registry,
         project,
@@ -304,6 +313,8 @@ pub(crate) fn spawn_registered_agent(
         name,
         command,
         Some(tool.id),
+        Some(tool.tool_type),
+        env,
     )
 }
 
@@ -314,6 +325,8 @@ fn spawn(
     name: String,
     command: String,
     agent_tool_id: Option<AgentToolId>,
+    agent_tool_type: Option<String>,
+    env: BTreeMap<String, String>,
 ) -> Result<SpawnResult, String> {
     let created = registry
         .create(Process {
@@ -323,7 +336,7 @@ fn spawn(
             name,
             command: Some(command),
             working_dir: project.path.clone(),
-            env: BTreeMap::new(),
+            env,
             auto_start: false,
             auto_restart: false,
             restart_when_changed: Vec::new(),
@@ -344,8 +357,17 @@ fn spawn(
             return Err(error.to_string());
         }
     };
-    let agent_instructions =
-        (kind == ProcessKind::Agent).then(|| agent_instructions(&running, project));
+    let agent_instructions = (kind == ProcessKind::Agent).then(|| {
+        agent_instructions(
+            &running,
+            project,
+            running
+                .env
+                .get(GBUILD_MCP_URL_ENV)
+                .expect("agent spawn always records its MCP URL"),
+            agent_tool_type.as_deref().unwrap_or("unknown"),
+        )
+    });
     Ok(SpawnResult {
         process_id: running.id,
         project_id: running.project_id,
@@ -420,6 +442,56 @@ fn command_with_args(command: &str, extra_args: &[String]) -> Result<String, Str
     Ok(format!("{command} {args}"))
 }
 
+fn command_with_mcp_wiring(
+    command: &str,
+    tool_type: &str,
+    mcp_url: &str,
+    extra_args: &[String],
+) -> Result<String, String> {
+    let mut launch_args = mcp_launch_args(tool_type, mcp_url);
+    launch_args.extend(extra_args.iter().cloned());
+    command_with_args(command, &launch_args)
+}
+
+fn mcp_launch_args(tool_type: &str, mcp_url: &str) -> Vec<String> {
+    match normalize_tool_type(tool_type).as_str() {
+        "claude" | "claude_code" => vec![
+            "--mcp-config".to_owned(),
+            json!({
+                "mcpServers": {
+                    "gbuild": {
+                        "type": "http",
+                        "url": mcp_url,
+                        "headers": {
+                            "x-gbuild-mcp-token": "${GBUILD_MCP_TOKEN}"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            "--strict-mcp-config".to_owned(),
+        ],
+        "codex" => vec![
+            "-c".to_owned(),
+            format!(
+                "mcp_servers.gbuild.url={}",
+                serde_json::to_string(mcp_url).expect("MCP URL serializes as a TOML string")
+            ),
+            "-c".to_owned(),
+            "mcp_servers.gbuild.env_http_headers={\"x-gbuild-mcp-token\"=\"GBUILD_MCP_TOKEN\"}"
+                .to_owned(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_tool_type(tool_type: &str) -> String {
+    tool_type
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+}
+
 fn shell_quote(argument: &str) -> String {
     if !argument.is_empty()
         && argument.bytes().all(|byte| {
@@ -435,14 +507,32 @@ fn shell_quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\"'\"'"))
 }
 
-fn agent_instructions(process: &Process, project: &Project) -> String {
+fn agent_instructions(
+    process: &Process,
+    project: &Project,
+    mcp_url: &str,
+    tool_type: &str,
+) -> String {
+    let client_wiring = match normalize_tool_type(tool_type).as_str() {
+        "claude" | "claude_code" => {
+            "This Claude launch already has a strict per-launch MCP config for the server named gbuild."
+        }
+        "codex" => {
+            "This Codex launch already has per-launch mcp_servers.gbuild URL and header overrides."
+        }
+        _ => {
+            "If this client does not expose a gbuild connector automatically, configure one from GBUILD_MCP_URL and GBUILD_MCP_TOKEN before using coordination tools."
+        }
+    };
     format!(
         "[gbuild context] You are gbuild process ID {process_id} ({process_name}), in project \
          {project_id} ({project_name}, repo {project_path}). gbuild set \
-         GBUILD_PROCESS_ID={process_id} and injected the secret GBUILD_MCP_TOKEN environment \
-         variable. Use the gbuild MCP tools at /mcp: configure the \
-         x-gbuild-mcp-token header from ${{GBUILD_MCP_TOKEN}}, then call whoami() first to \
-         confirm that you auto-identify as process {process_id}. Use \
+         GBUILD_PROCESS_ID={process_id}, GBUILD_MCP_URL={mcp_url}, and the secret \
+         GBUILD_MCP_TOKEN environment variable. {client_wiring} The connector must use the exact \
+         URL in ${{GBUILD_MCP_URL}} ({mcp_url}) and send the x-gbuild-mcp-token header from \
+         ${{GBUILD_MCP_TOKEN}}. Use the MCP server named gbuild, never a globally configured Solo \
+         or unrelated gbuild server. Call whoami() through gbuild first to confirm that you \
+         auto-identify as process {process_id}. Use \
          identify_session(process_id={process_id}) only if whoami cannot identify you. \
          [END GBUILD CONTEXT]",
         process_id = process.id,
@@ -450,6 +540,8 @@ fn agent_instructions(process: &Process, project: &Project) -> String {
         project_id = project.id,
         project_name = project.name,
         project_path = project.path,
+        client_wiring = client_wiring,
+        mcp_url = mcp_url,
     )
 }
 
@@ -528,6 +620,53 @@ mod tests {
     }
 
     #[test]
+    fn claude_launch_uses_only_the_per_process_gbuild_connector() {
+        let command = command_with_mcp_wiring(
+            "claude --dangerously-skip-permissions",
+            "claude_code",
+            "http://127.0.0.1:43123/mcp",
+            &["--model".into(), "opus".into()],
+        )
+        .unwrap();
+        assert!(command.contains("--mcp-config"));
+        assert!(command.contains("--strict-mcp-config"));
+        assert!(command.contains("http://127.0.0.1:43123/mcp"));
+        assert!(command.contains("x-gbuild-mcp-token"));
+        assert!(command.contains("${GBUILD_MCP_TOKEN}"));
+        assert!(command.ends_with("--model opus"));
+    }
+
+    #[test]
+    fn codex_launch_overrides_gbuild_url_and_process_token_header() {
+        let command = command_with_mcp_wiring(
+            "codex --dangerously-bypass-approvals-and-sandbox",
+            "codex",
+            "http://127.0.0.1:43124/mcp",
+            &["--model".into(), "gpt-test".into()],
+        )
+        .unwrap();
+        assert!(command.contains("mcp_servers.gbuild.url="));
+        assert!(command.contains("http://127.0.0.1:43124/mcp"));
+        assert!(command.contains("mcp_servers.gbuild.env_http_headers="));
+        assert!(command.contains("GBUILD_MCP_TOKEN"));
+        assert!(command.ends_with("--model gpt-test"));
+    }
+
+    #[test]
+    fn generic_launch_keeps_command_and_relies_on_injected_environment() {
+        assert_eq!(
+            command_with_mcp_wiring(
+                "future-agent --interactive",
+                "future_v9",
+                "http://127.0.0.1:43125/mcp",
+                &["two words".into()],
+            )
+            .unwrap(),
+            "future-agent --interactive 'two words'"
+        );
+    }
+
+    #[test]
     fn preamble_carries_identity_project_and_mcp_hints_without_the_secret() {
         let project = Project {
             id: 7,
@@ -557,12 +696,20 @@ mod tests {
             exited_at: None,
             agent_tool_id: Some(1),
         };
-        let preamble = agent_instructions(&process, &project);
+        let preamble = agent_instructions(
+            &process,
+            &project,
+            "http://127.0.0.1:43126/mcp",
+            "claude_code",
+        );
         assert!(preamble.contains("process ID 41 (worker)"));
         assert!(preamble.contains("project 7 (demo, repo /tmp/workspace)"));
         assert!(preamble.contains("GBUILD_PROCESS_ID=41"));
+        assert!(preamble.contains("GBUILD_MCP_URL=http://127.0.0.1:43126/mcp"));
         assert!(preamble.contains("${GBUILD_MCP_TOKEN}"));
-        assert!(preamble.contains("call whoami() first"));
+        assert!(preamble.contains("server named gbuild"));
+        assert!(preamble.contains("never a globally configured Solo"));
+        assert!(preamble.contains("Call whoami() through gbuild first"));
         assert!(!preamble.contains("secret-token"));
     }
 }

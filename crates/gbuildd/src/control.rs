@@ -138,7 +138,11 @@ struct SpawnAgentParams {
 }
 
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
-pub(crate) async fn handle_text(text: &str, registry: &SharedProcessRegistry) -> String {
+pub(crate) async fn handle_text(
+    text: &str,
+    registry: &SharedProcessRegistry,
+    mcp_url: &str,
+) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return text.to_owned();
     };
@@ -147,7 +151,7 @@ pub(crate) async fn handle_text(text: &str, registry: &SharedProcessRegistry) ->
     };
 
     let id = request.id;
-    let result = dispatch(&request.method, request.params, registry).await;
+    let result = dispatch(&request.method, request.params, registry, mcp_url).await;
     match result {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
         Err((code, message)) => json!({
@@ -163,6 +167,7 @@ async fn dispatch(
     method: &str,
     params: Value,
     registry: &SharedProcessRegistry,
+    mcp_url: &str,
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
@@ -330,6 +335,7 @@ async fn dispatch(
                 params.agent_tool_id,
                 params.name,
                 params.extra_args,
+                mcp_url,
             )
             .map(json_value)
             .map_err(|error| ("spawn_failed", error));
