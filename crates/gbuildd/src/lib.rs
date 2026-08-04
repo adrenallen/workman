@@ -42,6 +42,7 @@ mod process_registry;
 pub mod process_stats;
 pub mod readiness;
 mod settings;
+mod subprocesses;
 mod timers;
 mod user_config;
 

@@ -202,6 +202,9 @@ async fn dispatch(
     if let Some(result) = crate::coordination::dispatch(method, params.clone(), registry.store()) {
         return result;
     }
+    if let Some(result) = crate::subprocesses::dispatch(method, params.clone(), &mut registry) {
+        return result;
+    }
     match method {
         "projects.list" => {
             return project_result(list_projects(registry.store()));
