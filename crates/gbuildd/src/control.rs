@@ -146,13 +146,13 @@ async fn dispatch(
     let result = match method {
         "process.create" => registry.create(process_param(params)?).map(json_value),
         "process.update" => registry.update(process_param(params)?).map(json_value),
-        "process.get" => {
+        "process.get" | "process.status" => {
             let params: ProcessIdParams = params_as(params)?;
-            registry.get(params.process_id).map(json_value)
+            registry.get_status(params.process_id).map(json_value)
         }
         "process.list" => {
             let params: ListParams = params_as(params)?;
-            registry.list(params.project_id).map(json_value)
+            registry.list_statuses(params.project_id).map(json_value)
         }
         "process.start" => {
             let params: ProcessIdParams = params_as(params)?;

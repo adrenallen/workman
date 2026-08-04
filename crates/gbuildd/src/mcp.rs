@@ -312,7 +312,7 @@ impl GbuildMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match registry.list(Some(project.id)) {
+        match registry.list_statuses(Some(project.id)) {
             Ok(processes) => success(json!({ "project": project, "processes": processes })),
             Err(error) => failure(error.code(), error.to_string()),
         }

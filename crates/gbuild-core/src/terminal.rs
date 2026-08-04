@@ -281,8 +281,11 @@ impl TerminalOutput {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub(crate) fn feed(&self, bytes: &[u8]) {
-        self.lock().feed(bytes);
+    pub(crate) fn feed_and_read_viewport(&self, bytes: &[u8]) -> RenderedRows {
+        let mut terminal = self.lock();
+        terminal.feed(bytes);
+        let viewport_start = terminal.history_rows();
+        terminal.read_rows(viewport_start..usize::MAX)
     }
 
     pub fn read_rows(&self, range: Range<usize>) -> RenderedRows {

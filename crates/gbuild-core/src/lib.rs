@@ -1,5 +1,6 @@
 //! Shared domain and service code for gbuild.
 
+pub mod attention;
 pub mod domain;
 pub mod store;
 pub mod terminal;

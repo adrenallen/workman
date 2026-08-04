@@ -15,6 +15,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
+use crate::attention::{AgentState, AttentionTracker};
 use crate::terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput};
 
 /// Portable PTY exit status and terminal dimensions used by the host API.
@@ -242,6 +243,8 @@ pub struct PtySpawnOptions {
     pub raw_buffer_capacity: usize,
     /// Maximum number of rendered rows retained above the viewport.
     pub scrollback_lines: usize,
+    /// Agent tool family used for terminal-attention classification.
+    pub tool_type: Option<String>,
     mcp_token: String,
 }
 
@@ -256,6 +259,7 @@ impl PtySpawnOptions {
             size: DEFAULT_PTY_SIZE,
             raw_buffer_capacity: DEFAULT_RAW_BUFFER_CAPACITY,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            tool_type: None,
             mcp_token: mcp_token.into(),
         }
     }
@@ -290,6 +294,12 @@ impl PtySpawnOptions {
         self.scrollback_lines = lines;
         self
     }
+
+    /// Select the per-tool attention adapter for this process.
+    pub fn with_tool_type(mut self, tool_type: impl Into<String>) -> Self {
+        self.tool_type = Some(tool_type.into());
+        self
+    }
 }
 
 impl fmt::Debug for PtySpawnOptions {
@@ -303,6 +313,7 @@ impl fmt::Debug for PtySpawnOptions {
             .field("size", &self.size)
             .field("raw_buffer_capacity", &self.raw_buffer_capacity)
             .field("scrollback_lines", &self.scrollback_lines)
+            .field("tool_type", &self.tool_type)
             .field("mcp_token", &"[redacted]")
             .finish()
     }
@@ -318,6 +329,7 @@ pub struct PtyProcess {
     exit_status: Option<ExitStatus>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
+    attention: AttentionTracker,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -370,9 +382,11 @@ impl PtyProcess {
             options.scrollback_lines,
         );
         let reader_terminal = terminal_output.clone();
+        let attention = AttentionTracker::new(options.tool_type);
+        let reader_attention = attention.clone();
         let reader_thread = match thread::Builder::new()
             .name(format!("gbuild-pty-{}-reader", options.process_id))
-            .spawn(move || capture_output(reader, reader_output, reader_terminal))
+            .spawn(move || capture_output(reader, reader_output, reader_terminal, reader_attention))
         {
             Ok(thread) => thread,
             Err(error) => {
@@ -392,6 +406,7 @@ impl PtyProcess {
             exit_status: None,
             raw_output,
             terminal_output,
+            attention,
             reader_thread: Some(reader_thread),
         })
     }
@@ -414,6 +429,16 @@ impl PtyProcess {
     /// Clone a thread-safe handle to rendered grid and scrollback reads.
     pub fn terminal_output(&self) -> TerminalOutput {
         self.terminal_output.clone()
+    }
+
+    /// Clone the attention tracker driven by this process's PTY output.
+    pub fn attention_tracker(&self) -> AttentionTracker {
+        self.attention.clone()
+    }
+
+    /// Read the current tool-aware attention state.
+    pub fn agent_state(&self) -> AgentState {
+        self.attention.snapshot()
     }
 
     /// Write bytes to the terminal and flush them to the child.
@@ -462,6 +487,7 @@ impl PtyProcess {
             .try_wait()?;
         if let Some(status) = &status {
             self.exit_status = Some(status.clone());
+            self.attention.mark_exited();
         }
         Ok(status)
     }
@@ -478,6 +504,7 @@ impl PtyProcess {
             .ok_or_else(|| io::Error::other("PTY child handle is closed"))?
             .wait()?;
         self.exit_status = Some(status.clone());
+        self.attention.mark_exited();
         Ok(status)
     }
 
@@ -529,6 +556,7 @@ impl fmt::Debug for PtyProcess {
             .field("exit_status", &self.exit_status)
             .field("raw_output", &self.raw_output)
             .field("terminal_output", &self.terminal_output)
+            .field("attention", &self.attention)
             .finish_non_exhaustive()
     }
 }
@@ -543,6 +571,7 @@ impl Drop for PtyProcess {
                 let _ = child.wait();
             }
         }
+        self.attention.mark_exited();
 
         // Closing these handles releases the PTY. The reader owns a cloned fd;
         // detaching avoids a potentially unbounded join if a child escaped.
@@ -556,6 +585,7 @@ fn capture_output(
     mut reader: Box<dyn Read + Send>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
+    attention: AttentionTracker,
 ) {
     let mut chunk = [0_u8; 8192];
     loop {
@@ -563,7 +593,12 @@ fn capture_output(
             Ok(0) => break,
             Ok(count) => {
                 raw_output.push(&chunk[..count]);
-                terminal_output.feed(&chunk[..count]);
+                let rendered = terminal_output.feed_and_read_viewport(&chunk[..count]);
+                attention.observe_output(
+                    &chunk[..count],
+                    &rendered.text(),
+                    rendered.alternate_screen,
+                );
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // Unix PTYs commonly report EIO when their final slave closes.
@@ -766,5 +801,42 @@ mod tests {
         assert!(output.total_bytes_seen() >= (CAPACITY * 8) as u64);
         assert_eq!(output.len(), CAPACITY);
         assert_eq!(output.snapshot().len(), CAPACITY);
+    }
+
+    #[test]
+    fn pty_output_drives_tool_aware_attention_state() {
+        let command = concat!(
+            "printf '\\033[2J\\033[HClaude wants to use Bash\\n'; ",
+            "printf 'Do you want to proceed?\\n❯ 1. Yes, allow\\n'; ",
+            "sleep 30"
+        );
+        let options =
+            PtySpawnOptions::new(45, "secret-token", command).with_tool_type("claude_code");
+        let mut process = PtyProcess::spawn(options).expect("spawn Claude-like PTY process");
+
+        wait_for_rendered_output(&process, "Do you want to proceed?");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let state = loop {
+            let state = process.agent_state();
+            if state.state == crate::attention::AttentionState::NeedsInput {
+                break state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "permission dialog was not classified: {state:?}"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(state.state, crate::attention::AttentionState::NeedsInput);
+        assert!(state.needs_input);
+        assert!(!state.idle, "permission prompts must never look done");
+
+        process
+            .terminate(Duration::from_millis(100))
+            .expect("terminate PTY process");
+        assert_eq!(
+            process.agent_state().state,
+            crate::attention::AttentionState::Exited
+        );
     }
 }

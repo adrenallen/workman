@@ -39,7 +39,8 @@ mod process_registry;
 
 pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
-    BulkFailure, BulkProcessResult, ProcessRegistry, RegistryError, RegistryResult,
+    BulkFailure, BulkProcessResult, ProcessRegistry, ProcessStatusView, RegistryError,
+    RegistryResult,
 };
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
@@ -775,6 +776,7 @@ mod tests {
             if crashed["result"]["status"] == "crashed" {
                 assert_eq!(crashed["result"]["exit_code"], 7);
                 assert!(crashed["result"]["exited_at"].as_i64().is_some());
+                assert_eq!(crashed["result"]["agent_state"]["state"], "exited");
                 break;
             }
             assert!(
@@ -848,6 +850,7 @@ mod tests {
             .find(|process| process["id"] == 104)
             .unwrap();
         assert_eq!(terminal["status"], "stopped");
+        assert_eq!(terminal["agent_state"]["state"], "exited");
 
         socket.close(None).await.unwrap();
         server.stop().await;

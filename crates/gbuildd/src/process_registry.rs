@@ -9,6 +9,7 @@ use std::{
 
 use gbuild_core::{
     Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, Store, StoreError,
+    attention::{AgentState, AttentionTracker},
     pty::{ExitStatus, PtyProcess, PtySize, PtySpawnOptions, RawOutput},
     terminal::TerminalOutput,
 };
@@ -120,6 +121,14 @@ pub struct BulkProcessResult {
     pub failures: Vec<BulkFailure>,
 }
 
+/// A durable process record plus live, non-persisted attention signals.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ProcessStatusView {
+    #[serde(flatten)]
+    pub process: Process,
+    pub agent_state: AgentState,
+}
+
 /// Owns persisted process records and live PTY handles.
 pub struct ProcessRegistry {
     store: Store,
@@ -191,9 +200,40 @@ impl ProcessRegistry {
         self.require(process_id)
     }
 
+    /// Get a process with raw signals, adapter flags, and derived attention state.
+    pub fn get_status(&mut self, process_id: ProcessId) -> RegistryResult<ProcessStatusView> {
+        let process = self.get(process_id)?;
+        self.status_view(process)
+    }
+
     pub fn list(&mut self, project_id: Option<ProjectId>) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
         Ok(self.store.list_processes(project_id)?)
+    }
+
+    /// List process status views, including agent state for every process.
+    pub fn list_statuses(
+        &mut self,
+        project_id: Option<ProjectId>,
+    ) -> RegistryResult<Vec<ProcessStatusView>> {
+        self.list(project_id)?
+            .into_iter()
+            .map(|process| self.status_view(process))
+            .collect()
+    }
+
+    /// Attach attention state to an already-loaded process record.
+    pub fn status_view(&self, process: Process) -> RegistryResult<ProcessStatusView> {
+        let tool_type = self.tool_type_for(&process)?;
+        let agent_state = self
+            .outputs
+            .get(&process.id)
+            .map(|output| output.attention.snapshot())
+            .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        Ok(ProcessStatusView {
+            process,
+            agent_state,
+        })
     }
 
     pub fn start(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
@@ -217,10 +257,14 @@ impl ProcessRegistry {
         process.exited_at = None;
         self.store.put_process(&process)?;
 
+        let tool_type = self.tool_type_for(&process)?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         self.store
             .set_process_mcp_token(process.id, &token, now_millis())?;
         let mut options = PtySpawnOptions::new(process.id, token, command);
+        if let Some(tool_type) = tool_type {
+            options = options.with_tool_type(tool_type);
+        }
         if !process.working_dir.is_empty() {
             options = options.with_working_dir(&process.working_dir);
         }
@@ -254,6 +298,7 @@ impl ProcessRegistry {
             ProcessOutput {
                 raw: hosted.raw_output(),
                 terminal: hosted.terminal_output(),
+                attention: hosted.attention_tracker(),
             },
         );
         self.running.insert(process_id, hosted);
@@ -533,11 +578,35 @@ impl ProcessRegistry {
             .get_process(process_id)?
             .ok_or(RegistryError::NotFound(process_id))
     }
+
+    fn tool_type_for(&self, process: &Process) -> RegistryResult<Option<String>> {
+        if let Some(agent_tool_id) = process.agent_tool_id {
+            if let Some(tool) = self.store.get_agent_tool(agent_tool_id)? {
+                return Ok(Some(tool.tool_type));
+            }
+        }
+
+        let command_is_claude = process.command.as_deref().is_some_and(|command| {
+            command
+                .split(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+                })
+                .any(|word| {
+                    word.eq_ignore_ascii_case("claude") || word.eq_ignore_ascii_case("claude-code")
+                })
+        });
+        if process.kind == ProcessKind::Agent && command_is_claude {
+            Ok(Some("claude_code".into()))
+        } else {
+            Ok(Some(process.kind.as_str().into()))
+        }
+    }
 }
 
 struct ProcessOutput {
     raw: RawOutput,
     terminal: TerminalOutput,
+    attention: AttentionTracker,
 }
 
 impl Drop for ProcessRegistry {
@@ -618,8 +687,9 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::thread;
 
-    use gbuild_core::{ProcessSource, Project};
+    use gbuild_core::{AgentTool, ProcessSource, Project, attention::AttentionState};
 
     use super::*;
 
@@ -671,5 +741,87 @@ mod tests {
         assert_eq!(signal_number("Terminated: 15"), Some(15));
         assert_eq!(signal_number("Killed"), Some(9));
         assert_eq!(signal_number("unknown"), None);
+    }
+
+    #[test]
+    fn status_view_exposes_attention_and_never_calls_permission_idle() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/attention-registry-test".into(),
+                name: "attention".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+            })
+            .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 9,
+                name: "Claude Code".into(),
+                command: "claude".into(),
+                tool_type: "claude_code".into(),
+                enabled: true,
+            })
+            .unwrap();
+
+        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(100))
+            .expect("create process registry");
+        registry
+            .create(Process {
+                id: 10,
+                project_id: 1,
+                kind: ProcessKind::Agent,
+                name: "claude".into(),
+                command: Some(
+                    "printf 'Do you want to proceed?\\n❯ 1. Yes, allow\\n'; sleep 30".into(),
+                ),
+                working_dir: "/tmp".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: Some(9),
+            })
+            .unwrap();
+        registry.start(10).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let waiting = loop {
+            let status = registry.get_status(10).unwrap();
+            if status.agent_state.state == AttentionState::NeedsInput {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "permission dialog was not classified: {:?}",
+                status.agent_state
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            waiting.agent_state.tool_type.as_deref(),
+            Some("claude_code")
+        );
+        assert!(waiting.agent_state.needs_input);
+        assert!(!waiting.agent_state.idle);
+        let payload = serde_json::to_value(&waiting).unwrap();
+        assert_eq!(payload["agent_state"]["state"], "needs_input");
+        assert!(payload["agent_state"]["idle_seconds"].is_number());
+        assert!(payload["agent_state"]["last_output_at"].is_number());
+        assert!(payload["agent_state"]["last_content_change_at"].is_number());
+
+        registry.stop(10).unwrap();
+        let stopped = registry.get_status(10).unwrap();
+        assert_eq!(stopped.agent_state.state, AttentionState::Exited);
+        assert!(stopped.agent_state.exited);
     }
 }
