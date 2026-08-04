@@ -384,6 +384,25 @@ impl<'store> ScratchpadService<'store> {
         content: String,
         expected_revision: Option<i64>,
     ) -> ScratchpadServiceResult<Scratchpad> {
+        self.append_section_with_create(
+            project_id,
+            scratchpad_id,
+            heading,
+            content,
+            false,
+            expected_revision,
+        )
+    }
+
+    pub fn append_section_with_create(
+        &self,
+        project_id: ProjectId,
+        scratchpad_id: ScratchpadId,
+        heading: &str,
+        content: String,
+        create_heading: bool,
+        expected_revision: Option<i64>,
+    ) -> ScratchpadServiceResult<Scratchpad> {
         validate_nonempty("append content", &content)?;
         let mut scratchpad = self.require_revision(project_id, scratchpad_id, expected_revision)?;
         if heading_matches(heading, &scratchpad.name) {
@@ -392,7 +411,16 @@ impl<'store> ScratchpadService<'store> {
             return self.persist_update(scratchpad, revision);
         }
         let mut lines = content_lines(&scratchpad.content);
-        let range = section_range(&lines, heading)?;
+        let range = match section_range(&lines, heading) {
+            Ok(range) => range,
+            Err(ScratchpadServiceError::HeadingNotFound(_)) if create_heading => {
+                scratchpad.content =
+                    append_created_section(&scratchpad.content, heading, &content)?;
+                let revision = scratchpad.revision;
+                return self.persist_update(scratchpad, revision);
+            }
+            Err(error) => return Err(error),
+        };
         let appended = content_lines(&content);
         lines.splice(range.end..range.end, appended);
         scratchpad.content = lines.join("\n");
@@ -1022,6 +1050,29 @@ fn append_text(existing: &str, addition: &str) -> String {
     } else {
         format!("{existing}\n{addition}")
     }
+}
+
+fn append_created_section(
+    existing: &str,
+    heading: &str,
+    content: &str,
+) -> ScratchpadServiceResult<String> {
+    let normalized = normalize_heading_text(heading);
+    validate_nonempty("section heading", &normalized)?;
+    let level = markdown_heading(heading)
+        .map(|(level, _)| level.max(2))
+        .unwrap_or(2);
+    let separator = if existing.is_empty() || existing.ends_with("\n\n") {
+        ""
+    } else if existing.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    Ok(format!(
+        "{existing}{separator}{} {normalized}\n\n{content}",
+        "#".repeat(level)
+    ))
 }
 
 fn content_lines(content: &str) -> Vec<String> {

@@ -108,9 +108,26 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     call(&first, "select_project", json!({ "project_id": 1 })).await;
     call(&second, "select_project", json!({ "project_id": 1 })).await;
 
-    let tool_names = first
-        .list_all_tools()
-        .await?
+    let tools = first.list_all_tools().await?;
+    let append_section_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_append_section")
+        .expect("scratchpad_append_section tool is registered");
+    assert!(
+        append_section_tool
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("create_heading=true")
+    );
+    assert!(
+        append_section_tool
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key("create_heading"))
+    );
+    let tool_names = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect::<Vec<_>>();
@@ -379,6 +396,57 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let tags = call(&first, "scratchpad_tags_list", json!({})).await;
     assert_eq!(tags["tags"], json!(["mcp", "shared"]));
 
+    let missing_strict = invoke(
+        &first,
+        "scratchpad_append_section",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "heading": "Integration Summary",
+            "content": "Joined result",
+            "expected_revision": 10
+        }),
+    )
+    .await;
+    assert_error_code(&missing_strict, "scratchpad_heading_not_found");
+    let stale_create = invoke(
+        &first,
+        "scratchpad_append_section",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "heading": "Integration Summary",
+            "content": "Stale result",
+            "create_heading": true,
+            "expected_revision": 9
+        }),
+    )
+    .await;
+    assert_error_code(&stale_create, "scratchpad_revision_conflict");
+    let created_section = call(
+        &first,
+        "scratchpad_append_section",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "heading": "Integration Summary",
+            "content": "Joined result",
+            "create_heading": true,
+            "expected_revision": 10
+        }),
+    )
+    .await;
+    assert_eq!(created_section["revision"], 11);
+    let created_read = call(
+        &first,
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert!(
+        created_read["scratchpad"]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("## Integration Summary\n\nJoined result")
+    );
+
     call(
         &first,
         "scratchpad_save_to_file",
@@ -424,10 +492,10 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let archived = call(
         &first,
         "scratchpad_archive",
-        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 10 }),
+        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 11 }),
     )
     .await;
-    assert_eq!(archived["revision"], 11);
+    assert_eq!(archived["revision"], 12);
     assert_eq!(archived["archived"], true);
     let listed = call(&first, "scratchpad_list", json!({})).await;
     assert_eq!(listed["total_count"], 1, "archived scratchpad is hidden");
@@ -468,7 +536,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     call(
         &first,
         "scratchpad_delete",
-        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 11 }),
+        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 12 }),
     )
     .await;
 

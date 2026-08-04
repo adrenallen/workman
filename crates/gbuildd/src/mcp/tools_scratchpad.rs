@@ -123,6 +123,8 @@ struct ScratchpadAppendSectionArgs {
     heading: String,
     content: String,
     #[serde(default)]
+    create_heading: bool,
+    #[serde(default)]
     expected_revision: Option<i64>,
 }
 
@@ -333,7 +335,9 @@ impl GbuildMcp {
         }
     }
 
-    #[tool(description = "Append under an existing normalized, case-insensitive markdown heading")]
+    #[tool(
+        description = "Append under a normalized, case-insensitive markdown heading. Missing headings stay an error unless create_heading=true, which creates the section at the document end; revision-guarded"
+    )]
     async fn scratchpad_append_section(
         &self,
         Extension(parts): Extension<Parts>,
@@ -344,11 +348,12 @@ impl GbuildMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).append_section(
+        match ScratchpadService::new(registry.store()).append_section_with_create(
             project.id,
             args.scratchpad_id,
             &args.heading,
             args.content,
+            args.create_heading,
             args.expected_revision,
         ) {
             Ok(scratchpad) => revision_receipt(&scratchpad),
