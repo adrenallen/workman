@@ -46,6 +46,28 @@ export interface ConnectionStatus {
   status: 'connecting' | 'connected' | 'disconnected';
   message: string | null;
   port: number | null;
+  app_version: string;
+  app_build_id: string;
+  app_control_protocol_version: number;
+  daemon_version: string | null;
+  daemon_build_id: string | null;
+  daemon_control_protocol_version: number | null;
+  version_compatible: boolean;
+}
+
+export class DaemonRequestError extends Error {
+  constructor(
+    readonly method: string,
+    readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'DaemonRequestError';
+  }
+}
+
+export function isUnsupportedControlMethod(cause: unknown): boolean {
+  return cause instanceof DaemonRequestError && cause.code === 'method_not_found';
 }
 
 export interface ProcessView {
@@ -136,6 +158,7 @@ interface ProcessStatusesEvent {
 }
 
 interface PendingRequest {
+  method: string;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -182,7 +205,17 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
   }
 
   coordinationSnapshot(projectId: number): Promise<CoordinationSnapshot> {
-    return this.request('coordination.snapshot', { project_id: projectId });
+    return this.requestOptional(
+      'coordination.snapshot',
+      { project_id: projectId },
+      {
+        project_id: projectId,
+        todos: [],
+        todo_total_count: 0,
+        scratchpads: [],
+        scratchpad_total_count: 0
+      }
+    );
   }
 
   coordinationTodo(projectId: number, todoId: number): Promise<TodoDetail> {
@@ -236,11 +269,15 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
   }
 
   subscribeProcessStatuses(): Promise<{ subscribed: boolean }> {
-    return this.request('process.status_subscribe');
+    return this.requestOptional('process.status_subscribe', {}, { subscribed: false });
   }
 
   syncConfig(projectId: number): Promise<{ project_id: number; synced: boolean }> {
-    return this.request('config.sync', { project_id: projectId });
+    return this.requestOptional(
+      'config.sync',
+      { project_id: projectId },
+      { project_id: projectId, synced: false }
+    );
   }
 
   startProcess(processId: number): Promise<ProcessView> {
@@ -260,7 +297,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
   }
 
   listAgentTools(): Promise<AgentTool[]> {
-    return this.request('agent_tools.list');
+    return this.requestOptional('agent_tools.list', {}, []);
   }
 
   saveAgentTool(tool: AgentToolInput): Promise<AgentTool> {
@@ -356,6 +393,23 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request(method, params);
   }
 
+  restartDaemon(): Promise<{ restarting: boolean }> {
+    return invoke('daemon_restart', { confirmProcessesStopped: true });
+  }
+
+  private async requestOptional<T>(
+    method: string,
+    params: Record<string, unknown>,
+    fallback: T
+  ): Promise<T> {
+    try {
+      return await this.request<T>(method, params);
+    } catch (cause) {
+      if (isUnsupportedControlMethod(cause)) return fallback;
+      throw cause;
+    }
+  }
+
   private async request<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
     const id = `desktop-${Date.now()}-${++this.sequence}`;
     const message = JSON.stringify({ id, method: type, params: fields });
@@ -365,6 +419,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
         reject(new Error('The daemon did not answer in time'));
       }, 5000);
       this.pending.set(id, {
+        method: type,
         resolve: (result) => resolve(result as T),
         reject,
         timeout
@@ -410,7 +465,13 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     if (rpc.ok && rpc.result !== undefined) {
       pending.resolve(rpc.result);
     } else {
-      pending.reject(new Error(rpc.error?.message ?? 'The daemon rejected the request'));
+      pending.reject(
+        new DaemonRequestError(
+          pending.method,
+          rpc.error?.code ?? 'unknown_error',
+          rpc.error?.message ?? 'The daemon rejected the request'
+        )
+      );
     }
   }
 }

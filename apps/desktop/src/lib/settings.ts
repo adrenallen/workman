@@ -28,6 +28,8 @@ export interface DaemonSettingsInfo {
   port: number;
   pid: number;
   version: string;
+  build_id: string;
+  control_protocol_version: number;
   uptime_ms: number;
   mcp: McpConnectionInfo;
 }
@@ -41,5 +43,5 @@ export function loadDaemonSettings(client: DaemonClient): Promise<DaemonSettings
 }
 
 export function restartDaemon(client: DaemonClient): Promise<DaemonRestartResult> {
-  return client.control<DaemonRestartResult>('daemon.restart');
+  return client.restartDaemon();
 }

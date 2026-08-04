@@ -111,13 +111,12 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let parent = ClientInfo::default().serve(parent_transport).await?;
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
-    assert!(
-        tools
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| { tool["name"] == "Claude" && tool["command"] == "claude" })
-    );
+    assert!(tools.as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "Claude"
+            && tool["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with("claude"))
+    }));
     assert!(tools.as_array().unwrap().iter().any(|tool| {
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));

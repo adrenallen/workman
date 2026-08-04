@@ -5,6 +5,25 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 install_home=${HOME:?HOME must be set}
 bin_dir=${GBUILD_INSTALL_BIN_DIR:-"$install_home/.local/bin"}
+daemon_was_running=false
+
+if [[ -n "${GBUILD_DATA_DIR:-}" ]]; then
+  daemon_data_dir=$GBUILD_DATA_DIR
+elif [[ $(uname -s) == Darwin ]]; then
+  daemon_data_dir="$install_home/Library/Application Support/gbuild"
+elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+  daemon_data_dir="$XDG_DATA_HOME/gbuild"
+else
+  daemon_data_dir="$install_home/.local/share/gbuild"
+fi
+
+discovery_file="$daemon_data_dir/daemon.json"
+if [[ -r "$discovery_file" ]]; then
+  daemon_pid=$(sed -nE 's/.*"pid"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$discovery_file" | head -n 1)
+  if [[ "$daemon_pid" =~ ^[0-9]+$ ]] && kill -0 "$daemon_pid" 2>/dev/null; then
+    daemon_was_running=true
+  fi
+fi
 
 if [[ "$bin_dir" != /* ]]; then
   printf 'gbuild: install directory must be absolute: %s\n' "$bin_dir" >&2
@@ -67,6 +86,11 @@ for binary in gbuild gbuildd gbuild-desktop; do
 done
 
 printf '\n  ✓ gbuild is installed\n'
+if [[ "$daemon_was_running" == true ]]; then
+  printf '\n  ⚠ A gbuild daemon was already running during this install.\n'
+  printf '    Restart it from the app banner or Settings to apply the new daemon version.\n'
+  printf '    Restarting stops currently running project processes.\n'
+fi
 case ":${PATH:-}:" in
   *":$bin_dir:"*) ;;
   *)

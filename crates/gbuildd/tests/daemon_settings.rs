@@ -83,6 +83,11 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
     assert_eq!(info["port"], server.discovery.port);
     assert_eq!(info["pid"], std::process::id());
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["build_id"], gbuildd::BUILD_ID);
+    assert_eq!(
+        info["control_protocol_version"],
+        gbuildd::CONTROL_PROTOCOL_VERSION
+    );
     assert!(info["uptime_ms"].as_u64().is_some());
     assert_eq!(
         info["mcp"]["endpoint"],
@@ -119,6 +124,14 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
                 .contains(&server.discovery.token)
         })
     }));
+
+    let hello = rpc(&mut socket, "hello", "daemon.hello").await;
+    assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(hello["build_id"], gbuildd::BUILD_ID);
+    assert_eq!(
+        hello["control_protocol_version"],
+        gbuildd::CONTROL_PROTOCOL_VERSION
+    );
 
     let restarted = rpc(&mut socket, "restart", "daemon.restart").await;
     assert_eq!(restarted["restarting"], true);

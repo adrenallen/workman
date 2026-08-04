@@ -98,6 +98,8 @@ pub struct DaemonSettingsInfo {
     pub port: u16,
     pub pid: u32,
     pub version: &'static str,
+    pub build_id: &'static str,
+    pub control_protocol_version: u32,
     pub uptime_ms: u64,
     pub mcp: McpConnectionInfo,
 }
@@ -124,6 +126,8 @@ impl DaemonRuntimeSettings {
             port: self.discovery.port,
             pid: self.discovery.pid,
             version: env!("CARGO_PKG_VERSION"),
+            build_id: crate::BUILD_ID,
+            control_protocol_version: crate::CONTROL_PROTOCOL_VERSION,
             uptime_ms: self
                 .started_at
                 .elapsed()

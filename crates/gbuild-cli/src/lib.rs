@@ -14,10 +14,13 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use gbuild_core::{Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId};
-use gbuildd::{Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service};
+use gbuildd::{DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::timeout,
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
@@ -29,6 +32,8 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const DAEMON_WAIT: Duration = Duration::from_secs(5);
 const OUTPUT_POLL: Duration = Duration::from_millis(30);
 const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
+const HELLO_REQUEST_ID: &str = "__gbuild_cli_hello__";
+const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
 const HELP: &str = "\
 Usage: gbuild [--data-dir PATH] [--daemon PATH] [COMMAND]\n\
@@ -71,7 +76,7 @@ pub async fn run_env() -> Result<()> {
     let daemon = daemon_executable(cli.daemon);
 
     if matches!(&cli.command, Command::App) {
-        return launch_app();
+        return launch_app(&data_dir, &daemon).await;
     }
     if let Command::McpSetup { run, client } = &cli.command {
         return mcp_setup(&data_dir, &daemon, *client, *run).await;
@@ -937,11 +942,22 @@ async fn mcp_setup(
     Ok(())
 }
 
-fn launch_app() -> Result<()> {
+async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
     let executable = desktop_executable().ok_or_else(|| {
         cli_error("could not find gbuild-desktop; run the installer again or set GBUILD_DESKTOP")
     })?;
+    let client = Client::connect(data_dir, daemon).await?;
+    match client.daemon_version.as_ref() {
+        Some(version) => println!(
+            "gbuild daemon v{} · build {} · control protocol {}",
+            version.version, version.build_id, version.control_protocol_version
+        ),
+        None => println!("gbuild daemon legacy · no version handshake"),
+    }
+    drop(client);
     let child = ProcessCommand::new(&executable)
+        .env("GBUILD_DATA_DIR", data_dir)
+        .env("GBUILD_DAEMON_BIN", daemon)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -994,6 +1010,7 @@ struct Client {
     socket: Socket,
     next_id: u64,
     discovery: Discovery,
+    daemon_version: Option<DaemonVersion>,
 }
 
 impl Client {
@@ -1004,11 +1021,13 @@ impl Client {
             header::AUTHORIZATION,
             format!("Bearer {}", discovery.token).parse()?,
         );
-        let (socket, _) = connect_async(request).await?;
+        let (mut socket, _) = connect_async(request).await?;
+        let daemon_version = negotiate_daemon_version(&mut socket).await;
         Ok(Self {
             socket,
             next_id: 1,
             discovery,
+            daemon_version,
         })
     }
 
@@ -1055,6 +1074,44 @@ impl Client {
             }
         }
     }
+}
+
+async fn negotiate_daemon_version(socket: &mut Socket) -> Option<DaemonVersion> {
+    socket
+        .send(Message::Text(
+            json!({ "id": HELLO_REQUEST_ID, "method": "daemon.hello", "params": {} })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .ok()?;
+
+    timeout(HELLO_TIMEOUT, async {
+        loop {
+            match socket.next().await? {
+                Ok(Message::Text(text)) => {
+                    let response = serde_json::from_str::<Value>(&text).ok()?;
+                    if response.get("id").and_then(Value::as_str) == Some(HELLO_REQUEST_ID) {
+                        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+                            return None;
+                        }
+                        return response
+                            .get("result")
+                            .cloned()
+                            .and_then(|result| serde_json::from_value(result).ok());
+                    }
+                }
+                Ok(Message::Ping(bytes)) => {
+                    socket.send(Message::Pong(bytes)).await.ok()?;
+                }
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[derive(Debug, Deserialize)]

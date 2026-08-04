@@ -20,6 +20,7 @@
   } from './lib/coordination';
   import {
     DaemonClient,
+    isUnsupportedControlMethod,
     type ConnectionStatus,
     type ProcessView,
     type Project,
@@ -46,7 +47,18 @@
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
   let coordination = $state<CoordinationSnapshot | null>(null);
-  let connection = $state<ConnectionStatus>({ status: 'connecting', message: null, port: null });
+  let connection = $state<ConnectionStatus>({
+    status: 'connecting',
+    message: null,
+    port: null,
+    app_version: '',
+    app_build_id: '',
+    app_control_protocol_version: 0,
+    daemon_version: null,
+    daemon_build_id: null,
+    daemon_control_protocol_version: null,
+    version_compatible: false
+  });
   let selection = $state<ProjectTreeSelection | null>(null);
   let todoDetail = $state<TodoDetail | null>(null);
   let scratchpadRead = $state<ScratchpadRead | null>(null);
@@ -77,6 +89,7 @@
   let scratchpadContent = $state('');
   let agentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
+  let versionRestarting = $state(false);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
@@ -90,6 +103,9 @@
     ...processes.filter((process) => process.kind === 'command')
   ]);
   let frameItemLabel = $derived(settingsOpen ? 'Settings' : (selection?.label ?? 'Project'));
+  let versionSkew = $derived(
+    connection.status === 'connected' && !connection.version_compatible
+  );
 
   $effect(() => {
     const projectId = selectedProject?.id ?? null;
@@ -143,7 +159,12 @@
       if (active && connection.status === 'connected' && !busy) void refreshProjects();
     }, 5000);
     const coordinationTimer = setInterval(() => {
-      if (active && connection.status === 'connected' && selectedProject) {
+      if (
+        active &&
+        connection.status === 'connected' &&
+        connection.version_compatible &&
+        selectedProject
+      ) {
         void refreshCoordination(selectedProject.id, false);
       }
     }, 2500);
@@ -168,6 +189,13 @@
   function applyConnectionStatus(status: ConnectionStatus): void {
     const reconnected = connection.status !== 'connected' && status.status === 'connected';
     connection = status;
+    if (status.status === 'connected') {
+      console.info(
+        `gbuild daemon: ${status.daemon_version ?? 'legacy'} ` +
+          `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
+      );
+      if (status.version_compatible) versionRestarting = false;
+    }
     if (reconnected) {
       void client.subscribeProcessStatuses().catch(reportError);
       void refreshProjects();
@@ -198,7 +226,12 @@
     } catch (cause) {
       reportError(cause);
     }
-    await Promise.all([refreshProcesses(projectId), refreshCoordination(projectId, true)]);
+    if (connection.version_compatible) {
+      await Promise.all([refreshProcesses(projectId), refreshCoordination(projectId, true)]);
+    } else {
+      coordination = null;
+      await refreshProcesses(projectId);
+    }
   }
 
   async function refreshProjects(): Promise<void> {
@@ -558,7 +591,20 @@
   }
 
   function reportError(cause: unknown): void {
+    if (isUnsupportedControlMethod(cause)) return;
     error = cause instanceof Error ? cause.message : String(cause);
+  }
+
+  async function restartOutdatedDaemon(): Promise<void> {
+    if (versionRestarting) return;
+    if (!window.confirm('Restart gbuild daemon? All running project processes will stop.')) return;
+    versionRestarting = true;
+    try {
+      await client.restartDaemon();
+    } catch (cause) {
+      versionRestarting = false;
+      reportError(cause);
+    }
   }
 </script>
 
@@ -568,9 +614,23 @@
   <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'gbuild'}</title>
 </svelte:head>
 
+{#if versionSkew}
+  <section class="version-banner" aria-live="assertive">
+    <div>
+      <strong>gbuild daemon is running an older version</strong>
+      <span>Restarting loads this app’s control protocol and agent config. All running project processes will stop.</span>
+    </div>
+    <small>app {connection.app_build_id || 'current'} · daemon {connection.daemon_build_id ?? 'legacy'}</small>
+    <button type="button" disabled={versionRestarting} onclick={() => void restartOutdatedDaemon()}>
+      {versionRestarting ? 'Restarting daemon…' : 'Restart daemon'}
+    </button>
+  </section>
+{/if}
+
 <main
   class="app-shell"
   class:no-project={selectedProject === null}
+  class:with-version-banner={versionSkew}
   style={`--project-rail-width: ${projectRailCollapsed ? collapsedProjectRailWidth : projectRailWidth}px; --tree-rail-width: ${treeRailCollapsed ? collapsedTreeRailWidth : treeRailWidth}px;`}
 >
   <aside class="project-rail" class:collapsed={projectRailCollapsed} aria-label="Projects">
@@ -751,7 +811,17 @@
 
 <style>
   .app-shell { display: grid; width: 100%; height: 100%; grid-template-columns: var(--project-rail-width) var(--tree-rail-width) minmax(0, 1fr); background: var(--night); }
+  .app-shell.with-version-banner { height: calc(100% - 38px); }
   .app-shell.no-project { grid-template-columns: var(--project-rail-width) minmax(0, 1fr); }
+  .version-banner { display: grid; width: 100%; height: 38px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, #15171a); color: var(--text); }
+  .version-banner div { min-width: 0; }
+  .version-banner strong, .version-banner span { display: block; }
+  .version-banner strong { color: #f2d69a; font-size: 10px; }
+  .version-banner span { overflow: hidden; margin-top: 2px; color: #b3a382; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .version-banner small { color: #91866f; font: 7px 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .version-banner button { min-height: 25px; border: 1px solid #8a7449; border-radius: 3px; padding: 0 9px; background: #3a3020; color: #f2d69a; font-size: 8px; font-weight: 680; cursor: pointer; }
+  .version-banner button:hover:not(:disabled) { border-color: #b09259; background: #493b25; }
+  .version-banner button:disabled { cursor: default; opacity: 0.6; }
   .project-rail, .tree-rail, .main-frame { min-width: 0; min-height: 0; }
   .project-rail, .tree-rail { position: relative; border-right: 1px solid var(--border); }
   .project-rail { display: flex; flex-direction: column; background: #17191c; }

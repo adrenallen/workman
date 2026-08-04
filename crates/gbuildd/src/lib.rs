@@ -45,6 +45,7 @@ mod settings;
 mod subprocesses;
 mod timers;
 mod user_config;
+mod version;
 
 pub use config::{
     ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, TrustFieldChange, TrustFields,
@@ -78,6 +79,7 @@ pub use user_config::{
     UserConfigError, parse_user_config, sync_user_agent_tools, sync_user_config_file,
     user_config_path,
 };
+pub use version::{BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonVersion};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
 
@@ -285,7 +287,12 @@ fn router(state: AppState) -> Router {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+    Json(json!({
+        "status": "ok",
+        "version": BUILD_VERSION,
+        "build_id": BUILD_ID,
+        "control_protocol_version": CONTROL_PROTOCOL_VERSION,
+    }))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -426,7 +433,8 @@ async fn handle_session_control(
     let method = request.get("method")?.as_str()?;
     if !matches!(
         method,
-        "daemon.info"
+        "daemon.hello"
+            | "daemon.info"
             | "daemon.restart"
             | "terminal.attach"
             | "terminal.detach"
@@ -437,6 +445,11 @@ async fn handle_session_control(
     }
 
     let id = request.get("id").cloned().unwrap_or_default();
+    if method == "daemon.hello" {
+        return Some(
+            json!({ "id": id, "ok": true, "result": DaemonVersion::current() }).to_string(),
+        );
+    }
     if method == "daemon.info" {
         return Some(json!({ "id": id, "ok": true, "result": settings.info() }).to_string());
     }

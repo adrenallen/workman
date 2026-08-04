@@ -4,15 +4,23 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::{SinkExt, StreamExt};
-use gbuildd::{DaemonConfig, DaemonServer, Discovery, default_data_dir, discover_or_spawn};
-use serde::Serialize;
+use gbuildd::{
+    BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonConfig, DaemonServer, DaemonVersion,
+    Discovery, default_data_dir, discover_or_spawn, probe,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tauri::{Emitter, State};
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{sleep, timeout},
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -22,11 +30,19 @@ const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
 const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"GBT1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
+const HELLO_REQUEST_ID: &str = "__gbuild_desktop_hello__";
+const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
+const RESTART_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone)]
 struct BridgeState {
-    sender: mpsc::Sender<String>,
+    sender: mpsc::Sender<BridgeCommand>,
     status: Arc<Mutex<ConnectionStatus>>,
+}
+
+enum BridgeCommand {
+    Send(String),
+    Restart(oneshot::Sender<Result<(), String>>),
 }
 
 #[derive(Clone, Serialize)]
@@ -34,6 +50,13 @@ struct ConnectionStatus {
     status: &'static str,
     message: Option<String>,
     port: Option<u16>,
+    app_version: &'static str,
+    app_build_id: &'static str,
+    app_control_protocol_version: u32,
+    daemon_version: Option<String>,
+    daemon_build_id: Option<String>,
+    daemon_control_protocol_version: Option<u32>,
+    version_compatible: bool,
 }
 
 impl ConnectionStatus {
@@ -42,8 +65,51 @@ impl ConnectionStatus {
             status: "connecting",
             message: None,
             port: None,
+            app_version: BUILD_VERSION,
+            app_build_id: BUILD_ID,
+            app_control_protocol_version: CONTROL_PROTOCOL_VERSION,
+            daemon_version: None,
+            daemon_build_id: None,
+            daemon_control_protocol_version: None,
+            version_compatible: false,
         }
     }
+
+    fn connected(port: u16, daemon: Option<&DaemonVersion>) -> Self {
+        Self {
+            status: "connected",
+            message: None,
+            port: Some(port),
+            app_version: BUILD_VERSION,
+            app_build_id: BUILD_ID,
+            app_control_protocol_version: CONTROL_PROTOCOL_VERSION,
+            daemon_version: daemon.map(|version| version.version.clone()),
+            daemon_build_id: daemon.map(|version| version.build_id.clone()),
+            daemon_control_protocol_version: daemon.map(|version| version.control_protocol_version),
+            version_compatible: daemon.is_some_and(DaemonVersion::matches_current_build),
+        }
+    }
+
+    fn disconnected(message: impl Into<String>) -> Self {
+        Self {
+            status: "disconnected",
+            message: Some(message.into()),
+            ..Self::connecting()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HelloResponse {
+    id: Value,
+    ok: bool,
+    #[serde(default)]
+    result: Option<DaemonVersion>,
+}
+
+#[derive(Clone, Serialize)]
+struct DaemonRestartResult {
+    restarting: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -69,8 +135,29 @@ fn daemon_send(message: String, state: State<'_, BridgeState>) -> Result<(), Str
     }
     state
         .sender
-        .try_send(message)
+        .try_send(BridgeCommand::Send(message))
         .map_err(|error| format!("daemon bridge is not accepting messages: {error}"))
+}
+
+#[tauri::command]
+async fn daemon_restart(
+    confirm_processes_stopped: bool,
+    state: State<'_, BridgeState>,
+) -> Result<DaemonRestartResult, String> {
+    if !confirm_processes_stopped {
+        return Err("restart requires confirmation that project processes will stop".to_owned());
+    }
+    let (reply, receive) = oneshot::channel();
+    state
+        .sender
+        .send(BridgeCommand::Restart(reply))
+        .await
+        .map_err(|_| "daemon bridge is not running".to_owned())?;
+    timeout(RESTART_TIMEOUT, receive)
+        .await
+        .map_err(|_| "timed out waiting for the daemon to stop".to_owned())?
+        .map_err(|_| "daemon bridge dropped the restart request".to_owned())??;
+    Ok(DaemonRestartResult { restarting: true })
 }
 
 #[tauri::command]
@@ -90,7 +177,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![daemon_send, daemon_status])
+        .invoke_handler(tauri::generate_handler![
+            daemon_send,
+            daemon_restart,
+            daemon_status
+        ])
         .setup(move |app| {
             tauri::async_runtime::spawn(run_bridge(app.handle().clone(), task_state, receiver));
             Ok(())
@@ -125,7 +216,7 @@ pub fn run_embedded_daemon(data_dir: PathBuf) -> Result<(), Box<dyn Error>> {
 async fn run_bridge(
     app: tauri::AppHandle,
     state: BridgeState,
-    mut receiver: mpsc::Receiver<String>,
+    mut receiver: mpsc::Receiver<BridgeCommand>,
 ) {
     let mut reconnect_delay = Duration::from_millis(250);
     loop {
@@ -133,22 +224,32 @@ async fn run_bridge(
         match connect_daemon().await {
             Ok((discovery, mut socket)) => {
                 reconnect_delay = Duration::from_millis(250);
+                let daemon_version = negotiate_daemon_version(&mut socket).await;
+                log_daemon_version(daemon_version.as_ref());
                 publish_status(
                     &app,
                     &state,
-                    ConnectionStatus {
-                        status: "connected",
-                        message: None,
-                        port: Some(discovery.port),
-                    },
+                    ConnectionStatus::connected(discovery.port, daemon_version.as_ref()),
                 );
 
                 loop {
                     tokio::select! {
                         outgoing = receiver.recv() => {
                             let Some(outgoing) = outgoing else { return };
-                            if socket.send(Message::Text(outgoing.into())).await.is_err() {
-                                break;
+                            match outgoing {
+                                BridgeCommand::Send(message) => {
+                                    if socket.send(Message::Text(message.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                BridgeCommand::Restart(reply) => {
+                                    let result = stop_discovered_daemon(&discovery).await;
+                                    let restarting = result.is_ok();
+                                    let _ = reply.send(result);
+                                    if restarting {
+                                        break;
+                                    }
+                                }
                             }
                         }
                         incoming = socket.next() => {
@@ -172,28 +273,96 @@ async fn run_bridge(
                 publish_status(
                     &app,
                     &state,
-                    ConnectionStatus {
-                        status: "disconnected",
-                        message: Some("Daemon connection closed; retrying".to_owned()),
-                        port: None,
-                    },
+                    ConnectionStatus::disconnected("Daemon connection closed; retrying"),
                 );
             }
             Err(error) => {
-                publish_status(
-                    &app,
-                    &state,
-                    ConnectionStatus {
-                        status: "disconnected",
-                        message: Some(error),
-                        port: None,
-                    },
-                );
+                publish_status(&app, &state, ConnectionStatus::disconnected(error));
             }
         }
         tokio::time::sleep(reconnect_delay).await;
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(3));
     }
+}
+
+async fn negotiate_daemon_version(
+    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+) -> Option<DaemonVersion> {
+    socket
+        .send(Message::Text(
+            json!({ "id": HELLO_REQUEST_ID, "method": "daemon.hello", "params": {} })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .ok()?;
+
+    timeout(HELLO_TIMEOUT, async {
+        loop {
+            match socket.next().await? {
+                Ok(Message::Text(text)) => {
+                    let response = serde_json::from_str::<HelloResponse>(&text).ok()?;
+                    if response.id == HELLO_REQUEST_ID {
+                        return response.ok.then_some(response.result).flatten();
+                    }
+                }
+                Ok(Message::Ping(bytes)) => {
+                    socket.send(Message::Pong(bytes)).await.ok()?;
+                }
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn log_daemon_version(daemon: Option<&DaemonVersion>) {
+    if let Some(daemon) = daemon {
+        eprintln!(
+            "gbuild desktop: connected to daemon v{} (build {}, control protocol {})",
+            daemon.version, daemon.build_id, daemon.control_protocol_version
+        );
+    } else {
+        eprintln!("gbuild desktop: connected to a legacy daemon without a version handshake");
+    }
+}
+
+async fn stop_discovered_daemon(discovery: &Discovery) -> Result<(), String> {
+    if discovery.pid <= 1 || discovery.pid == std::process::id() {
+        return Err("refusing to signal an invalid daemon process".to_owned());
+    }
+    let current = Discovery::read(default_data_dir())
+        .map_err(|error| format!("could not verify daemon discovery: {error}"))?;
+    if current.pid != discovery.pid || current.token != discovery.token {
+        return Err("daemon discovery changed before restart; reconnect and try again".to_owned());
+    }
+
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(discovery.pid.to_string())
+        .status()
+        .map_err(|error| format!("could not signal daemon {}: {error}", discovery.pid))?;
+    if !status.success() {
+        return Err(format!(
+            "could not gracefully stop daemon {}: {status}",
+            discovery.pid
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while probe(discovery).await {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "daemon {} did not stop within 5 seconds",
+                discovery.pid
+            ));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 async fn connect_daemon() -> Result<
@@ -343,5 +512,14 @@ mod tests {
         assert!(frame.gap);
         assert_eq!(frame.data, b"\x1b[31mraw\x00bytes");
         assert!(parse_terminal_frame(b"not-a-terminal-frame").is_none());
+    }
+
+    #[test]
+    fn connection_status_marks_missing_and_older_builds_incompatible() {
+        assert!(!ConnectionStatus::connected(1, None).version_compatible);
+        let mut older = DaemonVersion::current();
+        older.build_id = "older".to_owned();
+        assert!(!ConnectionStatus::connected(1, Some(&older)).version_compatible);
+        assert!(ConnectionStatus::connected(1, Some(&DaemonVersion::current())).version_compatible);
     }
 }
