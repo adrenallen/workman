@@ -8,9 +8,10 @@
     read: ScratchpadRead | null;
     loading: boolean;
     onSelect: (scratchpadId: number) => void;
+    onRefresh: () => void;
   }
 
-  let { scratchpads, selectedId, read, loading, onSelect }: Props = $props();
+  let { scratchpads, selectedId, read, loading, onSelect, onRefresh }: Props = $props();
   let query = $state('');
   let filtered = $derived.by(() => {
     const needle = query.trim().toLowerCase();
@@ -54,7 +55,10 @@
           </span>
         </button>
       {:else}
-        <div class="empty-list">{query ? 'No matching notes.' : 'No shared notes yet.'}</div>
+        <div class="empty-list">
+          <span>{query ? 'No matching notes.' : 'No shared notes yet.'}</span>
+          {#if !query}<button type="button" onclick={onRefresh}>Check again</button>{/if}
+        </div>
       {/each}
     </div>
   </aside>
@@ -91,8 +95,14 @@
     {:else}
       <div class="viewer-empty">
         <span class="note-glyph" aria-hidden="true">▤</span>
-        <h3>Select a scratchpad</h3>
-        <p>Agent notes render here and refresh as revisions land.</p>
+        <span class="eyebrow">Shared project memory</span>
+        <h3>{scratchpads.length === 0 ? 'No scratchpads yet' : 'Select a scratchpad'}</h3>
+        <p>
+          {scratchpads.length === 0
+            ? 'Agents create scratchpads to leave durable notes, plans, and handoffs for the team.'
+            : 'Agent notes render here and refresh as revisions land.'}
+        </p>
+        <button type="button" onclick={onRefresh}>Refresh notes</button>
       </div>
     {/if}
   </article>
@@ -214,7 +224,11 @@
   .note-copy { min-width: 0; }
   .note-copy strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .note-copy small { display: block; overflow: hidden; margin-top: 4px; color: #607985; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
-  .empty-list { padding: 24px 9px; color: #58707a; font-size: 8px; text-align: center; }
+  .empty-list { display: grid; justify-items: center; gap: 9px; padding: 24px 9px; color: #58707a; font-size: 8px; text-align: center; }
+  .empty-list button,
+  .viewer-empty button { border: 1px solid #3e6d66; border-radius: 3px; padding: 7px 10px; background: #14312c; color: #d2e7e3; font: 650 8px 'Archivo Variable', sans-serif; cursor: pointer; }
+  .empty-list button:hover,
+  .viewer-empty button:hover { border-color: var(--signal); }
 
   .viewer { display: flex; min-width: 0; flex-direction: column; }
 
@@ -272,7 +286,7 @@
   }
 
   .viewer-empty h3 { color: #8ca0a8; }
-  .viewer-empty p, .empty-note { margin: 6px 0 0; color: #5c737d; font-size: 10px; }
+  .viewer-empty p, .empty-note { max-width: 380px; margin: 6px 0 13px; color: #5c737d; font-size: 10px; line-height: 1.55; }
   .note-glyph { color: #46636d; font-size: 28px; }
 
   .loader {

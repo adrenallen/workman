@@ -71,8 +71,27 @@ export interface CoordinationSnapshot {
   scratchpad_total_count: number;
 }
 
+export interface NewTodoInput {
+  title: string;
+  body: string;
+  priority: TodoPriority;
+  tags: string[];
+}
+
+export interface TodoCompleteResult {
+  todo: TodoView;
+  affected_todo_ids: number[];
+}
+
 export interface CoordinationClient {
   coordinationSnapshot(projectId: number): Promise<CoordinationSnapshot>;
   coordinationTodo(projectId: number, todoId: number): Promise<TodoDetail>;
+  coordinationTodoCreate(projectId: number, input: NewTodoInput): Promise<TodoView>;
+  coordinationTodoComplete(
+    projectId: number,
+    todoId: number,
+    completed: boolean
+  ): Promise<TodoCompleteResult>;
+  coordinationTodoComment(projectId: number, todoId: number, body: string): Promise<TodoComment>;
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead>;
 }

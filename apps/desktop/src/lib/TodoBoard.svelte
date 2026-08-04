@@ -7,7 +7,11 @@
     selectedId: number | null;
     detail: TodoDetail | null;
     detailLoading: boolean;
+    busy: boolean;
     onSelect: (todoId: number) => void;
+    onCreate: () => void;
+    onComplete: (todoId: number, completed: boolean) => void;
+    onComment: (todoId: number, body: string) => void;
   }
 
   const columns: { status: TodoStatus; label: string; marker: string }[] = [
@@ -17,7 +21,23 @@
     { status: 'completed', label: 'Done', marker: '●' }
   ];
 
-  let { todos, selectedId, detail, detailLoading, onSelect }: Props = $props();
+  let {
+    todos,
+    selectedId,
+    detail,
+    detailLoading,
+    busy,
+    onSelect,
+    onCreate,
+    onComplete,
+    onComment
+  }: Props = $props();
+  let commentBody = $state('');
+
+  $effect(() => {
+    selectedId;
+    commentBody = '';
+  });
 
   function inColumn(status: TodoStatus): TodoSummary[] {
     return todos.filter((todo) => todo.status === status);
@@ -44,114 +64,150 @@
       <span class="eyebrow">Coordination graph</span>
       <h3>Todo board</h3>
     </div>
-    <span class="count">{todos.length.toString().padStart(2, '0')} tasks</span>
+    <div class="board-actions">
+      <span class="count">{todos.length.toString().padStart(2, '0')} tasks</span>
+      <button type="button" disabled={busy} onclick={onCreate}><span>+</span> New todo</button>
+    </div>
   </header>
 
-  <div class="columns">
-    {#each columns as column}
-      {@const columnTodos = inColumn(column.status)}
-      <section class="column" aria-label={column.label}>
-        <header>
-          <span aria-hidden="true">{column.marker}</span>
-          <strong>{column.label}</strong>
-          <small>{columnTodos.length}</small>
-        </header>
-        <div class="cards">
-          {#each columnTodos as todo (todo.id)}
-            <button
-              class="todo-card"
-              class:selected={selectedId === todo.id}
-              class:blocked={todo.is_blocked}
-              type="button"
-              aria-pressed={selectedId === todo.id}
-              onclick={() => onSelect(todo.id)}
-            >
-              <span class="card-topline">
-                <span class:high={todo.priority === 'high'} class="priority">{todo.priority}</span>
-                <span class="todo-id">#{todo.id}</span>
-              </span>
-              <strong>{todo.title}</strong>
-              {#if todo.tags.length > 0}
-                <span class="tags">
-                  {#each todo.tags.slice(0, 3) as tag}<i>{tag}</i>{/each}
-                  {#if todo.tags.length > 3}<i>+{todo.tags.length - 3}</i>{/if}
+  {#if todos.length === 0}
+    <div class="empty-board">
+      <span class="empty-mark" aria-hidden="true">◇</span>
+      <span class="eyebrow">A shared work queue</span>
+      <h4>Turn the next outcome into a todo</h4>
+      <p>Todos give people and agents one place to claim work, record decisions, and mark progress.</p>
+      <button type="button" disabled={busy} onclick={onCreate}><span>+</span> Create the first todo</button>
+    </div>
+  {:else}
+    <div class="columns">
+      {#each columns as column}
+        {@const columnTodos = inColumn(column.status)}
+        <section class="column" aria-label={column.label}>
+          <header>
+            <span aria-hidden="true">{column.marker}</span>
+            <strong>{column.label}</strong>
+            <small>{columnTodos.length}</small>
+          </header>
+          <div class="cards">
+            {#each columnTodos as todo (todo.id)}
+              <button
+                class="todo-card"
+                class:selected={selectedId === todo.id}
+                class:blocked={todo.is_blocked}
+                type="button"
+                aria-pressed={selectedId === todo.id}
+                onclick={() => onSelect(todo.id)}
+              >
+                <span class="card-topline">
+                  <span class:high={todo.priority === 'high'} class="priority">{todo.priority}</span>
+                  <span class="todo-id">#{todo.id}</span>
                 </span>
-              {/if}
-              <span class="signals">
-                {#if todo.is_blocked}
-                  <span class="blocker" title={`Blocked by ${todo.unresolved_blocker_count} open task(s)`}>
-                    ⛓ {todo.unresolved_blocker_count}
+                <strong>{todo.title}</strong>
+                {#if todo.tags.length > 0}
+                  <span class="tags">
+                    {#each todo.tags.slice(0, 3) as tag}<i>{tag}</i>{/each}
+                    {#if todo.tags.length > 3}<i>+{todo.tags.length - 3}</i>{/if}
                   </span>
-                {:else if todo.blocker_ids.length > 0}
-                  <span title="All blockers resolved">✓ deps</span>
                 {/if}
-                {#if todo.comment_count > 0}<span title="Comments">◌ {todo.comment_count}</span>{/if}
-                {#if todo.locked_by}
-                  <span class="lock" title={`Locked by ${todo.locked_by}`}>▣ {shortActor(todo.locked_by)}</span>
-                {/if}
-              </span>
-            </button>
-          {:else}
-            <div class="empty-column"><span>·</span> Clear</div>
-          {/each}
-        </div>
-      </section>
-    {/each}
-  </div>
-
-  {#if selectedId !== null}
-    <aside class="detail" aria-live="polite">
-      {#if detailLoading && detail?.todo.id !== selectedId}
-        <div class="detail-empty">Reading task #{selectedId}…</div>
-      {:else if detail}
-        <div class="detail-copy">
-          <header>
-            <div>
-              <span class="eyebrow">Task #{detail.todo.id}</span>
-              <h4>{detail.todo.title}</h4>
-            </div>
-            <div class="detail-badges">
-              <span class={`priority ${detail.todo.priority === 'high' ? 'high' : ''}`}>
-                {detail.todo.priority}
-              </span>
-              {#if detail.todo.locked_by}<span class="lock">▣ {detail.todo.locked_by}</span>{/if}
-            </div>
-          </header>
-          {#if detail.todo.is_blocked}
-            <p class="blocked-note">
-              Dependencies {detail.todo.blocker_ids.map((id) => `#${id}`).join(', ')} ·
-              {detail.todo.unresolved_blocker_count} unresolved
-            </p>
-          {/if}
-          <div class="todo-body">
-            {#if detail.todo.body.trim()}
-              <MarkdownView source={detail.todo.body} />
+                <span class="signals">
+                  {#if todo.is_blocked}
+                    <span class="blocker" title={`Blocked by ${todo.unresolved_blocker_count} open task(s)`}>
+                      ⛓ {todo.unresolved_blocker_count}
+                    </span>
+                  {:else if todo.blocker_ids.length > 0}
+                    <span title="All blockers resolved">✓ deps</span>
+                  {/if}
+                  {#if todo.comment_count > 0}<span title="Comments">◌ {todo.comment_count}</span>{/if}
+                  {#if todo.locked_by}
+                    <span class="lock" title={`Locked by ${todo.locked_by}`}>▣ {shortActor(todo.locked_by)}</span>
+                  {/if}
+                </span>
+              </button>
             {:else}
-              <p class="muted">No task notes.</p>
-            {/if}
-          </div>
-        </div>
-        <section class="comments" aria-label="Todo comments">
-          <header>
-            <span>Thread</span>
-            <small>{detail.comment_total_count}</small>
-          </header>
-          <div class="comment-list">
-            {#each detail.comments as comment (comment.id)}
-              <article>
-                <header>
-                  <strong>{comment.actor}</strong>
-                  <time datetime={new Date(comment.created_at).toISOString()}>{formatTime(comment.created_at)}</time>
-                </header>
-                <p>{comment.body}</p>
-              </article>
-            {:else}
-              <p class="muted">No comments yet.</p>
+              <div class="empty-column"><span>·</span> Clear</div>
             {/each}
           </div>
         </section>
-      {/if}
-    </aside>
+      {/each}
+    </div>
+
+    {#if selectedId !== null}
+      <aside class="detail" aria-live="polite">
+        {#if detailLoading && detail?.todo.id !== selectedId}
+          <div class="detail-empty">Reading task #{selectedId}…</div>
+        {:else if detail}
+          <div class="detail-copy">
+            <header>
+              <div>
+                <span class="eyebrow">Task #{detail.todo.id}</span>
+                <h4>{detail.todo.title}</h4>
+              </div>
+              <div class="detail-actions">
+                <div class="detail-badges">
+                  <span class={`priority ${detail.todo.priority === 'high' ? 'high' : ''}`}>
+                    {detail.todo.priority}
+                  </span>
+                  {#if detail.todo.locked_by}<span class="lock">▣ {detail.todo.locked_by}</span>{/if}
+                </div>
+                <button
+                  class:completed={detail.todo.completed}
+                  type="button"
+                  disabled={busy}
+                  onclick={() => onComplete(detail.todo.id, !detail.todo.completed)}
+                >
+                  {detail.todo.completed ? 'Reopen' : 'Complete'}
+                </button>
+              </div>
+            </header>
+            {#if detail.todo.is_blocked}
+              <p class="blocked-note">
+                Dependencies {detail.todo.blocker_ids.map((id) => `#${id}`).join(', ')} ·
+                {detail.todo.unresolved_blocker_count} unresolved
+              </p>
+            {/if}
+            <div class="todo-body">
+              {#if detail.todo.body.trim()}
+                <MarkdownView source={detail.todo.body} />
+              {:else}
+                <p class="muted">No task notes.</p>
+              {/if}
+            </div>
+          </div>
+          <section class="comments" aria-label="Todo comments">
+            <header>
+              <span>Thread</span>
+              <small>{detail.comment_total_count}</small>
+            </header>
+            <div class="comment-list">
+              {#each detail.comments as comment (comment.id)}
+                <article>
+                  <header>
+                    <strong>{comment.actor}</strong>
+                    <time datetime={new Date(comment.created_at).toISOString()}>{formatTime(comment.created_at)}</time>
+                  </header>
+                  <p>{comment.body}</p>
+                </article>
+              {:else}
+                <p class="muted">No comments yet. Add context for whoever picks this up next.</p>
+              {/each}
+            </div>
+            <form
+              class="comment-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                const body = commentBody.trim();
+                if (!body) return;
+                commentBody = '';
+                onComment(detail.todo.id, body);
+              }}
+            >
+              <textarea bind:value={commentBody} rows="2" placeholder="Add a comment" aria-label="Add a todo comment"></textarea>
+              <button type="submit" disabled={busy || !commentBody.trim()}>Comment</button>
+            </form>
+          </section>
+        {/if}
+      </aside>
+    {/if}
   {/if}
 </section>
 
@@ -178,6 +234,28 @@
   }
 
   .board-heading > div { gap: 11px; }
+
+  .board-actions { justify-content: flex-end; }
+
+  .board-actions button,
+  .empty-board button,
+  .detail-actions > button,
+  .comment-form button {
+    border: 1px solid #3f6f68;
+    border-radius: 3px;
+    background: #14312c;
+    color: #d5e9e5;
+    font-size: 9px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .board-actions button { display: flex; align-items: center; gap: 6px; padding: 7px 9px; }
+  .board-actions button span, .empty-board button span { color: var(--signal); font: 12px 'JetBrains Mono Variable', monospace; }
+  .board-actions button:disabled,
+  .empty-board button:disabled,
+  .detail-actions > button:disabled,
+  .comment-form button:disabled { cursor: not-allowed; opacity: 0.48; }
 
   .board-heading h3 {
     margin: 0;
@@ -213,6 +291,23 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
+
+  .empty-board {
+    display: grid;
+    min-height: 360px;
+    place-content: center;
+    justify-items: center;
+    border: 1px dashed #2c4651;
+    border-radius: 4px;
+    padding: 34px;
+    background: rgb(9 24 32 / 46%);
+    text-align: center;
+  }
+
+  .empty-mark { color: var(--signal); font-size: 32px; }
+  .empty-board h4 { margin: 10px 0 0; color: #dbe6e9; font-size: 21px; }
+  .empty-board p { max-width: 420px; margin: 10px 0 19px; color: #687f89; font-size: 11px; line-height: 1.6; }
+  .empty-board button { display: flex; align-items: center; gap: 8px; padding: 9px 12px; }
 
   .columns {
     display: grid;
@@ -335,6 +430,9 @@
   .detail > .detail-copy > header { justify-content: space-between; gap: 15px; }
   .detail-copy h4 { margin: 3px 0 0; color: #e0e9ec; font-size: 16px; }
   .detail-badges { display: flex; flex-wrap: wrap; gap: 8px; font-size: 7px; }
+  .detail-actions { display: flex; align-items: center; gap: 9px; }
+  .detail-actions > button { padding: 7px 9px; }
+  .detail-actions > button.completed { border-color: #35515d; background: #10242d; color: #8da2aa; }
 
   .todo-body { margin-top: 15px; }
 
@@ -371,6 +469,11 @@
   .comments article strong { overflow: hidden; color: #88d8cc; text-overflow: ellipsis; }
   .comments article time { flex: none; color: #536b76; }
   .comments article p { margin: 6px 0 0; color: #aebfc5; font-size: 10px; line-height: 1.45; white-space: pre-wrap; }
+  .comment-list > .muted { padding: 12px; line-height: 1.5; }
+  .comment-form { display: grid; gap: 7px; border-top: 1px solid #29434e; padding: 9px; }
+  .comment-form textarea { width: 100%; resize: vertical; border: 1px solid #304b56; border-radius: 3px; padding: 8px; background: #081820; color: #d7e1e4; font-size: 10px; line-height: 1.4; outline: 0; }
+  .comment-form textarea:focus { border-color: var(--signal); }
+  .comment-form button { justify-self: end; padding: 7px 10px; }
   .muted, .detail-empty { color: #607680; font-size: 10px; }
   .detail-empty { grid-column: 1 / -1; padding: 24px; font-family: 'JetBrains Mono Variable', monospace; }
 

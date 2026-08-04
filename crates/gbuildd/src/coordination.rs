@@ -1,10 +1,11 @@
-//! Read-only coordination RPCs used by the desktop todo and scratchpad views.
+//! Coordination RPCs used by the desktop todo and scratchpad views.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gbuild_core::{
-    ProjectId, ScratchpadId, ScratchpadListQuery, ScratchpadReadMode, ScratchpadService,
-    ScratchpadServiceError, Store, TodoId, TodoListQuery, TodoService, TodoServiceError, TodoSort,
+    NewTodo, ProjectId, ScratchpadId, ScratchpadListQuery, ScratchpadReadMode, ScratchpadService,
+    ScratchpadServiceError, Store, TodoId, TodoListQuery, TodoPriority, TodoService,
+    TodoServiceError, TodoSort,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,6 +24,33 @@ struct TodoParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateTodoParams {
+    project_id: ProjectId,
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default = "medium_priority")]
+    priority: TodoPriority,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteTodoParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    #[serde(default = "default_true")]
+    completed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentTodoParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ScratchpadParams {
     project_id: ProjectId,
     scratchpad_id: ScratchpadId,
@@ -33,6 +61,9 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
     match method {
         "coordination.snapshot" => Some(snapshot(params, store)),
         "coordination.todo" => Some(todo_detail(params, store)),
+        "coordination.todo_create" => Some(todo_create(params, store)),
+        "coordination.todo_complete" => Some(todo_complete(params, store)),
+        "coordination.todo_comment" => Some(todo_comment(params, store)),
         "coordination.scratchpad" => Some(scratchpad_read(params, store)),
         _ => None,
     }
@@ -92,6 +123,55 @@ fn todo_detail(params: Value, store: &Store) -> ControlResult {
     }))
 }
 
+fn todo_create(params: Value, store: &Store) -> ControlResult {
+    let params: CreateTodoParams = params_as(params)?;
+    TodoService::new(store)
+        .create(
+            params.project_id,
+            NewTodo {
+                title: params.title,
+                body: params.body,
+                priority: params.priority,
+                tags: params.tags,
+            },
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
+fn todo_complete(params: Value, store: &Store) -> ControlResult {
+    let params: CompleteTodoParams = params_as(params)?;
+    let (todo, affected_todo_ids) = TodoService::new(store)
+        .complete(
+            params.project_id,
+            params.todo_id,
+            "desktop-ui",
+            params.completed,
+            false,
+            now_millis(),
+        )
+        .map_err(todo_error)?;
+    Ok(json!({
+        "todo": todo,
+        "affected_todo_ids": affected_todo_ids,
+    }))
+}
+
+fn todo_comment(params: Value, store: &Store) -> ControlResult {
+    let params: CommentTodoParams = params_as(params)?;
+    TodoService::new(store)
+        .comment_create(
+            params.project_id,
+            params.todo_id,
+            "desktop-ui",
+            params.body,
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
 fn scratchpad_read(params: Value, store: &Store) -> ControlResult {
     let params: ScratchpadParams = params_as(params)?;
     let read = ScratchpadService::new(store)
@@ -112,6 +192,18 @@ fn scratchpad_read(params: Value, store: &Store) -> ControlResult {
 
 fn params_as<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, (&'static str, String)> {
     serde_json::from_value(params).map_err(|error| ("invalid_params", error.to_string()))
+}
+
+fn json_value<T: serde::Serialize>(value: T) -> Value {
+    serde_json::to_value(value).expect("coordination response must serialize")
+}
+
+const fn medium_priority() -> TodoPriority {
+    TodoPriority::Medium
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn todo_error(error: TodoServiceError) -> (&'static str, String) {

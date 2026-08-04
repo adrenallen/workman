@@ -1,22 +1,27 @@
 <script lang="ts">
-  import TodoBoard from './TodoBoard.svelte';
   import ScratchpadPanel from './ScratchpadPanel.svelte';
+  import TodoBoard from './TodoBoard.svelte';
   import type {
     CoordinationClient,
     CoordinationSnapshot,
     ScratchpadRead,
     TodoDetail,
+    TodoPriority,
     TodoSummary
   } from './coordination';
+
+  type CoordinationViewMode = 'todos' | 'scratchpads';
 
   interface Props {
     client: CoordinationClient;
     projectId: number;
     connected: boolean;
+    view: CoordinationViewMode;
+    actionSignal: number;
     onError: (message: string) => void;
   }
 
-  let { client, projectId, connected, onError }: Props = $props();
+  let { client, projectId, connected, view, actionSignal, onError }: Props = $props();
   let snapshot = $state<CoordinationSnapshot | null>(null);
   let selectedTodoId = $state<number | null>(null);
   let todoDetail = $state<TodoDetail | null>(null);
@@ -25,7 +30,15 @@
   let scratchpadRead = $state<ScratchpadRead | null>(null);
   let scratchpadLoading = $state(false);
   let refreshing = $state(false);
+  let mutating = $state(false);
+  let createOpen = $state(false);
+  let createTitle = $state('');
+  let createBody = $state('');
+  let createPriority = $state<TodoPriority>('medium');
+  let createTags = $state('');
   let sequence = 0;
+  let observedActionSignal = $state(0);
+  let actionSignalReady = false;
 
   $effect(() => {
     const activeProject = projectId;
@@ -45,6 +58,18 @@
       disposed = true;
       clearInterval(poll);
     };
+  });
+
+  $effect(() => {
+    if (!actionSignalReady) {
+      observedActionSignal = actionSignal;
+      actionSignalReady = true;
+      return;
+    }
+    if (actionSignal === observedActionSignal) return;
+    observedActionSignal = actionSignal;
+    if (view === 'todos') createOpen = true;
+    else if (connected) void refresh(projectId, () => false);
   });
 
   function preferredTodo(todos: TodoSummary[]): number | null {
@@ -69,6 +94,7 @@
         : preferredTodo(next.todos);
       if (todoId !== selectedTodoId) selectedTodoId = todoId;
       if (todoId !== null) void loadTodo(activeProject, todoId, request);
+      else todoDetail = null;
 
       const scratchpadId = next.scratchpads.some(
         (scratchpad) => scratchpad.id === selectedScratchpadId
@@ -85,6 +111,8 @@
           scratchpadRead.scratchpad.revision !== selectedSummary?.revision)
       ) {
         void loadScratchpad(activeProject, scratchpadId, request);
+      } else if (scratchpadId === null) {
+        scratchpadRead = null;
       }
     } catch (cause) {
       if (!disposed() && activeProject === projectId) onError(message(cause));
@@ -93,7 +121,11 @@
     }
   }
 
-  async function loadTodo(activeProject: number, todoId: number, parentSequence?: number): Promise<void> {
+  async function loadTodo(
+    activeProject: number,
+    todoId: number,
+    parentSequence?: number
+  ): Promise<void> {
     todoLoading = true;
     try {
       const next = await client.coordinationTodo(activeProject, todoId);
@@ -101,7 +133,8 @@
         activeProject !== projectId ||
         todoId !== selectedTodoId ||
         (parentSequence !== undefined && parentSequence !== sequence)
-      ) return;
+      )
+        return;
       todoDetail = next;
     } catch (cause) {
       if (activeProject === projectId && todoId === selectedTodoId) onError(message(cause));
@@ -122,7 +155,8 @@
         activeProject !== projectId ||
         scratchpadId !== selectedScratchpadId ||
         (parentSequence !== undefined && parentSequence !== sequence)
-      ) return;
+      )
+        return;
       scratchpadRead = next;
     } catch (cause) {
       if (activeProject === projectId && scratchpadId === selectedScratchpadId) {
@@ -132,6 +166,64 @@
       if (activeProject === projectId && scratchpadId === selectedScratchpadId) {
         scratchpadLoading = false;
       }
+    }
+  }
+
+  async function createTodo(): Promise<void> {
+    const title = createTitle.trim();
+    if (!title || mutating) return;
+    mutating = true;
+    try {
+      const todo = await client.coordinationTodoCreate(projectId, {
+        title,
+        body: createBody.trim(),
+        priority: createPriority,
+        tags: createTags
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+      });
+      selectedTodoId = todo.id;
+      createOpen = false;
+      createTitle = '';
+      createBody = '';
+      createPriority = 'medium';
+      createTags = '';
+      await refresh(projectId, () => false);
+      await loadTodo(projectId, todo.id);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      mutating = false;
+    }
+  }
+
+  async function completeTodo(todoId: number, completed: boolean): Promise<void> {
+    if (mutating) return;
+    mutating = true;
+    try {
+      await client.coordinationTodoComplete(projectId, todoId, completed);
+      selectedTodoId = todoId;
+      await refresh(projectId, () => false);
+      await loadTodo(projectId, todoId);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      mutating = false;
+    }
+  }
+
+  async function commentTodo(todoId: number, body: string): Promise<void> {
+    if (mutating || !body.trim()) return;
+    mutating = true;
+    try {
+      await client.coordinationTodoComment(projectId, todoId, body.trim());
+      await loadTodo(projectId, todoId);
+      await refresh(projectId, () => false);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      mutating = false;
     }
   }
 
@@ -148,132 +240,134 @@
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
+
+  function focusInput(node: HTMLInputElement): void {
+    queueMicrotask(() => node.focus());
+  }
 </script>
 
 <div class="coordination-view">
-  <header class="coordination-heading">
-    <div>
-      <span class="eyebrow">Project pulse</span>
-      <h2>Coordination</h2>
-      <p>Work graph and shared agent notes</p>
-    </div>
-    <span class="sync" class:refreshing>
-      <i aria-hidden="true"></i>
-      {connected ? 'live · 2s' : 'offline'}
-    </span>
-  </header>
+  <div class="live-strip">
+    <span class:refreshing><i aria-hidden="true"></i>{connected ? 'Live project data · 2s' : 'Offline'}</span>
+    {#if snapshot}
+      <small>
+        {view === 'todos'
+          ? `${snapshot.todo_total_count} todo${snapshot.todo_total_count === 1 ? '' : 's'}`
+          : `${snapshot.scratchpad_total_count} note${snapshot.scratchpad_total_count === 1 ? '' : 's'}`}
+      </small>
+    {/if}
+  </div>
 
   {#if !connected}
-    <div class="offline">Reconnect to the daemon to load coordination state.</div>
+    <div class="offline">Reconnect to the daemon to load this project.</div>
   {:else if snapshot === null}
-    <div class="loading"><span aria-hidden="true"></span> Loading coordination graph…</div>
-  {:else}
+    <div class="loading"><span aria-hidden="true"></span> Loading project data…</div>
+  {:else if view === 'todos'}
     <TodoBoard
       todos={snapshot.todos}
       selectedId={selectedTodoId}
       detail={todoDetail}
       detailLoading={todoLoading}
+      busy={mutating}
       onSelect={selectTodo}
+      onCreate={() => (createOpen = true)}
+      onComplete={(todoId, completed) => void completeTodo(todoId, completed)}
+      onComment={(todoId, body) => void commentTodo(todoId, body)}
     />
+  {:else}
     <ScratchpadPanel
       scratchpads={snapshot.scratchpads}
       selectedId={selectedScratchpadId}
       read={scratchpadRead}
       loading={scratchpadLoading}
       onSelect={selectScratchpad}
+      onRefresh={() => void refresh(projectId, () => false)}
     />
   {/if}
 </div>
 
+{#if createOpen}
+  <div
+    class="dialog-backdrop"
+    role="presentation"
+    onclick={(event) => {
+      if (event.target === event.currentTarget && !mutating) createOpen = false;
+    }}
+  >
+    <form
+      class="create-dialog"
+      aria-label="Create todo"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createTodo();
+      }}
+    >
+      <header>
+        <div>
+          <span>New project todo</span>
+          <h2>What needs to happen?</h2>
+        </div>
+        <button type="button" aria-label="Close" disabled={mutating} onclick={() => (createOpen = false)}>×</button>
+      </header>
+      <label>
+        <span>Title</span>
+        <input bind:value={createTitle} use:focusInput placeholder="Ship the first useful slice" required />
+      </label>
+      <label>
+        <span>Notes <small>optional</small></span>
+        <textarea bind:value={createBody} rows="4" placeholder="Outcome, constraints, or context"></textarea>
+      </label>
+      <div class="form-row">
+        <label>
+          <span>Priority</span>
+          <select bind:value={createPriority}>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </label>
+        <label>
+          <span>Tags <small>comma separated</small></span>
+          <input bind:value={createTags} placeholder="ui, follow-up" />
+        </label>
+      </div>
+      <footer>
+        <button type="button" disabled={mutating} onclick={() => (createOpen = false)}>Cancel</button>
+        <button class="submit" type="submit" disabled={mutating || !createTitle.trim()}>
+          {mutating ? 'Creating…' : 'Create todo'}
+        </button>
+      </footer>
+    </form>
+  </div>
+{/if}
+
 <style>
-  .coordination-view {
-    display: grid;
-    min-width: 0;
-    gap: 20px;
-    padding: 20px clamp(20px, 3.6vw, 52px) 42px;
-  }
+  .coordination-view { display: grid; min-width: 0; gap: 15px; }
+  .live-strip { display: flex; align-items: center; justify-content: space-between; min-height: 30px; border-bottom: 1px solid #263e49; color: #5e7883; font-family: 'JetBrains Mono Variable', monospace; font-size: 7px; letter-spacing: 0.07em; text-transform: uppercase; }
+  .live-strip > span { display: flex; align-items: center; gap: 7px; }
+  .live-strip i { width: 6px; height: 6px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 8px rgb(99 215 197 / 55%); }
+  .live-strip .refreshing i { animation: pulse 0.8s ease-in-out infinite alternate; }
+  .live-strip small { color: #526b76; font: inherit; }
+  .loading, .offline { display: flex; min-height: 280px; align-items: center; justify-content: center; gap: 9px; color: #66808a; font: 9px 'JetBrains Mono Variable', monospace; }
+  .loading span { width: 12px; height: 12px; border: 1px solid #36535e; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
 
-  .coordination-heading,
-  .coordination-heading > div,
-  .sync,
-  .loading {
-    display: flex;
-    align-items: center;
-  }
-
-  .coordination-heading { justify-content: space-between; gap: 20px; }
-  .coordination-heading > div { flex-wrap: wrap; gap: 9px 13px; }
-
-  .coordination-heading h2 {
-    margin: 0;
-    color: #e0e9ec;
-    font-size: 22px;
-    line-height: 1;
-  }
-
-  .coordination-heading p {
-    width: 100%;
-    margin: 0;
-    color: #607985;
-    font-size: 10px;
-  }
-
-  .eyebrow,
-  .sync,
-  .loading,
-  .offline {
-    font-family: 'JetBrains Mono Variable', monospace;
-  }
-
-  .eyebrow {
-    color: var(--signal);
-    font-size: 8px;
-    font-weight: 650;
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-  }
-
-  .sync {
-    flex: none;
-    gap: 7px;
-    border: 1px solid #29434e;
-    border-radius: 999px;
-    padding: 6px 9px;
-    color: #69828c;
-    font-size: 7px;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  .sync i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--signal);
-    box-shadow: 0 0 8px rgb(99 215 197 / 55%);
-  }
-
-  .sync.refreshing i { animation: pulse 0.8s ease-in-out infinite alternate; }
-
-  .loading,
-  .offline {
-    min-height: 220px;
-    place-content: center;
-    justify-content: center;
-    gap: 9px;
-    color: #66808a;
-    font-size: 9px;
-  }
-
-  .loading span {
-    width: 12px;
-    height: 12px;
-    border: 1px solid #36535e;
-    border-top-color: var(--signal);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
+  .dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(2 9 13 / 72%); backdrop-filter: blur(5px); }
+  .create-dialog { width: min(520px, 100%); border: 1px solid #36525e; border-radius: 5px; padding: 0; background: #0d2029; color: #dce6e9; box-shadow: 0 26px 70px rgb(0 0 0 / 42%); }
+  .create-dialog header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid #29424c; padding: 20px 22px 17px; }
+  .create-dialog header span, label > span { color: #69838e; font: 700 8px 'JetBrains Mono Variable', monospace; letter-spacing: 0.09em; text-transform: uppercase; }
+  .create-dialog h2 { margin: 6px 0 0; color: #edf3f5; font-size: 22px; font-weight: 560; }
+  .create-dialog header button { border: 0; background: transparent; color: #718892; font-size: 22px; cursor: pointer; }
+  .create-dialog > label, .form-row { margin: 17px 22px 0; }
+  .create-dialog label { display: grid; gap: 7px; }
+  label small { color: #506974; font: inherit; }
+  input, textarea, select { width: 100%; border: 1px solid #31505b; border-radius: 3px; padding: 10px 11px; background: #081820; color: #d9e4e7; font-size: 11px; outline: 0; }
+  input:focus, textarea:focus, select:focus { border-color: var(--signal); box-shadow: 0 0 0 2px rgb(99 215 197 / 8%); }
+  textarea { resize: vertical; line-height: 1.5; }
+  .form-row { display: grid; grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr); gap: 12px; }
+  .create-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 21px; border-top: 1px solid #29424c; padding: 14px 22px; }
+  .create-dialog footer button { min-height: 35px; border: 1px solid #35515c; border-radius: 3px; padding: 0 13px; background: #10252e; color: #9db0b7; font-size: 10px; cursor: pointer; }
+  .create-dialog footer .submit { border-color: #4b8179; background: #17372f; color: #def0ec; font-weight: 650; }
+  .create-dialog button:disabled { cursor: not-allowed; opacity: 0.5; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { to { opacity: 0.35; } }
 </style>

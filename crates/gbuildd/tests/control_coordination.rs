@@ -194,6 +194,58 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     );
     assert_eq!(detail["comments"][0]["actor"], "codex-w2");
 
+    let created = rpc(
+        &mut socket,
+        "todo-create",
+        "coordination.todo_create",
+        json!({
+            "project_id": 1,
+            "title": "Verify the desktop flow",
+            "body": "Created from the project todo section.",
+            "priority": "medium",
+            "tags": ["desktop"]
+        }),
+    )
+    .await;
+    let created_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["status"], "open");
+
+    let comment = rpc(
+        &mut socket,
+        "todo-comment",
+        "coordination.todo_comment",
+        json!({
+            "project_id": 1,
+            "todo_id": created_id,
+            "body": "The visible comment composer works."
+        }),
+    )
+    .await;
+    assert_eq!(comment["actor"], "desktop-ui");
+
+    let completed = rpc(
+        &mut socket,
+        "todo-complete",
+        "coordination.todo_complete",
+        json!({ "project_id": 1, "todo_id": created_id, "completed": true }),
+    )
+    .await;
+    assert_eq!(completed["todo"]["completed"], true);
+    assert_eq!(completed["todo"]["status"], "completed");
+
+    let created_detail = rpc(
+        &mut socket,
+        "created-detail",
+        "coordination.todo",
+        json!({ "project_id": 1, "todo_id": created_id }),
+    )
+    .await;
+    assert_eq!(created_detail["comment_total_count"], 1);
+    assert_eq!(
+        created_detail["comments"][0]["body"],
+        "The visible comment composer works."
+    );
+
     let first_read = rpc(
         &mut socket,
         "scratchpad-1",

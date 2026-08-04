@@ -4,7 +4,10 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   CoordinationClient,
   CoordinationSnapshot,
+  NewTodoInput,
   ScratchpadRead,
+  TodoComment,
+  TodoCompleteResult,
   TodoDetail
 } from './coordination';
 
@@ -168,6 +171,34 @@ export class DaemonClient implements CoordinationClient {
 
   coordinationTodo(projectId: number, todoId: number): Promise<TodoDetail> {
     return this.request('coordination.todo', { project_id: projectId, todo_id: todoId });
+  }
+
+  coordinationTodoCreate(projectId: number, input: NewTodoInput): Promise<TodoDetail['todo']> {
+    return this.request('coordination.todo_create', { project_id: projectId, ...input });
+  }
+
+  coordinationTodoComplete(
+    projectId: number,
+    todoId: number,
+    completed: boolean
+  ): Promise<TodoCompleteResult> {
+    return this.request('coordination.todo_complete', {
+      project_id: projectId,
+      todo_id: todoId,
+      completed
+    });
+  }
+
+  coordinationTodoComment(
+    projectId: number,
+    todoId: number,
+    body: string
+  ): Promise<TodoComment> {
+    return this.request('coordination.todo_comment', {
+      project_id: projectId,
+      todo_id: todoId,
+      body
+    });
   }
 
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead> {

@@ -70,7 +70,13 @@
   {#if processes.length === 0}
     <div class="empty">
       <span aria-hidden="true">⌁</span>
-      <p>No saved commands yet. Add <code>gbuild.yml</code> or open a terminal.</p>
+      <div>
+        <strong>No processes are registered</strong>
+        <p>Add commands in <code>gbuild.yml</code>, or spawn a terminal to start working now.</p>
+      </div>
+      <button type="button" disabled={!connected || busyId !== null} onclick={onSpawnTerminal}>
+        <span aria-hidden="true">+</span> Spawn terminal
+      </button>
     </div>
   {:else}
     <div class="process-list">
@@ -145,7 +151,7 @@
 <style>
   .process-panel {
     min-width: 0;
-    margin: 12px clamp(24px, 4vw, 58px) 10px;
+    margin: 0;
     border: 1px solid #273d49;
     border-radius: 4px;
     background: rgb(10 23 31 / 76%);
@@ -383,10 +389,12 @@
   }
 
   .empty {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 11px;
-    padding: 14px;
+    min-height: 150px;
+    padding: 25px;
     color: #708792;
   }
 
@@ -395,10 +403,16 @@
     font-family: 'JetBrains Mono Variable', monospace;
   }
 
+  .empty strong { display: block; color: #c6d4d9; font-size: 12px; }
+
   .empty p {
-    margin: 0;
+    margin: 5px 0 0;
     font-size: 10px;
+    line-height: 1.5;
   }
+
+  .empty button { display: flex; align-items: center; gap: 7px; border: 1px solid #4b8179; border-radius: 3px; padding: 9px 11px; background: #17362f; color: #dcece9; font-size: 9px; font-weight: 650; cursor: pointer; }
+  .empty button span { color: var(--signal); font: 13px 'JetBrains Mono Variable', monospace; }
 
   code {
     color: #9fb2bb;
@@ -413,5 +427,8 @@
     .actions {
       padding: 0 10px 8px 29px;
     }
+
+    .empty { grid-template-columns: auto minmax(0, 1fr); }
+    .empty button { grid-column: 2; justify-self: start; }
   }
 </style>
