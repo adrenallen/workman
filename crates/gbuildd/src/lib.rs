@@ -35,12 +35,17 @@ use uuid::Uuid;
 
 pub mod config;
 mod control;
+pub mod lifecycle;
 mod mcp;
 mod process_registry;
 
 pub use config::{
     ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, YmlProcess, is_process_trusted,
     parse_gbuild_yml, sync_gbuild_yml, sync_gbuild_yml_file, trust_hash_for_process,
+};
+pub use lifecycle::{
+    LifecycleOptions, auto_start_project, spawn_lifecycle_supervisor,
+    spawn_lifecycle_supervisor_with_options,
 };
 pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
@@ -156,6 +161,9 @@ impl DaemonServer {
         F: Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let lifecycle_task =
+            spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
+        let lifecycle_shutdown = shutdown_tx.clone();
         let state = AppState {
             token: self.discovery.token.clone(),
             port: self.discovery.port,
@@ -172,9 +180,12 @@ impl DaemonServer {
 
         // Keep the guard alive until all HTTP connections and WebSockets have drained.
         let _discovery_guard = self.discovery_guard;
-        axum::serve(listener, app)
+        let result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_server)
-            .await
+            .await;
+        let _ = lifecycle_shutdown.send(true);
+        let _ = lifecycle_task.await;
+        result
     }
 }
 

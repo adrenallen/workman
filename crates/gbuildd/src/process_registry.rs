@@ -392,6 +392,9 @@ impl ProcessRegistry {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
+            process.status = ProcessStatus::Stopped;
+            process.pid = None;
+            self.store.put_process(&process)?;
             return Ok(process);
         };
         let _ = self.store.clear_process_mcp_token(process_id);

@@ -121,6 +121,7 @@ async fn dispatch(
         "projects.select" => {
             let params: ProjectParams = params_as(params)?;
             select_project(registry.store(), params.project_id)?;
+            let _ = crate::lifecycle::auto_start_project(&mut registry, params.project_id);
             return project_result(list_projects(registry.store()));
         }
         "projects.rename" => {
