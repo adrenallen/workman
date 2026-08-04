@@ -17,7 +17,10 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-use crate::{ProcessRegistry, RegistryError, SharedProcessRegistry};
+use crate::{
+    ProcessRegistry, RegistryError, SharedProcessRegistry,
+    timer_events::{TimerLifecycleEvent, TimerLifecycleHub, TimerLifecycleKind},
+};
 
 const TIMER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -107,7 +110,7 @@ struct TimerRuntime {
     watch_state: BTreeMap<ProcessId, WatchProgress>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TimerView {
     #[serde(flatten)]
     pub timer: Timer,
@@ -121,14 +124,17 @@ pub(crate) enum TimerFireReason {
     Delay,
     IdleTransition,
     MaxWait,
+    AlreadySatisfied,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TimerFire {
     pub timer_id: TimerId,
+    pub project_id: ProjectId,
     pub delivery_process_id: ProcessId,
     pub reason: TimerFireReason,
     pub fired_at: i64,
+    pub timer: TimerView,
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +379,42 @@ impl<'a> TimerService<'a> {
         Ok(views)
     }
 
+    /// Return every active or paused timer for status-stream reconciliation.
+    pub(crate) fn list_active(&mut self, now_ms: i64) -> TimerResult<Vec<TimerView>> {
+        let timer_ids = {
+            let mut statement = self
+                .registry
+                .store()
+                .connection()
+                .prepare(
+                    "SELECT timer.id
+                     FROM timers AS timer
+                     LEFT JOIN timer_runtime AS runtime ON runtime.timer_id = timer.id
+                     WHERE timer.fired = 0
+                     ORDER BY COALESCE(runtime.due_at, timer.max_wait_deadline, timer.created_at), timer.id",
+                )
+                .map_err(persistence)?;
+            let rows = statement
+                .query_map([], |row| row.get(0))
+                .map_err(persistence)?;
+            let mut timer_ids = Vec::new();
+            for row in rows {
+                timer_ids.push(row.map_err(persistence)?);
+            }
+            timer_ids
+        };
+
+        let mut views = Vec::with_capacity(timer_ids.len());
+        for timer_id in timer_ids {
+            let Some(timer) = self.registry.store().get_timer(timer_id)? else {
+                continue;
+            };
+            let runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
+            views.push(TimerView::new(timer, runtime));
+        }
+        Ok(views)
+    }
+
     pub(crate) fn tick(&mut self, now_ms: i64) -> TimerResult<Vec<TimerFire>> {
         let timer_ids = self.pending_timer_ids()?;
         let mut fired = Vec::new();
@@ -427,11 +469,14 @@ impl<'a> TimerService<'a> {
                 timer.fired = true;
             }
             self.update(&timer, &runtime)?;
+            let project_id = self.registry.get(timer.delivery_process_id)?.project_id;
             fired.push(TimerFire {
                 timer_id: timer.id,
+                project_id,
                 delivery_process_id: timer.delivery_process_id,
                 reason,
                 fired_at: now_ms,
+                timer: TimerView::new(timer, runtime),
             });
         }
         Ok(fired)
@@ -674,6 +719,7 @@ fn persistence(error: impl fmt::Display) -> TimerError {
 
 pub(crate) fn spawn_timer_scheduler(
     registry: SharedProcessRegistry,
+    events: TimerLifecycleHub,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -688,7 +734,24 @@ pub(crate) fn spawn_timer_scheduler(
                 }
                 _ = ticker.tick() => {
                     let mut registry = registry.lock().await;
-                    let _ = TimerService::new(&mut registry).tick(now_millis());
+                    if let Ok(fires) = TimerService::new(&mut registry).tick(now_millis()) {
+                        for fire in fires {
+                            events.publish(TimerLifecycleEvent::for_timer(
+                                TimerLifecycleKind::Fired,
+                                fire.project_id,
+                                fire.timer.clone(),
+                                fire.fired_at,
+                                Some(fire.reason),
+                            ));
+                            events.publish(TimerLifecycleEvent::for_timer(
+                                TimerLifecycleKind::Delivered,
+                                fire.project_id,
+                                fire.timer,
+                                fire.fired_at,
+                                Some(fire.reason),
+                            ));
+                        }
+                    }
                 }
             }
         }

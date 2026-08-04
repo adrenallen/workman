@@ -18,6 +18,7 @@
 
   import { liveStats, type DescendantProcessStats } from './liveStats';
   import { killSubprocess, listSubprocesses } from './subprocesses';
+  import TimerCountdown from './TimerCountdown.svelte';
 
   let {
     client,
@@ -182,6 +183,7 @@
 
   <div class="telemetry">
     <span class="metric uptime" title="Process uptime">{formatDuration(stats?.uptime_seconds)}</span>
+    <TimerCountdown processId={process.id} />
     <strong class="process-name" title={process.name}>{process.name}</strong>
 
     <div class="subprocess-control" bind:this={popoverRoot}>

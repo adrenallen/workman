@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{ProcessRegistry, SharedProcessRegistry};
+use crate::{ProcessRegistry, SharedProcessRegistry, timer_events::TimerLifecycleHub};
 
 pub(crate) mod agent_spawning;
 mod tools_lock;
@@ -43,11 +43,16 @@ pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
 pub struct GbuildMcp {
     registry: SharedProcessRegistry,
     mcp_url: String,
+    timer_events: TimerLifecycleHub,
     tool_router: ToolRouter<Self>,
 }
 
 impl GbuildMcp {
-    pub fn new(registry: SharedProcessRegistry, mcp_url: String) -> Self {
+    pub(crate) fn new(
+        registry: SharedProcessRegistry,
+        mcp_url: String,
+        timer_events: TimerLifecycleHub,
+    ) -> Self {
         let mut tool_router = Self::tool_router();
         tool_router.merge(Self::process_tool_router());
         tool_router.merge(Self::readiness_tool_router());
@@ -59,6 +64,7 @@ impl GbuildMcp {
         Self {
             registry,
             mcp_url,
+            timer_events,
             tool_router,
         }
     }
@@ -67,6 +73,7 @@ impl GbuildMcp {
 pub fn streamable_http_service(
     registry: SharedProcessRegistry,
     mcp_url: String,
+    timer_events: TimerLifecycleHub,
 ) -> (
     StreamableHttpService<GbuildMcp, LocalSessionManager>,
     Arc<LocalSessionManager>,
@@ -74,7 +81,13 @@ pub fn streamable_http_service(
     let config = StreamableHttpServerConfig::default().with_json_response(true);
     let sessions = Arc::new(LocalSessionManager::default());
     let service = StreamableHttpService::new(
-        move || Ok(GbuildMcp::new(registry.clone(), mcp_url.clone())),
+        move || {
+            Ok(GbuildMcp::new(
+                registry.clone(),
+                mcp_url.clone(),
+                timer_events.clone(),
+            ))
+        },
         sessions.clone(),
         config,
     );

@@ -15,6 +15,7 @@ use serde_json::json;
 use super::{GbuildMcp, failure, scoped_project, success};
 use crate::{
     ProcessRegistry,
+    timer_events::{TimerLifecycleEvent, TimerLifecycleKind},
     timers::{IdleTimerOutcome, TimerError, TimerService, now_millis},
 };
 
@@ -108,6 +109,7 @@ impl GbuildMcp {
                 Ok(process) => process,
                 Err((code, message)) => return failure(code, message),
             };
+        let now = now_millis();
         match TimerService::new(&mut registry).set_delay(
             actor.id,
             delivery.id,
@@ -115,9 +117,18 @@ impl GbuildMcp {
             delay_ms,
             args.loop_timer,
             repeat_every_ms,
-            now_millis(),
+            now,
         ) {
-            Ok(timer) => success(json!({ "project_id": project.id, "timer": timer })),
+            Ok(timer) => {
+                self.timer_events.publish(TimerLifecycleEvent::for_timer(
+                    TimerLifecycleKind::Created,
+                    project.id,
+                    timer.clone(),
+                    now,
+                    None,
+                ));
+                success(json!({ "project_id": project.id, "timer": timer }))
+            }
             Err(error) => timer_failure(error),
         }
     }
@@ -154,11 +165,20 @@ impl GbuildMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         match TimerService::new(&mut registry).cancel(&actor.id, project.id, args.timer_id) {
-            Ok(timer) => success(json!({
-                "project_id": project.id,
-                "timer_id": timer.timer.id,
-                "cancelled": true,
-            })),
+            Ok(timer) => {
+                self.timer_events.publish(TimerLifecycleEvent::for_timer(
+                    TimerLifecycleKind::Cancelled,
+                    project.id,
+                    timer.clone(),
+                    now_millis(),
+                    None,
+                ));
+                success(json!({
+                    "project_id": project.id,
+                    "timer_id": timer.timer.id,
+                    "cancelled": true,
+                }))
+            }
             Err(error) => timer_failure(error),
         }
     }
@@ -238,25 +258,44 @@ impl GbuildMcp {
             max_wait_ms,
             now_millis(),
         ) {
-            Ok(IdleTimerOutcome::Created(timer)) => success(json!({
-                "project_id": project.id,
-                "already_satisfied": false,
-                "delivered_immediately": false,
-                "timer": timer,
-            })),
+            Ok(IdleTimerOutcome::Created(timer)) => {
+                self.timer_events.publish(TimerLifecycleEvent::for_timer(
+                    TimerLifecycleKind::Created,
+                    project.id,
+                    timer.clone(),
+                    timer.timer.created_at,
+                    None,
+                ));
+                success(json!({
+                    "project_id": project.id,
+                    "already_satisfied": false,
+                    "delivered_immediately": false,
+                    "timer": timer,
+                }))
+            }
             Ok(IdleTimerOutcome::AlreadySatisfied {
                 watch_process_ids,
                 delivery_process_id,
                 delivered_at,
-            }) => success(json!({
-                "project_id": project.id,
-                "already_satisfied": true,
-                "delivered_immediately": true,
-                "delivery_process_id": delivery_process_id,
-                "delivered_at": delivered_at,
-                "timer": null,
-                "watch_process_ids": watch_process_ids,
-            })),
+            }) => {
+                for kind in [TimerLifecycleKind::Fired, TimerLifecycleKind::Delivered] {
+                    self.timer_events.publish(TimerLifecycleEvent::immediate(
+                        kind,
+                        project.id,
+                        delivery_process_id,
+                        delivered_at,
+                    ));
+                }
+                success(json!({
+                    "project_id": project.id,
+                    "already_satisfied": true,
+                    "delivered_immediately": true,
+                    "delivery_process_id": delivery_process_id,
+                    "delivered_at": delivered_at,
+                    "timer": null,
+                    "watch_process_ids": watch_process_ids,
+                }))
+            }
             Err(error) => timer_failure(error),
         }
     }
@@ -279,7 +318,20 @@ impl GbuildMcp {
             TimerService::new(&mut registry).resume(&actor.id, project.id, args.timer_id, now)
         };
         match result {
-            Ok(timer) => success(json!({ "project_id": project.id, "timer": timer })),
+            Ok(timer) => {
+                self.timer_events.publish(TimerLifecycleEvent::for_timer(
+                    if pause {
+                        TimerLifecycleKind::Paused
+                    } else {
+                        TimerLifecycleKind::Resumed
+                    },
+                    project.id,
+                    timer.clone(),
+                    now,
+                    None,
+                ));
+                success(json!({ "project_id": project.id, "timer": timer }))
+            }
             Err(error) => timer_failure(error),
         }
     }

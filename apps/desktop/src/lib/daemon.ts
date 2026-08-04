@@ -25,6 +25,12 @@ import {
   updateLiveStats,
   type LiveStatsSnapshot
 } from './liveStats';
+import {
+  resetTimerLifecycle,
+  updateTimerLifecycle,
+  type TimerLifecycleEvent,
+  type TimerView
+} from './timerLifecycle';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -156,6 +162,8 @@ interface ProcessStatusesEvent {
   event: 'process.statuses';
   processes: ProcessView[];
   stats?: LiveStatsSnapshot;
+  timers?: TimerView[];
+  timer_events?: TimerLifecycleEvent[];
 }
 
 interface PendingRequest {
@@ -387,6 +395,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     this.terminalListeners.clear();
     this.processListeners.clear();
     resetLiveStats();
+    resetTimerLifecycle();
   }
 
   /** Typed escape hatch for small control-channel surfaces owned by feature modules. */
@@ -452,6 +461,12 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     if (event.event === 'process.statuses' && Array.isArray(event.processes)) {
       if (event.stats && typeof event.stats.sampled_at === 'number') {
         updateLiveStats(event.stats);
+      }
+      if (Array.isArray(event.timers) || Array.isArray(event.timer_events)) {
+        updateTimerLifecycle(
+          Array.isArray(event.timers) ? event.timers : undefined,
+          Array.isArray(event.timer_events) ? event.timer_events : []
+        );
       }
       for (const listener of this.processListeners) listener(event.processes);
       return;

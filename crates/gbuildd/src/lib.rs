@@ -43,6 +43,7 @@ pub mod process_stats;
 pub mod readiness;
 mod settings;
 mod subprocesses;
+mod timer_events;
 mod timers;
 mod user_config;
 mod version;
@@ -210,7 +211,12 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lifecycle_task =
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
-        let timer_task = timers::spawn_timer_scheduler(self.registry.clone(), shutdown_rx.clone());
+        let timer_events = timer_events::TimerLifecycleHub::default();
+        let timer_task = timers::spawn_timer_scheduler(
+            self.registry.clone(),
+            timer_events.clone(),
+            shutdown_rx.clone(),
+        );
         let live_stats = process_stats::LiveStatsHub::new();
         let live_stats_task = process_stats::spawn_live_stats_sampler(
             live_stats.clone(),
@@ -231,6 +237,7 @@ impl DaemonServer {
             settings: runtime_settings,
             registry: self.registry,
             live_stats,
+            timer_events,
         };
         let app = router(state);
         let listener = self.listener;
@@ -266,11 +273,13 @@ struct AppState {
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
     live_stats: process_stats::LiveStatsHub,
+    timer_events: timer_events::TimerLifecycleHub,
 }
 
 fn router(state: AppState) -> Router {
     let mcp_url = format!("http://127.0.0.1:{}/mcp", state.port);
-    let (mcp_service, mcp_sessions) = mcp::streamable_http_service(state.registry.clone(), mcp_url);
+    let (mcp_service, mcp_sessions) =
+        mcp::streamable_http_service(state.registry.clone(), mcp_url, state.timer_events.clone());
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
@@ -305,6 +314,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
             state.settings,
             state.registry,
             state.live_stats,
+            state.timer_events,
         )
     })
 }
@@ -316,11 +326,13 @@ async fn control_session(
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
     live_stats: process_stats::LiveStatsHub,
+    timer_events: timer_events::TimerLifecycleHub,
 ) {
     let mcp_url = settings.info().mcp.endpoint;
     let _live_stats_client = live_stats.client_connected();
     let mut terminal = TerminalSubscription::default();
     let mut status_subscribed = false;
+    let mut timer_event_cursor = timer_events.latest_sequence();
     let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
     terminal_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal_tick.tick().await;
@@ -400,13 +412,24 @@ async fn control_session(
                 }
             }
             _ = status_tick.tick(), if status_subscribed => {
-                let statuses = registry.lock().await.list_statuses(None);
-                if let Ok(processes) = statuses {
+                let (statuses, timers) = {
+                    let mut registry = registry.lock().await;
+                    let statuses = registry.list_statuses(None);
+                    let timers = timers::TimerService::new(&mut registry)
+                        .list_active(timers::now_millis());
+                    (statuses, timers)
+                };
+                if let (Ok(processes), Ok(timers)) = (statuses, timers) {
                     let stats = live_stats.snapshot().await;
+                    let (latest_timer_event, lifecycle_events) =
+                        timer_events.events_since(timer_event_cursor);
+                    timer_event_cursor = latest_timer_event;
                     let event = json!({
                         "event": "process.statuses",
                         "processes": processes,
                         "stats": stats,
+                        "timers": timers,
+                        "timer_events": lifecycle_events,
                     });
                     if socket.send(Message::Text(event.to_string().into())).await.is_err() {
                         break;
