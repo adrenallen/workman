@@ -467,7 +467,7 @@
     </aside>
   {/if}
 
-  <section class="content-shell">
+  <section class="content-shell" class:empty={selectedProject === null}>
     {#if selectedProject}
       <header class="section-header" data-tauri-drag-region>
         <div>
@@ -758,6 +758,7 @@
   .daemon-state small { margin-top: 3px; color: #4d6671; font-size: 7px; }
 
   .content-shell { position: relative; display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; background: radial-gradient(circle at 80% 6%, rgb(79 125 143 / 9%), transparent 28%), repeating-linear-gradient(0deg, transparent 0 43px, rgb(118 144 160 / 3%) 44px), var(--night); }
+  .content-shell.empty { display: flex; }
   .section-header { display: flex; min-height: 118px; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 28px clamp(24px, 3.5vw, 48px) 19px; border-bottom: 1px solid #243a46; }
   .breadcrumb { color: #5f7884; font: 700 7px 'JetBrains Mono Variable', monospace; letter-spacing: 0.1em; text-transform: uppercase; }
   .section-header h1 { margin: 7px 0 0; color: #edf4f6; font-size: clamp(25px, 3.4vw, 38px); font-weight: 540; letter-spacing: -0.035em; line-height: 1; }
