@@ -1,0 +1,7 @@
+range=0..5 total=5 viewport=1 screen=4 cols=5 alt=false cursor=4:3:true
+000>|abcde|
+    style 0:4-4 fg=Foreground bg=Background flags=Flags(WRAPLINE)
+001 |fghij|
+002 |line2|
+003 |line3|
+004 |end|

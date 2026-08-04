@@ -1,0 +1,9 @@
+range=0..6 total=6 viewport=0 screen=6 cols=24 alt=true cursor=1:4:true
+000 |fn main() {|
+    style 0:0-10 fg=#50fa78 bg=Background flags=Flags(0x0)
+001 |    println!("hi");|
+002 |}|
+003 ||
+004 ||
+005 | NORMAL  demo.rs|
+    style 5:0-15 fg=Foreground bg=Background flags=Flags(INVERSE)

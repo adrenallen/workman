@@ -15,6 +15,8 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
+use crate::terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput};
+
 /// Portable PTY exit status and terminal dimensions used by the host API.
 pub use portable_pty::{ExitStatus, PtySize};
 
@@ -45,6 +47,15 @@ pub struct RawRingBuffer {
     start: usize,
     len: usize,
     total_bytes_seen: u64,
+}
+
+/// A literal byte match within the retained raw stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawSearchMatch {
+    /// Offset within the currently retained ring snapshot.
+    pub retained_offset: usize,
+    /// Absolute byte offset since this process's capture started.
+    pub stream_offset: u64,
 }
 
 impl RawRingBuffer {
@@ -131,6 +142,29 @@ impl RawRingBuffer {
     pub fn total_bytes_seen(&self) -> u64 {
         self.total_bytes_seen
     }
+
+    /// Search retained raw bytes for a literal byte sequence.
+    pub fn search(&self, needle: &[u8], max_matches: usize) -> Vec<RawSearchMatch> {
+        if needle.is_empty() || max_matches == 0 || needle.len() > self.len {
+            return Vec::new();
+        }
+
+        let snapshot = self.snapshot();
+        let stream_start = self
+            .total_bytes_seen
+            .saturating_sub(u64::try_from(self.len).unwrap_or(u64::MAX));
+        snapshot
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(offset, window)| {
+                (window == needle).then_some(RawSearchMatch {
+                    retained_offset: offset,
+                    stream_offset: stream_start.saturating_add(offset as u64),
+                })
+            })
+            .take(max_matches)
+            .collect()
+    }
 }
 
 /// Thread-safe view of a process's raw output ring.
@@ -185,6 +219,11 @@ impl RawOutput {
     pub fn total_bytes_seen(&self) -> u64 {
         self.lock().total_bytes_seen()
     }
+
+    /// Search retained raw bytes for a literal byte sequence.
+    pub fn search(&self, needle: &[u8], max_matches: usize) -> Vec<RawSearchMatch> {
+        self.lock().search(needle, max_matches)
+    }
 }
 
 /// Configuration for a command hosted inside a PTY.
@@ -201,6 +240,8 @@ pub struct PtySpawnOptions {
     pub size: PtySize,
     /// Maximum number of raw output bytes retained in memory.
     pub raw_buffer_capacity: usize,
+    /// Maximum number of rendered rows retained above the viewport.
+    pub scrollback_lines: usize,
     mcp_token: String,
 }
 
@@ -214,6 +255,7 @@ impl PtySpawnOptions {
             env: BTreeMap::new(),
             size: DEFAULT_PTY_SIZE,
             raw_buffer_capacity: DEFAULT_RAW_BUFFER_CAPACITY,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             mcp_token: mcp_token.into(),
         }
     }
@@ -242,6 +284,12 @@ impl PtySpawnOptions {
         self.raw_buffer_capacity = capacity;
         self
     }
+
+    /// Set the rendered scrollback row limit.
+    pub fn with_scrollback_lines(mut self, lines: usize) -> Self {
+        self.scrollback_lines = lines;
+        self
+    }
 }
 
 impl fmt::Debug for PtySpawnOptions {
@@ -254,6 +302,7 @@ impl fmt::Debug for PtySpawnOptions {
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("size", &self.size)
             .field("raw_buffer_capacity", &self.raw_buffer_capacity)
+            .field("scrollback_lines", &self.scrollback_lines)
             .field("mcp_token", &"[redacted]")
             .finish()
     }
@@ -268,6 +317,7 @@ pub struct PtyProcess {
     child: Option<Box<dyn Child + Send + Sync>>,
     exit_status: Option<ExitStatus>,
     raw_output: RawOutput,
+    terminal_output: TerminalOutput,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -314,9 +364,15 @@ impl PtyProcess {
 
         let raw_output = RawOutput::new(options.raw_buffer_capacity);
         let reader_output = raw_output.clone();
+        let terminal_output = TerminalOutput::new(
+            options.size.rows,
+            options.size.cols,
+            options.scrollback_lines,
+        );
+        let reader_terminal = terminal_output.clone();
         let reader_thread = match thread::Builder::new()
             .name(format!("gbuild-pty-{}-reader", options.process_id))
-            .spawn(move || capture_output(reader, reader_output))
+            .spawn(move || capture_output(reader, reader_output, reader_terminal))
         {
             Ok(thread) => thread,
             Err(error) => {
@@ -335,6 +391,7 @@ impl PtyProcess {
             child: Some(child),
             exit_status: None,
             raw_output,
+            terminal_output,
             reader_thread: Some(reader_thread),
         })
     }
@@ -354,6 +411,11 @@ impl PtyProcess {
         self.raw_output.clone()
     }
 
+    /// Clone a thread-safe handle to rendered grid and scrollback reads.
+    pub fn terminal_output(&self) -> TerminalOutput {
+        self.terminal_output.clone()
+    }
+
     /// Write bytes to the terminal and flush them to the child.
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         let writer = self
@@ -366,11 +428,16 @@ impl PtyProcess {
 
     /// Resize the PTY, causing the kernel to deliver SIGWINCH as appropriate.
     pub fn resize(&self, size: PtySize) -> Result<()> {
+        // Keep the parser blocked until its grid matches the kernel dimensions,
+        // so output emitted immediately after SIGWINCH cannot use the old size.
+        let mut terminal = self.terminal_output.lock();
         self.master
             .as_ref()
             .ok_or_else(|| anyhow!("PTY master is closed"))?
             .resize(size)
-            .context("resize PTY")
+            .context("resize PTY")?;
+        terminal.resize(size.rows, size.cols);
+        Ok(())
     }
 
     /// Read the terminal dimensions currently recorded by the kernel.
@@ -461,6 +528,7 @@ impl fmt::Debug for PtyProcess {
             .field("pid", &self.pid)
             .field("exit_status", &self.exit_status)
             .field("raw_output", &self.raw_output)
+            .field("terminal_output", &self.terminal_output)
             .finish_non_exhaustive()
     }
 }
@@ -484,12 +552,19 @@ impl Drop for PtyProcess {
     }
 }
 
-fn capture_output(mut reader: Box<dyn Read + Send>, output: RawOutput) {
+fn capture_output(
+    mut reader: Box<dyn Read + Send>,
+    raw_output: RawOutput,
+    terminal_output: TerminalOutput,
+) {
     let mut chunk = [0_u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
-            Ok(count) => output.push(&chunk[..count]),
+            Ok(count) => {
+                raw_output.push(&chunk[..count]);
+                terminal_output.feed(&chunk[..count]);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // Unix PTYs commonly report EIO when their final slave closes.
             Err(_) => break,
@@ -519,6 +594,22 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for PTY output: {output:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_rendered_output(process: &PtyProcess, needle: &str) {
+        let output = process.terminal_output();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !output.search_rendered(needle, 1).is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for rendered PTY output: {:?}",
+                output.read_rows(0..usize::MAX)
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -554,11 +645,25 @@ mod tests {
         assert_eq!(ring.len(), 5);
         assert_eq!(ring.capacity(), 5);
         assert_eq!(ring.total_bytes_seen(), 7);
+        assert_eq!(
+            ring.search(b"de", 10),
+            vec![RawSearchMatch {
+                retained_offset: 1,
+                stream_offset: 3,
+            }]
+        );
 
         ring.push(b"0123456789");
         assert_eq!(ring.snapshot(), b"56789");
         assert_eq!(ring.len(), 5);
         assert_eq!(ring.total_bytes_seen(), 17);
+        assert_eq!(
+            ring.search(b"78", 1),
+            vec![RawSearchMatch {
+                retained_offset: 2,
+                stream_offset: 14,
+            }]
+        );
     }
 
     #[test]
@@ -575,7 +680,8 @@ mod tests {
     fn pty_injects_identity_writes_reads_and_resizes() {
         let command = concat!(
             "trap 'printf cleanup-complete\\n; exit 0' TERM; ",
-            "printf 'env:%s:%s\\n' \"$GBUILD_PROCESS_ID\" \"$GBUILD_MCP_TOKEN\"; ",
+            "printf '\\033[32menv:%s:%s\\033[0m\\n' ",
+            "\"$GBUILD_PROCESS_ID\" \"$GBUILD_MCP_TOKEN\"; ",
             "IFS= read -r line; printf 'got:%s\\n' \"$line\"; sleep 30"
         );
         let options = PtySpawnOptions::new(42, "secret-token", command)
@@ -584,8 +690,10 @@ mod tests {
         let mut process = PtyProcess::spawn(options).expect("spawn PTY process");
 
         wait_for_output(&process, b"env:42:secret-token");
+        wait_for_rendered_output(&process, "env:42:secret-token");
         process.write_all(b"hello pty\n").expect("write PTY input");
         wait_for_output(&process, b"got:hello pty");
+        wait_for_rendered_output(&process, "got:hello pty");
 
         let size = PtySize {
             rows: 40,
@@ -599,6 +707,8 @@ mod tests {
         assert_eq!(actual.cols, size.cols);
         assert_eq!(actual.pixel_width, size.pixel_width);
         assert_eq!(actual.pixel_height, size.pixel_height);
+        assert_eq!(process.terminal_output().screen_rows(), 40);
+        assert_eq!(process.terminal_output().columns(), 120);
 
         let status = process
             .terminate(Duration::from_millis(500))

@@ -2,6 +2,7 @@
 
 pub mod domain;
 pub mod store;
+pub mod terminal;
 
 #[cfg(unix)]
 pub mod pty;

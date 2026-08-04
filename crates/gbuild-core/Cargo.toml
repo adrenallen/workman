@@ -8,6 +8,7 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 nix = { version = "0.28", features = ["process", "signal"] }
 portable-pty = "0.9"
