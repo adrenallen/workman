@@ -39,6 +39,7 @@ pub mod lifecycle;
 mod mcp;
 mod process_registry;
 pub mod readiness;
+mod timers;
 
 pub use config::{
     ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, YmlProcess, is_process_trusted,
@@ -169,6 +170,7 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lifecycle_task =
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
+        let timer_task = timers::spawn_timer_scheduler(self.registry.clone(), shutdown_rx.clone());
         let lifecycle_shutdown = shutdown_tx.clone();
         let state = AppState {
             token: self.discovery.token.clone(),
@@ -191,6 +193,7 @@ impl DaemonServer {
             .await;
         let _ = lifecycle_shutdown.send(true);
         let _ = lifecycle_task.await;
+        let _ = timer_task.await;
         result
     }
 }
