@@ -4,7 +4,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   CoordinationClient,
   CoordinationSnapshot,
+  NewScratchpadInput,
   NewTodoInput,
+  Scratchpad,
   ScratchpadRead,
   TodoComment,
   TodoCompleteResult,
@@ -219,6 +221,13 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('coordination.scratchpad', {
       project_id: projectId,
       scratchpad_id: scratchpadId
+    });
+  }
+
+  coordinationScratchpadCreate(projectId: number, input: NewScratchpadInput): Promise<Scratchpad> {
+    return this.request('coordination.scratchpad_create', {
+      project_id: projectId,
+      ...input
     });
   }
 

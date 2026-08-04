@@ -56,6 +56,16 @@ struct ScratchpadParams {
     scratchpad_id: ScratchpadId,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateScratchpadParams {
+    project_id: ProjectId,
+    name: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
 /// Returns `None` when `method` belongs to another control module.
 pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<ControlResult> {
     match method {
@@ -65,6 +75,7 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.todo_complete" => Some(todo_complete(params, store)),
         "coordination.todo_comment" => Some(todo_comment(params, store)),
         "coordination.scratchpad" => Some(scratchpad_read(params, store)),
+        "coordination.scratchpad_create" => Some(scratchpad_create(params, store)),
         _ => None,
     }
 }
@@ -188,6 +199,21 @@ fn scratchpad_read(params: Value, store: &Store) -> ControlResult {
         "scratchpad": read.scratchpad,
         "total_lines": read.total_lines,
     }))
+}
+
+fn scratchpad_create(params: Value, store: &Store) -> ControlResult {
+    let params: CreateScratchpadParams = params_as(params)?;
+    ScratchpadService::new(store)
+        .write(
+            params.project_id,
+            None,
+            params.name,
+            params.content,
+            Some(params.tags),
+            None,
+        )
+        .map(|(scratchpad, _)| json_value(scratchpad))
+        .map_err(scratchpad_error)
 }
 
 fn params_as<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, (&'static str, String)> {

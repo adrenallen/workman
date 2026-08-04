@@ -78,6 +78,12 @@ export interface NewTodoInput {
   tags: string[];
 }
 
+export interface NewScratchpadInput {
+  name: string;
+  content: string;
+  tags: string[];
+}
+
 export interface TodoCompleteResult {
   todo: TodoView;
   affected_todo_ids: number[];
@@ -94,4 +100,5 @@ export interface CoordinationClient {
   ): Promise<TodoCompleteResult>;
   coordinationTodoComment(projectId: number, todoId: number, body: string): Promise<TodoComment>;
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead>;
+  coordinationScratchpadCreate(projectId: number, input: NewScratchpadInput): Promise<Scratchpad>;
 }

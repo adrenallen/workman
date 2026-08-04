@@ -179,6 +179,22 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     let todo_id = target["id"].as_i64().unwrap();
     let scratchpad_id = snapshot["scratchpads"][0]["id"].as_i64().unwrap();
 
+    let created_scratchpad = rpc(
+        &mut socket,
+        "scratchpad-create",
+        "coordination.scratchpad_create",
+        json!({
+            "project_id": 1,
+            "name": "Release notes",
+            "content": "First desktop-authored revision.",
+            "tags": ["desktop"]
+        }),
+    )
+    .await;
+    assert_eq!(created_scratchpad["name"], "Release notes");
+    assert_eq!(created_scratchpad["revision"], 1);
+    assert_eq!(created_scratchpad["tags"], json!(["desktop"]));
+
     let detail = rpc(
         &mut socket,
         "todo-detail",
@@ -276,7 +292,13 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
         json!({ "project_id": 1 }),
     )
     .await;
-    assert_eq!(second_snapshot["scratchpads"][0]["revision"], 2);
+    let refreshed = second_snapshot["scratchpads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scratchpad| scratchpad["id"] == scratchpad_id)
+        .unwrap();
+    assert_eq!(refreshed["revision"], 2);
     let second_read = rpc(
         &mut socket,
         "scratchpad-2",
