@@ -603,6 +603,24 @@ fn resolve_process(
     Ok((process, actor))
 }
 
+pub(super) fn resolve_process_target(
+    registry: &mut ProcessRegistry,
+    parts: &Parts,
+    process_id: Option<ProcessId>,
+    process_name: Option<&str>,
+    project_id: Option<ProjectId>,
+) -> Result<(Process, Actor), (&'static str, String)> {
+    resolve_process(
+        registry,
+        parts,
+        ProcessTarget {
+            process_id,
+            process_name,
+            project_id,
+        },
+    )
+}
+
 fn parse_process_id(value: &str) -> Option<ProcessId> {
     value.parse().ok().or_else(|| {
         value
