@@ -10,6 +10,7 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
+use serde_json::json;
 
 use super::{GbuildMcp, failure, scoped_project, success, tools_process::resolve_process_target};
 use crate::{DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService};
@@ -52,7 +53,9 @@ struct WaitForBoundPortArgs {
 
 #[tool_router(router = readiness_tool_router, vis = "pub(crate)")]
 impl GbuildMcp {
-    #[tool(description = "List active project services with readiness, ports, and localhost URLs")]
+    #[tool(
+        description = "List active project services with readiness, ports, and localhost URLs. Returns { services: [...] }"
+    )]
     async fn services_list(
         &self,
         Extension(parts): Extension<Parts>,
@@ -69,7 +72,7 @@ impl GbuildMcp {
             .services_list(&self.registry, Some(project_id))
             .await
         {
-            Ok(services) => success(services),
+            Ok(services) => success(json!({ "services": services })),
             Err(error) => readiness_failure(error),
         }
     }

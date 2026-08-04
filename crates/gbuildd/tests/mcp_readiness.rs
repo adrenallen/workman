@@ -54,9 +54,25 @@ async fn call(client: &Client, name: &'static str, args: Value) -> Value {
         .await
         .unwrap_or_else(|error| panic!("{name} failed: {error}"));
     assert_ne!(result.is_error, Some(true), "{name} returned {result:?}");
-    result
+    let structured = result
         .structured_content
-        .unwrap_or_else(|| panic!("{name} returned no structured content"))
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name} returned no structured content"));
+    assert!(
+        structured.is_object(),
+        "{name} returned non-object structured content: {structured}"
+    );
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text())
+        .unwrap_or_else(|| panic!("{name} returned no text content"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&text.text).unwrap(),
+        *structured,
+        "{name} text content diverged from structured content"
+    );
+    structured.clone()
 }
 
 fn self_process(project: &Project) -> Process {
@@ -248,6 +264,8 @@ async fn rmcp_readiness_tools_drive_restart_wait_and_report_url() -> Result<(), 
 
     let services = call(&client, "services_list", json!({})).await;
     let dev_service = services
+        .get("services")
+        .unwrap()
         .as_array()
         .unwrap()
         .iter()

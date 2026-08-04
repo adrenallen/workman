@@ -25,7 +25,25 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{name} failed: {error}"));
     assert_ne!(result.is_error, Some(true), "{name} returned an error");
-    result.structured_content.unwrap()
+    let structured = result
+        .structured_content
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name} returned no structured content"));
+    assert!(
+        structured.is_object(),
+        "{name} returned non-object structured content: {structured}"
+    );
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text())
+        .unwrap_or_else(|| panic!("{name} returned no text content"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&text.text).unwrap(),
+        *structured,
+        "{name} text content diverged from structured content"
+    );
+    structured.clone()
 }
 
 async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error>> {
@@ -58,7 +76,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
 /// routine/CI runs. Run it explicitly when changing per-launch connector wiring.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires authenticated Claude and Codex CLIs"]
-async fn real_claude_and_codex_whoami_route_to_spawning_daemon() -> Result<(), Box<dyn Error>> {
+async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemon()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -93,7 +112,7 @@ async fn real_claude_and_codex_whoami_route_to_spawning_daemon() -> Result<(), B
         StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
     );
     let parent = ClientInfo::default().serve(transport).await?;
-    let prompt = "Call the whoami tool from the MCP server named gbuild. Do not use solo or any other MCP server. After whoami succeeds, print exactly ROUTING_OK and nothing else.";
+    let prompt = "Use only the MCP server named gbuild. Call whoami, list_agent_tools, and list_processes. Confirm list_agent_tools has an agent_tools array and list_processes has a processes array. After all three calls succeed, print exactly ROUTING_OK and nothing else. Do not use solo or any other MCP server.";
 
     let claude = call(
         &parent,

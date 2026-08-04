@@ -146,7 +146,9 @@ struct SendInputArgs {
 
 #[tool_router(router = process_tool_router, vis = "pub(crate)")]
 impl GbuildMcp {
-    #[tool(description = "List processes in the effective project scope")]
+    #[tool(
+        description = "List processes in the effective project scope. Returns { processes: [...] }"
+    )]
     async fn list_processes(
         &self,
         Extension(parts): Extension<Parts>,
@@ -158,7 +160,7 @@ impl GbuildMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         match registry.list_statuses(Some(project.id)) {
-            Ok(processes) => success(processes),
+            Ok(processes) => success(json!({ "processes": processes })),
             Err(error) => registry_failure(error),
         }
     }

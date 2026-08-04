@@ -71,11 +71,13 @@ pub(crate) struct SpawnResult {
 
 #[tool_router(router = agent_spawning_tool_router, vis = "pub(crate)")]
 impl GbuildMcp {
-    #[tool(description = "List enabled and disabled built-in or custom agent command presets")]
+    #[tool(
+        description = "List enabled and disabled built-in or custom agent command presets. Returns { agent_tools: [...] }"
+    )]
     async fn list_agent_tools(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
         match load_agent_tools(&registry) {
-            Ok(tools) => success(tools),
+            Ok(tools) => success(json!({ "agent_tools": tools })),
             Err(error) => failure("store_error", error),
         }
     }

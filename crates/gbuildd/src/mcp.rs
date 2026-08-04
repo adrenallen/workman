@@ -24,7 +24,7 @@ use rmcp::{
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{ProcessRegistry, SharedProcessRegistry};
@@ -638,6 +638,10 @@ fn resolve_project_id(
 
 fn success(value: impl Serialize) -> CallToolResult {
     match serde_json::to_value(value) {
+        // Some MCP clients reject a top-level array in `structuredContent`.
+        // List tools use semantic envelopes; this fallback keeps newly added
+        // tools from accidentally reintroducing an incompatible root array.
+        Ok(Value::Array(items)) => CallToolResult::structured(json!({ "items": items })),
         Ok(value) => CallToolResult::structured(value),
         Err(error) => failure("serialization_error", error.to_string()),
     }
@@ -654,4 +658,22 @@ fn now_millis() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_never_emits_a_root_array_and_keeps_text_in_sync() {
+        let result = success(vec![json!({ "id": 1 }), json!({ "id": 2 })]);
+        let structured = result.structured_content.unwrap();
+
+        assert_eq!(structured, json!({ "items": [{ "id": 1 }, { "id": 2 }] }));
+        let text = result.content[0].as_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text.text).unwrap(),
+            structured
+        );
+    }
 }

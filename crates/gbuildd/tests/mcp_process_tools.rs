@@ -36,9 +36,25 @@ async fn call_result(client: &Client, name: &'static str, args: Value) -> CallTo
 async fn call(client: &Client, name: &'static str, args: Value) -> Value {
     let result = call_result(client, name, args).await;
     assert_ne!(result.is_error, Some(true), "{name} returned {result:?}");
-    result
+    let structured = result
         .structured_content
-        .unwrap_or_else(|| panic!("{name} returned no structured content"))
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name} returned no structured content"));
+    assert!(
+        structured.is_object(),
+        "{name} returned non-object structured content: {structured}"
+    );
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text())
+        .unwrap_or_else(|| panic!("{name} returned no text content"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&text.text).unwrap(),
+        *structured,
+        "{name} text content diverged from structured content"
+    );
+    structured.clone()
 }
 
 fn process(id: i64, project: &Project, kind: ProcessKind, name: &str, command: &str) -> Process {
@@ -213,7 +229,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     }
 
     let processes = call(&client, "list_processes", json!({})).await;
-    assert_eq!(processes.as_array().unwrap().len(), 5);
+    assert_eq!(processes["processes"].as_array().unwrap().len(), 5);
     let own_status = call(&client, "get_process_status", json!({})).await;
     assert_eq!(own_status["id"], 1);
     assert!(own_status["agent_state"].is_object());

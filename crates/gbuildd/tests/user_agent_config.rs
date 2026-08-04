@@ -104,11 +104,21 @@ async fn list_agent_tools(discovery: &Discovery) -> Result<Vec<Value>, Box<dyn E
         )
         .await?;
     assert_ne!(result.is_error, Some(true));
-    let tools = result
+    let structured = result
         .structured_content
-        .ok_or("list_agent_tools returned no structured content")?
+        .as_ref()
+        .ok_or("list_agent_tools returned no structured content")?;
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text())
+        .ok_or("list_agent_tools returned no text content")?;
+    assert_eq!(serde_json::from_str::<Value>(&text.text)?, *structured);
+    let tools = structured
+        .get("agent_tools")
+        .ok_or("list_agent_tools response omitted agent_tools")?
         .as_array()
-        .ok_or("list_agent_tools response was not an array")?
+        .ok_or("list_agent_tools agent_tools was not an array")?
         .clone();
     let _ = client.cancel().await;
     Ok(tools)

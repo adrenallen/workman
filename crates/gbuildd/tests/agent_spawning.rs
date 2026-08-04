@@ -31,9 +31,25 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{name} failed: {error}"));
     assert_ne!(result.is_error, Some(true), "{name} returned an error");
-    result
+    let structured = result
         .structured_content
-        .unwrap_or_else(|| panic!("{name} returned no structured content"))
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name} returned no structured content"));
+    assert!(
+        structured.is_object(),
+        "{name} returned non-object structured content: {structured}"
+    );
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text())
+        .unwrap_or_else(|| panic!("{name} returned no text content"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&text.text).unwrap(),
+        *structured,
+        "{name} text content diverged from structured content"
+    );
+    structured.clone()
 }
 
 async fn wait_for_fake_agent_context(path: &Path) -> Result<(i64, String, String), Box<dyn Error>> {
@@ -113,13 +129,13 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let parent = ClientInfo::default().serve(parent_transport).await?;
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
-    assert!(tools.as_array().unwrap().iter().any(|tool| {
+    assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
         tool["name"] == "Claude"
             && tool["command"]
                 .as_str()
                 .is_some_and(|command| command.starts_with("claude"))
     }));
-    assert!(tools.as_array().unwrap().iter().any(|tool| {
+    assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
 
