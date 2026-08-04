@@ -158,9 +158,11 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         call(&process_client, "help", json!({ "topic": "scoping" })).await["topic"],
         "scoping"
     );
-    assert_eq!(
-        call(&process_client, "mcp_tools_summary", json!({})).await["count"],
-        13
+    assert!(
+        call(&process_client, "mcp_tools_summary", json!({})).await["count"]
+            .as_u64()
+            .unwrap()
+            >= 13
     );
     assert_eq!(
         call(&process_client, "list_projects", json!({})).await["projects"]

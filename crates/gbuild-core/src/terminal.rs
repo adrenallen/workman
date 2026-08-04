@@ -296,6 +296,15 @@ impl TerminalOutput {
         self.lock().search_rendered(needle, max_matches)
     }
 
+    /// Clear retained scrollback and the visible grid without detaching the PTY reader.
+    pub fn clear(&self) {
+        let mut terminal = self.lock();
+        let rows = u16::try_from(terminal.screen_rows()).unwrap_or(u16::MAX);
+        let columns = u16::try_from(terminal.columns()).unwrap_or(u16::MAX);
+        let scrollback_lines = terminal.scrollback_limit();
+        *terminal = TerminalEmulator::new(rows, columns, scrollback_lines);
+    }
+
     pub fn screen_rows(&self) -> usize {
         self.lock().screen_rows()
     }
@@ -398,5 +407,20 @@ mod tests {
         assert_eq!(matches[0].row_text, "plain red text");
         assert_eq!(matches[0].byte_range, 6..9);
         assert_eq!(matches[1].row_text, "red again");
+    }
+
+    #[test]
+    fn terminal_output_clear_keeps_the_shared_handle_live() {
+        let output = TerminalOutput::new(3, 20, 4);
+        output.feed_and_read_viewport(b"before clear");
+        assert_eq!(output.search_rendered("before", 1).len(), 1);
+
+        output.clear();
+        assert!(output.search_rendered("before", 1).is_empty());
+        assert_eq!(output.screen_rows(), 3);
+        assert_eq!(output.columns(), 20);
+
+        output.feed_and_read_viewport(b"after clear");
+        assert_eq!(output.search_rendered("after", 1).len(), 1);
     }
 }

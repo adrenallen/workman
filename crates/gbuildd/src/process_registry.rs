@@ -137,6 +137,41 @@ pub struct RenderedProcessOutput {
     pub status: ProcessStatus,
 }
 
+/// A clamped, zero-based, end-exclusive slice of rendered terminal rows.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RenderedOutputRange {
+    pub text: String,
+    pub start: usize,
+    pub end: usize,
+    pub total_rows: usize,
+    pub viewport_start: usize,
+    pub cursor_row: usize,
+    pub alternate_screen: bool,
+    pub raw_end_offset: u64,
+    pub status: ProcessStatus,
+}
+
+/// One case-insensitive match in escape-free rendered output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RenderedOutputSearchMatch {
+    /// One-based retained terminal row.
+    pub row: usize,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub text: String,
+}
+
+/// One case-insensitive match in the retained raw PTY stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RawOutputSearchMatch {
+    /// One-based raw text line within the retained ring snapshot.
+    pub line: usize,
+    pub stream_offset: u64,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub text: String,
+}
+
 /// Per-process failure reported by a bulk command operation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BulkFailure {
@@ -522,6 +557,138 @@ impl ProcessRegistry {
         })
     }
 
+    /// Read a clamped range of physical terminal rows across scrollback and viewport.
+    pub fn rendered_output_range(
+        &mut self,
+        process_id: ProcessId,
+        range: std::ops::Range<usize>,
+    ) -> RegistryResult<RenderedOutputRange> {
+        self.refresh_exits()?;
+        let process = self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(RenderedOutputRange {
+                text: String::new(),
+                start: 0,
+                end: 0,
+                total_rows: 0,
+                viewport_start: 0,
+                cursor_row: 0,
+                alternate_screen: false,
+                raw_end_offset: 0,
+                status: process.status,
+            });
+        };
+        let rows = output.terminal.read_rows(range);
+        Ok(RenderedOutputRange {
+            text: rows.text(),
+            start: rows.start,
+            end: rows.end,
+            total_rows: rows.total_rows,
+            viewport_start: rows.viewport_start,
+            cursor_row: rows.cursor.row,
+            alternate_screen: rows.alternate_screen,
+            raw_end_offset: output.raw.total_bytes_seen(),
+            status: process.status,
+        })
+    }
+
+    /// Search escape-free terminal rows using an ASCII-case-insensitive substring match.
+    pub fn search_rendered_output(
+        &mut self,
+        process_id: ProcessId,
+        pattern: &str,
+        max_matches: usize,
+    ) -> RegistryResult<Vec<RenderedOutputSearchMatch>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(Vec::new());
+        };
+        if pattern.is_empty() || max_matches == 0 {
+            return Ok(Vec::new());
+        }
+
+        let rows = output.terminal.read_rows(0..usize::MAX);
+        let mut matches = Vec::new();
+        for row in rows.rows {
+            for (byte_start, byte_end) in ascii_case_insensitive_matches(
+                &row.text,
+                pattern,
+                max_matches.saturating_sub(matches.len()),
+            ) {
+                matches.push(RenderedOutputSearchMatch {
+                    row: row.index + 1,
+                    byte_start,
+                    byte_end,
+                    text: row.text.clone(),
+                });
+                if matches.len() == max_matches {
+                    return Ok(matches);
+                }
+            }
+        }
+        Ok(matches)
+    }
+
+    /// Search retained raw output while preserving absolute stream offsets.
+    pub fn search_raw_output(
+        &mut self,
+        process_id: ProcessId,
+        pattern: &str,
+        max_matches: usize,
+    ) -> RegistryResult<Vec<RawOutputSearchMatch>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(Vec::new());
+        };
+        if pattern.is_empty() || max_matches == 0 {
+            return Ok(Vec::new());
+        }
+
+        let bytes = output.raw.snapshot();
+        let stream_start = output
+            .raw
+            .total_bytes_seen()
+            .saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let mut matches = Vec::new();
+        let mut retained_offset = 0_usize;
+        for (line_index, raw_line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            let line = String::from_utf8_lossy(raw_line);
+            let text = line.trim_end_matches(['\r', '\n']);
+            for (byte_start, byte_end) in ascii_case_insensitive_matches(
+                text,
+                pattern,
+                max_matches.saturating_sub(matches.len()),
+            ) {
+                matches.push(RawOutputSearchMatch {
+                    line: line_index + 1,
+                    stream_offset: stream_start
+                        .saturating_add((retained_offset + byte_start) as u64),
+                    byte_start,
+                    byte_end,
+                    text: text.to_owned(),
+                });
+                if matches.len() == max_matches {
+                    return Ok(matches);
+                }
+            }
+            retained_offset = retained_offset.saturating_add(raw_line.len());
+        }
+        Ok(matches)
+    }
+
+    /// Clear retained raw and rendered output without stopping or detaching the process.
+    pub fn clear_output(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let process = self.require(process_id)?;
+        if let Some(output) = self.outputs.get(&process_id) {
+            output.raw.clear();
+            output.terminal.clear();
+        }
+        Ok(process)
+    }
+
     /// Send raw bytes to a live process's PTY.
     pub fn send_input(&mut self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
         self.refresh_exits()?;
@@ -767,6 +934,20 @@ fn now_millis() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+fn ascii_case_insensitive_matches(
+    haystack: &str,
+    needle: &str,
+    limit: usize,
+) -> Vec<(usize, usize)> {
+    let haystack = haystack.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    haystack
+        .match_indices(&needle)
+        .map(|(start, value)| (start, start + value.len()))
+        .take(limit)
+        .collect()
 }
 
 #[cfg(test)]

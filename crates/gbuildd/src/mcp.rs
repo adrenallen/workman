@@ -22,23 +22,9 @@ use uuid::Uuid;
 
 use crate::{ProcessRegistry, SharedProcessRegistry};
 
-pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
+mod tools_process;
 
-const TOOL_NAMES: &[&str] = &[
-    "whoami",
-    "identify_session",
-    "help",
-    "mcp_tools_summary",
-    "mcp_smoke_test",
-    "list_projects",
-    "select_project",
-    "get_project",
-    "get_project_status",
-    "get_project_stats",
-    "create_project",
-    "rename_project",
-    "delete_project",
-];
+pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
 
 #[derive(Clone)]
 pub struct GbuildMcp {
@@ -48,9 +34,11 @@ pub struct GbuildMcp {
 
 impl GbuildMcp {
     pub fn new(registry: SharedProcessRegistry) -> Self {
+        let mut tool_router = Self::tool_router();
+        tool_router.merge(Self::process_tool_router());
         Self {
             registry,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 }
@@ -233,10 +221,16 @@ impl GbuildMcp {
 
     #[tool(description = "List the core MCP tools exposed by this daemon")]
     async fn mcp_tools_summary(&self) -> CallToolResult {
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
         success(json!({
             "enabled": true,
-            "count": TOOL_NAMES.len(),
-            "tools": TOOL_NAMES,
+            "count": tools.len(),
+            "tools": tools,
         }))
     }
 
