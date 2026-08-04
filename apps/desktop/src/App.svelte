@@ -1,11 +1,12 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
+  import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import TerminalView from './lib/TerminalView.svelte';
@@ -27,6 +28,14 @@
     type Project,
     type TrustReview
   } from './lib/daemon';
+  import {
+    appNavigation,
+    readRecentNavigationKeys,
+    recordRecentNavigation,
+    type AppNavigationRequest,
+    type AppNavigationTarget,
+    type NavigationProjectSnapshot
+  } from './lib/navigation';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -91,6 +100,11 @@
   let agentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
   let versionRestarting = $state(false);
+  let quickJumpOpen = $state(false);
+  let quickJumpLoading = $state(false);
+  let quickJumpRecentKeys = $state<string[]>([]);
+  let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
+  let navigationIndexRequest = 0;
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
@@ -153,8 +167,17 @@
 
     let active = true;
     const stopStatuses = client.onProcessStatuses((next) => {
-      if (!active || !selectedProject) return;
-      applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
+      if (!active) return;
+      cacheProcessStatuses(next);
+      if (selectedProject) {
+        applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
+      }
+    });
+    let lastNavigationRequest = 0;
+    const stopNavigation = appNavigation.subscribe(({ request }) => {
+      if (!active || !request || request.id === lastNavigationRequest) return;
+      lastNavigationRequest = request.id;
+      void resolveNavigationRequest(request).finally(() => appNavigation.acknowledge(request.id));
     });
     const projectTimer = setInterval(() => {
       if (active && connection.status === 'connected' && !busy) void refreshProjects();
@@ -183,6 +206,7 @@
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
       stopStatuses();
+      stopNavigation();
       client.close();
     };
   });
@@ -205,6 +229,12 @@
 
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
+    if (event.metaKey && !event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      if (quickJumpOpen) closeQuickJump();
+      else openQuickJump();
+      return;
+    }
     if (
       target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
     ) return;
@@ -215,9 +245,181 @@
       return;
     }
     if (event.key === 'Escape') {
-      if (dialog) dialog = null;
+      if (quickJumpOpen) closeQuickJump();
+      else if (dialog) dialog = null;
       else if (settingsOpen) settingsOpen = false;
       else clearSelection();
+    }
+  }
+
+  function openQuickJump(): void {
+    quickJumpRecentKeys = readRecentNavigationKeys();
+    quickJumpOpen = true;
+    void refreshQuickJumpIndex(true);
+  }
+
+  function closeQuickJump(): void {
+    quickJumpOpen = false;
+  }
+
+  function chooseQuickJumpTarget(target: AppNavigationTarget): void {
+    closeQuickJump();
+    appNavigation.navigate(target, 'palette');
+  }
+
+  function cacheProcessStatuses(next: ProcessView[]): void {
+    const grouped = new Map<number, ProcessView[]>();
+    for (const process of next) {
+      const group = grouped.get(process.project_id) ?? [];
+      group.push(process);
+      grouped.set(process.project_id, group);
+    }
+    let changed = false;
+    const updated = { ...navigationIndex };
+    for (const [projectId, projectProcesses] of grouped) {
+      updated[projectId] = {
+        processes: projectProcesses,
+        coordination: updated[projectId]?.coordination ?? null
+      };
+      changed = true;
+    }
+    if (changed) navigationIndex = updated;
+  }
+
+  function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
+    navigationIndex = {
+      ...navigationIndex,
+      [projectId]: {
+        processes: next,
+        coordination: navigationIndex[projectId]?.coordination ?? null
+      }
+    };
+  }
+
+  function cacheProjectCoordination(projectId: number, next: CoordinationSnapshot): void {
+    navigationIndex = {
+      ...navigationIndex,
+      [projectId]: {
+        processes: navigationIndex[projectId]?.processes ?? [],
+        coordination: next
+      }
+    };
+  }
+
+  async function refreshQuickJumpIndex(force: boolean): Promise<void> {
+    if (connection.status !== 'connected') return;
+    const request = ++navigationIndexRequest;
+    const projectList = [...projects];
+    quickJumpLoading = true;
+    try {
+      const [tools, snapshots] = await Promise.all([
+        client.listAgentTools().catch(() => agentTools),
+        Promise.all(
+          projectList.map(async (project): Promise<[number, NavigationProjectSnapshot]> => {
+            const cached = navigationIndex[project.id];
+            if (!force && cached?.coordination) return [project.id, cached];
+            const [projectProcesses, projectCoordination] = await Promise.all([
+              client.processes(project.id).catch(() => cached?.processes ?? []),
+              connection.version_compatible
+                ? client.coordinationSnapshot(project.id).catch(() => cached?.coordination ?? null)
+                : Promise.resolve(null)
+            ]);
+            return [
+              project.id,
+              { processes: projectProcesses, coordination: projectCoordination }
+            ];
+          })
+        )
+      ]);
+      if (request !== navigationIndexRequest) return;
+      agentTools = tools.filter((tool) => tool.enabled);
+      navigationIndex = Object.fromEntries(snapshots);
+    } finally {
+      if (request === navigationIndexRequest) quickJumpLoading = false;
+    }
+  }
+
+  async function resolveNavigationRequest(request: AppNavigationRequest): Promise<void> {
+    try {
+      const target = request.target;
+      const projectId = navigationProjectId(target);
+      if (projectId !== null && !(await activateProject(projectId))) return;
+
+      recordRecentNavigation(target);
+      quickJumpRecentKeys = readRecentNavigationKeys();
+      dialog = null;
+
+      switch (target.type) {
+        case 'project':
+          settingsOpen = false;
+          clearSelection();
+          return;
+        case 'item':
+          await selectTreeItem(target.selection);
+          return;
+        case 'settings':
+          if (selectedProject) settingsOpen = true;
+          return;
+        case 'new-terminal':
+          await spawnTerminal();
+          return;
+        case 'spawn-agent': {
+          let tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
+          if (!tool) {
+            const tools = await client.listAgentTools();
+            agentTools = tools.filter((candidate) => candidate.enabled);
+            tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
+          }
+          if (!tool) throw new Error(`Agent tool ${target.agentToolName} is no longer enabled`);
+          await spawnAgent(tool);
+          return;
+        }
+        case 'add-command':
+          settingsOpen = false;
+          dialog = 'command';
+          return;
+        case 'new-todo':
+          settingsOpen = false;
+          resetTodoForm();
+          dialog = 'todo';
+          return;
+        case 'new-scratchpad':
+          settingsOpen = false;
+          scratchpadName = '';
+          scratchpadContent = '';
+          dialog = 'scratchpad';
+          return;
+      }
+    } catch (cause) {
+      reportError(cause);
+    }
+  }
+
+  function navigationProjectId(target: AppNavigationTarget): number | null {
+    if (target.type === 'item') return target.selection.projectId;
+    if ('projectId' in target && typeof target.projectId === 'number') return target.projectId;
+    return selectedProject?.id ?? projects[0]?.id ?? null;
+  }
+
+  async function activateProject(projectId: number): Promise<boolean> {
+    if (selectedProject?.id === projectId) return true;
+    if (!projects.some((project) => project.id === projectId)) return false;
+
+    busy = true;
+    try {
+      projects = await client.select(projectId);
+      loadedProjectId = projectId;
+      processes = [];
+      coordination = null;
+      selection = null;
+      todoDetail = null;
+      scratchpadRead = null;
+      settingsOpen = false;
+      await tick();
+      await loadProject(projectId);
+      return selectedProject?.id === projectId;
+    } finally {
+      busy = false;
     }
   }
 
@@ -239,6 +441,7 @@
     busy = true;
     try {
       projects = await client.projects();
+      void refreshQuickJumpIndex(false);
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -250,6 +453,7 @@
     const request = ++processRequest;
     try {
       const next = await client.processes(projectId);
+      cacheProjectProcesses(projectId, next);
       if (request === processRequest && selectedProject?.id === projectId) applyProcesses(next);
     } catch (cause) {
       if (request === processRequest) reportError(cause);
@@ -269,6 +473,7 @@
     if (showLoading) detailLoading = true;
     try {
       const next = await client.coordinationSnapshot(projectId);
+      cacheProjectCoordination(projectId, next);
       if (request === coordinationRequest && selectedProject?.id === projectId) coordination = next;
     } catch (cause) {
       if (request === coordinationRequest) reportError(cause);
@@ -279,6 +484,8 @@
 
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
+    recordRecentNavigation({ type: 'item', selection: next });
+    quickJumpRecentKeys = readRecentNavigationKeys();
     settingsOpen = false;
     selection = next;
     todoDetail = null;
@@ -524,16 +731,9 @@
     }
   }
 
-  async function selectProject(project: Project): Promise<void> {
+  function selectProject(project: Project): void {
     if (project.selected || busy) return;
-    busy = true;
-    try {
-      projects = await client.select(project.id);
-    } catch (cause) {
-      reportError(cause);
-    } finally {
-      busy = false;
-    }
+    appNavigation.navigate({ type: 'project', projectId: project.id }, 'project-rail');
   }
 
   function beginRename(project: Project): void {
@@ -781,6 +981,19 @@
     {/if}
   </section>
 </main>
+
+{#if quickJumpOpen}
+  <QuickJumpPalette
+    {projects}
+    index={navigationIndex}
+    currentProjectId={selectedProject?.id ?? null}
+    {agentTools}
+    recentKeys={quickJumpRecentKeys}
+    loading={quickJumpLoading}
+    onChoose={chooseQuickJumpTarget}
+    onClose={closeQuickJump}
+  />
+{/if}
 
 {#if dialog && dialog !== 'command'}
   <div class="dialog-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) dialog = null; }}>
