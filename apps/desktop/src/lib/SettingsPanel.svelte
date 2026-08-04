@@ -8,6 +8,7 @@
 
   let { client, connection, onError }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
+  let loadError = $state<string | null>(null);
   let loading = $state(false);
   let restarting = $state(false);
   let sawRestartDisconnect = $state(false);
@@ -36,11 +37,15 @@
   async function refresh(): Promise<void> {
     const current = ++request;
     loading = info === null;
+    loadError = null;
     try {
       const next = await loadDaemonSettings(client);
-      if (current === request) info = next;
+      if (current === request) {
+        info = next;
+        loadError = null;
+      }
     } catch (cause) {
-      if (current === request) onError(message(cause));
+      if (current === request) loadError = message(cause);
     } finally {
       if (current === request) loading = false;
     }
@@ -74,6 +79,22 @@
     </div>
   {:else if loading && info === null}
     <div class="loading"><i aria-hidden="true"></i><span>Reading daemon settings…</span></div>
+  {:else if loadError && info === null}
+    <div class="settings-grid degraded">
+      <section class="compatibility" aria-live="polite">
+        <span class="compatibility-mark" aria-hidden="true">!</span>
+        <div class="compatibility-copy">
+          <span class="eyebrow">Daemon compatibility</span>
+          <h2>Settings opened, but the daemon is out of date</h2>
+          <p>The installed app is ready. Restart the local daemon to load connection, runtime, and agent-tool settings.</p>
+          <code>{loadError}</code>
+        </div>
+        <button type="button" disabled={connection.status !== 'connected' || loading} onclick={() => void refresh()}>
+          {loading ? 'Checking…' : 'Retry settings'}
+        </button>
+      </section>
+      <div class="appearance"><AppearanceCard /></div>
+    </div>
   {:else if info}
     <div class="settings-grid">
       <div class="mcp"><McpConnectionCard connection={info.mcp} /></div>
@@ -91,6 +112,16 @@
 
   .settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: 10px; align-items: start; }
   .mcp, .agents { grid-column: 1 / -1; }
+  .compatibility { display: grid; min-height: 178px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border)); border-radius: 4px; padding: 14px; background: var(--surface); }
+  .compatibility-mark { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); color: var(--warning); font: 700 14px/1 'JetBrains Mono Variable', monospace; }
+  .compatibility-copy { min-width: 0; }
+  .compatibility .eyebrow { color: var(--warning); font: 650 7px/1.2 'JetBrains Mono Variable', monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+  .compatibility h2 { margin: 4px 0 0; color: var(--text); font-size: 15px; }
+  .compatibility p { max-width: 560px; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+  .compatibility code { display: block; overflow: hidden; margin-top: 8px; color: #a9afb7; font: 8px/1.4 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .compatibility button { min-height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 9px; background: var(--surface-raised); color: var(--text-soft); font: 650 8px 'JetBrains Mono Variable', monospace; cursor: pointer; }
+  .compatibility button:hover:not(:disabled) { border-color: #707780; color: var(--text); }
+  .compatibility button:disabled { cursor: default; opacity: 0.45; }
   .unavailable, .loading { min-height: 180px; justify-content: center; gap: 10px; border: 1px dashed var(--border-strong); border-radius: 4px; color: #9299a2; }
   .unavailable > span { color: #45636e; font-size: 30px; }
   .unavailable h2 { margin: 0; color: #a5b7bd; font-size: 14px; }
@@ -98,5 +129,5 @@
   .loading { font-size: 8px; }
   .loading i { width: 14px; height: 14px; border: 1px solid #3c5660; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .mcp, .agents { grid-column: auto; } }
+  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .mcp, .agents { grid-column: auto; } .compatibility { grid-template-columns: auto minmax(0, 1fr); } .compatibility button { grid-column: 2; justify-self: start; } }
 </style>
