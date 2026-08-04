@@ -5,21 +5,31 @@
   import {
     DaemonClient,
     type ConnectionStatus,
+    type ProcessView,
     type Project
   } from './lib/daemon';
+  import TerminalView from './lib/TerminalView.svelte';
 
   const client = new DaemonClient();
   let projects = $state<Project[]>([]);
+  let processes = $state<ProcessView[]>([]);
   let connection = $state<ConnectionStatus>({
     status: 'connecting',
     message: null,
     port: null
   });
   let busy = $state(false);
+  let processBusy = $state(false);
+  let processRequest = 0;
   let error = $state<string | null>(null);
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
+  let selectedProcessId = $state<number | null>(null);
+  let loadedProjectId = $state<number | null>(null);
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
+  let selectedProcess = $derived(
+    processes.find((process) => process.id === selectedProcessId) ?? null
+  );
 
   function applyConnectionStatus(status: ConnectionStatus): void {
     const wasConnected = connection.status === 'connected';
@@ -34,10 +44,30 @@
     });
   }
 
+  $effect(() => {
+    const projectId = selectedProject?.id ?? null;
+    const connected = connection.status === 'connected';
+    if (!connected || projectId === null) {
+      processes = [];
+      selectedProcessId = null;
+      loadedProjectId = null;
+      return;
+    }
+    if (loadedProjectId !== projectId) {
+      loadedProjectId = projectId;
+      processes = [];
+      selectedProcessId = null;
+      void refreshProcesses(projectId);
+    }
+  });
+
   onMount(() => {
     let active = true;
     const statusRefresh = setInterval(() => {
-      if (active && connection.status === 'connected' && !busy) void refreshProjects();
+      if (active && connection.status === 'connected' && !busy) {
+        void refreshProjects();
+        if (selectedProject) void refreshProcesses(selectedProject.id);
+      }
     }, 5000);
     void client
       .start(
@@ -80,6 +110,27 @@
     await withProjects(() => client.projects());
   }
 
+  async function refreshProcesses(projectId: number): Promise<void> {
+    const request = ++processRequest;
+    processBusy = true;
+    try {
+      const next = await client.processes(projectId);
+      if (request !== processRequest || selectedProject?.id !== projectId) return;
+      processes = next;
+      const selectedStillExists = next.some((process) => process.id === selectedProcessId);
+      if (!selectedStillExists) {
+        selectedProcessId =
+          next.find((process) => process.status === 'running')?.id ?? next[0]?.id ?? null;
+      }
+    } catch (cause) {
+      if (request === processRequest) {
+        error = cause instanceof Error ? cause.message : String(cause);
+      }
+    } finally {
+      if (request === processRequest) processBusy = false;
+    }
+  }
+
   async function registerProject(): Promise<void> {
     const selected = await open({
       directory: true,
@@ -116,6 +167,10 @@
 
   function projectLabel(project: Project): string {
     return project.display_name ?? project.name;
+  }
+
+  function reportTerminalError(message: string): void {
+    error = message;
   }
 </script>
 
@@ -242,10 +297,42 @@
         <span></span>
         <small>{selectedProject.status}</small>
       </div>
-      <div class="workspace-empty">
-        <div class="terminal-prompt" aria-hidden="true"><span>›</span><i></i></div>
-        <h3>Workspace connected</h3>
-        <p>Processes and terminal sessions will occupy this surface next.</p>
+      {#if processes.length > 0}
+        <nav class="process-strip" aria-label="Project processes">
+          {#each processes as process (process.id)}
+            <button
+              type="button"
+              class:active={process.id === selectedProcessId}
+              aria-current={process.id === selectedProcessId ? 'true' : undefined}
+              onclick={() => (selectedProcessId = process.id)}
+            >
+              <span
+                class="process-light"
+                class:is-running={process.status === 'running'}
+                class:is-crashed={process.status === 'crashed'}
+              ></span>
+              <span><strong>{process.name}</strong><small>{process.kind}</small></span>
+            </button>
+          {/each}
+        </nav>
+      {/if}
+      <div class="workspace-body">
+        {#if selectedProcess}
+          {#key selectedProcess.id}
+            <TerminalView
+              {client}
+              process={selectedProcess}
+              connected={connection.status === 'connected'}
+              onError={reportTerminalError}
+            />
+          {/key}
+        {:else}
+          <div class="workspace-empty">
+            <div class="terminal-prompt" aria-hidden="true"><span>›</span><i></i></div>
+            <h3>{processBusy ? 'Loading processes' : 'No process selected'}</h3>
+            <p>{processBusy ? 'Reading the project process registry.' : 'Start or register a process to open its terminal stream.'}</p>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="welcome">

@@ -20,6 +20,8 @@ use tokio_tungstenite::{
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
+const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"GBT1";
+const TERMINAL_FRAME_HEADER_LEN: usize = 21;
 
 #[derive(Clone)]
 struct BridgeState {
@@ -49,6 +51,15 @@ impl ConnectionStatus {
 enum DaemonFrame {
     Text(String),
     Binary(Vec<u8>),
+    Terminal(TerminalFrame),
+}
+
+#[derive(Clone, Serialize)]
+struct TerminalFrame {
+    process_id: i64,
+    start_offset: u64,
+    gap: bool,
+    data: Vec<u8>,
 }
 
 #[tauri::command]
@@ -147,7 +158,10 @@ async fn run_bridge(
                                     let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Text(text.to_string()));
                                 }
                                 Ok(Message::Binary(bytes)) => {
-                                    let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Binary(bytes.to_vec()));
+                                    let frame = parse_terminal_frame(&bytes)
+                                        .map(DaemonFrame::Terminal)
+                                        .unwrap_or_else(|| DaemonFrame::Binary(bytes.to_vec()));
+                                    let _ = app.emit(MESSAGE_EVENT, frame);
                                 }
                                 Ok(Message::Close(_)) | Err(_) => break,
                                 Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
@@ -211,6 +225,20 @@ async fn connect_daemon() -> Result<
 fn publish_status(app: &tauri::AppHandle, state: &BridgeState, status: ConnectionStatus) {
     *lock_status(&state.status) = status.clone();
     let _ = app.emit(STATUS_EVENT, status);
+}
+
+fn parse_terminal_frame(bytes: &[u8]) -> Option<TerminalFrame> {
+    if bytes.len() < TERMINAL_FRAME_HEADER_LEN || &bytes[..4] != TERMINAL_FRAME_MAGIC {
+        return None;
+    }
+    let process_id = i64::from_be_bytes(bytes[4..12].try_into().ok()?);
+    let start_offset = u64::from_be_bytes(bytes[12..20].try_into().ok()?);
+    Some(TerminalFrame {
+        process_id,
+        start_offset,
+        gap: bytes[20] & 1 == 1,
+        data: bytes[TERMINAL_FRAME_HEADER_LEN..].to_vec(),
+    })
 }
 
 fn lock_status(status: &Mutex<ConnectionStatus>) -> std::sync::MutexGuard<'_, ConnectionStatus> {
@@ -299,5 +327,21 @@ mod tests {
             embedded_daemon_data_dir(args),
             Some(PathBuf::from("/tmp/gbuild-data"))
         );
+    }
+
+    #[test]
+    fn terminal_binary_frame_is_decoded_without_touching_raw_payload() {
+        let mut bytes = Vec::from(*TERMINAL_FRAME_MAGIC);
+        bytes.extend_from_slice(&42_i64.to_be_bytes());
+        bytes.extend_from_slice(&8192_u64.to_be_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(b"\x1b[31mraw\x00bytes");
+
+        let frame = parse_terminal_frame(&bytes).unwrap();
+        assert_eq!(frame.process_id, 42);
+        assert_eq!(frame.start_offset, 8192);
+        assert!(frame.gap);
+        assert_eq!(frame.data, b"\x1b[31mraw\x00bytes");
+        assert!(parse_terminal_frame(b"not-a-terminal-frame").is_none());
     }
 }

@@ -377,7 +377,10 @@ input:focus-visible {
 
 .workspace {
   position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background:
     radial-gradient(circle at 76% 16%, rgb(74 120 142 / 11%), transparent 28%),
@@ -394,6 +397,7 @@ input:focus-visible {
   font-family: 'JetBrains Mono Variable', monospace;
   font-size: 8px;
   letter-spacing: 0.14em;
+  pointer-events: none;
 }
 
 .workspace-heading {
@@ -401,7 +405,7 @@ input:focus-visible {
   align-items: flex-end;
   justify-content: space-between;
   gap: 30px;
-  padding: 54px clamp(28px, 5vw, 72px) 20px;
+  padding: clamp(28px, 5vh, 48px) clamp(24px, 4vw, 58px) 16px;
 }
 
 .eyebrow {
@@ -433,7 +437,7 @@ input:focus-visible {
   grid-template-columns: 1fr auto;
   align-items: center;
   gap: 12px;
-  padding: 0 clamp(28px, 5vw, 72px);
+  padding: 0 clamp(24px, 4vw, 58px);
 }
 
 .status-rule span {
@@ -452,6 +456,98 @@ input:focus-visible {
 .status-rule small {
   color: #718795;
   font-size: 8px;
+}
+
+.process-strip {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 13px clamp(24px, 4vw, 58px) 10px;
+  scrollbar-color: #2b4353 transparent;
+  scrollbar-width: thin;
+}
+
+.process-strip button {
+  display: grid;
+  min-width: 126px;
+  max-width: 220px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #283d49;
+  border-radius: 3px;
+  padding: 8px 10px;
+  color: #8ea1ab;
+  background: rgb(15 29 38 / 68%);
+  text-align: left;
+  cursor: pointer;
+}
+
+.process-strip button:hover {
+  border-color: #3d5963;
+  background: #122732;
+}
+
+.process-strip button.active {
+  border-color: #4b857a;
+  color: #dce8e4;
+  background: linear-gradient(115deg, rgb(99 215 197 / 12%), rgb(17 36 45 / 88%));
+  box-shadow: inset 0 -1px 0 rgb(99 215 197 / 24%);
+}
+
+.process-strip button > span:last-child,
+.process-strip strong,
+.process-strip small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-strip strong {
+  font-size: 11px;
+  font-weight: 580;
+}
+
+.process-strip small {
+  margin-top: 3px;
+  color: #637985;
+  font-family: 'JetBrains Mono Variable', monospace;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.process-light {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #536873;
+  box-shadow: 0 0 0 3px rgb(83 104 115 / 10%);
+}
+
+.process-light.is-running {
+  background: var(--signal);
+  box-shadow: 0 0 0 3px rgb(99 215 197 / 10%);
+}
+
+.process-light.is-crashed {
+  background: var(--fault);
+  box-shadow: 0 0 0 3px rgb(239 125 117 / 10%);
+}
+
+.workspace-body {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 clamp(18px, 3vw, 44px) clamp(18px, 3vw, 38px);
+}
+
+.workspace-body > .terminal-frame {
+  width: 100%;
+  height: 100%;
 }
 
 .workspace-empty,
@@ -531,6 +627,19 @@ input:focus-visible {
 
   .workspace {
     min-height: 360px;
+  }
+
+  .workspace-heading {
+    padding-top: 24px;
+  }
+
+  .process-strip {
+    padding-top: 10px;
+  }
+
+  .workspace-body {
+    min-height: 300px;
+    padding-inline: 14px;
   }
 }
 

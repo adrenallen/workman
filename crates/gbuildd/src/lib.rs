@@ -29,7 +29,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
     sync::{Mutex, watch},
-    time::{Instant, sleep, timeout},
+    time::{Instant, MissedTickBehavior, interval, sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -61,6 +61,12 @@ pub use readiness::{
 };
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
+
+const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"GBT1";
+const TERMINAL_FRAME_HEADER_LEN: usize = 21;
+const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
+const TERMINAL_STREAM_TICK: Duration = Duration::from_millis(16);
 
 /// The name of the secure daemon discovery file in the gbuild data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
@@ -233,6 +239,11 @@ async fn control_session(
     mut shutdown: watch::Receiver<bool>,
     registry: SharedProcessRegistry,
 ) {
+    let mut terminal = TerminalSubscription::default();
+    let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
+    terminal_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    terminal_tick.tick().await;
+
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -250,7 +261,11 @@ async fn control_session(
                 let reply = match message {
                     Message::Text(text) => {
                         if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
-                            Message::Text(control::handle_text(&text, &registry).await.into())
+                            let response = match handle_terminal_control(&text, &registry, &mut terminal).await {
+                                Some(response) => response,
+                                None => control::handle_text(&text, &registry).await,
+                            };
+                            Message::Text(response.into())
                         } else {
                             Message::Text(json!({
                                 "type": "error",
@@ -271,8 +286,155 @@ async fn control_session(
                     break;
                 }
             }
+            _ = terminal_tick.tick(), if terminal.process_id.is_some() => {
+                match terminal_output_frames(&registry, &mut terminal).await {
+                    Ok(frames) => {
+                        for frame in frames {
+                            if socket.send(Message::Binary(frame.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let process_id = terminal.process_id.take();
+                        let event = json!({
+                            "event": "terminal.error",
+                            "process_id": process_id,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        });
+                        if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+#[derive(Default)]
+struct TerminalSubscription {
+    process_id: Option<gbuild_core::ProcessId>,
+    offset: u64,
+}
+
+async fn handle_terminal_control(
+    text: &str,
+    registry: &SharedProcessRegistry,
+    terminal: &mut TerminalSubscription,
+) -> Option<String> {
+    let request: serde_json::Value = serde_json::from_str(text).ok()?;
+    let method = request.get("method")?.as_str()?;
+    if !matches!(method, "terminal.attach" | "terminal.detach") {
+        return None;
+    }
+
+    let id = request.get("id").cloned().unwrap_or_default();
+    if method == "terminal.detach" {
+        terminal.process_id = None;
+        terminal.offset = 0;
+        return Some(
+            json!({
+                "id": id,
+                "ok": true,
+                "result": { "process_id": null }
+            })
+            .to_string(),
+        );
+    }
+
+    let params = request.get("params").cloned().unwrap_or_default();
+    let Some(process_id) = params.get("process_id").and_then(serde_json::Value::as_i64) else {
+        return Some(
+            json!({
+                "id": id,
+                "ok": false,
+                "error": {
+                    "code": "invalid_params",
+                    "message": "terminal.attach requires an integer process_id"
+                }
+            })
+            .to_string(),
+        );
+    };
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    match registry.lock().await.select(process_id) {
+        Ok(process) => {
+            terminal.process_id = Some(process_id);
+            terminal.offset = offset;
+            Some(
+                json!({
+                    "id": id,
+                    "ok": true,
+                    "result": {
+                        "process_id": process_id,
+                        "project_id": process.project_id,
+                        "offset": offset
+                    }
+                })
+                .to_string(),
+            )
+        }
+        Err(error) => Some(
+            json!({
+                "id": id,
+                "ok": false,
+                "error": { "code": error.code(), "message": error.to_string() }
+            })
+            .to_string(),
+        ),
+    }
+}
+
+async fn terminal_output_frames(
+    registry: &SharedProcessRegistry,
+    terminal: &mut TerminalSubscription,
+) -> RegistryResult<Vec<Vec<u8>>> {
+    let Some(process_id) = terminal.process_id else {
+        return Ok(Vec::new());
+    };
+    let mut frames = Vec::new();
+    for _ in 0..TERMINAL_STREAM_CHUNKS_PER_TICK {
+        let requested_offset = terminal.offset;
+        let chunk = registry.lock().await.raw_output(
+            process_id,
+            Some(requested_offset),
+            TERMINAL_STREAM_CHUNK_BYTES,
+        )?;
+        terminal.offset = chunk.end_offset;
+        if chunk.data.is_empty() {
+            break;
+        }
+        frames.push(encode_terminal_frame(
+            process_id,
+            chunk.start_offset,
+            chunk.start_offset > requested_offset,
+            &chunk.data,
+        ));
+        if chunk.end_offset >= chunk.total_bytes {
+            break;
+        }
+    }
+    Ok(frames)
+}
+
+fn encode_terminal_frame(
+    process_id: gbuild_core::ProcessId,
+    start_offset: u64,
+    gap: bool,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(TERMINAL_FRAME_HEADER_LEN + data.len());
+    frame.extend_from_slice(TERMINAL_FRAME_MAGIC);
+    frame.extend_from_slice(&process_id.to_be_bytes());
+    frame.extend_from_slice(&start_offset.to_be_bytes());
+    frame.push(u8::from(gap));
+    frame.extend_from_slice(data);
+    frame
 }
 
 async fn authorize_local_request(
