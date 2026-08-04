@@ -1,0 +1,12 @@
+[package]
+name = "gbuild-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "gbuild"
+path = "src/main.rs"
+
+[dependencies]
+gbuild-core.workspace = true

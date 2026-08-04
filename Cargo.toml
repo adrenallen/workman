@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/gbuild-core",
+    "crates/gbuildd",
+    "crates/gbuild-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+gbuild-core = { path = "crates/gbuild-core" }

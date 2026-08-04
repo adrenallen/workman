@@ -1,0 +1,8 @@
+[package]
+name = "gbuildd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gbuild-core.workspace = true
