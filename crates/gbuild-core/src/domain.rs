@@ -160,6 +160,15 @@ string_enum! {
     }
 }
 
+string_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentToolSource {
+        Local => "local",
+        Config => "config",
+    }
+}
+
 /// A registered repository/workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -179,6 +188,7 @@ pub struct AgentTool {
     pub command: String,
     pub tool_type: String,
     pub enabled: bool,
+    pub source: AgentToolSource,
 }
 
 /// Persisted process metadata. PTY output is intentionally kept out of SQLite.

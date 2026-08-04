@@ -3,7 +3,7 @@ use std::{
 };
 
 use axum::http::{HeaderName, HeaderValue};
-use gbuild_core::{AgentTool, Project};
+use gbuild_core::{AgentTool, AgentToolSource, Project};
 use gbuildd::{DaemonConfig, DaemonServer, GBUILD_MCP_TOKEN_HEADER};
 use rmcp::{
     ServiceExt,
@@ -95,6 +95,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             command: fake_agent.to_string_lossy().into_owned(),
             tool_type: "claude_code".into(),
             enabled: true,
+            source: AgentToolSource::Local,
         })?;
     }
 

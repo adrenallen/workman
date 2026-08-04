@@ -42,6 +42,7 @@
   }
 
   function beginEdit(tool: AgentTool): void {
+    if (tool.source === 'config') return;
     draft = {
       id: tool.id,
       name: tool.name,
@@ -71,6 +72,7 @@
   }
 
   async function toggle(tool: AgentTool): Promise<void> {
+    if (tool.source === 'config') return;
     busyId = tool.id;
     try {
       await store.save({ ...tool, enabled: !tool.enabled });
@@ -82,6 +84,7 @@
   }
 
   async function remove(tool: AgentTool): Promise<void> {
+    if (tool.source === 'config') return;
     if (!window.confirm(`Delete the ${tool.name} agent tool? Existing agents may require it.`)) return;
     busyId = tool.id;
     try {
@@ -104,7 +107,7 @@
     <div>
       <span class="eyebrow">Shared registry</span>
       <h2 id="agent-tools-title">Agent tools</h2>
-      <p>Commands available when the Agents section starts a coding session.</p>
+      <p>Commands available when the Agents section starts a coding session. Config-file entries are read-only here.</p>
     </div>
     <button class="add" type="button" disabled={!connected || editing !== null} onclick={beginNew}>
       <span aria-hidden="true">+</span> Add tool
@@ -125,7 +128,7 @@
         <article class:disabled={!tool.enabled}>
           <div class="tool-mark" aria-hidden="true">{tool.name.slice(0, 1).toUpperCase()}</div>
           <div class="tool-copy">
-            <div><strong>{tool.name}</strong><span>{tool.tool_type}</span></div>
+            <div><strong>{tool.name}</strong><span>{tool.tool_type}</span>{#if tool.source === 'config'}<span>config</span>{/if}</div>
             <code>{tool.command}</code>
           </div>
           <button
@@ -134,12 +137,12 @@
             type="button"
             role="switch"
             aria-checked={tool.enabled}
-            disabled={!connected || busyId !== null}
+            disabled={!connected || busyId !== null || tool.source === 'config'}
             onclick={() => void toggle(tool)}
           ><i aria-hidden="true"></i><span>{tool.enabled ? 'Enabled' : 'Disabled'}</span></button>
           <div class="row-actions">
-            <button type="button" disabled={!connected || editing !== null || busyId !== null} onclick={() => beginEdit(tool)}>Edit</button>
-            <button class="delete" type="button" disabled={!connected || busyId !== null} onclick={() => void remove(tool)}>Delete</button>
+            <button type="button" disabled={!connected || editing !== null || busyId !== null || tool.source === 'config'} onclick={() => beginEdit(tool)}>Edit</button>
+            <button class="delete" type="button" disabled={!connected || busyId !== null || tool.source === 'config'} onclick={() => void remove(tool)}>Delete</button>
           </div>
         </article>
       {/each}

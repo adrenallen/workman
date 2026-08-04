@@ -6,6 +6,7 @@ export interface AgentTool {
   command: string;
   tool_type: string;
   enabled: boolean;
+  source: 'local' | 'config';
 }
 
 export interface AgentToolInput {

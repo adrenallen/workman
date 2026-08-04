@@ -744,6 +744,7 @@ mod tests {
                 command: "scripted-timer-claude".into(),
                 tool_type: "claude_code".into(),
                 enabled: true,
+                source: gbuild_core::AgentToolSource::Local,
             })
             .unwrap();
         let mut registry =

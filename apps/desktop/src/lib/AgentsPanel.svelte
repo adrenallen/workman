@@ -97,6 +97,10 @@
   }
 
   function openEditor(tool?: AgentTool): void {
+    if (tool?.source === 'config') {
+      onError(`${tool.name} is managed by the per-user config file`);
+      return;
+    }
     editingTool = tool
       ? { ...tool }
       : { name: '', command: '', tool_type: 'custom', enabled: true };
@@ -117,6 +121,7 @@
   }
 
   async function toggleTool(tool: AgentTool): Promise<void> {
+    if (tool.source === 'config') return;
     try {
       await toolStore.save({ ...tool, enabled: !tool.enabled });
     } catch (cause) {
@@ -125,6 +130,7 @@
   }
 
   async function removeTool(tool: AgentTool): Promise<void> {
+    if (tool.source === 'config') return;
     if (!window.confirm(`Delete the ${tool.name} agent tool?`)) return;
     try {
       await toolStore.remove(tool.id);
@@ -234,6 +240,7 @@
               <div class="tool-heading">
                 <strong>{tool.name}</strong>
                 <span>{tool.tool_type.replaceAll('_', ' ')}</span>
+                {#if tool.source === 'config'}<span>config</span>{/if}
               </div>
               <code>{tool.command}</code>
             </div>
@@ -245,9 +252,10 @@
                 role="switch"
                 aria-checked={tool.enabled}
                 aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+                disabled={!connected || tool.source === 'config'}
                 onclick={() => toggleTool(tool)}
               ><span></span></button>
-              <button type="button" onclick={() => openEditor(tool)}>Edit</button>
+              <button type="button" disabled={tool.source === 'config'} onclick={() => openEditor(tool)}>Edit</button>
               <button class="spawn" type="button" onclick={() => openSpawn(tool)} disabled={!connected || !tool.enabled}>
                 Spawn
               </button>

@@ -6,7 +6,7 @@ use std::{
 
 use axum::http::{HeaderName, HeaderValue};
 use gbuild_core::{
-    AgentTool, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
     attention::AttentionState,
 };
 use gbuildd::{DaemonConfig, DaemonServer, GBUILD_MCP_TOKEN_HEADER};
@@ -155,6 +155,7 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
             command: "scripted-timer-claude".into(),
             tool_type: "claude_code".into(),
             enabled: true,
+            source: AgentToolSource::Local,
         })?;
         registry.create(process(
             DELIVERY_ID,

@@ -26,6 +26,29 @@ project directory, `gbuild app` for the desktop workspace, or `gbuild mcp-setup`
 
 Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
+## User agent tools
+
+Agent commands can be managed in `gbuild/config.yml` beneath the platform config directory
+(`~/Library/Application Support/gbuild/config.yml` on macOS, or
+`${XDG_CONFIG_HOME:-~/.config}/gbuild/config.yml` on Linux). Set `GBUILD_CONFIG` to use a
+different file. The daemon reconciles this file on startup; file-backed entries are visible but
+read-only in the desktop settings, while tools created in the UI remain in the database.
+
+```yaml
+agent_tools:
+  - name: Codex
+    command: codex --dangerously-bypass-approvals-and-sandbox
+    tool_type: codex
+    enabled: true
+  - name: Custom agent
+    command: /opt/agents/custom --interactive
+    # tool_type is optional and inferred from the command executable.
+```
+
+Names are the stable identity for file-backed entries. Removing one from the file removes that
+managed entry at the next daemon restart. Unknown `tool_type` values are accepted and use the
+generic terminal-prompt attention detector.
+
 ## Scratchpad Markdown Titles
 
 A scratchpad's `name` is its canonical Markdown H1. When `scratchpad_write` or

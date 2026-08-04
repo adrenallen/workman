@@ -42,6 +42,7 @@ mod process_registry;
 pub mod readiness;
 mod settings;
 mod timers;
+mod user_config;
 
 pub use config::{
     ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, TrustFieldChange, TrustFields,
@@ -59,12 +60,17 @@ pub use process_registry::{
 };
 pub use readiness::{
     BoundListener, DEFAULT_PORT_WAIT, DetectedListener, MAX_PORT_WAIT, PortDetector,
-    ReadinessError, ReadinessService, ReadinessState, Service, ServiceProtocol,
-    SystemPortDetector, WaitForBoundPortResult,
+    ReadinessError, ReadinessService, ReadinessState, Service, ServiceProtocol, SystemPortDetector,
+    WaitForBoundPortResult,
 };
 pub use settings::{
     DaemonSettingsInfo, McpClient, McpClientSetup, McpConnectionInfo, McpSetupField,
     McpSetupFormat, mcp_connection_info,
+};
+pub use user_config::{
+    AgentToolSyncReport, GBUILD_CONFIG_ENV, USER_CONFIG_FILE, UserAgentTool, UserConfig,
+    UserConfigError, parse_user_config, sync_user_agent_tools, sync_user_config_file,
+    user_config_path,
 };
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
@@ -146,6 +152,13 @@ impl DaemonServer {
         std::fs::create_dir_all(&config.data_dir)?;
         let store =
             gbuild_core::Store::open(database_path(&config.data_dir)).map_err(registry_io_error)?;
+        let user_config_path = user_config_path();
+        sync_user_config_file(&store, &user_config_path).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {error}", user_config_path.display()),
+            )
+        })?;
         let registry = Arc::new(Mutex::new(
             ProcessRegistry::new(store).map_err(registry_io_error)?,
         ));

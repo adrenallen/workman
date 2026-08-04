@@ -1130,6 +1130,7 @@ mod tests {
                 command: "claude".into(),
                 tool_type: "claude_code".into(),
                 enabled: true,
+                source: gbuild_core::AgentToolSource::Local,
             })
             .unwrap();
 

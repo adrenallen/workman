@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, env};
 
 use axum::http::request::Parts;
 use gbuild_core::{
-    AgentTool, AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectId,
+    AgentTool, AgentToolId, AgentToolSource, Process, ProcessId, ProcessKind, ProcessSource,
+    ProcessStatus, Project, ProjectId,
 };
 use rmcp::{
     handler::server::{tool::Extension, wrapper::Parameters},
@@ -163,23 +163,9 @@ impl GbuildMcp {
 }
 
 pub(crate) fn load_agent_tools(registry: &ProcessRegistry) -> Result<Vec<AgentTool>, String> {
-    let mut statement = registry
+    registry
         .store()
-        .connection()
-        .prepare("SELECT id, name, command, tool_type, enabled FROM agent_tools ORDER BY id")
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(AgentTool {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                command: row.get(2)?,
-                tool_type: row.get(3)?,
-                enabled: row.get(4)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
+        .list_agent_tools()
         .map_err(|error| error.to_string())
 }
 
@@ -209,24 +195,24 @@ pub(crate) fn save_agent_tool(
 
     let id = match id {
         Some(id) => {
-            if registry
+            let existing = registry
                 .store()
                 .get_agent_tool(id)
-                .map_err(|error| error.to_string())?
-                .is_none()
-            {
-                return Err(format!("agent tool {id} was not found"));
+                .map_err(|error| error.to_string())?;
+            match existing {
+                None => return Err(format!("agent tool {id} was not found")),
+                Some(tool) if tool.source == AgentToolSource::Config => {
+                    return Err(format!(
+                        "agent tool {id} is managed by the per-user config file"
+                    ));
+                }
+                Some(_) => {}
             }
             id
         }
         None => registry
             .store()
-            .connection()
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_tools",
-                [],
-                |row| row.get(0),
-            )
+            .next_agent_tool_id()
             .map_err(|error| error.to_string())?,
     };
     let tool = AgentTool {
@@ -235,6 +221,7 @@ pub(crate) fn save_agent_tool(
         command: command.to_owned(),
         tool_type: tool_type.to_owned(),
         enabled,
+        source: AgentToolSource::Local,
     };
     registry
         .store()
@@ -247,6 +234,16 @@ pub(crate) fn delete_agent_tool(
     registry: &ProcessRegistry,
     agent_tool_id: AgentToolId,
 ) -> Result<bool, String> {
+    if registry
+        .store()
+        .get_agent_tool(agent_tool_id)
+        .map_err(|error| error.to_string())?
+        .is_some_and(|tool| tool.source == AgentToolSource::Config)
+    {
+        return Err(format!(
+            "agent tool {agent_tool_id} is managed by the per-user config file"
+        ));
+    }
     let referenced = registry
         .store()
         .connection()
@@ -263,9 +260,7 @@ pub(crate) fn delete_agent_tool(
     }
     registry
         .store()
-        .connection()
-        .execute("DELETE FROM agent_tools WHERE id = ?1", [agent_tool_id])
-        .map(|changed| changed > 0)
+        .delete_agent_tool(agent_tool_id)
         .map_err(|error| error.to_string())
 }
 
@@ -474,12 +469,47 @@ mod tests {
                 command: "/tmp/fake-agent".into(),
                 tool_type: "claude_code".into(),
                 enabled: true,
+                source: AgentToolSource::Local,
             })
             .unwrap();
         let tools = load_agent_tools(&registry).unwrap();
         assert_eq!(tools.len(), 5);
         assert!(tools.iter().any(|tool| tool.command == "claude"));
         assert!(tools.iter().any(|tool| tool.command == "/tmp/fake-agent"));
+    }
+
+    #[test]
+    fn config_managed_tools_are_read_only_through_registry_mutations() {
+        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        registry
+            .store()
+            .put_agent_tool(&AgentTool {
+                id: 99,
+                name: "Configured".into(),
+                command: "configured-agent".into(),
+                tool_type: "future".into(),
+                enabled: true,
+                source: AgentToolSource::Config,
+            })
+            .unwrap();
+
+        assert!(
+            save_agent_tool(
+                &registry,
+                Some(99),
+                "Configured".into(),
+                "changed".into(),
+                "future".into(),
+                false,
+            )
+            .unwrap_err()
+            .contains("managed by the per-user config file")
+        );
+        assert!(
+            delete_agent_tool(&registry, 99)
+                .unwrap_err()
+                .contains("managed by the per-user config file")
+        );
     }
 
     #[test]

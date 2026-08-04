@@ -27,10 +27,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "timer_runtime",
         include_str!("../migrations/0004_timer_runtime.sql"),
     ),
+    (
+        5,
+        "agent_tool_source",
+        include_str!("../migrations/0005_agent_tool_source.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 4;
+pub const LATEST_SCHEMA_VERSION: i64 = 5;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -249,19 +254,21 @@ impl Store {
 
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
         self.connection.execute(
-            "INSERT INTO agent_tools (id, name, command, tool_type, enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO agent_tools (id, name, command, tool_type, enabled, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 command = excluded.command,
                 tool_type = excluded.tool_type,
-                enabled = excluded.enabled",
+                enabled = excluded.enabled,
+                source = excluded.source",
             params![
                 tool.id,
                 tool.name,
                 tool.command,
                 tool.tool_type,
-                tool.enabled
+                tool.enabled,
+                tool.source
             ],
         )?;
         Ok(())
@@ -271,7 +278,8 @@ impl Store {
         let tool = self
             .connection
             .query_row(
-                "SELECT id, name, command, tool_type, enabled FROM agent_tools WHERE id = ?1",
+                "SELECT id, name, command, tool_type, enabled, source
+                 FROM agent_tools WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(AgentTool {
@@ -280,11 +288,47 @@ impl Store {
                         command: row.get(2)?,
                         tool_type: row.get(3)?,
                         enabled: row.get(4)?,
+                        source: row.get(5)?,
                     })
                 },
             )
             .optional()?;
         Ok(tool)
+    }
+
+    pub fn list_agent_tools(&self) -> StoreResult<Vec<AgentTool>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, command, tool_type, enabled, source
+             FROM agent_tools ORDER BY id",
+        )?;
+        let tools = statement
+            .query_map([], |row| {
+                Ok(AgentTool {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    command: row.get(2)?,
+                    tool_type: row.get(3)?,
+                    enabled: row.get(4)?,
+                    source: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tools)
+    }
+
+    pub fn next_agent_tool_id(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_tools",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn delete_agent_tool(&self, id: i64) -> StoreResult<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM agent_tools WHERE id = ?1", [id])?
+            > 0)
     }
 
     pub fn put_process(&self, process: &Process) -> StoreResult<()> {

@@ -6,9 +6,9 @@ use std::{
 };
 
 use gbuild_core::{
-    Actor, AgentTool, LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource, ProcessStatus,
-    Project, ProjectLock, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker, TodoComment,
-    TodoPriority, TodoStatus,
+    Actor, AgentTool, AgentToolSource, LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource,
+    ProcessStatus, Project, ProjectLock, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker,
+    TodoComment, TodoPriority, TodoStatus,
 };
 
 #[test]
@@ -157,6 +157,7 @@ fn domain_records_round_trip_through_store() {
         command: "codex".into(),
         tool_type: "codex".into(),
         enabled: true,
+        source: AgentToolSource::Local,
     };
     store.put_agent_tool(&agent_tool).expect("put agent tool");
     assert_eq!(

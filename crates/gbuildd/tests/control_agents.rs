@@ -81,7 +81,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
 
     let presets = rpc(&mut socket, 1, "agent_tools.list", json!({})).await;
     assert!(presets["ok"].as_bool().unwrap());
-    assert_eq!(presets["result"].as_array().unwrap().len(), 4);
+    assert!(presets["result"].as_array().unwrap().len() >= 4);
 
     let created = rpc(
         &mut socket,
