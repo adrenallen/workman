@@ -305,6 +305,55 @@ impl Store {
         Ok(process)
     }
 
+    /// List process records, optionally restricting the result to one project.
+    pub fn list_processes(&self, project_id: Option<ProjectId>) -> StoreResult<Vec<Process>> {
+        let (sql, parameter) = match project_id {
+            Some(project_id) => (
+                "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
+                        auto_restart, restart_when_changed, source, trust_hash, status, pid,
+                        exit_code, exit_signal, exited_at, agent_tool_id
+                 FROM processes WHERE project_id = ?1 ORDER BY id",
+                Some(project_id),
+            ),
+            None => (
+                "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
+                        auto_restart, restart_when_changed, source, trust_hash, status, pid,
+                        exit_code, exit_signal, exited_at, agent_tool_id
+                 FROM processes ORDER BY project_id, id",
+                None,
+            ),
+        };
+
+        let mut statement = self.connection.prepare(sql)?;
+        let processes = match parameter {
+            Some(project_id) => statement
+                .query_map([project_id], process_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => statement
+                .query_map([], process_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        Ok(processes)
+    }
+
+    /// Return an unused positive process ID for a caller that serializes creates.
+    pub fn next_process_id(&self) -> StoreResult<ProcessId> {
+        let id = self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM processes",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Delete one process record. Related timers and actor links follow schema FK rules.
+    pub fn delete_process(&self, id: ProcessId) -> StoreResult<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM processes WHERE id = ?1", [id])?
+            > 0)
+    }
+
     pub fn put_todo(&mut self, todo: &Todo) -> StoreResult<()> {
         let transaction = self.connection.transaction()?;
         transaction.execute(

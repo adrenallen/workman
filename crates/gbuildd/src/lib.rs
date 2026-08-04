@@ -1,12 +1,13 @@
 //! Loopback-only HTTP and WebSocket control server for `gbuild`.
 
 use std::{
-    env,
+    env, fmt,
     future::Future,
     io,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,13 +28,25 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     process::Command,
-    sync::watch,
+    sync::{Mutex, watch},
     time::{Instant, sleep, timeout},
 };
 use uuid::Uuid;
 
+mod control;
+mod process_registry;
+
+pub use process_registry::{
+    BulkFailure, BulkProcessResult, ProcessRegistry, RegistryError, RegistryResult,
+};
+
+pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
+
 /// The name of the secure daemon discovery file in the gbuild data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
+
+/// The SQLite state file stored beside daemon discovery metadata.
+pub const DATABASE_FILE: &str = "gbuild.sqlite3";
 
 /// Runtime configuration for the local daemon server.
 #[derive(Clone, Debug)]
@@ -87,11 +100,18 @@ pub struct DaemonServer {
     listener: TcpListener,
     discovery: Discovery,
     discovery_guard: DiscoveryGuard,
+    registry: SharedProcessRegistry,
 }
 
 impl DaemonServer {
     /// Bind only IPv4 loopback and publish the selected port and a fresh bearer token.
     pub async fn bind(config: DaemonConfig) -> io::Result<Self> {
+        std::fs::create_dir_all(&config.data_dir)?;
+        let store =
+            gbuild_core::Store::open(database_path(&config.data_dir)).map_err(registry_io_error)?;
+        let registry = Arc::new(Mutex::new(
+            ProcessRegistry::new(store).map_err(registry_io_error)?,
+        ));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
         let port = listener.local_addr()?.port();
         let discovery = Discovery {
@@ -105,6 +125,7 @@ impl DaemonServer {
             listener,
             discovery,
             discovery_guard,
+            registry,
         })
     }
 
@@ -114,6 +135,11 @@ impl DaemonServer {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// Clone the process registry handle used by WebSocket control sessions.
+    pub fn registry(&self) -> SharedProcessRegistry {
+        self.registry.clone()
     }
 
     /// Serve until `shutdown` resolves, then close upgraded sockets and remove discovery.
@@ -126,6 +152,7 @@ impl DaemonServer {
             token: self.discovery.token.clone(),
             port: self.discovery.port,
             shutdown: shutdown_rx,
+            registry: self.registry,
         };
         let app = router(state);
         let listener = self.listener;
@@ -148,6 +175,7 @@ struct AppState {
     token: String,
     port: u16,
     shutdown: watch::Receiver<bool>,
+    registry: SharedProcessRegistry,
 }
 
 fn router(state: AppState) -> Router {
@@ -167,10 +195,14 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| control_session(socket, state.shutdown))
+    ws.on_upgrade(move |socket| control_session(socket, state.shutdown, state.registry))
 }
 
-async fn control_session(mut socket: WebSocket, mut shutdown: watch::Receiver<bool>) {
+async fn control_session(
+    mut socket: WebSocket,
+    mut shutdown: watch::Receiver<bool>,
+    registry: SharedProcessRegistry,
+) {
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -188,7 +220,7 @@ async fn control_session(mut socket: WebSocket, mut shutdown: watch::Receiver<bo
                 let reply = match message {
                     Message::Text(text) => {
                         if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
-                            Message::Text(text)
+                            Message::Text(control::handle_text(&text, &registry).await.into())
                         } else {
                             Message::Text(json!({
                                 "type": "error",
@@ -306,6 +338,10 @@ pub fn discovery_path(data_dir: impl AsRef<Path>) -> PathBuf {
     data_dir.as_ref().join(DISCOVERY_FILE)
 }
 
+pub fn database_path(data_dir: impl AsRef<Path>) -> PathBuf {
+    data_dir.as_ref().join(DATABASE_FILE)
+}
+
 /// Resolve the platform data directory, with `GBUILD_DATA_DIR` as an explicit override.
 pub fn default_data_dir() -> PathBuf {
     if let Some(path) = env::var_os("GBUILD_DATA_DIR") {
@@ -411,6 +447,10 @@ fn invalid_data(error: impl std::error::Error + Send + Sync + 'static) -> io::Er
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+fn registry_io_error(error: impl fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}
+
 /// Check that a discovered daemon answers its authenticated health endpoint.
 pub async fn probe(discovery: &Discovery) -> bool {
     timeout(Duration::from_millis(500), probe_inner(discovery))
@@ -482,7 +522,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::oneshot;
     use tokio_tungstenite::{
-        connect_async,
+        MaybeTlsStream, WebSocketStream, connect_async,
         tungstenite::{Message, client::IntoClientRequest},
     };
 
@@ -491,6 +531,7 @@ mod tests {
     struct TestServer {
         discovery: Discovery,
         data_dir: PathBuf,
+        registry: SharedProcessRegistry,
         shutdown: Option<oneshot::Sender<()>>,
         task: tokio::task::JoinHandle<io::Result<()>>,
         _temp: TempDir,
@@ -507,6 +548,7 @@ mod tests {
             .await
             .unwrap();
             let discovery = server.discovery().clone();
+            let registry = server.registry();
             let (shutdown, receive_shutdown) = oneshot::channel();
             let task = tokio::spawn(server.serve_until(async move {
                 let _ = receive_shutdown.await;
@@ -515,6 +557,7 @@ mod tests {
             Self {
                 discovery,
                 data_dir,
+                registry,
                 shutdown: Some(shutdown),
                 task,
                 _temp: temp,
@@ -538,6 +581,52 @@ mod tests {
         }
     }
 
+    async fn rpc(
+        socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        socket
+            .send(Message::Text(
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(message) = message else {
+            panic!("expected JSON text response, got {message:?}");
+        };
+        let response: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(response["id"], id);
+        response
+    }
+
+    fn process_params(id: i64, kind: &str, name: &str, command: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "project_id": 1,
+            "kind": kind,
+            "name": name,
+            "command": command,
+            "working_dir": "/tmp",
+            "env": {},
+            "auto_start": false,
+            "auto_restart": false,
+            "restart_when_changed": [],
+            "source": "local",
+            "trust_hash": null,
+            "status": "crashed",
+            "pid": null,
+            "exit_code": 99,
+            "exit_signal": null,
+            "exited_at": 1,
+            "agent_tool_id": null
+        })
+    }
+
     #[tokio::test]
     async fn authenticated_websocket_echoes_json_and_binary_frames() {
         let server = TestServer::start().await;
@@ -559,6 +648,184 @@ mod tests {
             socket.next().await.unwrap().unwrap(),
             Message::Binary(binary.into())
         );
+
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn websocket_drives_full_process_lifecycle_and_bulk_commands() {
+        let server = TestServer::start().await;
+        server
+            .registry
+            .lock()
+            .await
+            .store()
+            .put_project(&gbuild_core::Project {
+                id: 1,
+                path: "/tmp/gbuild-control-test".into(),
+                name: "control-test".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+            })
+            .unwrap();
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+
+        let long_running = "trap 'exit 0' TERM; printf 'ready\\n'; sleep 30";
+        let created = rpc(
+            &mut socket,
+            1,
+            "process.create",
+            process_params(101, "command", "dev", long_running),
+        )
+        .await;
+        assert_eq!(created["result"]["status"], "stopped");
+        assert!(created["result"]["exit_code"].is_null());
+
+        let started = rpc(
+            &mut socket,
+            2,
+            "process.start",
+            json!({ "process_id": 101 }),
+        )
+        .await;
+        assert_eq!(started["result"]["status"], "running");
+        assert!(started["result"]["pid"].as_u64().is_some());
+
+        let renamed = rpc(
+            &mut socket,
+            3,
+            "process.rename",
+            json!({ "process_id": 101, "name": "web" }),
+        )
+        .await;
+        assert_eq!(renamed["result"]["name"], "web");
+        let selected = rpc(
+            &mut socket,
+            4,
+            "process.select",
+            json!({ "process_id": 101 }),
+        )
+        .await;
+        assert_eq!(selected["result"]["selected_process_id"], 101);
+
+        let restarted = rpc(
+            &mut socket,
+            5,
+            "process.restart",
+            json!({ "process_id": 101 }),
+        )
+        .await;
+        assert_eq!(restarted["result"]["status"], "running");
+        let stopped = rpc(&mut socket, 6, "process.stop", json!({ "process_id": 101 })).await;
+        assert_eq!(stopped["result"]["status"], "stopped");
+        assert!(stopped["result"]["exited_at"].as_i64().is_some());
+
+        let closed = rpc(
+            &mut socket,
+            7,
+            "process.close",
+            json!({ "process_id": 101 }),
+        )
+        .await;
+        assert!(closed["ok"].as_bool().unwrap());
+        let missing = rpc(&mut socket, 8, "process.get", json!({ "process_id": 101 })).await;
+        assert_eq!(missing["error"]["code"], "process_not_found");
+
+        rpc(
+            &mut socket,
+            9,
+            "process.create",
+            process_params(102, "agent", "crasher", "exit 7"),
+        )
+        .await;
+        rpc(
+            &mut socket,
+            10,
+            "process.start",
+            json!({ "process_id": 102 }),
+        )
+        .await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let crashed = rpc(&mut socket, 11, "process.get", json!({ "process_id": 102 })).await;
+            if crashed["result"]["status"] == "crashed" {
+                assert_eq!(crashed["result"]["exit_code"], 7);
+                assert!(crashed["result"]["exited_at"].as_i64().is_some());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "process did not report its crash"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        rpc(
+            &mut socket,
+            12,
+            "process.create",
+            process_params(103, "command", "worker", long_running),
+        )
+        .await;
+        rpc(
+            &mut socket,
+            13,
+            "process.create",
+            process_params(104, "terminal", "shell", long_running),
+        )
+        .await;
+        let started_all = rpc(
+            &mut socket,
+            14,
+            "process.start_all_commands",
+            json!({ "project_id": 1 }),
+        )
+        .await;
+        assert!(
+            started_all["result"]["failures"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            started_all["result"]["processes"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(started_all["result"]["processes"][0]["id"], 103);
+        assert_eq!(started_all["result"]["processes"][0]["status"], "running");
+
+        let restarted_all = rpc(
+            &mut socket,
+            15,
+            "process.restart_all_commands",
+            json!({ "project_id": 1 }),
+        )
+        .await;
+        assert!(
+            restarted_all["result"]["failures"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let stopped_all = rpc(
+            &mut socket,
+            16,
+            "process.stop_all_commands",
+            json!({ "project_id": 1 }),
+        )
+        .await;
+        assert_eq!(stopped_all["result"]["processes"][0]["status"], "stopped");
+
+        let listed = rpc(&mut socket, 17, "process.list", json!({ "project_id": 1 })).await;
+        let terminal = listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|process| process["id"] == 104)
+            .unwrap();
+        assert_eq!(terminal["status"], "stopped");
 
         socket.close(None).await.unwrap();
         server.stop().await;
