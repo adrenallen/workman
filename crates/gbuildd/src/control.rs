@@ -46,6 +46,26 @@ struct ProjectParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkingDirectoryParams {
+    project_id: ProjectId,
+    #[serde(default)]
+    working_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveYmlCommandParams {
+    project_id: ProjectId,
+    name: String,
+    command: String,
+    #[serde(default)]
+    working_dir: String,
+    #[serde(default)]
+    auto_start: bool,
+    #[serde(default)]
+    auto_restart: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterProjectParams {
     path: String,
 }
@@ -250,6 +270,44 @@ async fn dispatch(
             return crate::lifecycle::sync_project_config(&mut registry, &project)
                 .map(|()| json!({ "project_id": params.project_id, "synced": true }))
                 .map_err(|error| ("config_error", error.to_string()));
+        }
+        "config.status" => {
+            let params: ProjectParams = params_as(params)?;
+            let project = registry
+                .store()
+                .get_project(params.project_id)
+                .map_err(project_store_error)?
+                .ok_or(("project_not_found", "project not found".to_owned()))?;
+            let path = Path::new(&project.path).join(crate::GBUILD_CONFIG_FILE);
+            return Ok(json!({
+                "project_id": params.project_id,
+                "path": path,
+                "exists": path.is_file(),
+            }));
+        }
+        "config.validate_working_dir" => {
+            let params: WorkingDirectoryParams = params_as(params)?;
+            return crate::config::validate_project_working_dir(
+                registry.store(),
+                params.project_id,
+                &params.working_dir,
+            )
+            .map(json_value)
+            .map_err(config_error);
+        }
+        "config.command_save" => {
+            let params: SaveYmlCommandParams = params_as(params)?;
+            return crate::config::write_gbuild_yml_command(
+                &mut registry,
+                params.project_id,
+                params.name,
+                params.command,
+                params.working_dir,
+                params.auto_start,
+                params.auto_restart,
+            )
+            .map(json_value)
+            .map_err(config_error);
         }
         "process.raw_output" => {
             let params: OutputParams = params_as(params)?;
@@ -515,6 +573,22 @@ fn json_value(value: impl serde::Serialize) -> Value {
 
 fn registry_error(error: RegistryError) -> (&'static str, String) {
     (error.code(), error.to_string())
+}
+
+fn config_error(error: crate::ConfigError) -> (&'static str, String) {
+    let code = match &error {
+        crate::ConfigError::ProjectNotFound(_) => "project_not_found",
+        crate::ConfigError::InvalidProcessName | crate::ConfigError::MissingCommand(_) => {
+            "invalid_params"
+        }
+        crate::ConfigError::LocalNameConflict(_) => "process_name_conflict",
+        crate::ConfigError::ParentTraversal { .. }
+        | crate::ConfigError::WorkingDirectory { .. }
+        | crate::ConfigError::NotDirectory { .. }
+        | crate::ConfigError::OutsideProject { .. } => "invalid_working_directory",
+        _ => "config_error",
+    };
+    (code, error.to_string())
 }
 
 fn readiness_error(error: ReadinessError) -> (&'static str, String) {

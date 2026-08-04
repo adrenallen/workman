@@ -2,6 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
 
+  import AddCommandDialog from './lib/AddCommandDialog.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
@@ -344,6 +345,17 @@
     } finally {
       processBusyId = null;
     }
+  }
+
+  async function commandAdded(
+    process: Pick<ProcessView, 'id' | 'project_id' | 'name'>
+  ): Promise<void> {
+    const projectId = process.project_id;
+    dialog = null;
+    await refreshProcesses(projectId);
+    if (selectedProject?.id !== projectId) return;
+    const added = processes.find((candidate) => candidate.id === process.id) ?? process;
+    selection = projectTreeSelection('command', added.id, projectId, added.name);
   }
 
   async function openAgentDialog(): Promise<void> {
@@ -770,7 +782,7 @@
   </section>
 </main>
 
-{#if dialog}
+{#if dialog && dialog !== 'command'}
   <div class="dialog-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) dialog = null; }}>
     {#if dialog === 'todo'}
       <form class="dialog" aria-label="Create todo" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
@@ -795,14 +807,17 @@
         </div>
         <footer><button type="button" onclick={() => { dialog = null; settingsOpen = true; }}>Open Settings</button><button type="button" onclick={() => (dialog = null)}>Cancel</button></footer>
       </section>
-    {:else}
-      <section class="dialog" aria-label="Add command">
-        <header><div><span>Project command</span><h2>Add it to gbuild.yml</h2></div><button type="button" aria-label="Close" onclick={() => (dialog = null)}>×</button></header>
-        <div class="command-help"><code>{selectedProject?.path}/gbuild.yml</code><p>Define the command in this project file, then refresh the tree. Commands stay reviewable and versioned with the repository.</p></div>
-        <footer><button type="button" onclick={() => (dialog = null)}>Cancel</button><button class="primary" type="button" onclick={() => { if (selectedProject) void loadProject(selectedProject.id); dialog = null; }}>Refresh commands</button></footer>
-      </section>
     {/if}
   </div>
+{/if}
+
+{#if dialog === 'command' && selectedProject}
+  <AddCommandDialog
+    {client}
+    project={selectedProject}
+    onAdded={(process) => void commandAdded(process)}
+    onClose={() => (dialog = null)}
+  />
 {/if}
 
 {#if trustReview}
@@ -920,9 +935,7 @@
   .agent-choices > button:hover { background: #25282d; }
   .agent-choices strong { font-size: 10px; } .agent-choices small { overflow: hidden; color: var(--muted); font: 8px 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
   .agent-choices span { grid-row: 1 / 3; grid-column: 2; align-self: center; color: #aeb3ba; font-size: 9px; }
-  .agent-choices p, .command-help { margin: 0; padding: 13px; color: #969da6; font-size: 10px; }
-  .command-help code { display: block; overflow-x: auto; border: 1px solid #3b4047; padding: 7px; background: #111315; color: #d4d7db; font-size: 9px; }
-  .command-help p { margin: 8px 0 0; line-height: 1.5; }
+  .agent-choices p { margin: 0; padding: 13px; color: #969da6; font-size: 10px; }
 
   @media (max-width: 760px) {
     .document-title { grid-template-columns: 50px minmax(0, 1fr) 50px; }

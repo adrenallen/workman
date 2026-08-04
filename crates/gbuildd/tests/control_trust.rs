@@ -278,3 +278,132 @@ async fn websocket_syncs_reviews_and_trusts_yml_processes() {
     socket.close(None).await.unwrap();
     server.stop().await;
 }
+
+#[tokio::test]
+async fn websocket_add_command_writes_trusts_and_watches_new_gbuild_yml() {
+    let server = TestServer::start().await;
+    let project = server.data_dir.join("add-command-project");
+    std::fs::create_dir(&project).unwrap();
+    let (mut socket, _) = connect_async(server.request()).await.unwrap();
+
+    let registered = rpc(
+        &mut socket,
+        "register",
+        "projects.register",
+        json!({ "path": project }),
+    )
+    .await;
+    let project_id = registered["result"][0]["id"].as_i64().unwrap();
+    let status = rpc(
+        &mut socket,
+        "status-before",
+        "config.status",
+        json!({ "project_id": project_id }),
+    )
+    .await;
+    assert_eq!(status["result"]["exists"], false);
+
+    let outside = server.data_dir.to_string_lossy().into_owned();
+    let rejected = rpc(
+        &mut socket,
+        "outside-working-dir",
+        "config.validate_working_dir",
+        json!({ "project_id": project_id, "working_dir": outside }),
+    )
+    .await;
+    assert_eq!(rejected["error"]["code"], "invalid_working_directory");
+
+    let validated = rpc(
+        &mut socket,
+        "root-working-dir",
+        "config.validate_working_dir",
+        json!({ "project_id": project_id, "working_dir": "" }),
+    )
+    .await;
+    assert_eq!(validated["result"]["relative"], ".");
+    assert_eq!(
+        validated["result"]["absolute"],
+        std::fs::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let saved = rpc(
+        &mut socket,
+        "save-command",
+        "config.command_save",
+        json!({
+            "project_id": project_id,
+            "name": "Web",
+            "command": "trap 'exit 0' TERM; sleep 30",
+            "working_dir": "",
+            "auto_start": true,
+            "auto_restart": false,
+        }),
+    )
+    .await;
+    assert_eq!(saved["result"]["source"], "yml");
+    assert_eq!(saved["result"]["status"], "running");
+    assert!(
+        saved["result"]["trust_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    let process_id = saved["result"]["id"].as_i64().unwrap();
+
+    let path = project.join("gbuild.yml");
+    let yaml = std::fs::read_to_string(&path).unwrap();
+    assert!(yaml.contains("name: add-command-project"));
+    assert!(yaml.contains("Web:"));
+    assert!(yaml.contains("command: trap 'exit 0' TERM; sleep 30"));
+    let status = rpc(
+        &mut socket,
+        "status-after",
+        "config.status",
+        json!({ "project_id": project_id }),
+    )
+    .await;
+    assert_eq!(status["result"]["exists"], true);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    std::fs::write(
+        &path,
+        "name: add-command-project\nprocesses:\n  Web:\n    command: printf external-change\n    auto_start: true\n",
+    )
+    .unwrap();
+    let changed = timeout(Duration::from_secs(3), async {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let review = rpc(
+                &mut socket,
+                &format!("external-review-{attempt}"),
+                "process.trust_review",
+                json!({ "process_id": process_id }),
+            )
+            .await;
+            if review["result"]["trusted"] == false {
+                break review;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("external gbuild.yml edit did not revoke in-app trust");
+    assert_eq!(changed["result"]["changes"][0]["field"], "command");
+    assert_eq!(
+        changed["result"]["fields"]["command"],
+        "printf external-change"
+    );
+
+    rpc(
+        &mut socket,
+        "close-yml-process",
+        "process.close",
+        json!({ "process_id": process_id }),
+    )
+    .await;
+    socket.close(None).await.unwrap();
+    server.stop().await;
+}

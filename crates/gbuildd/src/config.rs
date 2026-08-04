@@ -20,28 +20,40 @@ use crate::{ProcessRegistry, RegistryError};
 pub const GBUILD_CONFIG_FILE: &str = "gbuild.yml";
 
 /// Parsed top-level `gbuild.yml` document.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GbuildConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(default)]
     pub processes: BTreeMap<String, YmlProcess>,
 }
 
 /// One command process declared by name in `gbuild.yml`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct YmlProcess {
     pub command: String,
-    #[serde(default = "default_working_dir")]
+    #[serde(
+        default = "default_working_dir",
+        skip_serializing_if = "is_default_working_dir"
+    )]
     pub working_dir: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub auto_start: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub auto_restart: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restart_when_changed: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+/// Canonical working-directory paths returned to the add-command UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ValidatedWorkingDirectory {
+    pub absolute: String,
+    pub relative: String,
 }
 
 /// IDs affected by one source-of-truth synchronization pass.
@@ -107,8 +119,13 @@ pub enum ConfigError {
     InvalidProjectName,
     InvalidProcessName,
     MissingCommand(String),
+    WrittenProcessMissing(String),
     LocalNameConflict(String),
     ReadConfig {
+        path: PathBuf,
+        source: io::Error,
+    },
+    WriteConfig {
         path: PathBuf,
         source: io::Error,
     },
@@ -145,12 +162,21 @@ impl fmt::Display for ConfigError {
                     "gbuild.yml process {name:?} has an empty command"
                 )
             }
+            Self::WrittenProcessMissing(name) => {
+                write!(
+                    formatter,
+                    "written gbuild.yml process {name:?} was not synchronized"
+                )
+            }
             Self::LocalNameConflict(name) => write!(
                 formatter,
                 "gbuild.yml process {name:?} conflicts with a local process"
             ),
             Self::ReadConfig { path, source } => {
                 write!(formatter, "cannot read {}: {source}", path.display())
+            }
+            Self::WriteConfig { path, source } => {
+                write!(formatter, "cannot write {}: {source}", path.display())
             }
             Self::ParentTraversal { process, path } => write!(
                 formatter,
@@ -185,6 +211,7 @@ impl Error for ConfigError {
             Self::Parse(error) => Some(error),
             Self::Registry(error) => Some(error),
             Self::ReadConfig { source, .. } => Some(source),
+            Self::WriteConfig { source, .. } => Some(source),
             Self::WorkingDirectory { source, .. } => Some(source),
             _ => None,
         }
@@ -210,6 +237,128 @@ pub fn parse_gbuild_yml(yaml: &str) -> Result<GbuildConfig, ConfigError> {
     } else {
         Ok(serde_yaml::from_str(yaml)?)
     }
+}
+
+/// Resolve an add-command working directory to canonical absolute and project-relative paths.
+pub fn validate_project_working_dir(
+    store: &Store,
+    project_id: ProjectId,
+    configured: &str,
+) -> Result<ValidatedWorkingDirectory, ConfigError> {
+    let project = store
+        .get_project(project_id)
+        .map_err(RegistryError::from)?
+        .ok_or(ConfigError::ProjectNotFound(project_id))?;
+    let root = canonical_directory("<project>", Path::new(&project.path))?;
+    let configured = configured.trim();
+    let configured = if configured.is_empty() {
+        "."
+    } else {
+        configured
+    };
+    let absolute = resolve_working_dir("<new command>", &root, configured)?;
+    let relative = absolute
+        .strip_prefix(&root)
+        .expect("validated command working directory is contained by the project root");
+    Ok(ValidatedWorkingDirectory {
+        absolute: absolute.to_string_lossy().into_owned(),
+        relative: if relative.as_os_str().is_empty() {
+            ".".into()
+        } else {
+            relative.to_string_lossy().into_owned()
+        },
+    })
+}
+
+/// Add or update one user-authored YAML command, trust that exact write, and honor auto-start.
+pub fn write_gbuild_yml_command(
+    registry: &mut ProcessRegistry,
+    project_id: ProjectId,
+    name: String,
+    command: String,
+    working_dir: String,
+    auto_start: bool,
+    auto_restart: bool,
+) -> Result<Process, ConfigError> {
+    let project = registry
+        .store()
+        .get_project(project_id)
+        .map_err(RegistryError::from)?
+        .ok_or(ConfigError::ProjectNotFound(project_id))?;
+    let root = canonical_directory("<project>", Path::new(&project.path))?;
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(ConfigError::InvalidProcessName);
+    }
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Err(ConfigError::MissingCommand(name));
+    }
+    let validated = validate_project_working_dir(registry.store(), project_id, &working_dir)?;
+    let path = root.join(GBUILD_CONFIG_FILE);
+    let existed = path.exists();
+    let mut config = if existed {
+        let yaml = fs::read_to_string(&path).map_err(|source| ConfigError::ReadConfig {
+            path: path.clone(),
+            source,
+        })?;
+        parse_gbuild_yml(&yaml)?
+    } else {
+        GbuildConfig {
+            name: Some(project.name.clone()),
+            ..GbuildConfig::default()
+        }
+    };
+    let retained = config.processes.get(&name);
+    let restart_when_changed = retained
+        .map(|process| process.restart_when_changed.clone())
+        .unwrap_or_default();
+    let env = retained
+        .map(|process| process.env.clone())
+        .unwrap_or_default();
+    config.processes.insert(
+        name.clone(),
+        YmlProcess {
+            command,
+            working_dir: validated.relative,
+            auto_start,
+            auto_restart,
+            restart_when_changed,
+            env,
+        },
+    );
+
+    if config
+        .name
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidProjectName);
+    }
+    let prepared = prepare_processes(project_id, &root, config.processes.clone())?;
+    let existing = registry.list(Some(project_id))?;
+    for process in &prepared {
+        if existing.iter().any(|existing| {
+            existing.name == process.name && existing.source == ProcessSource::Local
+        }) {
+            return Err(ConfigError::LocalNameConflict(process.name.clone()));
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&config)?;
+    fs::write(&path, &yaml).map_err(|source| ConfigError::WriteConfig {
+        path: path.clone(),
+        source,
+    })?;
+    sync_gbuild_yml(registry, project_id, &yaml)?;
+
+    let process = registry
+        .list(Some(project_id))?
+        .into_iter()
+        .find(|process| process.source == ProcessSource::Yml && process.name == name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(name.clone()))?;
+    let expected_hash = trust_hash_for_process(&process);
+    Ok(registry.trust_yml_process(process.id, &expected_hash)?)
 }
 
 /// Read `<project root>/gbuild.yml` and synchronize it into the registry.
@@ -456,6 +605,14 @@ fn default_working_dir() -> String {
     ".".into()
 }
 
+fn is_default_working_dir(value: &String) -> bool {
+    value == "."
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 fn is_active(status: ProcessStatus) -> bool {
     matches!(status, ProcessStatus::Starting | ProcessStatus::Running)
 }
@@ -522,6 +679,103 @@ mod tests {
         let parsed = parse_gbuild_yml("name: Empty\n").unwrap();
         assert!(parsed.processes.is_empty());
         assert_eq!(parse_gbuild_yml("").unwrap(), GbuildConfig::default());
+    }
+
+    #[test]
+    fn in_app_write_creates_trusted_command_and_external_edit_revokes_trust() {
+        let mut fixture = Fixture::new();
+        let running = write_gbuild_yml_command(
+            &mut fixture.registry,
+            1,
+            "Web".into(),
+            "trap 'exit 0' TERM; sleep 30".into(),
+            "frontend".into(),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(running.status, ProcessStatus::Running);
+        assert!(is_process_trusted(&running));
+
+        let path = fixture.root.path().join(GBUILD_CONFIG_FILE);
+        let written = fs::read_to_string(&path).unwrap();
+        let parsed = parse_gbuild_yml(&written).unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("fixture"));
+        assert_eq!(
+            parsed.processes["Web"].command,
+            "trap 'exit 0' TERM; sleep 30"
+        );
+        assert_eq!(parsed.processes["Web"].working_dir, "frontend");
+        assert!(parsed.processes["Web"].auto_start);
+
+        fs::write(
+            &path,
+            "name: fixture\nprocesses:\n  Web:\n    command: printf externally-edited\n    working_dir: frontend\n    auto_start: true\n",
+        )
+        .unwrap();
+        sync_gbuild_yml_file(&mut fixture.registry, 1).unwrap();
+        let pending = fixture.process("Web");
+        assert_eq!(pending.id, running.id);
+        assert_eq!(pending.status, ProcessStatus::Stopped);
+        assert!(pending.trust_hash.is_none());
+        let review = fixture.registry.trust_review(pending.id).unwrap();
+        assert!(!review.trusted);
+        assert_eq!(review.changes.len(), 1);
+        assert_eq!(review.changes[0].field, "command");
+    }
+
+    #[test]
+    fn in_app_write_preserves_other_yml_entries_and_updates_by_name() {
+        let mut fixture = Fixture::new();
+        let path = fixture.root.path().join(GBUILD_CONFIG_FILE);
+        fs::write(
+            &path,
+            "name: Existing project\nicon: ship\nprocesses:\n  Existing:\n    command: printf keep\n  Deploy:\n    command: printf old\n    env:\n      TOKEN: retained\n    restart_when_changed:\n      - src/**\n",
+        )
+        .unwrap();
+
+        let updated = write_gbuild_yml_command(
+            &mut fixture.registry,
+            1,
+            "Deploy".into(),
+            "printf new".into(),
+            "".into(),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(is_process_trusted(&updated));
+        assert!(updated.auto_restart);
+
+        let parsed = parse_gbuild_yml(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("Existing project"));
+        assert_eq!(parsed.icon.as_deref(), Some("ship"));
+        assert_eq!(parsed.processes["Existing"].command, "printf keep");
+        assert_eq!(parsed.processes["Deploy"].command, "printf new");
+        assert!(parsed.processes["Deploy"].auto_restart);
+        assert_eq!(parsed.processes["Deploy"].env["TOKEN"], "retained");
+        assert_eq!(parsed.processes["Deploy"].restart_when_changed, ["src/**"]);
+        assert_eq!(parsed.processes.len(), 2);
+    }
+
+    #[test]
+    fn add_command_working_directory_validation_returns_both_path_forms() {
+        let fixture = Fixture::new();
+        let validated =
+            validate_project_working_dir(fixture.registry.store(), 1, "frontend").unwrap();
+        assert_eq!(
+            validated.absolute,
+            fs::canonicalize(fixture.root.path().join("frontend"))
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert_eq!(validated.relative, "frontend");
+
+        let outside = fixture.outside.path().to_string_lossy().into_owned();
+        assert!(matches!(
+            validate_project_working_dir(fixture.registry.store(), 1, &outside),
+            Err(ConfigError::OutsideProject { .. })
+        ));
     }
 
     #[test]
