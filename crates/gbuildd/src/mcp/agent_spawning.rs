@@ -108,7 +108,7 @@ impl GbuildMcp {
         Parameters(args): Parameters<SpawnProcessArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
@@ -137,6 +137,7 @@ impl GbuildMcp {
                         None,
                         None,
                         BTreeMap::new(),
+                        actor.process_id,
                     )
                 })
             }
@@ -155,6 +156,7 @@ impl GbuildMcp {
                     args.extra_args,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
+                    actor.process_id,
                 )
             }
         };
@@ -173,7 +175,7 @@ impl GbuildMcp {
         Parameters(args): Parameters<SpawnAgentArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
@@ -185,6 +187,7 @@ impl GbuildMcp {
             args.extra_args,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
+            actor.process_id,
         ) {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
@@ -313,6 +316,7 @@ pub(crate) fn spawn_registered_agent(
     extra_args: Vec<String>,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
+    spawned_by_process_id: Option<ProcessId>,
 ) -> Result<SpawnResult, String> {
     let tool = load_agent_tool(registry, agent_tool_id)?;
     if !tool.enabled {
@@ -340,6 +344,7 @@ pub(crate) fn spawn_registered_agent(
         Some(tool.id),
         Some(tool_type.clone()),
         env,
+        spawned_by_process_id,
     )?;
     if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
         auto_acknowledge_initial_dialog(registry, result.process_id)?;
@@ -417,6 +422,7 @@ fn spawn(
     agent_tool_id: Option<AgentToolId>,
     agent_tool_type: Option<String>,
     env: BTreeMap<String, String>,
+    spawned_by_process_id: Option<ProcessId>,
 ) -> Result<SpawnResult, String> {
     let created = registry
         .create(Process {
@@ -438,6 +444,7 @@ fn spawn(
             exit_signal: None,
             exited_at: None,
             agent_tool_id,
+            spawned_by_process_id,
         })
         .map_err(|error| error.to_string())?;
     let running = match registry.start(created.id) {
@@ -804,6 +811,7 @@ mod tests {
             exit_signal: None,
             exited_at: None,
             agent_tool_id: Some(1),
+            spawned_by_process_id: None,
         };
         let preamble = agent_instructions(
             &process,

@@ -123,6 +123,7 @@ fn process(id: i64, name: &str, command: &str, agent_tool_id: Option<i64>) -> Pr
         exit_signal: None,
         exited_at: None,
         agent_tool_id,
+        spawned_by_process_id: None,
     }
 }
 

@@ -122,6 +122,7 @@ fn test_process(id: i64, label: &str, working_dir: &str) -> Process {
         exit_signal: None,
         exited_at: None,
         agent_tool_id: None,
+        spawned_by_process_id: None,
     }
 }
 

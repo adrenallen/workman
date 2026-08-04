@@ -32,10 +32,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent_tool_source",
         include_str!("../migrations/0005_agent_tool_source.sql"),
     ),
+    (
+        6,
+        "process_lineage",
+        include_str!("../migrations/0006_process_lineage.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 5;
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -338,10 +343,10 @@ impl Store {
             "INSERT INTO processes (
                 id, project_id, kind, name, command, working_dir, env, auto_start,
                 auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                exit_code, exit_signal, exited_at, agent_tool_id
+                exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18
+                ?15, ?16, ?17, ?18, ?19
              )
              ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
@@ -360,7 +365,8 @@ impl Store {
                 exit_code = excluded.exit_code,
                 exit_signal = excluded.exit_signal,
                 exited_at = excluded.exited_at,
-                agent_tool_id = excluded.agent_tool_id",
+                agent_tool_id = excluded.agent_tool_id,
+                spawned_by_process_id = excluded.spawned_by_process_id",
             params![
                 process.id,
                 process.project_id,
@@ -380,6 +386,7 @@ impl Store {
                 process.exit_signal,
                 process.exited_at,
                 process.agent_tool_id,
+                process.spawned_by_process_id,
             ],
         )?;
         Ok(())
@@ -391,7 +398,7 @@ impl Store {
             .query_row(
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
                  FROM processes WHERE id = ?1",
                 [id],
                 process_from_row,
@@ -406,14 +413,14 @@ impl Store {
             Some(project_id) => (
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
                  FROM processes WHERE project_id = ?1 ORDER BY id",
                 Some(project_id),
             ),
             None => (
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
                  FROM processes ORDER BY project_id, id",
                 None,
             ),
@@ -480,7 +487,7 @@ impl Store {
                 "SELECT p.id, p.project_id, p.kind, p.name, p.command, p.working_dir, p.env,
                         p.auto_start, p.auto_restart, p.restart_when_changed, p.source,
                         p.trust_hash, p.status, p.pid, p.exit_code, p.exit_signal, p.exited_at,
-                        p.agent_tool_id
+                        p.agent_tool_id, p.spawned_by_process_id
                  FROM process_mcp_tokens AS token
                  JOIN processes AS p ON p.id = token.process_id
                  WHERE token.token = ?1",
@@ -930,6 +937,7 @@ fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {
         exit_signal: row.get(15)?,
         exited_at: row.get(16)?,
         agent_tool_id: row.get(17)?,
+        spawned_by_process_id: row.get(18)?,
     })
 }
 

@@ -77,6 +77,7 @@ fn process(id: i64, project: &Project, kind: ProcessKind, name: &str, command: &
         exit_signal: None,
         exited_at: None,
         agent_tool_id: None,
+        spawned_by_process_id: None,
     }
 }
 

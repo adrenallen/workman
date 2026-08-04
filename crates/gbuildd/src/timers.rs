@@ -791,6 +791,7 @@ mod tests {
             exit_signal: None,
             exited_at: None,
             agent_tool_id,
+            spawned_by_process_id: None,
         }
     }
 

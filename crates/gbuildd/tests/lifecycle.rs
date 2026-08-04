@@ -65,6 +65,7 @@ fn process(root: &TempDir, id: i64, command: &str) -> Process {
         exit_signal: None,
         exited_at: None,
         agent_tool_id: None,
+        spawned_by_process_id: None,
     }
 }
 

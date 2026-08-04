@@ -1153,6 +1153,7 @@ mod tests {
                 exit_signal: None,
                 exited_at: None,
                 agent_tool_id: None,
+                spawned_by_process_id: None,
             })
             .unwrap();
 
@@ -1218,6 +1219,7 @@ mod tests {
                 exit_signal: None,
                 exited_at: None,
                 agent_tool_id: Some(9),
+                spawned_by_process_id: None,
             })
             .unwrap();
         registry.start(10).unwrap();

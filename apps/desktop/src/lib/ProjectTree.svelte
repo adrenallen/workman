@@ -3,6 +3,10 @@
 
   import CountBadge from './CountBadge.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
+  import {
+    agentLineageRows,
+    type AgentAttentionRollup
+  } from './agentLineage';
   import type { ProcessView, Project } from './daemon';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
   import { liveStats, type ProcessRuntimeStats } from './liveStats';
@@ -88,7 +92,7 @@
     const matches = openTodos.filter((todo) => matchesQuery(todo.title));
     return showAllTodos || query.trim() ? matches : matches.slice(0, 5);
   });
-  let visibleAgents = $derived(agents.filter((process) => matchesQuery(process.name)));
+  let visibleAgentRows = $derived(agentLineageRows(agents, query));
   let visibleTerminals = $derived(
     terminals.filter((process) => matchesQuery(`${workingDirLabel(process.working_dir)} ${process.name}`))
   );
@@ -161,6 +165,22 @@
       case 'error': return '×';
       default: return '';
     }
+  }
+
+  function lineageTone(rollup: AgentAttentionRollup): 'attention' | 'working' | 'error' | 'idle' {
+    if (rollup.needsInput > 0) return 'attention';
+    if (rollup.crashed > 0) return 'error';
+    if (rollup.working > 0) return 'working';
+    return 'idle';
+  }
+
+  function lineageTitle(rollup: AgentAttentionRollup): string {
+    const states = [];
+    if (rollup.needsInput > 0) states.push(`${rollup.needsInput} need input`);
+    if (rollup.working > 0) states.push(`${rollup.working} working`);
+    if (rollup.crashed > 0) states.push(`${rollup.crashed} crashed`);
+    const suffix = states.length > 0 ? ` · ${states.join(', ')}` : '';
+    return `${rollup.total} nested agent${rollup.total === 1 ? '' : 's'}${suffix}`;
   }
 
   function todoGlyph(todo: TodoSummary): string {
@@ -281,19 +301,37 @@
               {/if}
               <button class="add-row" type="button" data-tree-row onclick={onCreateTodo}>+ Add todo</button>
             {:else if group === 'agents'}
-              {#each visibleAgents as process (process.id)}
+              {#each visibleAgentRows as row (row.process.id)}
+                {@const process = row.process}
                 {@const stats = runtimeStats(process)}
                 <button
                   type="button"
-                  class="tree-row"
+                  class="tree-row agent-row"
+                  class:agent-child={row.depth > 0}
                   class:selected={selection?.key === `agent:${process.id}`}
+                  style={`--agent-depth: ${row.depth}`}
                   data-tree-row
                   onclick={() => selectProcess(process)}
                 >
+                  {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
                   <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
                   <span class="row-copy"><strong>{process.name}</strong></span>
-                  {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
-                </button>
+                  {#if row.rollup.total > 0 || stats}
+                    <span class="row-badges">
+                      {#if row.rollup.total > 0}
+                        <span
+                          class={`lineage-rollup ${lineageTone(row.rollup)}`}
+                          title={lineageTitle(row.rollup)}
+                          aria-label={lineageTitle(row.rollup)}
+                        >↳{row.rollup.total}</span>
+                      {/if}
+                      {#if stats?.descendant_count}
+                        <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
+                      {/if}
+                      {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
+                    </span>
+                  {/if}
+              </button>
               {:else}
                 <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
               {/each}
@@ -388,6 +426,7 @@
   .group-rows { padding: 0 4px 4px 13px; }
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: #c8ccd1; text-align: left; cursor: pointer; }
   .tree-row { grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
+  .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: #202328; }
   .tree-row.selected { background: #292d32; color: #fff; box-shadow: inset 2px 0 #7a818a; }
   .row-copy { min-width: 0; }
@@ -395,6 +434,11 @@
   .row-copy strong { font-size: 10px; font-weight: 590; }
   .row-copy small { margin-top: 1px; color: #777e87; font: 7px 'JetBrains Mono Variable', monospace; }
   .row-badges { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 3px; }
+  .lineage-glyph { color: #687e74; font: 10px/1 'JetBrains Mono Variable', monospace; transform: translateY(-1px); }
+  .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid #3d4643; border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 8px/1 'JetBrains Mono Variable', monospace; }
+  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--warning) 48%, #30343a); color: var(--warning); }
+  .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, #30343a); color: var(--signal); }
+  .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, #30343a); color: var(--fault); }
   .attention-dot { display: grid; width: 12px; height: 12px; place-items: center; border: 1px solid #565d66; border-radius: 50%; color: #89909a; font: 700 7px/1 'JetBrains Mono Variable', monospace; }
   .attention-dot.working { border: 2px solid #3f554c; border-top-color: var(--signal); animation: spin 0.85s linear infinite; }
   .attention-dot.idle { border-color: var(--signal); }

@@ -361,6 +361,7 @@ async fn dispatch(
                 params.extra_args,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
+                None,
             )
             .map(json_value)
             .map_err(|error| ("spawn_failed", error));
@@ -494,6 +495,7 @@ fn spawn_terminal(
         exit_signal: None,
         exited_at: None,
         agent_tool_id: None,
+        spawned_by_process_id: None,
     })?;
     registry.start(process.id)
 }

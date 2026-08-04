@@ -89,6 +89,7 @@ export interface ProcessView {
   exit_signal: number | null;
   exited_at: number | null;
   agent_tool_id: number | null;
+  spawned_by_process_id: number | null;
   agent_state: AgentState;
 }
 

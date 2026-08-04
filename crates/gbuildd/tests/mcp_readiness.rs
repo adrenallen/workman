@@ -95,6 +95,7 @@ fn self_process(project: &Project) -> Process {
         exit_signal: None,
         exited_at: None,
         agent_tool_id: None,
+        spawned_by_process_id: None,
     }
 }
 

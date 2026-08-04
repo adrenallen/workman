@@ -187,6 +187,7 @@ fn domain_records_round_trip_through_store() {
         exit_signal: None,
         exited_at: None,
         agent_tool_id: Some(agent_tool.id),
+        spawned_by_process_id: None,
     };
     store.put_process(&process).expect("put process");
     assert_eq!(
@@ -327,6 +328,30 @@ fn domain_records_round_trip_through_store() {
     assert_eq!(
         store.get_process_by_mcp_token("process-secret").unwrap(),
         None
+    );
+
+    let child = Process {
+        id: 9,
+        name: "codex-child".into(),
+        pid: Some(4321),
+        spawned_by_process_id: Some(process.id),
+        ..process.clone()
+    };
+    store.put_process(&child).expect("put child process");
+    assert_eq!(store.get_process(child.id).unwrap(), Some(child.clone()));
+    assert!(
+        store
+            .delete_process(process.id)
+            .expect("delete parent process")
+    );
+    assert_eq!(
+        store
+            .get_process(child.id)
+            .unwrap()
+            .expect("child remains")
+            .spawned_by_process_id,
+        None,
+        "closing a parent promotes its children by clearing their lineage foreign key"
     );
 }
 

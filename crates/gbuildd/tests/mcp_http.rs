@@ -132,6 +132,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             exit_signal: None,
             exited_at: None,
             agent_tool_id: None,
+            spawned_by_process_id: None,
         })?;
         registry.start(42)?;
         registry.store().connection().query_row(

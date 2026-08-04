@@ -212,6 +212,8 @@ pub struct Process {
     pub exit_signal: Option<i32>,
     pub exited_at: Option<i64>,
     pub agent_tool_id: Option<AgentToolId>,
+    #[serde(default)]
+    pub spawned_by_process_id: Option<ProcessId>,
 }
 
 /// A work item and its lease-based edit-lock metadata.
