@@ -38,6 +38,7 @@ mod control;
 pub mod lifecycle;
 mod mcp;
 mod process_registry;
+pub mod readiness;
 
 pub use config::{
     ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, YmlProcess, is_process_trusted,
@@ -51,6 +52,11 @@ pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
     BulkFailure, BulkProcessResult, ProcessRegistry, ProcessStatusView, RegistryError,
     RegistryResult,
+};
+pub use readiness::{
+    BoundListener, DEFAULT_PORT_WAIT, DetectedListener, MAX_PORT_WAIT, PortDetector,
+    ReadinessError, ReadinessService, ReadinessState, Service, ServiceProtocol,
+    SystemPortDetector, WaitForBoundPortResult,
 };
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;

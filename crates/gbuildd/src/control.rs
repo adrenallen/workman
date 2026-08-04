@@ -1,13 +1,16 @@
 //! JSON request dispatch for the authenticated WebSocket control channel.
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gbuild_core::{Process, ProcessId, ProcessStatus, Project, ProjectId, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{RegistryError, SharedProcessRegistry};
+use crate::{
+    DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService, RegistryError,
+    SharedProcessRegistry,
+};
 
 #[derive(Debug, Deserialize)]
 struct ControlRequest {
@@ -81,6 +84,12 @@ struct ResizeParams {
     pixel_height: u16,
 }
 
+#[derive(Debug, Deserialize)]
+struct WaitForPortParams {
+    process_id: ProcessId,
+    timeout_ms: Option<u64>,
+}
+
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
 pub(crate) async fn handle_text(text: &str, registry: &SharedProcessRegistry) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -108,6 +117,40 @@ async fn dispatch(
     params: Value,
     registry: &SharedProcessRegistry,
 ) -> Result<Value, (&'static str, String)> {
+    let readiness = ReadinessService::default();
+    match method {
+        "services.list" => {
+            let params: ListParams = params_as(params)?;
+            return readiness
+                .services_list(registry, params.project_id)
+                .await
+                .map(json_value)
+                .map_err(readiness_error);
+        }
+        "process.get_ports" | "process.ports" => {
+            let params: ProcessIdParams = params_as(params)?;
+            return readiness
+                .get_process_ports(registry, params.process_id)
+                .await
+                .map(json_value)
+                .map_err(readiness_error);
+        }
+        "process.wait_for_bound_port" => {
+            let params: WaitForPortParams = params_as(params)?;
+            let timeout = params
+                .timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_PORT_WAIT)
+                .min(MAX_PORT_WAIT);
+            return readiness
+                .wait_for_bound_port(registry, params.process_id, timeout)
+                .await
+                .map(json_value)
+                .map_err(readiness_error);
+        }
+        _ => {}
+    }
+
     let mut registry = registry.lock().await;
     match method {
         "projects.list" => {
@@ -260,6 +303,10 @@ fn json_value(value: impl serde::Serialize) -> Value {
 }
 
 fn registry_error(error: RegistryError) -> (&'static str, String) {
+    (error.code(), error.to_string())
+}
+
+fn readiness_error(error: ReadinessError) -> (&'static str, String) {
     (error.code(), error.to_string())
 }
 
