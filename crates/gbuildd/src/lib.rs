@@ -34,8 +34,10 @@ use tokio::{
 use uuid::Uuid;
 
 mod control;
+mod mcp;
 mod process_registry;
 
+pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
     BulkFailure, BulkProcessResult, ProcessRegistry, RegistryError, RegistryResult,
 };
@@ -179,9 +181,11 @@ struct AppState {
 }
 
 fn router(state: AppState) -> Router {
+    let mcp_service = mcp::streamable_http_service(state.registry.clone());
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
+        .nest_service("/mcp", mcp_service)
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -250,7 +254,10 @@ async fn authorize_local_request(
     request: Request,
     next: Next,
 ) -> Response {
-    if !valid_bearer(request.headers(), &state.token) {
+    let bearer_is_valid = valid_bearer(request.headers(), &state.token);
+    let process_token_is_valid = request.uri().path().starts_with("/mcp")
+        && valid_process_token(request.headers(), &state.registry).await;
+    if !bearer_is_valid && !process_token_is_valid {
         return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
     }
 
@@ -259,6 +266,21 @@ async fn authorize_local_request(
     }
 
     next.run(request).await
+}
+
+async fn valid_process_token(headers: &HeaderMap, registry: &SharedProcessRegistry) -> bool {
+    let Some(token) = headers
+        .get(GBUILD_MCP_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    registry
+        .lock()
+        .await
+        .store()
+        .get_process_by_mcp_token(token)
+        .is_ok_and(|process| process.is_some())
 }
 
 fn valid_bearer(headers: &HeaderMap, token: &str) -> bool {

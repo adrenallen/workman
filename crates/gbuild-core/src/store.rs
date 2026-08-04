@@ -10,11 +10,17 @@ use crate::domain::{
     TodoBlocker, TodoComment, TodoId,
 };
 
-const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "initial", include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "initial", include_str!("../migrations/0001_initial.sql")),
+    (
+        2,
+        "mcp_identity",
+        include_str!("../migrations/0002_mcp_identity.sql"),
+    ),
+];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -196,6 +202,41 @@ impl Store {
         Ok(project)
     }
 
+    pub fn list_projects(&self) -> StoreResult<Vec<Project>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, path, name, display_name, icon, selected FROM projects ORDER BY name, id",
+        )?;
+        let projects = statement
+            .query_map([], |row| {
+                Ok(Project {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    name: row.get(2)?,
+                    display_name: row.get(3)?,
+                    icon: row.get(4)?,
+                    selected: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(projects)
+    }
+
+    pub fn next_project_id(&self) -> StoreResult<ProjectId> {
+        let id = self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM projects",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn delete_project(&self, id: ProjectId) -> StoreResult<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM projects WHERE id = ?1", [id])?
+            > 0)
+    }
+
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
         self.connection.execute(
             "INSERT INTO agent_tools (id, name, command, tool_type, enabled)
@@ -352,6 +393,48 @@ impl Store {
             .connection
             .execute("DELETE FROM processes WHERE id = ?1", [id])?
             > 0)
+    }
+
+    pub fn set_process_mcp_token(
+        &self,
+        process_id: ProcessId,
+        token: &str,
+        created_at: i64,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO process_mcp_tokens (process_id, token, created_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(process_id) DO UPDATE SET
+                token = excluded.token,
+                created_at = excluded.created_at",
+            params![process_id, token, created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_process_mcp_token(&self, process_id: ProcessId) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM process_mcp_tokens WHERE process_id = ?1",
+            [process_id],
+        )? > 0)
+    }
+
+    pub fn get_process_by_mcp_token(&self, token: &str) -> StoreResult<Option<Process>> {
+        let process = self
+            .connection
+            .query_row(
+                "SELECT p.id, p.project_id, p.kind, p.name, p.command, p.working_dir, p.env,
+                        p.auto_start, p.auto_restart, p.restart_when_changed, p.source,
+                        p.trust_hash, p.status, p.pid, p.exit_code, p.exit_signal, p.exited_at,
+                        p.agent_tool_id
+                 FROM process_mcp_tokens AS token
+                 JOIN processes AS p ON p.id = token.process_id
+                 WHERE token.token = ?1",
+                [token],
+                process_from_row,
+            )
+            .optional()?;
+        Ok(process)
     }
 
     pub fn put_todo(&mut self, todo: &Todo) -> StoreResult<()> {
@@ -724,6 +807,52 @@ impl Store {
             )
             .optional()?;
         Ok(actor)
+    }
+
+    pub fn get_actor_by_session_id(&self, session_id: &str) -> StoreResult<Option<Actor>> {
+        let actor = self
+            .connection
+            .query_row(
+                "SELECT id, session_id, process_id, selected_project_id, created_at, last_seen_at
+                 FROM actors WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(Actor {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        process_id: row.get(2)?,
+                        selected_project_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                        last_seen_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(actor)
+    }
+
+    /// Exercise a temporary write/read/delete cycle on the active SQLite connection.
+    pub fn smoke_test(&mut self) -> StoreResult<bool> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS mcp_smoke_test (
+                id INTEGER PRIMARY KEY,
+                value TEXT NOT NULL
+             );
+             DELETE FROM mcp_smoke_test;",
+        )?;
+        transaction.execute(
+            "INSERT INTO mcp_smoke_test (id, value) VALUES (1, 'ok')",
+            [],
+        )?;
+        let value: String =
+            transaction.query_row("SELECT value FROM mcp_smoke_test WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
+        transaction.execute("DELETE FROM mcp_smoke_test WHERE id = 1", [])?;
+        transaction.execute_batch("DROP TABLE mcp_smoke_test;")?;
+        transaction.commit()?;
+        Ok(value == "ok")
     }
 }
 

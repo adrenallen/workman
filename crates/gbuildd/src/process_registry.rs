@@ -151,6 +151,10 @@ impl ProcessRegistry {
         &self.store
     }
 
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// Insert a new stopped process. An ID <= 0 is replaced with the next database ID.
     pub fn create(&mut self, mut process: Process) -> RegistryResult<Process> {
         if process.id <= 0 {
@@ -214,6 +218,8 @@ impl ProcessRegistry {
         self.store.put_process(&process)?;
 
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        self.store
+            .set_process_mcp_token(process.id, &token, now_millis())?;
         let mut options = PtySpawnOptions::new(process.id, token, command);
         if !process.working_dir.is_empty() {
             options = options.with_working_dir(&process.working_dir);
@@ -225,6 +231,7 @@ impl ProcessRegistry {
         let mut hosted = match PtyProcess::spawn(options) {
             Ok(hosted) => hosted,
             Err(error) => {
+                let _ = self.store.clear_process_mcp_token(process_id);
                 process.status = ProcessStatus::Crashed;
                 process.exited_at = Some(now_millis());
                 self.store.put_process(&process)?;
@@ -238,6 +245,7 @@ impl ProcessRegistry {
         process.status = ProcessStatus::Running;
         process.pid = Some(hosted.pid());
         if let Err(error) = self.store.put_process(&process) {
+            let _ = self.store.clear_process_mcp_token(process_id);
             let _ = hosted.terminate(self.stop_grace);
             return Err(error.into());
         }
@@ -259,6 +267,7 @@ impl ProcessRegistry {
         let Some(mut hosted) = self.running.remove(&process_id) else {
             return Ok(process);
         };
+        let _ = self.store.clear_process_mcp_token(process_id);
 
         match hosted.terminate(self.stop_grace) {
             Ok(status) => {
@@ -490,6 +499,7 @@ impl ProcessRegistry {
             let Some(status) = status else { continue };
 
             self.running.remove(&process_id);
+            let _ = self.store.clear_process_mcp_token(process_id);
             let mut process = self.require(process_id)?;
             apply_exit_info(&mut process, &status);
             process.status = if status.success() {
@@ -504,6 +514,7 @@ impl ProcessRegistry {
 
     fn reconcile_stale_processes(&mut self) -> RegistryResult<()> {
         for mut process in self.store.list_processes(None)? {
+            let _ = self.store.clear_process_mcp_token(process.id);
             if matches!(
                 process.status,
                 ProcessStatus::Starting | ProcessStatus::Running
@@ -532,6 +543,7 @@ struct ProcessOutput {
 impl Drop for ProcessRegistry {
     fn drop(&mut self) {
         for (process_id, mut hosted) in self.running.drain() {
+            let _ = self.store.clear_process_mcp_token(process_id);
             let status = hosted.terminate(self.stop_grace).ok();
             if let Ok(Some(mut process)) = self.store.get_process(process_id) {
                 if let Some(status) = status {

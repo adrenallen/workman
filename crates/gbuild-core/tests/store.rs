@@ -49,6 +49,7 @@ fn fresh_database_migrates_to_current_schema() {
             "actors",
             "agent_tools",
             "locks",
+            "process_mcp_tokens",
             "processes",
             "projects",
             "schema_migrations",
@@ -69,6 +70,40 @@ fn fresh_database_migrates_to_current_schema() {
         store.schema_version().expect("read schema version"),
         LATEST_SCHEMA_VERSION
     );
+}
+
+#[test]
+fn version_one_database_migrates_mcp_identity_schema() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open connection");
+    connection
+        .execute_batch(include_str!("../migrations/0001_initial.sql"))
+        .expect("apply version one");
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             INSERT INTO schema_migrations (version, name) VALUES (1, 'initial');
+             PRAGMA user_version = 1;",
+        )
+        .expect("record version one");
+
+    let store = Store::from_connection(connection).expect("migrate store");
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    let token_table_exists: bool = store
+        .connection()
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'process_mcp_tokens'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(token_table_exists);
 }
 
 #[test]
@@ -112,6 +147,8 @@ fn domain_records_round_trip_through_store() {
         store.get_project(project.id).unwrap(),
         Some(project.clone())
     );
+    assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
+    assert_eq!(store.next_project_id().unwrap(), 2);
 
     let agent_tool = AgentTool {
         id: 2,
@@ -154,6 +191,13 @@ fn domain_records_round_trip_through_store() {
         store.get_process(process.id).unwrap(),
         Some(process.clone())
     );
+    store
+        .set_process_mcp_token(process.id, "process-secret", 1_700_000_000_000)
+        .expect("set process token");
+    assert_eq!(
+        store.get_process_by_mcp_token("process-secret").unwrap(),
+        Some(process.clone())
+    );
 
     let actor = Actor {
         id: "mcp-abc".into(),
@@ -165,6 +209,10 @@ fn domain_records_round_trip_through_store() {
     };
     store.put_actor(&actor).expect("put actor");
     assert_eq!(store.get_actor(&actor.id).unwrap(), Some(actor.clone()));
+    assert_eq!(
+        store.get_actor_by_session_id(&actor.session_id).unwrap(),
+        Some(actor.clone())
+    );
 
     let prerequisite = Todo {
         id: 4,
@@ -267,6 +315,39 @@ fn domain_records_round_trip_through_store() {
     };
     store.put_timer(&timer).expect("put timer");
     assert_eq!(store.get_timer(timer.id).unwrap(), Some(timer));
+
+    assert!(store.smoke_test().expect("run smoke test"));
+    assert!(
+        store
+            .clear_process_mcp_token(process.id)
+            .expect("clear process token")
+    );
+    assert_eq!(
+        store.get_process_by_mcp_token("process-secret").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn project_catalog_can_delete_empty_projects() {
+    let store = Store::open_in_memory().expect("open store");
+    let project = Project {
+        id: 7,
+        path: "/workspace/empty".into(),
+        name: "empty".into(),
+        display_name: None,
+        icon: None,
+        selected: false,
+    };
+    store.put_project(&project).expect("put project");
+
+    assert!(store.delete_project(project.id).expect("delete project"));
+    assert_eq!(store.get_project(project.id).unwrap(), None);
+    assert!(
+        !store
+            .delete_project(project.id)
+            .expect("delete missing project")
+    );
 }
 
 fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
