@@ -12,6 +12,9 @@ pub const DEFAULT_QUIESCENCE: Duration = Duration::from_millis(500);
 /// Conservative idle fallback when no adapter recognizes the terminal contents.
 pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(5);
 
+/// Grace period in which newly delivered input keeps a process out of idle.
+pub const RECENT_INPUT_GRACE: Duration = Duration::from_secs(2);
+
 /// The orchestration-relevant state derived from output and terminal contents.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +70,12 @@ pub struct AgentState {
     pub last_output_at: Option<i64>,
     /// Unix timestamp in milliseconds for the newest rendered-content change.
     pub last_content_change_at: Option<i64>,
+    /// Unix timestamp in milliseconds for the newest PTY input write.
+    #[serde(default)]
+    pub last_input_at: Option<i64>,
+    /// Seconds since the newest PTY input write.
+    #[serde(default)]
+    pub last_input_seconds: Option<f64>,
     /// Adapter explanation such as `busy_spinner` or `permission_dialog`.
     pub classification: Option<String>,
 }
@@ -79,6 +88,7 @@ impl AgentState {
         started_at: i64,
         last_output_at: Option<i64>,
         last_content_change_at: Option<i64>,
+        last_input_at: Option<i64>,
         flags: &AdapterFlags,
     ) -> Self {
         let idle_since = last_output_at.unwrap_or(started_at);
@@ -96,6 +106,8 @@ impl AgentState {
             last_output_seconds: last_output_at.map(|at| elapsed_seconds(now_ms, at)),
             last_output_at,
             last_content_change_at,
+            last_input_at,
+            last_input_seconds: last_input_at.map(|at| elapsed_seconds(now_ms, at)),
             classification: flags.classification.clone(),
         }
     }
@@ -109,6 +121,7 @@ impl AgentState {
             tool_type,
             now,
             at,
+            None,
             None,
             None,
             &AdapterFlags::default(),
@@ -139,6 +152,7 @@ struct AttentionEngine {
     started_at: i64,
     last_output_at: Option<i64>,
     last_content_change_at: Option<i64>,
+    last_input_at: Option<i64>,
     last_rendered: String,
     last_alternate_screen: bool,
     flags: AdapterFlags,
@@ -179,6 +193,7 @@ impl AttentionEngine {
             self.started_at,
             self.last_output_at,
             self.last_content_change_at,
+            self.last_input_at,
             &self.flags,
         )
     }
@@ -186,6 +201,13 @@ impl AttentionEngine {
     fn derive_state(&self, now_ms: i64) -> AttentionState {
         if self.exited {
             return AttentionState::Exited;
+        }
+
+        if self
+            .last_input_at
+            .is_some_and(|at| elapsed(now_ms, at) < RECENT_INPUT_GRACE)
+        {
+            return AttentionState::Working;
         }
 
         // A pending question always beats the idle fallback. It may sit unchanged
@@ -250,6 +272,7 @@ impl AttentionTracker {
                 started_at: now_ms,
                 last_output_at: None,
                 last_content_change_at: None,
+                last_input_at: None,
                 last_rendered: String::new(),
                 last_alternate_screen: false,
                 flags: AdapterFlags::default(),
@@ -279,6 +302,16 @@ impl AttentionTracker {
     ) {
         self.lock()
             .observe_output(bytes, rendered, alternate_screen, now_ms);
+    }
+
+    /// Record input delivered to the process PTY.
+    pub fn observe_input(&self) {
+        self.observe_input_at(now_millis());
+    }
+
+    /// Deterministic form of [`Self::observe_input`].
+    pub fn observe_input_at(&self, now_ms: i64) {
+        self.lock().last_input_at = Some(now_ms);
     }
 
     /// Permanently transition this tracker to `exited`.
@@ -311,6 +344,7 @@ impl fmt::Debug for AttentionTracker {
             .field("started_at", &engine.started_at)
             .field("last_output_at", &engine.last_output_at)
             .field("last_content_change_at", &engine.last_content_change_at)
+            .field("last_input_at", &engine.last_input_at)
             .field("flags", &engine.flags)
             .field("exited", &engine.exited)
             .finish()
@@ -597,6 +631,30 @@ mod tests {
         let state = session.tracker.snapshot_at(2_600);
         assert_eq!(state.state, AttentionState::Idle);
         assert_eq!(state.classification.as_deref(), Some("resting_prompt"));
+    }
+
+    #[test]
+    fn recent_input_prevents_a_resting_prompt_from_racing_back_to_idle() {
+        let mut session = ScriptedSession::claude();
+        session.emit(2_000, b"Answer complete\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(2_600).state,
+            AttentionState::Idle
+        );
+
+        session.tracker.observe_input_at(2_700);
+        let prompted = session.tracker.snapshot_at(2_700);
+        assert_eq!(prompted.state, AttentionState::Working);
+        assert_eq!(prompted.last_input_at, Some(2_700));
+        assert_eq!(prompted.last_input_seconds, Some(0.0));
+        assert_eq!(
+            session.tracker.snapshot_at(4_699).state,
+            AttentionState::Working
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(4_700).state,
+            AttentionState::Idle
+        );
     }
 
     #[test]

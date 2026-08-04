@@ -240,6 +240,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
             .contains("SUBMITTED")
     );
     assert_eq!(paste_submit["status"]["agent_state"]["state"], "working");
+    assert!(paste_submit["status"]["agent_state"]["last_input_at"].is_number());
 
     let started = call(
         &client,

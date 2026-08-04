@@ -134,7 +134,11 @@ pub(crate) struct TimerFire {
 #[derive(Clone, Debug)]
 pub(crate) enum IdleTimerOutcome {
     Created(TimerView),
-    AlreadySatisfied { watch_process_ids: Vec<ProcessId> },
+    AlreadySatisfied {
+        watch_process_ids: Vec<ProcessId>,
+        delivery_process_id: ProcessId,
+        delivered_at: i64,
+    },
 }
 
 pub(crate) struct TimerService<'a> {
@@ -231,7 +235,13 @@ impl<'a> TimerService<'a> {
             );
         }
         if kind == TimerKind::IdleAll && watch_state.values().all(|progress| progress.satisfied) {
-            return Ok(IdleTimerOutcome::AlreadySatisfied { watch_process_ids });
+            self.registry
+                .submit_input(delivery_process_id, body.as_bytes())?;
+            return Ok(IdleTimerOutcome::AlreadySatisfied {
+                watch_process_ids,
+                delivery_process_id,
+                delivered_at: now_ms,
+            });
         }
 
         let due_at = now_ms.saturating_add(max_wait_ms);
@@ -893,6 +903,75 @@ mod tests {
     }
 
     #[test]
+    fn already_satisfied_idle_all_delivers_immediately_to_a_real_pty() {
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                PASTE_TUI_ID,
+                "paste-sensitive-agent",
+                paste_sensitive_tui(),
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(PASTE_TUI_ID).unwrap();
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Idle);
+
+        let body = "Already idle: wake now.";
+        assert!(body.len() < 100);
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "actor-immediate".into(),
+                PASTE_TUI_ID,
+                body.into(),
+                TimerKind::IdleAll,
+                vec![PASTE_TUI_ID],
+                10_000,
+                2_000,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            IdleTimerOutcome::AlreadySatisfied {
+                delivery_process_id: PASTE_TUI_ID,
+                delivered_at: 2_000,
+                ..
+            }
+        ));
+        wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Working);
+        assert!(
+            TimerService::new(&mut registry)
+                .list("actor-immediate", PROJECT_ID, 10, 2_000)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recently_prompted_process_does_not_satisfy_idle_all_before_output() {
+        let mut registry = test_registry(true);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+
+        registry.send_input(WORKER_ID, b"go\r").unwrap();
+        assert_eq!(
+            registry.get_status(WORKER_ID).unwrap().agent_state.state,
+            AttentionState::Working
+        );
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "actor-race".into(),
+                DELIVERY_ID,
+                "after real completion".into(),
+                TimerKind::IdleAll,
+                vec![WORKER_ID],
+                10_000,
+                now_millis(),
+            )
+            .unwrap();
+        assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
+    }
+
+    #[test]
     fn pending_timer_survives_store_and_registry_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("gbuild.db");
@@ -1065,6 +1144,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(already, IdleTimerOutcome::AlreadySatisfied { .. }));
+        wait_for_output(&mut registry, DELIVERY_ID, "received:[already idle]");
         assert!(
             TimerService::new(&mut registry)
                 .list("actor-all", PROJECT_ID, 10, 0)

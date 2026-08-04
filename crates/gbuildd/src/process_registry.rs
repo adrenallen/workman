@@ -737,6 +737,9 @@ impl ProcessRegistry {
             process_id,
             message: error.to_string(),
         })?;
+        if let Some(output) = self.outputs.get(&process_id) {
+            output.attention.observe_input();
+        }
         self.require(process_id)
     }
 
@@ -765,6 +768,9 @@ impl ProcessRegistry {
                 process_id,
                 message: error.to_string(),
             })?;
+        if let Some(output) = self.outputs.get(&process_id) {
+            output.attention.observe_input();
+        }
         self.require(process_id)
     }
 

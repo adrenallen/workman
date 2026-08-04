@@ -238,7 +238,10 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     )
     .await;
     assert_eq!(already["already_satisfied"], true);
+    assert_eq!(already["delivered_immediately"], true);
+    assert_eq!(already["delivery_process_id"], DELIVERY_ID);
     assert_eq!(already["timer"], Value::Null);
+    wait_for_output(&registry, DELIVERY_ID, "received:[already idle]").await?;
 
     let any = call(
         &owner,
@@ -251,6 +254,7 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     )
     .await;
     assert_eq!(any["already_satisfied"], false);
+    assert_eq!(any["delivered_immediately"], false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!output_contains(&registry, DELIVERY_ID, "fresh idle wake").await?);
     call(

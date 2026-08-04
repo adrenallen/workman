@@ -241,11 +241,19 @@ impl GbuildMcp {
             Ok(IdleTimerOutcome::Created(timer)) => success(json!({
                 "project_id": project.id,
                 "already_satisfied": false,
+                "delivered_immediately": false,
                 "timer": timer,
             })),
-            Ok(IdleTimerOutcome::AlreadySatisfied { watch_process_ids }) => success(json!({
+            Ok(IdleTimerOutcome::AlreadySatisfied {
+                watch_process_ids,
+                delivery_process_id,
+                delivered_at,
+            }) => success(json!({
                 "project_id": project.id,
                 "already_satisfied": true,
+                "delivered_immediately": true,
+                "delivery_process_id": delivery_process_id,
+                "delivered_at": delivered_at,
                 "timer": null,
                 "watch_process_ids": watch_process_ids,
             })),
