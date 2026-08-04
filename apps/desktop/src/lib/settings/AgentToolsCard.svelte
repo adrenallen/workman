@@ -1,0 +1,239 @@
+<script lang="ts">
+  import {
+    getAgentToolsStore,
+    type AgentTool,
+    type AgentToolInput,
+    type AgentToolsSnapshot
+  } from '../agentTools';
+  import type { DaemonClient } from '../daemon';
+
+  interface Props {
+    client: DaemonClient;
+    connected: boolean;
+    onError: (message: string) => void;
+  }
+
+  let { client, connected, onError }: Props = $props();
+  let store = $derived(getAgentToolsStore(client));
+  let snapshot = $state<AgentToolsSnapshot>({ tools: [], loading: false, error: null });
+  let editing = $state<number | 'new' | null>(null);
+  let draft = $state<AgentToolInput>(emptyDraft());
+  let saving = $state(false);
+  let busyId = $state<number | null>(null);
+
+  $effect(() => {
+    snapshot = store.current();
+    return store.subscribe((next) => (snapshot = next));
+  });
+
+  $effect(() => {
+    if (connected) {
+      void store.refresh().catch((cause) => onError(message(cause)));
+    }
+  });
+
+  function emptyDraft(): AgentToolInput {
+    return { name: '', command: '', tool_type: 'custom', enabled: true };
+  }
+
+  function beginNew(): void {
+    draft = emptyDraft();
+    editing = 'new';
+  }
+
+  function beginEdit(tool: AgentTool): void {
+    draft = {
+      id: tool.id,
+      name: tool.name,
+      command: tool.command,
+      tool_type: tool.tool_type,
+      enabled: tool.enabled
+    };
+    editing = tool.id;
+  }
+
+  async function save(): Promise<void> {
+    if (!draft.name.trim() || !draft.command.trim() || !draft.tool_type.trim()) return;
+    saving = true;
+    try {
+      await store.save({
+        ...draft,
+        name: draft.name.trim(),
+        command: draft.command.trim(),
+        tool_type: draft.tool_type.trim()
+      });
+      editing = null;
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function toggle(tool: AgentTool): Promise<void> {
+    busyId = tool.id;
+    try {
+      await store.save({ ...tool, enabled: !tool.enabled });
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      busyId = null;
+    }
+  }
+
+  async function remove(tool: AgentTool): Promise<void> {
+    if (!window.confirm(`Delete the ${tool.name} agent tool? Existing agents may require it.`)) return;
+    busyId = tool.id;
+    try {
+      await store.remove(tool.id);
+      if (editing === tool.id) editing = null;
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      busyId = null;
+    }
+  }
+
+  function message(cause: unknown): string {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+</script>
+
+<section class="card agent-tools-card" aria-labelledby="agent-tools-title">
+  <header>
+    <div>
+      <span class="eyebrow">Shared registry</span>
+      <h2 id="agent-tools-title">Agent tools</h2>
+      <p>Commands available when the Agents section starts a coding session.</p>
+    </div>
+    <button class="add" type="button" disabled={!connected || editing !== null} onclick={beginNew}>
+      <span aria-hidden="true">+</span> Add tool
+    </button>
+  </header>
+
+  {#if snapshot.loading && snapshot.tools.length === 0}
+    <div class="loading"><i aria-hidden="true"></i> Reading the shared registry…</div>
+  {:else if snapshot.tools.length === 0}
+    <div class="empty">
+      <span aria-hidden="true">⌘</span>
+      <div><strong>No agent tools registered</strong><p>Add a command such as <code>claude</code> or <code>codex</code> to make it available to Agents.</p></div>
+      <button type="button" disabled={!connected} onclick={beginNew}>Add the first tool</button>
+    </div>
+  {:else}
+    <div class="tool-list">
+      {#each snapshot.tools as tool (tool.id)}
+        <article class:disabled={!tool.enabled}>
+          <div class="tool-mark" aria-hidden="true">{tool.name.slice(0, 1).toUpperCase()}</div>
+          <div class="tool-copy">
+            <div><strong>{tool.name}</strong><span>{tool.tool_type}</span></div>
+            <code>{tool.command}</code>
+          </div>
+          <button
+            class:enabled={tool.enabled}
+            class="toggle"
+            type="button"
+            role="switch"
+            aria-checked={tool.enabled}
+            disabled={!connected || busyId !== null}
+            onclick={() => void toggle(tool)}
+          ><i aria-hidden="true"></i><span>{tool.enabled ? 'Enabled' : 'Disabled'}</span></button>
+          <div class="row-actions">
+            <button type="button" disabled={!connected || editing !== null || busyId !== null} onclick={() => beginEdit(tool)}>Edit</button>
+            <button class="delete" type="button" disabled={!connected || busyId !== null} onclick={() => void remove(tool)}>Delete</button>
+          </div>
+        </article>
+      {/each}
+    </div>
+  {/if}
+
+  {#if editing !== null}
+    <form
+      class="editor"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <header>
+        <div><span class="eyebrow">Registry entry</span><h3>{editing === 'new' ? 'Add agent tool' : `Edit ${draft.name}`}</h3></div>
+        <button type="button" class="close" aria-label="Close editor" onclick={() => (editing = null)}>×</button>
+      </header>
+      <div class="fields">
+        <label><span>Name</span><input type="text" bind:value={draft.name} placeholder="Claude" /></label>
+        <label><span>Tool type</span><input type="text" bind:value={draft.tool_type} list="agent-tool-types" placeholder="claude_code" /></label>
+        <label class="command"><span>Command</span><input type="text" bind:value={draft.command} placeholder="claude" /></label>
+        <datalist id="agent-tool-types"><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="custom"></option></datalist>
+        <label class="enabled-check"><input type="checkbox" bind:checked={draft.enabled} /><span>Available for new agents</span></label>
+      </div>
+      <footer>
+        <p>The command runs inside the selected project. Extra launch arguments are added from Agents.</p>
+        <div><button type="button" class="cancel" onclick={() => (editing = null)}>Cancel</button><button type="submit" class="save" disabled={saving || !draft.name.trim() || !draft.command.trim() || !draft.tool_type.trim()}>{saving ? 'Saving…' : 'Save tool'}</button></div>
+      </footer>
+    </form>
+  {/if}
+</section>
+
+<style>
+  .card { position: relative; border: 1px solid #29444f; border-radius: 5px; background: rgb(10 28 36 / 91%); }
+  .card > header, .card > header > div, .add, .tool-copy > div, .toggle, .row-actions, .editor > header, .editor footer, .editor footer > div, .empty { display: flex; align-items: center; }
+  .card > header { justify-content: space-between; gap: 15px; padding: 17px 18px 14px; }
+  .card > header > div { flex-wrap: wrap; gap: 5px 10px; }
+  .card > header p { width: 100%; margin: 0; color: #6e8690; font-size: 10px; }
+  .eyebrow, .add, .tool-copy span, .tool-copy code, .toggle, .row-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
+  .eyebrow { color: #6f8994; font-size: 7px; font-weight: 650; letter-spacing: 0.1em; text-transform: uppercase; }
+  h2 { margin: 0; color: #e1ebed; font-size: 17px; }
+  .add { gap: 6px; border: 1px solid #3a5d66; border-radius: 3px; padding: 8px 10px; background: #112b35; color: #c2d1d5; font-size: 8px; font-weight: 650; cursor: pointer; }
+  .add span { color: var(--signal); font-size: 13px; }
+  button:disabled { opacity: 0.42; cursor: default; }
+
+  .tool-list { border-top: 1px solid #243e49; }
+  article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border-bottom: 1px solid #223b45; padding: 11px 14px; }
+  article:last-child { border-bottom: 0; }
+  article.disabled { opacity: 0.58; }
+  .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: 11px; font-weight: 700; }
+  .tool-copy { min-width: 0; }
+  .tool-copy > div { gap: 7px; }
+  .tool-copy strong { color: #bacbd0; font-size: 11px; }
+  .tool-copy span { border: 1px solid #304c57; border-radius: 999px; padding: 2px 5px; color: #708a94; font-size: 6px; text-transform: uppercase; }
+  .tool-copy code { display: block; overflow: hidden; margin-top: 4px; color: #66808a; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+
+  .toggle { gap: 5px; border: 0; background: transparent; color: #718993; font-size: 7px; cursor: pointer; }
+  .toggle i { position: relative; width: 25px; height: 13px; border: 1px solid #405862; border-radius: 999px; background: #152832; }
+  .toggle i::after { position: absolute; top: 2px; left: 2px; width: 7px; height: 7px; border-radius: 50%; background: #647983; content: ''; transition: transform 120ms ease; }
+  .toggle.enabled i { border-color: #3e756f; background: rgb(99 215 197 / 11%); }
+  .toggle.enabled i::after { background: var(--signal); transform: translateX(12px); }
+  .row-actions { gap: 4px; }
+  .row-actions button { border: 1px solid #304b56; border-radius: 2px; padding: 5px 7px; background: transparent; color: #8198a1; font-size: 7px; cursor: pointer; }
+  .row-actions button:hover:not(:disabled) { border-color: #5a7780; color: #d3e0e3; }
+  .row-actions .delete:hover:not(:disabled) { border-color: var(--fault); color: var(--fault); }
+
+  .loading, .empty { min-height: 118px; border-top: 1px solid #243e49; justify-content: center; gap: 10px; padding: 18px; color: #67808a; font-size: 8px; }
+  .loading i { width: 12px; height: 12px; border: 1px solid #3b555f; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  .empty { justify-content: flex-start; }
+  .empty > span { color: #4f6d77; font-size: 23px; }
+  .empty strong { color: #a8bbc1; font-size: 10px; }
+  .empty p { margin: 3px 0 0; color: #607984; font-size: 9px; }
+  .empty code { color: #8bc9c0; }
+  .empty button { margin-left: auto; border: 1px solid #3c5e67; padding: 7px 9px; background: #112b35; color: #bccdd1; font-size: 8px; }
+
+  .editor { position: absolute; z-index: 3; inset: 8px; overflow: auto; border: 1px solid #47717a; border-radius: 4px; background: #0c2029; box-shadow: 0 18px 45px rgb(0 0 0 / 35%); }
+  .editor > header { justify-content: space-between; border-bottom: 1px solid #29444f; padding: 13px 15px; }
+  .editor h3 { margin: 3px 0 0; color: #dce7e9; font-size: 14px; }
+  .close { border: 0; background: transparent; color: #78909a; font-size: 20px; cursor: pointer; }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; padding: 15px; }
+  .editor label > span { display: block; margin-bottom: 5px; color: #708994; font-size: 7px; text-transform: uppercase; }
+  .editor input[type='text'] { width: 100%; border: 1px solid #304c57; border-radius: 2px; outline: 0; padding: 9px; background: #08171e; color: #c3d1d5; font-family: 'JetBrains Mono Variable', monospace; font-size: 9px; }
+  .editor input:focus { border-color: var(--signal); }
+  .command { grid-column: 1 / -1; }
+  .enabled-check { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; }
+  .enabled-check input { accent-color: var(--signal); }
+  .enabled-check span { margin: 0 !important; }
+  .editor footer { justify-content: space-between; gap: 12px; border-top: 1px solid #29444f; padding: 11px 15px; }
+  .editor footer p { margin: 0; color: #607984; font-size: 7px; }
+  .editor footer > div { gap: 6px; }
+  .editor footer button { border: 1px solid #38545e; border-radius: 2px; padding: 7px 9px; font-size: 8px; cursor: pointer; }
+  .cancel { background: transparent; color: #899da5; }
+  .save { background: var(--signal); color: #071a20; font-weight: 680; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 760px) { article { grid-template-columns: auto minmax(0, 1fr); } .toggle, .row-actions { grid-column: 2; justify-self: start; } .fields { grid-template-columns: 1fr; } .command, .enabled-check { grid-column: auto; } .editor footer { align-items: flex-start; flex-direction: column; } }
+</style>

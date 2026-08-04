@@ -844,7 +844,8 @@ fn shell_quote(value: &str) -> String {
 
 async fn mcp_setup(data_dir: &Path, daemon: &Path, run: bool) -> Result<()> {
     let discovery = gbuildd::discover_or_spawn(data_dir, daemon, DAEMON_WAIT).await?;
-    let url = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let connection = gbuildd::mcp_connection_info(&discovery);
+    let url = connection.endpoint;
     let authorization = format!("Authorization: Bearer {}", discovery.token);
     let args = [
         "mcp",
@@ -856,12 +857,7 @@ async fn mcp_setup(data_dir: &Path, daemon: &Path, run: bool) -> Result<()> {
         "--header",
         authorization.as_str(),
     ];
-    let printable = std::iter::once("claude")
-        .chain(args.iter().copied())
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    println!("{printable}");
+    println!("{}", connection.claude_command);
     if run {
         let status = ProcessCommand::new("claude")
             .args(args)

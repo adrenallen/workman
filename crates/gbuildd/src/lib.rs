@@ -40,6 +40,7 @@ pub mod lifecycle;
 mod mcp;
 mod process_registry;
 pub mod readiness;
+mod settings;
 mod timers;
 
 pub use config::{
@@ -61,6 +62,7 @@ pub use readiness::{
     ReadinessError, ReadinessService, ReadinessState, Service, ServiceProtocol,
     SystemPortDetector, WaitForBoundPortResult,
 };
+pub use settings::{DaemonSettingsInfo, McpConnectionInfo, mcp_connection_info};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
 
@@ -130,11 +132,14 @@ pub struct DaemonServer {
     discovery: Discovery,
     discovery_guard: DiscoveryGuard,
     registry: SharedProcessRegistry,
+    data_dir: PathBuf,
+    started_at: Instant,
 }
 
 impl DaemonServer {
     /// Bind only IPv4 loopback and publish the selected port and a fresh bearer token.
     pub async fn bind(config: DaemonConfig) -> io::Result<Self> {
+        let started_at = Instant::now();
         std::fs::create_dir_all(&config.data_dir)?;
         let store =
             gbuild_core::Store::open(database_path(&config.data_dir)).map_err(registry_io_error)?;
@@ -155,6 +160,8 @@ impl DaemonServer {
             discovery,
             discovery_guard,
             registry,
+            data_dir: config.data_dir,
+            started_at,
         })
     }
 
@@ -181,17 +188,28 @@ impl DaemonServer {
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
         let timer_task = timers::spawn_timer_scheduler(self.registry.clone(), shutdown_rx.clone());
         let lifecycle_shutdown = shutdown_tx.clone();
+        let runtime_settings = settings::DaemonRuntimeSettings::new(
+            self.data_dir,
+            self.discovery.clone(),
+            self.started_at,
+        );
         let state = AppState {
             token: self.discovery.token.clone(),
             port: self.discovery.port,
-            shutdown: shutdown_rx,
+            shutdown: shutdown_rx.clone(),
+            shutdown_request: shutdown_tx.clone(),
+            settings: runtime_settings,
             registry: self.registry,
         };
         let app = router(state);
         let listener = self.listener;
 
+        let mut requested_shutdown = shutdown_rx;
         let shutdown_server = async move {
-            shutdown.await;
+            tokio::select! {
+                _ = shutdown => {}
+                _ = requested_shutdown.changed() => {}
+            }
             let _ = shutdown_tx.send(true);
         };
 
@@ -212,6 +230,8 @@ struct AppState {
     token: String,
     port: u16,
     shutdown: watch::Receiver<bool>,
+    shutdown_request: watch::Sender<bool>,
+    settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
 }
 
@@ -238,12 +258,22 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| control_session(socket, state.shutdown, state.registry))
+    ws.on_upgrade(move |socket| {
+        control_session(
+            socket,
+            state.shutdown,
+            state.shutdown_request,
+            state.settings,
+            state.registry,
+        )
+    })
 }
 
 async fn control_session(
     mut socket: WebSocket,
     mut shutdown: watch::Receiver<bool>,
+    shutdown_request: watch::Sender<bool>,
+    settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
 ) {
     let mut terminal = TerminalSubscription::default();
@@ -275,6 +305,8 @@ async fn control_session(
                             let response = match handle_session_control(
                                 &text,
                                 &registry,
+                                &settings,
+                                &shutdown_request,
                                 &mut terminal,
                                 &mut status_subscribed,
                             ).await {
@@ -349,6 +381,8 @@ struct TerminalSubscription {
 async fn handle_session_control(
     text: &str,
     registry: &SharedProcessRegistry,
+    settings: &settings::DaemonRuntimeSettings,
+    shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
     status_subscribed: &mut bool,
 ) -> Option<String> {
@@ -356,7 +390,9 @@ async fn handle_session_control(
     let method = request.get("method")?.as_str()?;
     if !matches!(
         method,
-        "terminal.attach"
+        "daemon.info"
+            | "daemon.restart"
+            | "terminal.attach"
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
@@ -365,6 +401,17 @@ async fn handle_session_control(
     }
 
     let id = request.get("id").cloned().unwrap_or_default();
+    if method == "daemon.info" {
+        return Some(json!({ "id": id, "ok": true, "result": settings.info() }).to_string());
+    }
+    if method == "daemon.restart" {
+        let shutdown_request = shutdown_request.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            let _ = shutdown_request.send(true);
+        });
+        return Some(json!({ "id": id, "ok": true, "result": { "restarting": true } }).to_string());
+    }
     if matches!(
         method,
         "process.status_subscribe" | "process.status_unsubscribe"
