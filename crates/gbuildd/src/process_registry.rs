@@ -9,7 +9,7 @@ use std::{
 
 use gbuild_core::{
     Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store, StoreError,
-    attention::{AgentState, AttentionTracker},
+    attention::{AgentState, AttentionTracker, PendingDialog, pending_dialog},
     pty::{ExitStatus, PtyProcess, PtySize, PtySpawnOptions, RawOutput},
     terminal::TerminalOutput,
 };
@@ -198,6 +198,16 @@ pub struct ProcessStatusView {
     #[serde(flatten)]
     pub process: Process,
     pub agent_state: AgentState,
+    /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
+    pub events: Vec<ProcessEvent>,
+}
+
+/// A visible event produced by daemon-side process orchestration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProcessEvent {
+    pub at: i64,
+    pub kind: String,
+    pub message: String,
 }
 
 /// Owns persisted process records and live PTY handles.
@@ -319,9 +329,15 @@ impl ProcessRegistry {
             .get(&process.id)
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        let events = self
+            .outputs
+            .get(&process.id)
+            .map(|output| output.events.clone())
+            .unwrap_or_default();
         Ok(ProcessStatusView {
             process,
             agent_state,
+            events,
         })
     }
 
@@ -399,6 +415,7 @@ impl ProcessRegistry {
                 raw: hosted.raw_output(),
                 terminal: hosted.terminal_output(),
                 attention: hosted.attention_tracker(),
+                events: Vec::new(),
             },
         );
         self.running.insert(process_id, hosted);
@@ -592,6 +609,48 @@ impl ProcessRegistry {
             raw_end_offset: output.raw.total_bytes_seen(),
             status: process.status,
         })
+    }
+
+    /// Return a currently rendered choice/permission dialog, if recognized.
+    pub fn pending_dialog(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<PendingDialog>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(None);
+        };
+        let rendered = output.terminal.read_rows(0..usize::MAX).text();
+        let status = output.attention.snapshot();
+        Ok(pending_dialog(&rendered, status.classification.as_deref()))
+    }
+
+    /// Acknowledge a narrowly known first-run trust dialog with Enter.
+    pub fn acknowledge_known_dialog(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<PendingDialog>> {
+        let Some(dialog) = self.pending_dialog(process_id)? else {
+            return Ok(None);
+        };
+        if !dialog.known_first_run {
+            return Ok(None);
+        }
+        self.send_input(process_id, b"\r")?;
+        let event = ProcessEvent {
+            at: now_millis(),
+            kind: "dialog_auto_acknowledged".into(),
+            message: format!(
+                "gbuild auto-acknowledged known first-run {} with Enter",
+                dialog.classification
+            ),
+        };
+        if let Some(output) = self.outputs.get_mut(&process_id) {
+            output.events.push(event.clone());
+        }
+        eprintln!("process {process_id}: {}", event.message);
+        Ok(Some(dialog))
     }
 
     /// Read a clamped range of physical terminal rows across scrollback and viewport.
@@ -930,6 +989,7 @@ struct ProcessOutput {
     raw: RawOutput,
     terminal: TerminalOutput,
     attention: AttentionTracker,
+    events: Vec<ProcessEvent>,
 }
 
 impl Drop for ProcessRegistry {

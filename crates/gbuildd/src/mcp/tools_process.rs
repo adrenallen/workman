@@ -139,6 +139,9 @@ struct SendInputArgs {
     /// Submit text with Enter (CR). Defaults to true.
     #[serde(default)]
     submit: Option<bool>,
+    /// Intentionally deliver text while a recognized dialog is pending.
+    #[serde(default)]
+    force: bool,
     /// Wait before returning a rendered tail; clamped to 250-10000ms.
     #[serde(default)]
     wait_ms: Option<u64>,
@@ -457,7 +460,7 @@ impl GbuildMcp {
     }
 
     #[tool(
-        description = "Send text or raw bytes to a running process; wait_ms returns a fresh tail"
+        description = "Send text or raw bytes to a running process; guarded dialogs require force=true for text, while raw bytes bypass the guard; wait_ms returns a fresh tail"
     )]
     async fn send_input(
         &self,
@@ -480,6 +483,21 @@ impl GbuildMcp {
                 Ok(resolved) => resolved,
                 Err(error) => return target_failure(error),
             };
+            if args.bytes.is_none() && !args.force {
+                match registry.pending_dialog(process.id) {
+                    Ok(Some(dialog)) => {
+                        return CallToolResult::structured_error(json!({
+                            "code": "dialog_pending",
+                            "message": "process is awaiting a recognized dialog response; pass force=true to answer it intentionally, or send raw bytes",
+                            "process_id": process.id,
+                            "classification": dialog.classification,
+                            "dialog": dialog.rendered,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(error) => return registry_failure(error),
+                }
+            }
             let cursor = match registry.raw_output(process.id, None, 0) {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),

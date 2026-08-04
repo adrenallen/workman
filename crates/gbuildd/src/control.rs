@@ -76,6 +76,9 @@ struct InputParams {
     data: String,
     #[serde(default)]
     submit: bool,
+    /// Bypass the rendered-dialog guard for an intentional text response.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +138,13 @@ struct SpawnAgentParams {
     name: Option<String>,
     #[serde(default)]
     extra_args: Vec<String>,
+    /// Automatically accept narrowly recognized first-run trust dialogs.
+    #[serde(default = "default_true")]
+    auto_acknowledge_dialogs: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
@@ -273,6 +283,20 @@ async fn dispatch(
             let data = BASE64
                 .decode(params.data)
                 .map_err(|error| ("invalid_params", error.to_string()))?;
+            if params.submit
+                && !params.force
+                && let Some(dialog) = registry
+                    .pending_dialog(params.process_id)
+                    .map_err(registry_error)?
+            {
+                return Err((
+                    "dialog_pending",
+                    format!(
+                        "{} is awaiting a dialog response; pass force=true to answer it intentionally.\n\n{}",
+                        dialog.classification, dialog.rendered
+                    ),
+                ));
+            }
             return (if params.submit {
                 registry.submit_input(params.process_id, &data)
             } else {
@@ -336,6 +360,7 @@ async fn dispatch(
                 params.name,
                 params.extra_args,
                 mcp_url,
+                params.auto_acknowledge_dialogs,
             )
             .map(json_value)
             .map_err(|error| ("spawn_failed", error));

@@ -1,6 +1,10 @@
 //! Agent-tool discovery and local terminal/agent spawning MCP tools.
 
-use std::{collections::BTreeMap, env};
+use std::{
+    collections::BTreeMap,
+    env,
+    time::{Duration, Instant},
+};
 
 use axum::http::request::Parts;
 use gbuild_core::{
@@ -19,6 +23,11 @@ use super::{GbuildMcp, failure, scoped_project, success};
 use crate::ProcessRegistry;
 
 const GBUILD_MCP_URL_ENV: &str = "GBUILD_MCP_URL";
+const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
+const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
+const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
+const DIALOG_CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
+const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +52,9 @@ struct SpawnProcessArgs {
     /// Safely shell-quoted arguments appended to the registered agent command.
     #[serde(default)]
     extra_args: Vec<String>,
+    /// Automatically accept narrowly recognized first-run trust dialogs.
+    #[serde(default = "default_true")]
+    auto_acknowledge_dialogs: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -57,6 +69,13 @@ struct SpawnAgentArgs {
     /// Safely shell-quoted arguments appended to the registered agent command.
     #[serde(default)]
     extra_args: Vec<String>,
+    /// Automatically accept narrowly recognized first-run trust dialogs.
+    #[serde(default = "default_true")]
+    auto_acknowledge_dialogs: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +154,7 @@ impl GbuildMcp {
                     args.name,
                     args.extra_args,
                     &self.mcp_url,
+                    args.auto_acknowledge_dialogs,
                 )
             }
         };
@@ -164,6 +184,7 @@ impl GbuildMcp {
             args.name,
             args.extra_args,
             &self.mcp_url,
+            args.auto_acknowledge_dialogs,
         ) {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
@@ -291,6 +312,7 @@ pub(crate) fn spawn_registered_agent(
     name: Option<String>,
     extra_args: Vec<String>,
     mcp_url: &str,
+    auto_acknowledge_dialogs: bool,
 ) -> Result<SpawnResult, String> {
     let tool = load_agent_tool(registry, agent_tool_id)?;
     if !tool.enabled {
@@ -308,16 +330,82 @@ pub(crate) fn spawn_registered_agent(
     let command = command_with_mcp_wiring(&tool.command, &tool.tool_type, mcp_url, &extra_args)?;
     let name = process_name(registry, project.id, name, &tool.name)?;
     let env = BTreeMap::from([(GBUILD_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
-    spawn(
+    let tool_type = tool.tool_type;
+    let result = spawn(
         registry,
         project,
         ProcessKind::Agent,
         name,
         command,
         Some(tool.id),
-        Some(tool.tool_type),
+        Some(tool_type.clone()),
         env,
+    )?;
+    if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
+        auto_acknowledge_initial_dialog(registry, result.process_id)?;
+    }
+    Ok(result)
+}
+
+fn supports_first_run_dialog_ack(tool_type: &str) -> bool {
+    matches!(
+        normalize_tool_type(tool_type).as_str(),
+        "claude" | "claude_code" | "codex"
     )
+}
+
+fn auto_acknowledge_initial_dialog(
+    registry: &mut ProcessRegistry,
+    process_id: ProcessId,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let deadline = started + INITIAL_DIALOG_TIMEOUT;
+    let mut last_total_bytes = 0_u64;
+    let mut last_output_change = started;
+
+    while Instant::now() < deadline {
+        if let Some(dialog) = registry
+            .pending_dialog(process_id)
+            .map_err(|error| error.to_string())?
+        {
+            if !dialog.known_first_run {
+                return Ok(());
+            }
+            registry
+                .acknowledge_known_dialog(process_id)
+                .map_err(|error| error.to_string())?;
+            let clear_deadline = Instant::now() + DIALOG_CLEAR_TIMEOUT;
+            while Instant::now() < clear_deadline {
+                if registry
+                    .pending_dialog(process_id)
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+                {
+                    return Ok(());
+                }
+                std::thread::sleep(DIALOG_POLL_INTERVAL);
+            }
+            return Err(format!(
+                "process {process_id} did not clear its acknowledged first-run dialog"
+            ));
+        }
+
+        let raw = registry
+            .raw_output(process_id, None, 0)
+            .map_err(|error| error.to_string())?;
+        if raw.total_bytes != last_total_bytes {
+            last_total_bytes = raw.total_bytes;
+            last_output_change = Instant::now();
+        }
+        if last_total_bytes > 0
+            && started.elapsed() >= INITIAL_OUTPUT_SETTLE
+            && last_output_change.elapsed() >= INITIAL_OUTPUT_QUIET
+        {
+            return Ok(());
+        }
+        std::thread::sleep(DIALOG_POLL_INTERVAL);
+    }
+    Ok(())
 }
 
 fn spawn(
@@ -551,6 +639,25 @@ fn agent_instructions(
 mod tests {
     use super::*;
     use gbuild_core::Store;
+
+    #[test]
+    fn dialog_acknowledgment_defaults_on_and_can_be_disabled() {
+        let defaulted: SpawnAgentArgs = serde_json::from_value(json!({
+            "agent_tool_id": 1
+        }))
+        .unwrap();
+        assert!(defaulted.auto_acknowledge_dialogs);
+
+        let disabled: SpawnAgentArgs = serde_json::from_value(json!({
+            "agent_tool_id": 1,
+            "auto_acknowledge_dialogs": false
+        }))
+        .unwrap();
+        assert!(!disabled.auto_acknowledge_dialogs);
+        assert!(supports_first_run_dialog_ack("claude-code"));
+        assert!(supports_first_run_dialog_ack("codex"));
+        assert!(!supports_first_run_dialog_ack("custom"));
+    }
 
     #[test]
     fn migration_presets_and_custom_commands_are_listed_together() {

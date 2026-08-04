@@ -36,6 +36,18 @@ pub struct AdapterFlags {
     pub classification: Option<String>,
 }
 
+/// A rendered prompt that must be resolved before ordinary text is delivered.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingDialog {
+    /// Adapter classification that caused the guard to engage.
+    pub classification: String,
+    /// Escape-free rendered terminal text shown to the caller.
+    pub rendered: String,
+    /// Whether this is a narrowly recognized first-run trust prompt whose
+    /// affirmative default is safe for gbuild to acknowledge with Enter.
+    pub known_first_run: bool,
+}
+
 /// Input presented to a tool adapter after each emulator update.
 #[derive(Clone, Copy, Debug)]
 pub struct AdapterObservation<'a> {
@@ -386,6 +398,9 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
                 "esc to cancel",
                 "approve this action?",
                 "would you like to run",
+                "do you trust the files in this folder?",
+                "do you trust the contents of this folder?",
+                "trust this folder?",
                 "[y/n]",
                 "(y/n)",
             ],
@@ -459,11 +474,16 @@ impl ToolAttentionAdapter for PromptAdapter {
         let resting_at = last_resting_prompt(observation.rendered);
         let needs_input = is_latest(input_at, &[resting_at]);
         let resting_prompt = !needs_input && resting_at.is_some();
+        let known_first_run = is_known_first_run_trust_dialog(observation.rendered);
         AdapterFlags {
             needs_input,
             resting_prompt,
             classification: if needs_input {
-                Some("input_prompt".into())
+                Some(if known_first_run {
+                    "permission_dialog".into()
+                } else {
+                    "input_prompt".into()
+                })
             } else if resting_prompt {
                 Some("resting_prompt".into())
             } else {
@@ -472,6 +492,68 @@ impl ToolAttentionAdapter for PromptAdapter {
             ..AdapterFlags::default()
         }
     }
+}
+
+/// Recognize a currently rendered dialog that should block ordinary text input.
+///
+/// Permission adapters classify explicit confirmations directly. Generic input
+/// prompts are guarded only when they contain a numbered choice menu, avoiding
+/// false positives on ordinary shell prompts and informational text.
+pub fn pending_dialog(rendered: &str, classification: Option<&str>) -> Option<PendingDialog> {
+    let classification = classification?;
+    let known_first_run = is_known_first_run_trust_dialog(rendered);
+    let guard = known_first_run
+        || classification == "permission_dialog"
+        || (classification == "input_prompt" && has_numbered_choice_menu(rendered));
+    guard.then(|| PendingDialog {
+        classification: classification.to_owned(),
+        rendered: rendered.trim().to_owned(),
+        known_first_run,
+    })
+}
+
+/// Return true only for known, affirmative-by-default first-run trust prompts.
+pub fn is_known_first_run_trust_dialog(rendered: &str) -> bool {
+    let lowercase = rendered.to_ascii_lowercase();
+    let trust_question = [
+        "do you trust the contents of this directory?",
+        "do you trust the files in this folder?",
+        "do you trust the contents of this folder?",
+        "trust this folder?",
+    ]
+    .iter()
+    .any(|pattern| lowercase.contains(pattern));
+    let affirmative = [
+        "yes, continue",
+        "yes, proceed",
+        "yes, i trust",
+        "yes, trust",
+    ]
+    .iter()
+    .any(|pattern| lowercase.contains(pattern));
+    let negative = ["no, quit", "no, exit", "no, go back", "don't trust"]
+        .iter()
+        .any(|pattern| lowercase.contains(pattern));
+    trust_question && affirmative && negative && has_numbered_choice_menu(rendered)
+}
+
+fn has_numbered_choice_menu(rendered: &str) -> bool {
+    nonempty_lines(rendered)
+        .into_iter()
+        .filter(|(_, line)| {
+            let line = line
+                .trim_start_matches(['›', '❯', '>', '*', '•'])
+                .trim_start();
+            let Some((number, choice)) = line.split_once('.') else {
+                return false;
+            };
+            !number.is_empty()
+                && number.chars().all(|character| character.is_ascii_digit())
+                && !choice.trim().is_empty()
+        })
+        .take(2)
+        .count()
+        >= 2
 }
 
 fn last_resting_prompt(rendered: &str) -> Option<usize> {
@@ -777,5 +859,38 @@ mod tests {
         assert_eq!(state.state, AttentionState::NeedsInput);
         assert!(state.needs_input);
         assert!(!state.idle);
+    }
+
+    #[test]
+    fn codex_first_run_trust_menu_is_a_known_permission_dialog() {
+        let rendered = concat!(
+            "You are in /tmp/new-workspace\n",
+            "Do you trust the contents of this directory? Working with untrusted contents poses security risks.\n",
+            "› 1. Yes, continue\n",
+            "  2. No, quit\n",
+            "Press enter to continue",
+        );
+        let tracker =
+            AttentionTracker::new_at(Some("codex".into()), AttentionConfig::default(), 1_000);
+        tracker.observe_output_at(rendered.as_bytes(), rendered, true, 2_000);
+
+        let state = tracker.snapshot_at(60_000);
+        assert_eq!(state.state, AttentionState::NeedsInput);
+        assert_eq!(state.classification.as_deref(), Some("permission_dialog"));
+        assert_eq!(
+            pending_dialog(rendered, state.classification.as_deref()),
+            Some(PendingDialog {
+                classification: "permission_dialog".into(),
+                rendered: rendered.into(),
+                known_first_run: true,
+            })
+        );
+    }
+
+    #[test]
+    fn generic_numbered_input_is_guarded_but_plain_continue_text_is_not() {
+        let menu = "Choose a mode:\n1. Safe\n2. Quit\nPress enter to continue";
+        assert!(pending_dialog(menu, Some("input_prompt")).is_some());
+        assert!(pending_dialog("Press enter to continue", Some("input_prompt")).is_none());
     }
 }
