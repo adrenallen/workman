@@ -2,6 +2,7 @@
 
 pub mod attention;
 pub mod domain;
+pub mod locks;
 pub mod store;
 pub mod terminal;
 pub mod todos;
@@ -10,6 +11,7 @@ pub mod todos;
 pub mod pty;
 
 pub use domain::*;
+pub use locks::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todos::*;
 

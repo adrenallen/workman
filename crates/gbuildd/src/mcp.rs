@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::{ProcessRegistry, SharedProcessRegistry};
 
 mod agent_spawning;
+mod tools_lock;
 mod tools_process;
 mod tools_todo;
 
@@ -40,6 +41,7 @@ impl GbuildMcp {
         tool_router.merge(Self::process_tool_router());
         tool_router.merge(Self::agent_spawning_tool_router());
         tool_router.merge(Self::todo_tool_router());
+        tool_router.merge(Self::lock_tool_router());
         Self {
             registry,
             tool_router,
