@@ -17,10 +17,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "mcp_identity",
         include_str!("../migrations/0002_mcp_identity.sql"),
     ),
+    (
+        3,
+        "agent_tool_presets",
+        include_str!("../migrations/0003_agent_tool_presets.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+pub const LATEST_SCHEMA_VERSION: i64 = 3;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
