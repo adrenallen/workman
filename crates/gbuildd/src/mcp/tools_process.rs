@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use axum::http::request::Parts;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gbuild_core::{Actor, Process, ProcessId, ProjectId};
 use rmcp::{
     handler::server::{tool::Extension, wrapper::Parameters},
@@ -13,7 +13,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{failure, scoped_project, success, GbuildMcp};
+use super::{GbuildMcp, failure, scoped_project, success};
 use crate::{ProcessRegistry, RegistryError};
 
 const DEFAULT_OUTPUT_LINES: usize = 50;
