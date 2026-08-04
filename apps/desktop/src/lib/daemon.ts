@@ -10,6 +10,14 @@ import type {
   TodoCompleteResult,
   TodoDetail
 } from './coordination';
+import type {
+  AgentTool,
+  AgentToolInput,
+  AgentToolsClient,
+  DeleteAgentToolResult,
+  SpawnAgentInput,
+  SpawnAgentResult
+} from './agentTools';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -125,7 +133,7 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
-export class DaemonClient implements CoordinationClient {
+export class DaemonClient implements CoordinationClient, AgentToolsClient {
   private sequence = 0;
   private pending = new Map<string, PendingRequest>();
   private unlisten: UnlistenFn[] = [];
@@ -236,6 +244,26 @@ export class DaemonClient implements CoordinationClient {
     return this.request('process.spawn_terminal', { project_id: projectId });
   }
 
+  listAgentTools(): Promise<AgentTool[]> {
+    return this.request('agent_tools.list');
+  }
+
+  saveAgentTool(tool: AgentToolInput): Promise<AgentTool> {
+    return this.request('agent_tools.save', { tool });
+  }
+
+  deleteAgentTool(agentToolId: number): Promise<DeleteAgentToolResult> {
+    return this.request('agent_tools.delete', { agent_tool_id: agentToolId });
+  }
+
+  spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {
+    return this.request('agents.spawn', { ...input });
+  }
+
+  closeProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.close', { process_id: processId });
+  }
+
   trustReview(processId: number): Promise<TrustReview> {
     return this.request('process.trust_review', { process_id: processId });
   }
@@ -259,6 +287,14 @@ export class DaemonClient implements CoordinationClient {
     return this.request('process.send_input', {
       process_id: processId,
       data: bytesToBase64(data)
+    });
+  }
+
+  submitInput(processId: number, input: string): Promise<ProcessView> {
+    return this.request('process.send_input', {
+      process_id: processId,
+      data: bytesToBase64(new TextEncoder().encode(input)),
+      submit: true
     });
   }
 
@@ -297,6 +333,11 @@ export class DaemonClient implements CoordinationClient {
     this.pending.clear();
     this.terminalListeners.clear();
     this.processListeners.clear();
+  }
+
+  /** Typed escape hatch for small control-channel surfaces owned by feature modules. */
+  control<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    return this.request(method, params);
   }
 
   private async request<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {

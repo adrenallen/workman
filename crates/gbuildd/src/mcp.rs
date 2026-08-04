@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{ProcessRegistry, SharedProcessRegistry};
 
-mod agent_spawning;
+pub(crate) mod agent_spawning;
 mod tools_lock;
 mod tools_process;
 mod tools_readiness;

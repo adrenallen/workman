@@ -57,7 +57,7 @@ struct SpawnAgentArgs {
 }
 
 #[derive(Debug, Serialize)]
-struct SpawnResult {
+pub(crate) struct SpawnResult {
     process_id: ProcessId,
     project_id: ProjectId,
     name: String,
@@ -162,7 +162,7 @@ impl GbuildMcp {
     }
 }
 
-fn load_agent_tools(registry: &ProcessRegistry) -> Result<Vec<AgentTool>, String> {
+pub(crate) fn load_agent_tools(registry: &ProcessRegistry) -> Result<Vec<AgentTool>, String> {
     let mut statement = registry
         .store()
         .connection()
@@ -183,6 +183,92 @@ fn load_agent_tools(registry: &ProcessRegistry) -> Result<Vec<AgentTool>, String
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn save_agent_tool(
+    registry: &ProcessRegistry,
+    id: Option<AgentToolId>,
+    name: String,
+    command: String,
+    tool_type: String,
+    enabled: bool,
+) -> Result<AgentTool, String> {
+    let name = name.trim();
+    let command = command.trim();
+    let tool_type = tool_type.trim();
+    if name.is_empty() {
+        return Err("agent tool name cannot be empty".to_owned());
+    }
+    if command.is_empty() {
+        return Err("agent tool command cannot be empty".to_owned());
+    }
+    if command.contains('\0') {
+        return Err("agent tool command may not contain NUL bytes".to_owned());
+    }
+    if tool_type.is_empty() {
+        return Err("agent tool type cannot be empty".to_owned());
+    }
+
+    let id = match id {
+        Some(id) => {
+            if registry
+                .store()
+                .get_agent_tool(id)
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                return Err(format!("agent tool {id} was not found"));
+            }
+            id
+        }
+        None => registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_tools",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?,
+    };
+    let tool = AgentTool {
+        id,
+        name: name.to_owned(),
+        command: command.to_owned(),
+        tool_type: tool_type.to_owned(),
+        enabled,
+    };
+    registry
+        .store()
+        .put_agent_tool(&tool)
+        .map_err(|error| error.to_string())?;
+    Ok(tool)
+}
+
+pub(crate) fn delete_agent_tool(
+    registry: &ProcessRegistry,
+    agent_tool_id: AgentToolId,
+) -> Result<bool, String> {
+    let referenced = registry
+        .store()
+        .connection()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM processes WHERE agent_tool_id = ?1)",
+            [agent_tool_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if referenced {
+        return Err(format!(
+            "agent tool {agent_tool_id} is used by an existing agent; disable it instead"
+        ));
+    }
+    registry
+        .store()
+        .connection()
+        .execute("DELETE FROM agent_tools WHERE id = ?1", [agent_tool_id])
+        .map(|changed| changed > 0)
+        .map_err(|error| error.to_string())
+}
+
 fn load_agent_tool(
     registry: &ProcessRegistry,
     agent_tool_id: AgentToolId,
@@ -194,7 +280,7 @@ fn load_agent_tool(
         .ok_or_else(|| format!("agent tool {agent_tool_id} was not found"))
 }
 
-fn spawn_registered_agent(
+pub(crate) fn spawn_registered_agent(
     registry: &mut ProcessRegistry,
     project: &Project,
     agent_tool_id: AgentToolId,

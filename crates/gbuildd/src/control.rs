@@ -4,7 +4,8 @@ use std::{path::Path, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gbuild_core::{
-    Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId, Store,
+    AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
+    Store,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -73,6 +74,8 @@ struct OutputParams {
 struct InputParams {
     process_id: ProcessId,
     data: String,
+    #[serde(default)]
+    submit: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +105,36 @@ struct TrustProcessParams {
 struct SpawnTerminalParams {
     project_id: ProjectId,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentToolParams {
+    tool: AgentToolInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentToolInput {
+    #[serde(default)]
+    id: Option<AgentToolId>,
+    name: String,
+    command: String,
+    tool_type: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentToolIdParams {
+    agent_tool_id: AgentToolId,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpawnAgentParams {
+    project_id: ProjectId,
+    agent_tool_id: AgentToolId,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    extra_args: Vec<String>,
 }
 
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
@@ -232,10 +265,13 @@ async fn dispatch(
             let data = BASE64
                 .decode(params.data)
                 .map_err(|error| ("invalid_params", error.to_string()))?;
-            return registry
-                .send_input(params.process_id, &data)
-                .map(json_value)
-                .map_err(registry_error);
+            return (if params.submit {
+                registry.submit_input(params.process_id, &data)
+            } else {
+                registry.send_input(params.process_id, &data)
+            })
+            .map(json_value)
+            .map_err(registry_error);
         }
         "process.resize" => {
             let params: ResizeParams = params_as(params)?;
@@ -249,6 +285,51 @@ async fn dispatch(
                 )
                 .map(json_value)
                 .map_err(registry_error);
+        }
+        _ => {}
+    }
+
+    match method {
+        "agent_tools.list" => {
+            return crate::mcp::agent_spawning::load_agent_tools(&registry)
+                .map(json_value)
+                .map_err(|error| ("agent_tool_error", error));
+        }
+        "agent_tools.save" => {
+            let params: AgentToolParams = params_as(params)?;
+            return crate::mcp::agent_spawning::save_agent_tool(
+                &registry,
+                params.tool.id,
+                params.tool.name,
+                params.tool.command,
+                params.tool.tool_type,
+                params.tool.enabled,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_tool_error", error));
+        }
+        "agent_tools.delete" => {
+            let params: AgentToolIdParams = params_as(params)?;
+            return crate::mcp::agent_spawning::delete_agent_tool(&registry, params.agent_tool_id)
+                .map(|deleted| json!({ "agent_tool_id": params.agent_tool_id, "deleted": deleted }))
+                .map_err(|error| ("agent_tool_error", error));
+        }
+        "agents.spawn" => {
+            let params: SpawnAgentParams = params_as(params)?;
+            let project = registry
+                .store()
+                .get_project(params.project_id)
+                .map_err(project_store_error)?
+                .ok_or(("project_not_found", "project not found".to_owned()))?;
+            return crate::mcp::agent_spawning::spawn_registered_agent(
+                &mut registry,
+                &project,
+                params.agent_tool_id,
+                params.name,
+                params.extra_args,
+            )
+            .map(json_value)
+            .map_err(|error| ("spawn_failed", error));
         }
         _ => {}
     }
