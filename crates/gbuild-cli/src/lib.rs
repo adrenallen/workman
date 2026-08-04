@@ -7,12 +7,14 @@ use std::{
     fmt, io,
     os::fd::RawFd,
     path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
     time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
-use gbuild_core::{Process, ProcessStatus, ProjectId};
+use gbuild_core::{Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId};
+use gbuildd::{Discovery, Service};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -29,12 +31,24 @@ const OUTPUT_POLL: Duration = Duration::from_millis(30);
 const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 
 const HELP: &str = "\
-Usage: gbuild [--data-dir PATH] [--daemon PATH] <COMMAND>\n\
+Usage: gbuild [--data-dir PATH] [--daemon PATH] [COMMAND]\n\
 \n\
 Commands:\n\
+  (none)\n\
+      Register the current directory if needed, sync gbuild.yml, and show status.\n\
+  add [PATH]\n\
+      Register PATH (default: current directory) as a project.\n\
+  up [--project ID]\n\
+      Start trusted command processes for the current project.\n\
+  down [--project ID]\n\
+      Stop trusted command processes for the current project.\n\
+  app\n\
+      Launch the gbuild desktop app.\n\
+  mcp-setup [--run]\n\
+      Print, or execute, the Claude MCP registration command.\n\
   run [--project ID] [--name NAME] [--cwd PATH] -- <command...>\n\
-      Create and start a durable command process. GBUILD_PROJECT_ID is used when\n\
-      --project is absent.\n\
+      Create and start a durable command process. The current project or\n\
+      GBUILD_PROJECT_ID is used when --project is absent.\n\
   ps [--project ID]\n\
       List process IDs, project IDs, statuses, PIDs, names, and commands.\n\
   logs [-f|--follow] <PROCESS_ID>\n\
@@ -54,15 +68,27 @@ pub async fn run_env() -> Result<()> {
 
     let data_dir = cli.data_dir.unwrap_or_else(gbuildd::default_data_dir);
     let daemon = daemon_executable(cli.daemon);
+
+    if matches!(&cli.command, Command::App) {
+        return launch_app();
+    }
+    if let Command::McpSetup { run } = &cli.command {
+        return mcp_setup(&data_dir, &daemon, *run).await;
+    }
+
     let mut client = Client::connect(&data_dir, &daemon).await?;
 
     match cli.command {
+        Command::Status => status(&mut client).await,
+        Command::Add { path } => add(&mut client, path).await,
+        Command::Up { project_id } => set_commands(&mut client, project_id, true).await,
+        Command::Down { project_id } => set_commands(&mut client, project_id, false).await,
         Command::Run(options) => run_command(&mut client, options).await,
         Command::Ps { project_id } => ps(&mut client, project_id).await,
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
         Command::Stop { process_id } => stop(&mut client, process_id).await,
-        Command::Help => unreachable!(),
+        Command::App | Command::McpSetup { .. } | Command::Help => unreachable!(),
     }
 }
 
@@ -75,6 +101,12 @@ struct Cli {
 
 #[derive(Debug)]
 enum Command {
+    Status,
+    Add { path: PathBuf },
+    Up { project_id: Option<ProjectId> },
+    Down { project_id: Option<ProjectId> },
+    App,
+    McpSetup { run: bool },
     Run(RunOptions),
     Ps { project_id: Option<ProjectId> },
     Logs { process_id: i64, follow: bool },
@@ -107,12 +139,20 @@ impl Cli {
         let mut daemon = None;
         let command = loop {
             let Some(arg) = args.next() else {
-                return Err(cli_error(format!("a command is required\n\n{HELP}")));
+                break Command::Status;
             };
             match arg.as_str() {
                 "--data-dir" => data_dir = Some(PathBuf::from(next_value(&mut args, &arg)?)),
                 "--daemon" => daemon = Some(PathBuf::from(next_value(&mut args, &arg)?)),
                 "--help" | "-h" | "help" => break Command::Help,
+                "add" => break parse_add(args)?,
+                "up" => break parse_project_action(args, true)?,
+                "down" => break parse_project_action(args, false)?,
+                "app" => {
+                    require_no_args(args, "app")?;
+                    break Command::App;
+                }
+                "mcp-setup" => break parse_mcp_setup(args)?,
                 "run" => break parse_run(args)?,
                 "ps" => break parse_ps(args)?,
                 "logs" => break parse_logs(args)?,
@@ -136,6 +176,47 @@ impl Cli {
             command,
         })
     }
+}
+
+fn parse_add(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let path = args.next().map(PathBuf::from).unwrap_or_else(|| ".".into());
+    if args.next().is_some() {
+        return Err(cli_error("add accepts at most one path"));
+    }
+    Ok(Command::Add { path })
+}
+
+fn parse_project_action(mut args: impl Iterator<Item = String>, start: bool) -> Result<Command> {
+    let mut project_id = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--project" => project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?),
+            _ => return Err(cli_error(format!("unknown option {arg:?}"))),
+        }
+    }
+    Ok(if start {
+        Command::Up { project_id }
+    } else {
+        Command::Down { project_id }
+    })
+}
+
+fn parse_mcp_setup(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let mut run = false;
+    for arg in args.by_ref() {
+        match arg.as_str() {
+            "--run" => run = true,
+            _ => return Err(cli_error(format!("unknown mcp-setup option {arg:?}"))),
+        }
+    }
+    Ok(Command::McpSetup { run })
+}
+
+fn require_no_args(mut args: impl Iterator<Item = String>, command: &str) -> Result<()> {
+    if args.next().is_some() {
+        return Err(cli_error(format!("{command} does not accept arguments")));
+    }
+    Ok(())
 }
 
 fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
@@ -229,13 +310,262 @@ fn parse_id(value: &str, kind: &str) -> Result<i64> {
     Ok(id)
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ProjectView {
+    id: ProjectId,
+    path: String,
+    name: String,
+    display_name: Option<String>,
+    status: String,
+}
+
+impl ProjectView {
+    fn label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
+async fn status(client: &mut Client) -> Result<()> {
+    let cwd = canonical_directory(&env::current_dir()?)?;
+    let project = match project_for_path(client, &cwd).await? {
+        Some(project) => project,
+        None => register_project(client, &cwd).await?.0,
+    };
+    sync_project(client, project.id).await?;
+    let project = project_by_id(client, project.id).await?;
+    show_status(client, &project).await
+}
+
+async fn add(client: &mut Client, path: PathBuf) -> Result<()> {
+    let path = canonical_directory(&path)?;
+    let (project, created) = register_project(client, &path).await?;
+    sync_project(client, project.id).await?;
+    let project = project_by_id(client, project.id).await?;
+    println!();
+    if created {
+        println!("  ✓ Added to gbuild");
+    } else {
+        println!("  ✓ Already registered");
+    }
+    print_field("Project", project.label());
+    print_field("Path", &display_path(Path::new(&project.path)));
+    println!();
+    Ok(())
+}
+
+async fn register_project(client: &mut Client, path: &Path) -> Result<(ProjectView, bool)> {
+    let projects = list_projects(client).await?;
+    if let Some(project) = projects
+        .into_iter()
+        .find(|project| Path::new(&project.path) == path)
+    {
+        return Ok((project, false));
+    }
+    let projects: Vec<ProjectView> = client
+        .rpc("projects.register", json!({ "path": path }))
+        .await?;
+    let project = projects
+        .into_iter()
+        .find(|project| Path::new(&project.path) == path)
+        .ok_or_else(|| cli_error("daemon registered the directory but did not return it"))?;
+    Ok((project, true))
+}
+
+async fn sync_project(client: &mut Client, project_id: ProjectId) -> Result<()> {
+    let _: Value = client
+        .rpc("config.sync", json!({ "project_id": project_id }))
+        .await?;
+    Ok(())
+}
+
+async fn list_projects(client: &mut Client) -> Result<Vec<ProjectView>> {
+    client.rpc("projects.list", json!({})).await
+}
+
+async fn project_for_path(client: &mut Client, path: &Path) -> Result<Option<ProjectView>> {
+    let mut projects = list_projects(client)
+        .await?
+        .into_iter()
+        .filter(|project| path.starts_with(Path::new(&project.path)))
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| Path::new(&project.path).components().count());
+    Ok(projects.pop())
+}
+
+async fn project_by_id(client: &mut Client, project_id: ProjectId) -> Result<ProjectView> {
+    list_projects(client)
+        .await?
+        .into_iter()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| cli_error(format!("project {project_id} was not found")))
+}
+
+async fn resolve_project_id(
+    client: &mut Client,
+    explicit: Option<ProjectId>,
+    cwd: &Path,
+) -> Result<ProjectId> {
+    if let Some(id) = explicit {
+        return Ok(id);
+    }
+    if let Ok(value) = env::var("GBUILD_PROJECT_ID") {
+        return parse_id(&value, "project");
+    }
+    if let Some(project) = project_for_path(client, cwd).await? {
+        return Ok(project.id);
+    }
+    Err(cli_error(format!(
+        "no gbuild project contains {}; run `gbuild` there to add it",
+        display_path(cwd)
+    )))
+}
+
+async fn set_commands(client: &mut Client, explicit: Option<ProjectId>, start: bool) -> Result<()> {
+    let cwd = canonical_directory(&env::current_dir()?)?;
+    let project_id = resolve_project_id(client, explicit, &cwd).await?;
+    let project = project_by_id(client, project_id).await?;
+    sync_project(client, project_id).await?;
+    let processes: Vec<Process> = client
+        .rpc("process.list", json!({ "project_id": project_id }))
+        .await?;
+    let untrusted = processes
+        .iter()
+        .filter(|process| process.kind == ProcessKind::Command && !is_trusted(process))
+        .count();
+    let mut changed = 0;
+    for process in processes.into_iter().filter(|process| {
+        process.kind == ProcessKind::Command
+            && is_trusted(process)
+            && if start {
+                !is_active(process.status)
+            } else {
+                is_active(process.status)
+            }
+    }) {
+        let method = if start {
+            "process.start"
+        } else {
+            "process.stop"
+        };
+        let _: Process = client
+            .rpc(method, json!({ "process_id": process.id }))
+            .await?;
+        changed += 1;
+    }
+
+    println!();
+    println!(
+        "  ✓ {} {} command{}",
+        if start { "Started" } else { "Stopped" },
+        changed,
+        if changed == 1 { "" } else { "s" }
+    );
+    if untrusted > 0 {
+        println!(
+            "  ! {untrusted} command{} awaiting trust — review in `gbuild app`",
+            if untrusted == 1 { " is" } else { "s are" }
+        );
+    }
+    let project = project_by_id(client, project.id).await?;
+    show_status(client, &project).await
+}
+
+fn is_trusted(process: &Process) -> bool {
+    process.source != ProcessSource::Yml || process.trust_hash.is_some()
+}
+
+async fn show_status(client: &mut Client, project: &ProjectView) -> Result<()> {
+    let processes: Vec<Process> = client
+        .rpc("process.list", json!({ "project_id": project.id }))
+        .await?;
+    let services: Vec<Service> = client
+        .rpc("services.list", json!({ "project_id": project.id }))
+        .await
+        .unwrap_or_default();
+
+    println!();
+    println!("  {} · workspace status", project.label());
+    println!();
+    print_field("Project", project.label());
+    print_field("Path", &display_path(Path::new(&project.path)));
+    print_field(
+        "Daemon",
+        &format!("✓ healthy · 127.0.0.1:{}", client.discovery.port),
+    );
+    print_field("State", &project.status);
+    println!();
+    println!("  PROCESSES");
+    if processes.is_empty() {
+        println!("    · none — add commands in gbuild.yml or run `gbuild app`");
+    } else {
+        for process in &processes {
+            let marker = match process.status {
+                ProcessStatus::Running => "●",
+                ProcessStatus::Starting => "◐",
+                ProcessStatus::Crashed => "!",
+                ProcessStatus::Stopped | ProcessStatus::Exited => "○",
+            };
+            let trust = if is_trusted(process) {
+                ""
+            } else {
+                " · review"
+            };
+            println!(
+                "    {marker} {:<10} {}{}",
+                process.status, process.name, trust
+            );
+        }
+    }
+
+    let urls = services
+        .iter()
+        .flat_map(|service| service.urls.iter())
+        .collect::<Vec<_>>();
+    if !urls.is_empty() {
+        println!();
+        println!("  SERVICES");
+        for url in urls {
+            println!("    ↗ {url}");
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn print_field(label: &str, value: &str) {
+    println!("  {label:<8} {value}");
+}
+
+fn canonical_directory(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| cli_error(format!("cannot open {}: {error}", path.display())))?;
+    if !canonical.is_dir() {
+        return Err(cli_error(format!("not a directory: {}", path.display())));
+    }
+    Ok(canonical)
+}
+
+fn display_path(path: &Path) -> String {
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from)
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
+}
+
 async fn run_command(client: &mut Client, options: RunOptions) -> Result<()> {
     let cwd = options
         .cwd
         .unwrap_or(env::current_dir()?)
         .canonicalize()
         .map_err(|error| cli_error(format!("invalid working directory: {error}")))?;
-    let project_id = resolve_project(options.project_id)?;
+    let project_id = resolve_project_id(client, options.project_id, &cwd).await?;
     let command = shell_command(&options.command);
     let name = options.name.unwrap_or_else(|| {
         Path::new(&options.command[0])
@@ -277,18 +607,22 @@ async fn run_command(client: &mut Client, options: RunOptions) -> Result<()> {
     Ok(())
 }
 
-fn resolve_project(explicit: Option<ProjectId>) -> Result<ProjectId> {
-    if let Some(id) = explicit {
-        return Ok(id);
-    }
-    if let Ok(value) = env::var("GBUILD_PROJECT_ID") {
-        return parse_id(&value, "project");
-    }
-
-    Err(cli_error("run requires --project ID or GBUILD_PROJECT_ID"))
-}
-
 async fn ps(client: &mut Client, project_id: Option<ProjectId>) -> Result<()> {
+    let project_id = if project_id.is_some() || env::var_os("GBUILD_PROJECT_ID").is_some() {
+        Some(
+            resolve_project_id(
+                client,
+                project_id,
+                &canonical_directory(&env::current_dir()?)?,
+            )
+            .await?,
+        )
+    } else {
+        let cwd = canonical_directory(&env::current_dir()?)?;
+        project_for_path(client, &cwd)
+            .await?
+            .map(|project| project.id)
+    };
     let processes: Vec<Process> = client
         .rpc("process.list", json!({ "project_id": project_id }))
         .await?;
@@ -508,6 +842,77 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+async fn mcp_setup(data_dir: &Path, daemon: &Path, run: bool) -> Result<()> {
+    let discovery = gbuildd::discover_or_spawn(data_dir, daemon, DAEMON_WAIT).await?;
+    let url = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let authorization = format!("Authorization: Bearer {}", discovery.token);
+    let args = [
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "gbuild",
+        url.as_str(),
+        "--header",
+        authorization.as_str(),
+    ];
+    let printable = std::iter::once("claude")
+        .chain(args.iter().copied())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("{printable}");
+    if run {
+        let status = ProcessCommand::new("claude")
+            .args(args)
+            .status()
+            .map_err(|error| cli_error(format!("could not run Claude CLI MCP setup: {error}")))?;
+        if !status.success() {
+            return Err(cli_error(format!(
+                "Claude CLI MCP setup exited with {status}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn launch_app() -> Result<()> {
+    let executable = desktop_executable().ok_or_else(|| {
+        cli_error("could not find gbuild-desktop; run the installer again or set GBUILD_DESKTOP")
+    })?;
+    let child = ProcessCommand::new(&executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            cli_error(format!(
+                "could not launch {}: {error}",
+                executable.display()
+            ))
+        })?;
+    println!("✓ Opened gbuild (pid {})", child.id());
+    Ok(())
+}
+
+fn desktop_executable() -> Option<PathBuf> {
+    if let Some(explicit) = env::var_os("GBUILD_DESKTOP") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let current = env::current_exe().ok()?;
+    let directory = current.parent()?;
+    [
+        directory.join("gbuild-desktop"),
+        directory.join("bundle/macos/gbuild.app/Contents/MacOS/gbuild-desktop"),
+        directory.join("bundle/appimage/gbuild-desktop"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
 fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = explicit {
         return path;
@@ -527,6 +932,7 @@ fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
 struct Client {
     socket: Socket,
     next_id: u64,
+    discovery: Discovery,
 }
 
 impl Client {
@@ -538,7 +944,11 @@ impl Client {
             format!("Bearer {}", discovery.token).parse()?,
         );
         let (socket, _) = connect_async(request).await?;
-        Ok(Self { socket, next_id: 1 })
+        Ok(Self {
+            socket,
+            next_id: 1,
+            discovery,
+        })
     }
 
     async fn rpc<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> Result<T> {
@@ -703,6 +1113,23 @@ mod tests {
 
     #[test]
     fn parses_all_subcommands() {
+        let cli = Cli::parse(["gbuild"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::Status));
+
+        let cli = Cli::parse(["gbuild", "add"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::Add { path } if path == Path::new(".")));
+
+        let cli = Cli::parse(["gbuild", "up", "--project", "8"].map(OsString::from)).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                project_id: Some(8)
+            }
+        ));
+
+        let cli = Cli::parse(["gbuild", "mcp-setup", "--run"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::McpSetup { run: true }));
+
         let cli = Cli::parse(["gbuild", "logs", "--follow", "42"].map(OsString::from)).unwrap();
         assert!(matches!(
             cli.command,

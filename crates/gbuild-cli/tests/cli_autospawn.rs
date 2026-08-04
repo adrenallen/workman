@@ -2,7 +2,8 @@
 
 use std::{env, path::PathBuf, process::Command, time::Duration};
 
-use gbuildd::{DaemonConfig, DaemonServer, Discovery, discovery_path, probe};
+use gbuild_core::Store;
+use gbuildd::{DaemonConfig, DaemonServer, Discovery, database_path, discovery_path, probe};
 
 fn main() {
     let mut args = env::args_os().skip(1);
@@ -28,13 +29,14 @@ fn run_daemon(data_dir: PathBuf) {
 fn run_test() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let data_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
         let daemon_executable = env::current_exe().unwrap();
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_gbuild"))
             .arg("--data-dir")
             .arg(data_dir.path())
             .arg("--daemon")
             .arg(&daemon_executable)
-            .arg("ps")
+            .current_dir(project_dir.path())
             .output()
             .await
             .unwrap();
@@ -43,7 +45,18 @@ fn run_test() {
             "auto-spawned CLI failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("STATUS"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("workspace status"));
+        assert!(stdout.contains(project_dir.path().file_name().unwrap().to_str().unwrap()));
+        assert!(stdout.contains("✓ healthy"));
+
+        let store = Store::open(database_path(data_dir.path())).unwrap();
+        let projects = store.list_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].path,
+            project_dir.path().canonicalize().unwrap().to_string_lossy()
+        );
 
         let discovery = Discovery::read(data_dir.path()).unwrap();
         assert_ne!(discovery.pid, std::process::id());

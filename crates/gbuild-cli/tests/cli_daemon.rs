@@ -1,7 +1,9 @@
 use std::{process::Stdio, time::Duration};
 
 use gbuild_core::Project;
-use gbuildd::{DaemonConfig, DaemonServer};
+use gbuildd::{
+    DaemonConfig, DaemonServer, Discovery, sync_gbuild_yml_file, trust_hash_for_process,
+};
 use tempfile::TempDir;
 use tokio::{
     io::AsyncWriteExt,
@@ -11,6 +13,8 @@ use tokio::{
 
 struct TestDaemon {
     data_dir: TempDir,
+    project_dir: TempDir,
+    discovery: Discovery,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
@@ -18,32 +22,51 @@ struct TestDaemon {
 impl TestDaemon {
     async fn start() -> Self {
         let data_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project_dir.path().join("gbuild.yml"),
+            "processes:\n  Saved:\n    command: \"trap 'exit 0' TERM; sleep 30\"\n",
+        )
+        .unwrap();
         let server = DaemonServer::bind(DaemonConfig {
             data_dir: data_dir.path().to_owned(),
             port: 0,
         })
         .await
         .unwrap();
-        server
-            .registry()
-            .lock()
-            .await
+        let discovery = server.discovery().clone();
+        let registry = server.registry();
+        let mut registry = registry.lock().await;
+        let canonical_project = project_dir.path().canonicalize().unwrap();
+        registry
             .store()
             .put_project(&Project {
                 id: 1,
-                path: data_dir.path().to_string_lossy().into_owned(),
+                path: canonical_project.to_string_lossy().into_owned(),
                 name: "cli-test".into(),
                 display_name: None,
                 icon: None,
                 selected: true,
             })
             .unwrap();
+        sync_gbuild_yml_file(&mut registry, 1).unwrap();
+        let saved = registry
+            .list(Some(1))
+            .unwrap()
+            .into_iter()
+            .find(|process| process.name == "Saved")
+            .unwrap();
+        let hash = trust_hash_for_process(&saved);
+        registry.trust_yml_process(saved.id, &hash).unwrap();
+        drop(registry);
         let (shutdown, receive_shutdown) = oneshot::channel();
         let task = tokio::spawn(server.serve_until(async move {
             let _ = receive_shutdown.await;
         }));
         Self {
             data_dir,
+            project_dir,
+            discovery,
             shutdown: Some(shutdown),
             task,
         }
@@ -60,7 +83,8 @@ impl TestDaemon {
             .arg("--data-dir")
             .arg(self.data_dir.path())
             .arg("--daemon")
-            .arg("/daemon-must-not-be-spawned-in-this-test");
+            .arg("/daemon-must-not-be-spawned-in-this-test")
+            .current_dir(self.project_dir.path());
         command
     }
 
@@ -78,12 +102,10 @@ impl TestDaemon {
         let output = self
             .output(&[
                 "run",
-                "--project",
-                "1",
                 "--name",
                 name,
                 "--cwd",
-                self.data_dir.path().to_str().unwrap(),
+                self.project_dir.path().to_str().unwrap(),
                 "--",
                 shell_command,
             ])
@@ -131,13 +153,46 @@ async fn wait_for_logs(daemon: &TestDaemon, process_id: i64, needle: &str) -> St
 async fn all_cli_commands_drive_a_real_daemon() {
     let daemon = TestDaemon::start().await;
 
+    let status = daemon.output(&[]).await;
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.contains("cli-test · workspace status"),
+        "unexpected status output:\n{status}"
+    );
+    assert!(status.contains("Saved"));
+    assert!(status.contains("healthy"));
+
+    let setup = daemon.output(&["mcp-setup"]).await;
+    let setup = String::from_utf8_lossy(&setup.stdout);
+    assert!(setup.starts_with("claude mcp add --transport http gbuild "));
+    assert!(setup.contains(&format!("http://127.0.0.1:{}/mcp", daemon.discovery.port)));
+    assert!(setup.contains(&daemon.discovery.token));
+
+    let up = daemon.output(&["up"]).await;
+    assert!(String::from_utf8_lossy(&up.stdout).contains("Started 1 command"));
+    let ps = daemon.output(&["ps"]).await;
+    let saved = String::from_utf8_lossy(&ps.stdout);
+    assert!(
+        saved
+            .lines()
+            .any(|line| line.contains("Saved") && line.contains("running"))
+    );
+    let down = daemon.output(&["down"]).await;
+    assert!(String::from_utf8_lossy(&down.stdout).contains("Stopped 1 command"));
+
+    let extra = tempfile::tempdir().unwrap();
+    let added = daemon
+        .output(&["add", extra.path().to_str().unwrap()])
+        .await;
+    assert!(String::from_utf8_lossy(&added.stdout).contains("Added to gbuild"));
+
     let interactive = daemon
         .run(
             "interactive",
             "printf 'ready\\n'; IFS= read -r line; printf 'got:%s\\n' \"$line\"",
         )
         .await;
-    let ps = daemon.output(&["ps", "--project", "1"]).await;
+    let ps = daemon.output(&["ps"]).await;
     let ps = String::from_utf8_lossy(&ps.stdout);
     assert!(ps.contains("interactive"));
     assert!(ps.contains("running"));
