@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::{ProcessRegistry, SharedProcessRegistry};
 
 mod tools_process;
+mod tools_todo;
 
 pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
 
@@ -36,6 +37,7 @@ impl GbuildMcp {
     pub fn new(registry: SharedProcessRegistry) -> Self {
         let mut tool_router = Self::tool_router();
         tool_router.merge(Self::process_tool_router());
+        tool_router.merge(Self::todo_tool_router());
         Self {
             registry,
             tool_router,
