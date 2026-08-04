@@ -1,6 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import type {
+  CoordinationClient,
+  CoordinationSnapshot,
+  ScratchpadRead,
+  TodoDetail
+} from './coordination';
+
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
 export type ProcessKind = 'command' | 'terminal' | 'agent';
@@ -115,7 +122,7 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
-export class DaemonClient {
+export class DaemonClient implements CoordinationClient {
   private sequence = 0;
   private pending = new Map<string, PendingRequest>();
   private unlisten: UnlistenFn[] = [];
@@ -153,6 +160,21 @@ export class DaemonClient {
 
   rename(projectId: number, name: string): Promise<Project[]> {
     return this.request('projects.rename', { project_id: projectId, name });
+  }
+
+  coordinationSnapshot(projectId: number): Promise<CoordinationSnapshot> {
+    return this.request('coordination.snapshot', { project_id: projectId });
+  }
+
+  coordinationTodo(projectId: number, todoId: number): Promise<TodoDetail> {
+    return this.request('coordination.todo', { project_id: projectId, todo_id: todoId });
+  }
+
+  coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead> {
+    return this.request('coordination.scratchpad', {
+      project_id: projectId,
+      scratchpad_id: scratchpadId
+    });
   }
 
   processes(projectId: number): Promise<ProcessView[]> {

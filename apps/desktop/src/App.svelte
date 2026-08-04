@@ -9,9 +9,11 @@
     type Project,
     type TrustReview
   } from './lib/daemon';
+  import CoordinationView from './lib/CoordinationView.svelte';
   import ProcessPanel from './lib/ProcessPanel.svelte';
   import TerminalView from './lib/TerminalView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
+  import WorkspaceTabs, { type WorkspaceView } from './lib/WorkspaceTabs.svelte';
 
   const client = new DaemonClient();
   let projects = $state<Project[]>([]);
@@ -32,6 +34,7 @@
   let processActionId = $state<number | null>(null);
   let trustReview = $state<TrustReview | null>(null);
   let trustBusy = $state(false);
+  let workspaceView = $state<WorkspaceView>('processes');
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
     processes.find((process) => process.id === selectedProcessId) ?? null
@@ -393,36 +396,50 @@
         <span></span>
         <small>{selectedProject.status}</small>
       </div>
-      <ProcessPanel
-        {processes}
-        selectedId={selectedProcessId}
-        busyId={processActionId}
-        connected={connection.status === 'connected'}
-        onSelect={(processId) => (selectedProcessId = processId)}
-        onStart={(process) => void processAction(process, (id) => client.startProcess(id))}
-        onStop={(process) => void processAction(process, (id) => client.stopProcess(id))}
-        onRestart={(process) => void processAction(process, (id) => client.restartProcess(id))}
-        onTrust={(process) => void openTrustReview(process)}
-        onSpawnTerminal={() => void spawnTerminal()}
-      />
-      <div class="workspace-body">
-        {#if selectedProcess}
-          {#key selectedProcess.id}
-            <TerminalView
-              {client}
-              process={selectedProcess}
-              connected={connection.status === 'connected'}
-              onError={reportTerminalError}
-            />
-          {/key}
-        {:else}
-          <div class="workspace-empty">
-            <div class="terminal-prompt" aria-hidden="true"><span>›</span><i></i></div>
-            <h3>{processBusy ? 'Loading processes' : 'No process selected'}</h3>
-            <p>{processBusy ? 'Reading the project process registry.' : 'Start or register a process to open its terminal stream.'}</p>
+      <WorkspaceTabs active={workspaceView} onSelect={(view) => (workspaceView = view)} />
+      {#if workspaceView === 'processes'}
+        <div class="workspace-mode">
+          <ProcessPanel
+            {processes}
+            selectedId={selectedProcessId}
+            busyId={processActionId}
+            connected={connection.status === 'connected'}
+            onSelect={(processId) => (selectedProcessId = processId)}
+            onStart={(process) => void processAction(process, (id) => client.startProcess(id))}
+            onStop={(process) => void processAction(process, (id) => client.stopProcess(id))}
+            onRestart={(process) => void processAction(process, (id) => client.restartProcess(id))}
+            onTrust={(process) => void openTrustReview(process)}
+            onSpawnTerminal={() => void spawnTerminal()}
+          />
+          <div class="workspace-body">
+            {#if selectedProcess}
+              {#key selectedProcess.id}
+                <TerminalView
+                  {client}
+                  process={selectedProcess}
+                  connected={connection.status === 'connected'}
+                  onError={reportTerminalError}
+                />
+              {/key}
+            {:else}
+              <div class="workspace-empty">
+                <div class="terminal-prompt" aria-hidden="true"><span>›</span><i></i></div>
+                <h3>{processBusy ? 'Loading processes' : 'No process selected'}</h3>
+                <p>{processBusy ? 'Reading the project process registry.' : 'Start or register a process to open its terminal stream.'}</p>
+              </div>
+            {/if}
           </div>
-        {/if}
-      </div>
+        </div>
+      {:else}
+        <div class="coordination-stage">
+          <CoordinationView
+            {client}
+            projectId={selectedProject.id}
+            connected={connection.status === 'connected'}
+            onError={reportTerminalError}
+          />
+        </div>
+      {/if}
     {:else}
       <div class="welcome">
         <span class="eyebrow">Local orchestration</span>
@@ -441,3 +458,20 @@
     onClose={() => (trustReview = null)}
   />
 {/if}
+
+<style>
+  .workspace-mode {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .coordination-stage {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-color: #2b4551 transparent;
+    scrollbar-width: thin;
+  }
+</style>

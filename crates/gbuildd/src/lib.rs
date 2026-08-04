@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 pub mod config;
 mod control;
+mod coordination;
 pub mod lifecycle;
 mod mcp;
 mod process_registry;
