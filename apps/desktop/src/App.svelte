@@ -722,7 +722,7 @@
     </aside>
   {/if}
 
-  <section class="main-frame" class:empty={selectedProject === null}>
+  <section class="main-frame" class:empty={selectedProject === null} class:has-error={error !== null}>
     {#if selectedProject}
       <header class="document-title" data-tauri-drag-region>
         <div class="title-side"><span>{selection?.kind ?? 'project'}</span></div>
@@ -880,7 +880,8 @@
   .project-rail.collapsed .status-dot { position: absolute; z-index: 1; right: 6px; bottom: 6px; border: 1px solid #17191c; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
-  .main-frame { position: relative; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; background: var(--night); }
+  .main-frame { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; background: var(--night); }
+  .main-frame.has-error { grid-template-rows: auto auto minmax(0, 1fr) auto; }
   .main-frame.empty { display: flex; }
   .document-title { display: grid; min-height: 38px; grid-template-columns: minmax(90px, 1fr) auto minmax(90px, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 8px; background: #15171a; }
   .document-title h1 { overflow: hidden; margin: 0; color: #e4e6e9; font-size: 12px; font-weight: 620; text-align: center; text-overflow: ellipsis; white-space: nowrap; }

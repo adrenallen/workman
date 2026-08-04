@@ -316,7 +316,7 @@
   }
 </script>
 
-<section class="terminal-frame" class:is-stopped={process.status !== 'running'}>
+<section class="terminal-frame" class:is-stopped={process.status !== 'running'} class:search-open={searchOpen}>
   <header class="terminal-toolbar">
     <div class="terminal-identity">
       <span class="signal-light" class:is-live={process.status === 'running'}></span>
@@ -375,12 +375,16 @@
   .terminal-frame {
     position: relative;
     display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     min-height: 0;
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 4px;
     background: #101214;
+  }
+
+  .terminal-frame.search-open {
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 
   .terminal-toolbar {
