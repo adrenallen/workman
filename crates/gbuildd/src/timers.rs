@@ -661,9 +661,9 @@ fn idle_condition_satisfied(timer: &Timer, runtime: &TimerRuntime) -> bool {
 
 fn fresh_user_turn(body: &str) -> Vec<u8> {
     let mut input = body.as_bytes().to_vec();
-    if !input.ends_with(b"\n") {
-        input.push(b'\n');
-    }
+    // Raw-mode TUI agents interpret CR as Enter. LF is content (typically a
+    // newline in the composer), so preserve every body byte and submit once.
+    input.push(b'\r');
     input
 }
 
@@ -1058,7 +1058,7 @@ mod tests {
         };
         assert!(TimerService::new(&mut registry).tick(0).unwrap().is_empty());
 
-        registry.send_input(WORKER_ID, b"go\n").unwrap();
+        registry.send_input(WORKER_ID, b"go\r").unwrap();
         wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
         assert!(
             TimerService::new(&mut registry)
@@ -1119,5 +1119,12 @@ mod tests {
         assert!(!progress.satisfied);
         advance_watch_progress(&mut progress, true);
         assert!(progress.satisfied);
+    }
+
+    #[test]
+    fn fresh_user_turn_preserves_multiline_body_and_submits_with_carriage_return() {
+        let input = fresh_user_turn("first line\nsecond line\n");
+        assert_eq!(input, b"first line\nsecond line\n\r");
+        assert_eq!(input.last(), Some(&0x0d));
     }
 }

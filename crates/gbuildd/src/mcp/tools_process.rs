@@ -130,13 +130,13 @@ struct SendInputArgs {
     process_name: Option<String>,
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// UTF-8 text to write. A newline is appended unless submit=false.
+    /// UTF-8 text to write. Enter (CR) is appended unless submit=false.
     #[serde(default)]
     input: Option<String>,
     /// Raw PTY bytes. When present this overrides input and submit.
     #[serde(default)]
     bytes: Option<Vec<u8>>,
-    /// Append a newline to text input. Defaults to true.
+    /// Submit text with Enter (CR). Defaults to true.
     #[serde(default)]
     submit: Option<bool>,
     /// Wait before returning a rendered tail; clamped to 250-10000ms.
@@ -750,7 +750,7 @@ fn input_bytes(args: &SendInputArgs) -> Result<Vec<u8>, String> {
     };
     let mut data = input.as_bytes().to_vec();
     if args.submit.unwrap_or(true) {
-        data.push(b'\n');
+        data.push(b'\r');
     }
     Ok(data)
 }
@@ -779,4 +779,39 @@ fn tail_lines(text: &str, lines: usize) -> String {
     let mut tail = text.lines().rev().take(lines).collect::<Vec<_>>();
     tail.reverse();
     tail.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SendInputArgs, input_bytes};
+
+    #[test]
+    fn submitted_text_preserves_multiline_content_and_ends_with_carriage_return() {
+        let args = SendInputArgs {
+            input: Some("first line\nsecond line\n".into()),
+            submit: Some(true),
+            ..SendInputArgs::default()
+        };
+
+        let input = input_bytes(&args).unwrap();
+        assert_eq!(input, b"first line\nsecond line\n\r");
+        assert_eq!(input.last(), Some(&0x0d));
+    }
+
+    #[test]
+    fn raw_bytes_and_unsubmitted_text_remain_byte_exact() {
+        let raw = SendInputArgs {
+            bytes: Some(vec![0x0a, 0x0d]),
+            submit: Some(true),
+            ..SendInputArgs::default()
+        };
+        assert_eq!(input_bytes(&raw).unwrap(), vec![0x0a, 0x0d]);
+
+        let text = SendInputArgs {
+            input: Some("partial\ntext".into()),
+            submit: Some(false),
+            ..SendInputArgs::default()
+        };
+        assert_eq!(input_bytes(&text).unwrap(), b"partial\ntext");
+    }
 }

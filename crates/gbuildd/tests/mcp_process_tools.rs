@@ -215,7 +215,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     let submitted = call(
         &client,
         "send_input",
-        json!({ "process_id": 2, "bytes": [10], "wait_ms": 250 }),
+        json!({ "process_id": 2, "bytes": [13], "wait_ms": 250 }),
     )
     .await;
     assert!(submitted["fresh_raw_output"]
@@ -226,7 +226,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     let raw_input = call(
         &client,
         "send_input",
-        json!({ "process_id": 2, "bytes": [114, 97, 119, 10], "wait_ms": 250 }),
+        json!({ "process_id": 2, "bytes": [114, 97, 119, 13], "wait_ms": 250 }),
     )
     .await;
     assert!(raw_input["fresh_raw_output"]
