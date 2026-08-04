@@ -79,6 +79,35 @@ async fn wait_until(mut predicate: impl FnMut() -> bool) {
     }
 }
 
+fn attempt_count(path: &std::path::Path) -> usize {
+    fs::read(path).unwrap_or_default().len()
+}
+
+async fn wait_for_attempt_count(path: &std::path::Path, minimum: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let count = attempt_count(path);
+        if count >= minimum {
+            return count;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected at least {minimum} restart attempts before timeout, got {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn minimum_elapsed_for_attempts(options: &LifecycleOptions, attempt_count: usize) -> Duration {
+    let mut elapsed = Duration::ZERO;
+    let mut delay = options.restart_backoff_initial;
+    for _ in 1..attempt_count {
+        elapsed = elapsed.saturating_add(delay);
+        delay = delay.saturating_mul(2).min(options.restart_backoff_max);
+    }
+    elapsed
+}
+
 async fn stop_supervisor(
     shutdown_tx: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -163,19 +192,18 @@ async fn crash_loop_restarts_with_backoff_instead_of_hot_spinning() {
 
     let registry = Arc::new(Mutex::new(registry));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let options = test_options();
+    let started_at = Instant::now();
     let task =
-        spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, test_options())
+        spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, options.clone())
             .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(760)).await;
-    let count = fs::read(&attempts).unwrap_or_default().len();
+    let count = wait_for_attempt_count(&attempts, 3).await;
+    let elapsed = started_at.elapsed();
+    let minimum_elapsed = minimum_elapsed_for_attempts(&options, count);
     assert!(
-        count >= 3,
-        "expected multiple restart attempts, got {count}"
-    );
-    assert!(
-        count <= 4,
-        "exponential backoff should bound attempts, got {count}"
+        elapsed >= minimum_elapsed,
+        "{count} launches occurred in {elapsed:?}, faster than the configured cumulative backoff of {minimum_elapsed:?}"
     );
 
     stop_supervisor(shutdown_tx, task, &registry).await;
