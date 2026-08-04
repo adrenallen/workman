@@ -8,13 +8,15 @@ use std::{
 };
 
 use gbuild_core::{
-    Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, Store, StoreError,
+    Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store, StoreError,
     attention::{AgentState, AttentionTracker},
     pty::{ExitStatus, PtyProcess, PtySize, PtySpawnOptions, RawOutput},
     terminal::TerminalOutput,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::config::{is_process_trusted, trust_hash_for_process, validate_process_working_dir};
 
 const DEFAULT_STOP_GRACE: Duration = Duration::from_millis(500);
 
@@ -26,6 +28,13 @@ pub enum RegistryError {
     AlreadyExists(ProcessId),
     AlreadyRunning(ProcessId),
     NotRunning(ProcessId),
+    Untrusted(ProcessId),
+    NotYmlBacked(ProcessId),
+    TrustHashMismatch(ProcessId),
+    InvalidWorkingDirectory {
+        process_id: ProcessId,
+        message: String,
+    },
     MissingCommand(ProcessId),
     InvalidName,
     Pty {
@@ -42,6 +51,10 @@ impl RegistryError {
             Self::AlreadyExists(_) => "process_already_exists",
             Self::AlreadyRunning(_) => "process_already_running",
             Self::NotRunning(_) => "process_not_running",
+            Self::Untrusted(_) => "process_untrusted",
+            Self::NotYmlBacked(_) => "process_not_yml_backed",
+            Self::TrustHashMismatch(_) => "trust_hash_mismatch",
+            Self::InvalidWorkingDirectory { .. } => "invalid_working_directory",
             Self::MissingCommand(_) => "process_missing_command",
             Self::InvalidName => "invalid_process_name",
             Self::Pty { .. } => "pty_error",
@@ -57,6 +70,24 @@ impl fmt::Display for RegistryError {
             Self::AlreadyExists(id) => write!(formatter, "process {id} already exists"),
             Self::AlreadyRunning(id) => write!(formatter, "process {id} is already running"),
             Self::NotRunning(id) => write!(formatter, "process {id} is not running"),
+            Self::Untrusted(id) => write!(
+                formatter,
+                "gbuild.yml process {id} must be trusted before it can start"
+            ),
+            Self::NotYmlBacked(id) => {
+                write!(formatter, "process {id} is not backed by gbuild.yml")
+            }
+            Self::TrustHashMismatch(id) => write!(
+                formatter,
+                "gbuild.yml process {id} changed since it was reviewed"
+            ),
+            Self::InvalidWorkingDirectory {
+                process_id,
+                message,
+            } => write!(
+                formatter,
+                "gbuild.yml process {process_id} has an invalid working directory: {message}"
+            ),
             Self::MissingCommand(id) => write!(formatter, "process {id} has no command to start"),
             Self::InvalidName => formatter.write_str("process name must not be empty"),
             Self::Pty {
@@ -177,6 +208,9 @@ impl ProcessRegistry {
         process.exit_code = None;
         process.exit_signal = None;
         process.exited_at = None;
+        if process.source == ProcessSource::Yml {
+            process.trust_hash = None;
+        }
         self.store.put_process(&process)?;
         Ok(process)
     }
@@ -191,6 +225,13 @@ impl ProcessRegistry {
         process.exit_code = current.exit_code;
         process.exit_signal = current.exit_signal;
         process.exited_at = current.exited_at;
+        let current_hash = trust_hash_for_process(&current);
+        let updated_hash = trust_hash_for_process(&process);
+        let trust_still_applies = current.source == ProcessSource::Yml
+            && process.source == ProcessSource::Yml
+            && current.trust_hash.as_deref() == Some(current_hash.as_str())
+            && current_hash == updated_hash;
+        process.trust_hash = trust_still_applies.then_some(current_hash);
         self.store.put_process(&process)?;
         Ok(process)
     }
@@ -243,6 +284,17 @@ impl ProcessRegistry {
         }
 
         let mut process = self.require(process_id)?;
+        if process.source == ProcessSource::Yml {
+            if !is_process_trusted(&process) {
+                return Err(RegistryError::Untrusted(process_id));
+            }
+            validate_process_working_dir(&self.store, &process).map_err(|message| {
+                RegistryError::InvalidWorkingDirectory {
+                    process_id,
+                    message,
+                }
+            })?;
+        }
         let command = process
             .command
             .as_deref()
@@ -304,6 +356,36 @@ impl ProcessRegistry {
         self.running.insert(process_id, hosted);
         self.refresh_exits()?;
         self.require(process_id)
+    }
+
+    /// Approve exactly the YAML configuration hash that a reviewer observed.
+    pub fn trust_yml_process(
+        &mut self,
+        process_id: ProcessId,
+        expected_hash: &str,
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let mut process = self.require(process_id)?;
+        if process.source != ProcessSource::Yml {
+            return Err(RegistryError::NotYmlBacked(process_id));
+        }
+        validate_process_working_dir(&self.store, &process).map_err(|message| {
+            RegistryError::InvalidWorkingDirectory {
+                process_id,
+                message,
+            }
+        })?;
+        let actual = trust_hash_for_process(&process);
+        if expected_hash != actual {
+            return Err(RegistryError::TrustHashMismatch(process_id));
+        }
+        process.trust_hash = Some(actual);
+        self.store.put_process(&process)?;
+        if process.auto_start && !self.running.contains_key(&process_id) {
+            self.start(process_id)
+        } else {
+            Ok(process)
+        }
     }
 
     pub fn stop(&mut self, process_id: ProcessId) -> RegistryResult<Process> {

@@ -33,10 +33,15 @@ use tokio::{
 };
 use uuid::Uuid;
 
+pub mod config;
 mod control;
 mod mcp;
 mod process_registry;
 
+pub use config::{
+    ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, YmlProcess, is_process_trusted,
+    parse_gbuild_yml, sync_gbuild_yml, sync_gbuild_yml_file, trust_hash_for_process,
+};
 pub use mcp::GBUILD_MCP_TOKEN_HEADER;
 pub use process_registry::{
     BulkFailure, BulkProcessResult, ProcessRegistry, ProcessStatusView, RegistryError,
