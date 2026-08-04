@@ -1,5 +1,6 @@
 //! JSON request dispatch for the authenticated WebSocket control channel.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gbuild_core::{Process, ProcessId, ProjectId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +37,30 @@ struct ProjectParams {
     project_id: ProjectId,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct OutputParams {
+    process_id: ProcessId,
+    offset: Option<u64>,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InputParams {
+    process_id: ProcessId,
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResizeParams {
+    process_id: ProcessId,
+    rows: u16,
+    cols: u16,
+    #[serde(default)]
+    pixel_width: u16,
+    #[serde(default)]
+    pixel_height: u16,
+}
+
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
 pub(crate) async fn handle_text(text: &str, registry: &SharedProcessRegistry) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -64,6 +89,60 @@ async fn dispatch(
     registry: &SharedProcessRegistry,
 ) -> Result<Value, (&'static str, String)> {
     let mut registry = registry.lock().await;
+    match method {
+        "process.raw_output" => {
+            let params: OutputParams = params_as(params)?;
+            let mut chunk = registry
+                .raw_output(
+                    params.process_id,
+                    params.offset,
+                    params.max_bytes.unwrap_or(64 * 1024).clamp(1, 256 * 1024),
+                )
+                .map_err(registry_error)?;
+            let data = BASE64.encode(&chunk.data);
+            chunk.data.clear();
+            return Ok(json!({
+                "data": data,
+                "start_offset": chunk.start_offset,
+                "end_offset": chunk.end_offset,
+                "total_bytes": chunk.total_bytes,
+                "truncated": chunk.truncated,
+                "status": chunk.status,
+            }));
+        }
+        "process.rendered_output" => {
+            let params: ProcessIdParams = params_as(params)?;
+            return registry
+                .rendered_output(params.process_id)
+                .map(json_value)
+                .map_err(registry_error);
+        }
+        "process.send_input" => {
+            let params: InputParams = params_as(params)?;
+            let data = BASE64
+                .decode(params.data)
+                .map_err(|error| ("invalid_params", error.to_string()))?;
+            return registry
+                .send_input(params.process_id, &data)
+                .map(json_value)
+                .map_err(registry_error);
+        }
+        "process.resize" => {
+            let params: ResizeParams = params_as(params)?;
+            return registry
+                .resize(
+                    params.process_id,
+                    params.rows,
+                    params.cols,
+                    params.pixel_width,
+                    params.pixel_height,
+                )
+                .map(json_value)
+                .map_err(registry_error);
+        }
+        _ => {}
+    }
+
     let result = match method {
         "process.create" => registry.create(process_param(params)?).map(json_value),
         "process.update" => registry.update(process_param(params)?).map(json_value),

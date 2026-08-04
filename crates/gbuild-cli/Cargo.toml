@@ -8,5 +8,21 @@ rust-version.workspace = true
 name = "gbuild"
 path = "src/main.rs"
 
+[[test]]
+name = "cli_autospawn"
+path = "tests/cli_autospawn.rs"
+harness = false
+
 [dependencies]
 gbuild-core.workspace = true
+gbuildd = { path = "../gbuildd" }
+base64 = "0.22.1"
+futures-util = "0.3.31"
+libc = "0.2.177"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = "0.29.0"
+
+[dev-dependencies]
+tempfile = "3.21.0"

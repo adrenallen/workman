@@ -353,7 +353,16 @@ dependencies = [
 name = "gbuild-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "futures-util",
  "gbuild-core",
+ "gbuildd",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -374,6 +383,7 @@ name = "gbuildd"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "gbuild-core",
  "serde",

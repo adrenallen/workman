@@ -9,7 +9,8 @@ use std::{
 
 use gbuild_core::{
     Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, Store, StoreError,
-    pty::{ExitStatus, PtyProcess, PtySpawnOptions},
+    pty::{ExitStatus, PtyProcess, PtySize, PtySpawnOptions, RawOutput},
+    terminal::TerminalOutput,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,6 +24,7 @@ pub enum RegistryError {
     NotFound(ProcessId),
     AlreadyExists(ProcessId),
     AlreadyRunning(ProcessId),
+    NotRunning(ProcessId),
     MissingCommand(ProcessId),
     InvalidName,
     Pty {
@@ -38,6 +40,7 @@ impl RegistryError {
             Self::NotFound(_) => "process_not_found",
             Self::AlreadyExists(_) => "process_already_exists",
             Self::AlreadyRunning(_) => "process_already_running",
+            Self::NotRunning(_) => "process_not_running",
             Self::MissingCommand(_) => "process_missing_command",
             Self::InvalidName => "invalid_process_name",
             Self::Pty { .. } => "pty_error",
@@ -52,6 +55,7 @@ impl fmt::Display for RegistryError {
             Self::NotFound(id) => write!(formatter, "process {id} was not found"),
             Self::AlreadyExists(id) => write!(formatter, "process {id} already exists"),
             Self::AlreadyRunning(id) => write!(formatter, "process {id} is already running"),
+            Self::NotRunning(id) => write!(formatter, "process {id} is not running"),
             Self::MissingCommand(id) => write!(formatter, "process {id} has no command to start"),
             Self::InvalidName => formatter.write_str("process name must not be empty"),
             Self::Pty {
@@ -82,6 +86,25 @@ impl From<StoreError> for RegistryError {
 
 pub type RegistryResult<T> = Result<T, RegistryError>;
 
+/// A bounded slice of a process's retained raw PTY byte stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RawOutputChunk {
+    pub data: Vec<u8>,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub total_bytes: u64,
+    pub truncated: bool,
+    pub status: ProcessStatus,
+}
+
+/// Escape-free terminal text together with the raw cursor used for following.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RenderedProcessOutput {
+    pub text: String,
+    pub raw_end_offset: u64,
+    pub status: ProcessStatus,
+}
+
 /// Per-process failure reported by a bulk command operation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BulkFailure {
@@ -101,6 +124,7 @@ pub struct BulkProcessResult {
 pub struct ProcessRegistry {
     store: Store,
     running: HashMap<ProcessId, PtyProcess>,
+    outputs: HashMap<ProcessId, ProcessOutput>,
     selected: HashMap<ProjectId, ProcessId>,
     stop_grace: Duration,
 }
@@ -115,6 +139,7 @@ impl ProcessRegistry {
         let mut registry = Self {
             store,
             running: HashMap::new(),
+            outputs: HashMap::new(),
             selected: HashMap::new(),
             stop_grace,
         };
@@ -216,6 +241,13 @@ impl ProcessRegistry {
             let _ = hosted.terminate(self.stop_grace);
             return Err(error.into());
         }
+        self.outputs.insert(
+            process_id,
+            ProcessOutput {
+                raw: hosted.raw_output(),
+                terminal: hosted.terminal_output(),
+            },
+        );
         self.running.insert(process_id, hosted);
         self.refresh_exits()?;
         self.require(process_id)
@@ -266,6 +298,7 @@ impl ProcessRegistry {
             self.require(process_id)?
         };
         self.store.delete_process(process_id)?;
+        self.outputs.remove(&process_id);
         self.selected.retain(|_, selected| *selected != process_id);
         Ok(process)
     }
@@ -287,6 +320,109 @@ impl ProcessRegistry {
 
     pub fn selected_process(&self, project_id: ProjectId) -> Option<ProcessId> {
         self.selected.get(&project_id).copied()
+    }
+
+    /// Read raw output by absolute byte offset, clamped to the retained ring.
+    pub fn raw_output(
+        &mut self,
+        process_id: ProcessId,
+        offset: Option<u64>,
+        max_bytes: usize,
+    ) -> RegistryResult<RawOutputChunk> {
+        self.refresh_exits()?;
+        let process = self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(RawOutputChunk {
+                data: Vec::new(),
+                start_offset: 0,
+                end_offset: 0,
+                total_bytes: 0,
+                truncated: false,
+                status: process.status,
+            });
+        };
+
+        let snapshot = output.raw.snapshot();
+        let total_bytes = output.raw.total_bytes_seen();
+        let retained_start = total_bytes.saturating_sub(snapshot.len() as u64);
+        let requested = offset.unwrap_or(retained_start);
+        let start_offset = requested.clamp(retained_start, total_bytes);
+        let start = usize::try_from(start_offset - retained_start).unwrap_or(snapshot.len());
+        let end = start.saturating_add(max_bytes).min(snapshot.len());
+        let data = snapshot[start..end].to_vec();
+        let end_offset = start_offset.saturating_add(data.len() as u64);
+
+        Ok(RawOutputChunk {
+            data,
+            start_offset,
+            end_offset,
+            total_bytes,
+            truncated: requested < retained_start || end_offset < total_bytes,
+            status: process.status,
+        })
+    }
+
+    /// Read the daemon-rendered terminal buffer without ANSI escape sequences.
+    pub fn rendered_output(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<RenderedProcessOutput> {
+        self.refresh_exits()?;
+        let process = self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(RenderedProcessOutput {
+                text: String::new(),
+                raw_end_offset: 0,
+                status: process.status,
+            });
+        };
+        Ok(RenderedProcessOutput {
+            text: output.terminal.read_rows(0..usize::MAX).text(),
+            raw_end_offset: output.raw.total_bytes_seen(),
+            status: process.status,
+        })
+    }
+
+    /// Send raw bytes to a live process's PTY.
+    pub fn send_input(&mut self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let hosted = self
+            .running
+            .get_mut(&process_id)
+            .ok_or(RegistryError::NotRunning(process_id))?;
+        hosted.write_all(data).map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
+        self.require(process_id)
+    }
+
+    /// Resize a live process's PTY and server-side terminal emulator together.
+    pub fn resize(
+        &mut self,
+        process_id: ProcessId,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let hosted = self
+            .running
+            .get(&process_id)
+            .ok_or(RegistryError::NotRunning(process_id))?;
+        hosted
+            .resize(PtySize {
+                rows: rows.max(1),
+                cols: cols.max(1),
+                pixel_width,
+                pixel_height,
+            })
+            .map_err(|error| RegistryError::Pty {
+                process_id,
+                message: error.to_string(),
+            })?;
+        self.require(process_id)
     }
 
     pub fn start_all_commands(&mut self, project_id: ProjectId) -> BulkProcessResult {
@@ -386,6 +522,11 @@ impl ProcessRegistry {
             .get_process(process_id)?
             .ok_or(RegistryError::NotFound(process_id))
     }
+}
+
+struct ProcessOutput {
+    raw: RawOutput,
+    terminal: TerminalOutput,
 }
 
 impl Drop for ProcessRegistry {
