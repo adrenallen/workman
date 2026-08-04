@@ -390,7 +390,7 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
                 "(y/n)",
             ],
         );
-        let spinner_at = last_pattern(rendered, &["✻", "✽", "✶", "✳", "✢"]);
+        let spinner_at = last_claude_active_spinner(rendered);
         let busy_at = last_pattern(
             &lowercase,
             &[
@@ -406,7 +406,7 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
             ],
         )
         .max(spinner_at);
-        let resting_at = last_resting_prompt(rendered);
+        let resting_at = last_claude_resting_prompt(rendered);
 
         let needs_input = is_latest(permission_at, &[busy_at, resting_at]);
         let busy = !needs_input && is_latest(busy_at, &[permission_at, resting_at]);
@@ -489,6 +489,52 @@ fn last_resting_prompt(rendered: &str) -> Option<usize> {
         .rev()
         .take(4)
         .find_map(|(offset, line)| matches!(line, "❯" | ">" | "$" | "#").then_some(offset))
+}
+
+fn last_claude_resting_prompt(rendered: &str) -> Option<usize> {
+    nonempty_lines(rendered)
+        .into_iter()
+        .rev()
+        .take(8)
+        .find_map(|(offset, line)| {
+            let draft = line.strip_prefix('❯')?.trim();
+            (!is_claude_dialog_choice(draft)).then_some(offset)
+        })
+}
+
+fn is_claude_dialog_choice(text: &str) -> bool {
+    let Some((number, choice)) = text.split_once('.') else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|character| character.is_ascii_digit())
+        && !choice.trim().is_empty()
+}
+
+fn last_claude_active_spinner(rendered: &str) -> Option<usize> {
+    const SPINNERS: [&str; 5] = ["✻", "✽", "✶", "✳", "✢"];
+
+    nonempty_lines(rendered)
+        .into_iter()
+        .filter(|(_, line)| {
+            (line.contains('…') || line.contains("..."))
+                && SPINNERS.iter().any(|spinner| line.contains(spinner))
+        })
+        .map(|(offset, _)| offset)
+        .max()
+}
+
+fn nonempty_lines(rendered: &str) -> Vec<(usize, &str)> {
+    let mut offset = 0;
+    let mut lines = Vec::new();
+    for line in rendered.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            lines.push((offset, trimmed));
+        }
+        offset += line.len();
+    }
+    lines
 }
 
 fn is_latest(candidate: Option<usize>, others: &[Option<usize>]) -> bool {
@@ -631,6 +677,70 @@ mod tests {
         let state = session.tracker.snapshot_at(2_600);
         assert_eq!(state.state, AttentionState::Idle);
         assert_eq!(state.classification.as_deref(), Some("resting_prompt"));
+    }
+
+    #[test]
+    fn real_claude_resting_screen_with_draft_is_idle() {
+        let rendered = include_str!("../tests/fixtures/attention/claude_resting_with_draft.txt");
+        let tracker = AttentionTracker::new_at(
+            Some("claude_code".into()),
+            AttentionConfig::default(),
+            1_000,
+        );
+        tracker.observe_output_at(rendered.as_bytes(), rendered, false, 2_000);
+
+        assert_eq!(tracker.snapshot_at(2_500).state, AttentionState::Idle);
+        let state = tracker.snapshot_at(85_000);
+        assert_eq!(state.state, AttentionState::Idle);
+        assert!(!state.working);
+        assert!(!state.thinking);
+        assert_eq!(state.classification.as_deref(), Some("resting_prompt"));
+    }
+
+    #[test]
+    fn completed_claude_timing_line_is_not_an_active_spinner() {
+        let flags = ClaudeCodeAdapter.inspect(AdapterObservation {
+            rendered: "✻ Cogitated for 1s",
+            alternate_screen: false,
+        });
+
+        assert!(!flags.busy);
+        assert!(!flags.thinking);
+        assert_ne!(flags.classification.as_deref(), Some("busy_spinner"));
+    }
+
+    #[test]
+    fn real_claude_working_screen_stays_working() {
+        let rendered = include_str!("../tests/fixtures/attention/claude_working.txt");
+        let tracker = AttentionTracker::new_at(
+            Some("claude_code".into()),
+            AttentionConfig::default(),
+            1_000,
+        );
+        tracker.observe_output_at(rendered.as_bytes(), rendered, false, 2_000);
+
+        let state = tracker.snapshot_at(85_000);
+        assert_eq!(state.state, AttentionState::Working);
+        assert!(state.working);
+        assert!(state.thinking);
+        assert_eq!(state.classification.as_deref(), Some("busy_spinner"));
+    }
+
+    #[test]
+    fn real_claude_permission_dialog_still_needs_input() {
+        let rendered = include_str!("../tests/fixtures/attention/claude_permission_dialog.txt");
+        let tracker = AttentionTracker::new_at(
+            Some("claude_code".into()),
+            AttentionConfig::default(),
+            1_000,
+        );
+        tracker.observe_output_at(rendered.as_bytes(), rendered, false, 2_000);
+
+        let state = tracker.snapshot_at(85_000);
+        assert_eq!(state.state, AttentionState::NeedsInput);
+        assert!(state.needs_input);
+        assert!(!state.idle);
+        assert_eq!(state.classification.as_deref(), Some("permission_dialog"));
     }
 
     #[test]
