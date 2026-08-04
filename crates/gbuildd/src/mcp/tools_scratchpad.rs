@@ -251,7 +251,7 @@ struct ScratchpadLoadArgs {
 #[tool_router(router = scratchpad_tool_router, vis = "pub(crate)")]
 impl GbuildMcp {
     #[tool(
-        description = "Create or replace full scratchpad content and tags at an expected revision"
+        description = "Create or replace full scratchpad content and tags at an expected revision. A leading Markdown H1 becomes the canonical scratchpad name and is removed from stored body content; title-section reads, heading outlines, and file export reconstruct it"
     )]
     async fn scratchpad_write(
         &self,
@@ -648,7 +648,7 @@ impl GbuildMcp {
     }
 
     #[tool(
-        description = "Load UTF-8 text; relative paths stay inside the project and a leading H1 becomes the name"
+        description = "Load UTF-8 text from a project-relative path. A leading Markdown H1 becomes the canonical scratchpad name and is removed from stored body content; title-section reads, heading outlines, and file export reconstruct it"
     )]
     async fn scratchpad_load_from_file(
         &self,
