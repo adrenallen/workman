@@ -3,6 +3,9 @@
 pub mod domain;
 pub mod store;
 
+#[cfg(unix)]
+pub mod pty;
+
 pub use domain::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 
