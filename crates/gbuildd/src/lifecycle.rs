@@ -16,7 +16,10 @@ use tokio::{
     time::{Instant, MissedTickBehavior, interval},
 };
 
-use crate::{ProcessRegistry, RegistryError, SharedProcessRegistry, is_process_trusted};
+use crate::{
+    GBUILD_CONFIG_FILE, ProcessRegistry, RegistryError, SharedProcessRegistry, is_process_trusted,
+    sync_gbuild_yml, sync_gbuild_yml_file,
+};
 
 /// Timing policy for lifecycle reconciliation.
 #[derive(Clone, Debug)]
@@ -88,6 +91,7 @@ pub fn spawn_lifecycle_supervisor_with_options(
         event_rx,
         watched_projects: HashMap::new(),
         opened_projects: HashSet::new(),
+        pending_config_syncs: HashMap::new(),
         pending_changes: HashMap::new(),
         restart_attempts: HashMap::new(),
         restart_due: HashMap::new(),
@@ -104,6 +108,7 @@ struct LifecycleSupervisor {
     event_rx: mpsc::UnboundedReceiver<notify::Result<Event>>,
     watched_projects: HashMap<ProjectId, PathBuf>,
     opened_projects: HashSet<ProjectId>,
+    pending_config_syncs: HashMap<ProjectId, Instant>,
     pending_changes: HashMap<ProcessId, Instant>,
     restart_attempts: HashMap<ProcessId, u32>,
     restart_due: HashMap<ProcessId, Instant>,
@@ -136,6 +141,7 @@ impl LifecycleSupervisor {
 
     async fn reconcile(&mut self) {
         self.reconcile_projects().await;
+        self.apply_config_syncs().await;
         self.apply_changed_restarts().await;
         self.reconcile_crashes().await;
     }
@@ -161,12 +167,14 @@ impl LifecycleSupervisor {
                 let _ = self.watcher.unwatch(&root);
             }
             self.opened_projects.remove(&project_id);
+            self.pending_config_syncs.remove(&project_id);
         }
 
         for project in projects {
             self.watch_project(&project);
             if self.opened_projects.insert(project.id) {
                 let mut registry = self.registry.lock().await;
+                let _ = sync_project_config(&mut registry, &project);
                 let _ = auto_start_project(&mut registry, project.id);
             }
         }
@@ -191,11 +199,22 @@ impl LifecycleSupervisor {
         if matches!(event.kind, EventKind::Access(_)) {
             return;
         }
+        let deadline = Instant::now() + self.options.change_debounce;
+        for (project_id, root) in &self.watched_projects {
+            if event
+                .paths
+                .iter()
+                .filter_map(|path| relative_event_path(root, path))
+                .any(|path| path == Path::new(GBUILD_CONFIG_FILE))
+            {
+                self.pending_config_syncs.insert(*project_id, deadline);
+            }
+        }
+
         let processes = {
             let mut registry = self.registry.lock().await;
             registry.list(None).unwrap_or_default()
         };
-        let deadline = Instant::now() + self.options.change_debounce;
         for process in processes {
             if !is_active(process.status)
                 || !is_process_trusted(&process)
@@ -217,6 +236,23 @@ impl LifecycleSupervisor {
             {
                 self.pending_changes.insert(process.id, deadline);
             }
+        }
+    }
+
+    async fn apply_config_syncs(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .pending_config_syncs
+            .iter()
+            .filter_map(|(project_id, deadline)| (*deadline <= now).then_some(*project_id))
+            .collect::<Vec<_>>();
+        for project_id in due {
+            self.pending_config_syncs.remove(&project_id);
+            let mut registry = self.registry.lock().await;
+            let Ok(Some(project)) = registry.store().get_project(project_id) else {
+                continue;
+            };
+            let _ = sync_project_config_event(&mut registry, &project);
         }
     }
 
@@ -331,6 +367,28 @@ impl LifecycleSupervisor {
         self.restart_due.remove(&process_id);
         self.running_since.remove(&process_id);
     }
+}
+
+pub(crate) fn sync_project_config(
+    registry: &mut ProcessRegistry,
+    project: &Project,
+) -> Result<(), crate::ConfigError> {
+    if Path::new(&project.path).join(GBUILD_CONFIG_FILE).is_file() {
+        sync_gbuild_yml_file(registry, project.id)?;
+    }
+    Ok(())
+}
+
+fn sync_project_config_event(
+    registry: &mut ProcessRegistry,
+    project: &Project,
+) -> Result<(), crate::ConfigError> {
+    if Path::new(&project.path).join(GBUILD_CONFIG_FILE).is_file() {
+        sync_gbuild_yml_file(registry, project.id)?;
+    } else {
+        sync_gbuild_yml(registry, project.id, "")?;
+    }
+    Ok(())
 }
 
 fn is_active(status: ProcessStatus) -> bool {

@@ -16,7 +16,10 @@ use gbuild_core::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::config::{is_process_trusted, trust_hash_for_process, validate_process_working_dir};
+use crate::config::{
+    TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
+    validate_process_working_dir,
+};
 
 const DEFAULT_STOP_GRACE: Duration = Duration::from_millis(500);
 
@@ -201,6 +204,7 @@ pub struct ProcessRegistry {
     running: HashMap<ProcessId, PtyProcess>,
     outputs: HashMap<ProcessId, ProcessOutput>,
     selected: HashMap<ProjectId, ProcessId>,
+    trust_snapshots: HashMap<ProcessId, TrustFields>,
     stop_grace: Duration,
 }
 
@@ -211,11 +215,18 @@ impl ProcessRegistry {
     }
 
     pub fn with_stop_grace(store: Store, stop_grace: Duration) -> RegistryResult<Self> {
+        let trust_snapshots = store
+            .list_processes(None)?
+            .into_iter()
+            .filter(|process| process.source == ProcessSource::Yml && is_process_trusted(process))
+            .map(|process| (process.id, TrustFields::from_process(&process)))
+            .collect();
         let mut registry = Self {
             store,
             running: HashMap::new(),
             outputs: HashMap::new(),
             selected: HashMap::new(),
+            trust_snapshots,
             stop_grace,
         };
         registry.reconcile_stale_processes()?;
@@ -416,11 +427,34 @@ impl ProcessRegistry {
         }
         process.trust_hash = Some(actual);
         self.store.put_process(&process)?;
+        self.trust_snapshots
+            .insert(process_id, TrustFields::from_process(&process));
         if process.auto_start && !self.running.contains_key(&process_id) {
             self.start(process_id)
         } else {
             Ok(process)
         }
+    }
+
+    /// Build an approval payload and compare it with the last reviewed configuration.
+    pub fn trust_review(&mut self, process_id: ProcessId) -> RegistryResult<TrustReview> {
+        let process = self.get(process_id)?;
+        if process.source != ProcessSource::Yml {
+            return Err(RegistryError::NotYmlBacked(process_id));
+        }
+        let fields = TrustFields::from_process(&process);
+        let previous = self.trust_snapshots.get(&process_id);
+        let changes = trust_field_changes(previous, &fields);
+        let trusted = is_process_trusted(&process);
+        let expected_hash = trust_hash_for_process(&process);
+        Ok(TrustReview {
+            process_id,
+            process_name: process.name,
+            trusted,
+            expected_hash,
+            fields,
+            changes,
+        })
     }
 
     pub fn stop(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
@@ -473,6 +507,7 @@ impl ProcessRegistry {
         };
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
+        self.trust_snapshots.remove(&process_id);
         self.selected.retain(|_, selected| *selected != process_id);
         Ok(process)
     }
@@ -885,6 +920,36 @@ enum BulkAction {
     Start,
     Stop,
     Restart,
+}
+
+fn trust_field_changes(
+    previous: Option<&TrustFields>,
+    current: &TrustFields,
+) -> Vec<TrustFieldChange> {
+    let mut changes = Vec::new();
+    macro_rules! field_change {
+        ($field:ident) => {{
+            let previous_value = previous.map(|fields| {
+                serde_json::to_value(&fields.$field).expect("trust fields always serialize")
+            });
+            let current_value =
+                serde_json::to_value(&current.$field).expect("trust fields always serialize");
+            if previous_value.as_ref() != Some(&current_value) {
+                changes.push(TrustFieldChange {
+                    field: stringify!($field).to_owned(),
+                    previous: previous_value,
+                    current: current_value,
+                });
+            }
+        }};
+    }
+    field_change!(command);
+    field_change!(working_dir);
+    field_change!(env);
+    field_change!(auto_start);
+    field_change!(auto_restart);
+    field_change!(restart_when_changed);
+    changes
 }
 
 fn validate_name(name: &str) -> RegistryResult<()> {

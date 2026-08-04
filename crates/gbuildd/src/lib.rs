@@ -42,8 +42,9 @@ pub mod readiness;
 mod timers;
 
 pub use config::{
-    ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, YmlProcess, is_process_trusted,
-    parse_gbuild_yml, sync_gbuild_yml, sync_gbuild_yml_file, trust_hash_for_process,
+    ConfigError, GBUILD_CONFIG_FILE, GbuildConfig, SyncReport, TrustFieldChange, TrustFields,
+    TrustReview, YmlProcess, is_process_trusted, parse_gbuild_yml, sync_gbuild_yml,
+    sync_gbuild_yml_file, trust_hash_for_process,
 };
 pub use lifecycle::{
     LifecycleOptions, auto_start_project, spawn_lifecycle_supervisor,
@@ -67,6 +68,7 @@ const TERMINAL_FRAME_HEADER_LEN: usize = 21;
 const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
 const TERMINAL_STREAM_TICK: Duration = Duration::from_millis(16);
+const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
 
 /// The name of the secure daemon discovery file in the gbuild data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
@@ -240,9 +242,13 @@ async fn control_session(
     registry: SharedProcessRegistry,
 ) {
     let mut terminal = TerminalSubscription::default();
+    let mut status_subscribed = false;
     let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
     terminal_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal_tick.tick().await;
+    let mut status_tick = interval(PROCESS_STATUS_STREAM_TICK);
+    status_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    status_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -261,7 +267,12 @@ async fn control_session(
                 let reply = match message {
                     Message::Text(text) => {
                         if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
-                            let response = match handle_terminal_control(&text, &registry, &mut terminal).await {
+                            let response = match handle_session_control(
+                                &text,
+                                &registry,
+                                &mut terminal,
+                                &mut status_subscribed,
+                            ).await {
                                 Some(response) => response,
                                 None => control::handle_text(&text, &registry).await,
                             };
@@ -308,6 +319,18 @@ async fn control_session(
                     }
                 }
             }
+            _ = status_tick.tick(), if status_subscribed => {
+                let statuses = registry.lock().await.list_statuses(None);
+                if let Ok(processes) = statuses {
+                    let event = json!({
+                        "event": "process.statuses",
+                        "processes": processes,
+                    });
+                    if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -318,18 +341,39 @@ struct TerminalSubscription {
     offset: u64,
 }
 
-async fn handle_terminal_control(
+async fn handle_session_control(
     text: &str,
     registry: &SharedProcessRegistry,
     terminal: &mut TerminalSubscription,
+    status_subscribed: &mut bool,
 ) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(text).ok()?;
     let method = request.get("method")?.as_str()?;
-    if !matches!(method, "terminal.attach" | "terminal.detach") {
+    if !matches!(
+        method,
+        "terminal.attach"
+            | "terminal.detach"
+            | "process.status_subscribe"
+            | "process.status_unsubscribe"
+    ) {
         return None;
     }
 
     let id = request.get("id").cloned().unwrap_or_default();
+    if matches!(
+        method,
+        "process.status_subscribe" | "process.status_unsubscribe"
+    ) {
+        *status_subscribed = method == "process.status_subscribe";
+        return Some(
+            json!({
+                "id": id,
+                "ok": true,
+                "result": { "subscribed": *status_subscribed }
+            })
+            .to_string(),
+        );
+    }
     if method == "terminal.detach" {
         terminal.process_id = None;
         terminal.offset = 0;

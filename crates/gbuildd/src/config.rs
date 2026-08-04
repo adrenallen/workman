@@ -11,6 +11,7 @@ use gbuild_core::{
     Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{ProcessRegistry, RegistryError};
@@ -52,6 +53,49 @@ pub struct SyncReport {
     pub removed: Vec<ProcessId>,
     pub started: Vec<ProcessId>,
     pub awaiting_trust: Vec<ProcessId>,
+}
+
+/// The exact configuration fields covered by a YAML process approval.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TrustFields {
+    pub command: Option<String>,
+    pub working_dir: String,
+    pub env: BTreeMap<String, String>,
+    pub auto_start: bool,
+    pub auto_restart: bool,
+    pub restart_when_changed: Vec<String>,
+}
+
+impl TrustFields {
+    pub fn from_process(process: &Process) -> Self {
+        Self {
+            command: process.command.clone(),
+            working_dir: process.working_dir.clone(),
+            env: process.env.clone(),
+            auto_start: process.auto_start,
+            auto_restart: process.auto_restart,
+            restart_when_changed: process.restart_when_changed.clone(),
+        }
+    }
+}
+
+/// One trust-relevant field changed since the last approval.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TrustFieldChange {
+    pub field: String,
+    pub previous: Option<Value>,
+    pub current: Value,
+}
+
+/// Review payload shown before approving one YAML-backed command.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TrustReview {
+    pub process_id: ProcessId,
+    pub process_name: String,
+    pub trusted: bool,
+    pub expected_hash: String,
+    pub fields: TrustFields,
+    pub changes: Vec<TrustFieldChange>,
 }
 
 /// Errors raised before or during YAML synchronization.
@@ -275,24 +319,7 @@ pub fn sync_gbuild_yml(
 
 /// Calculate the canonical approval hash for one process's trust-relevant fields.
 pub fn trust_hash_for_process(process: &Process) -> String {
-    #[derive(Serialize)]
-    struct TrustFields<'a> {
-        command: &'a Option<String>,
-        working_dir: &'a str,
-        env: &'a BTreeMap<String, String>,
-        auto_start: bool,
-        auto_restart: bool,
-        restart_when_changed: &'a [String],
-    }
-
-    let fields = TrustFields {
-        command: &process.command,
-        working_dir: &process.working_dir,
-        env: &process.env,
-        auto_start: process.auto_start,
-        auto_restart: process.auto_restart,
-        restart_when_changed: &process.restart_when_changed,
-    };
+    let fields = TrustFields::from_process(process);
     let bytes = serde_json::to_vec(&fields).expect("trust fields always serialize");
     let digest = Sha256::digest(bytes);
     let mut hash = String::with_capacity(7 + digest.len() * 2);

@@ -2,8 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
-export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'crashed';
+export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
 export type ProcessKind = 'command' | 'terminal' | 'agent';
+export type ProcessSource = 'yml' | 'local';
+export type AttentionState = 'working' | 'needs_input' | 'idle' | 'exited';
 
 export interface Project {
   id: number;
@@ -28,9 +30,59 @@ export interface ProcessView {
   name: string;
   command: string | null;
   working_dir: string;
+  env: Record<string, string>;
+  auto_start: boolean;
+  auto_restart: boolean;
+  restart_when_changed: string[];
+  source: ProcessSource;
+  trust_hash: string | null;
   status: ProcessStatus;
   pid: number | null;
   exit_code: number | null;
+  exit_signal: number | null;
+  exited_at: number | null;
+  agent_tool_id: number | null;
+  agent_state: AgentState;
+}
+
+export interface AgentState {
+  state: AttentionState;
+  working: boolean;
+  needs_input: boolean;
+  idle: boolean;
+  exited: boolean;
+  thinking: boolean;
+  planning: boolean;
+  tool_type: string | null;
+  idle_seconds: number;
+  last_output_seconds: number | null;
+  last_output_at: number | null;
+  last_content_change_at: number | null;
+  classification: string | null;
+}
+
+export interface TrustFields {
+  command: string | null;
+  working_dir: string;
+  env: Record<string, string>;
+  auto_start: boolean;
+  auto_restart: boolean;
+  restart_when_changed: string[];
+}
+
+export interface TrustFieldChange {
+  field: keyof TrustFields;
+  previous: unknown | null;
+  current: unknown;
+}
+
+export interface TrustReview {
+  process_id: number;
+  process_name: string;
+  trusted: boolean;
+  expected_hash: string;
+  fields: TrustFields;
+  changes: TrustFieldChange[];
 }
 
 export interface TerminalFrame {
@@ -52,6 +104,11 @@ interface DaemonResponse {
   error?: { code: string; message: string };
 }
 
+interface ProcessStatusesEvent {
+  event: 'process.statuses';
+  processes: ProcessView[];
+}
+
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -63,6 +120,7 @@ export class DaemonClient {
   private pending = new Map<string, PendingRequest>();
   private unlisten: UnlistenFn[] = [];
   private terminalListeners = new Set<(frame: TerminalFrame) => void>();
+  private processListeners = new Set<(processes: ProcessView[]) => void>();
 
   async start(
     onStatus: (status: ConnectionStatus) => void,
@@ -101,6 +159,41 @@ export class DaemonClient {
     return this.request('process.list', { project_id: projectId });
   }
 
+  subscribeProcessStatuses(): Promise<{ subscribed: boolean }> {
+    return this.request('process.status_subscribe');
+  }
+
+  syncConfig(projectId: number): Promise<{ project_id: number; synced: boolean }> {
+    return this.request('config.sync', { project_id: projectId });
+  }
+
+  startProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.start', { process_id: processId });
+  }
+
+  stopProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.stop', { process_id: processId });
+  }
+
+  restartProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.restart', { process_id: processId });
+  }
+
+  spawnTerminal(projectId: number): Promise<ProcessView> {
+    return this.request('process.spawn_terminal', { project_id: projectId });
+  }
+
+  trustReview(processId: number): Promise<TrustReview> {
+    return this.request('process.trust_review', { process_id: processId });
+  }
+
+  trustYmlProcess(processId: number, expectedHash: string): Promise<ProcessView> {
+    return this.request('process.trust_yml', {
+      process_id: processId,
+      expected_hash: expectedHash
+    });
+  }
+
   attachTerminal(processId: number, offset = 0): Promise<{ process_id: number; offset: number }> {
     return this.request('terminal.attach', { process_id: processId, offset });
   }
@@ -137,6 +230,11 @@ export class DaemonClient {
     return () => this.terminalListeners.delete(listener);
   }
 
+  onProcessStatuses(listener: (processes: ProcessView[]) => void): () => void {
+    this.processListeners.add(listener);
+    return () => this.processListeners.delete(listener);
+  }
+
   close(): void {
     for (const unlisten of this.unlisten.splice(0)) unlisten();
     for (const pending of this.pending.values()) {
@@ -145,6 +243,7 @@ export class DaemonClient {
     }
     this.pending.clear();
     this.terminalListeners.clear();
+    this.processListeners.clear();
   }
 
   private async request<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
@@ -176,23 +275,29 @@ export class DaemonClient {
   }
 
   private handleText(text: string, onProtocolError: (message: string) => void): void {
-    let response: DaemonResponse;
+    let response: DaemonResponse | ProcessStatusesEvent;
     try {
-      response = JSON.parse(text) as DaemonResponse;
+      response = JSON.parse(text) as DaemonResponse | ProcessStatusesEvent;
     } catch {
       onProtocolError('The daemon sent an unreadable control message');
       return;
     }
-    if (typeof response.id !== 'string') return;
+    const event = response as ProcessStatusesEvent;
+    if (event.event === 'process.statuses' && Array.isArray(event.processes)) {
+      for (const listener of this.processListeners) listener(event.processes);
+      return;
+    }
+    const rpc = response as DaemonResponse;
+    if (typeof rpc.id !== 'string') return;
 
-    const pending = this.pending.get(response.id);
+    const pending = this.pending.get(rpc.id);
     if (!pending) return;
     clearTimeout(pending.timeout);
-    this.pending.delete(response.id);
-    if (response.ok && response.result !== undefined) {
-      pending.resolve(response.result);
+    this.pending.delete(rpc.id);
+    if (rpc.ok && rpc.result !== undefined) {
+      pending.resolve(rpc.result);
     } else {
-      pending.reject(new Error(response.error?.message ?? 'The daemon rejected the request'));
+      pending.reject(new Error(rpc.error?.message ?? 'The daemon rejected the request'));
     }
   }
 }

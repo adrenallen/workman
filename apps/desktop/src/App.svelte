@@ -6,9 +6,12 @@
     DaemonClient,
     type ConnectionStatus,
     type ProcessView,
-    type Project
+    type Project,
+    type TrustReview
   } from './lib/daemon';
+  import ProcessPanel from './lib/ProcessPanel.svelte';
   import TerminalView from './lib/TerminalView.svelte';
+  import TrustReviewDialog from './lib/TrustReview.svelte';
 
   const client = new DaemonClient();
   let projects = $state<Project[]>([]);
@@ -26,6 +29,9 @@
   let renameValue = $state('');
   let selectedProcessId = $state<number | null>(null);
   let loadedProjectId = $state<number | null>(null);
+  let processActionId = $state<number | null>(null);
+  let trustReview = $state<TrustReview | null>(null);
+  let trustBusy = $state(false);
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
     processes.find((process) => process.id === selectedProcessId) ?? null
@@ -34,7 +40,12 @@
   function applyConnectionStatus(status: ConnectionStatus): void {
     const wasConnected = connection.status === 'connected';
     connection = status;
-    if (status.status === 'connected' && !wasConnected) void refreshProjects();
+    if (status.status === 'connected' && !wasConnected) {
+      void client.subscribeProcessStatuses().catch((cause) => {
+        error = cause instanceof Error ? cause.message : String(cause);
+      });
+      void refreshProjects();
+    }
   }
 
   function focusRename(node: HTMLInputElement): void {
@@ -50,6 +61,7 @@
     if (!connected || projectId === null) {
       processes = [];
       selectedProcessId = null;
+      trustReview = null;
       loadedProjectId = null;
       return;
     }
@@ -57,16 +69,20 @@
       loadedProjectId = projectId;
       processes = [];
       selectedProcessId = null;
-      void refreshProcesses(projectId);
+      trustReview = null;
+      void loadProcesses(projectId);
     }
   });
 
   onMount(() => {
     let active = true;
+    const stopProcessStatuses = client.onProcessStatuses((next) => {
+      if (!active || !selectedProject) return;
+      applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
+    });
     const statusRefresh = setInterval(() => {
       if (active && connection.status === 'connected' && !busy) {
         void refreshProjects();
-        if (selectedProject) void refreshProcesses(selectedProject.id);
       }
     }, 5000);
     void client
@@ -90,6 +106,7 @@
     return () => {
       active = false;
       clearInterval(statusRefresh);
+      stopProcessStatuses();
       client.close();
     };
   });
@@ -116,18 +133,97 @@
     try {
       const next = await client.processes(projectId);
       if (request !== processRequest || selectedProject?.id !== projectId) return;
-      processes = next;
-      const selectedStillExists = next.some((process) => process.id === selectedProcessId);
-      if (!selectedStillExists) {
-        selectedProcessId =
-          next.find((process) => process.status === 'running')?.id ?? next[0]?.id ?? null;
-      }
+      applyProcesses(next);
     } catch (cause) {
       if (request === processRequest) {
         error = cause instanceof Error ? cause.message : String(cause);
       }
     } finally {
       if (request === processRequest) processBusy = false;
+    }
+  }
+
+  async function loadProcesses(projectId: number): Promise<void> {
+    try {
+      await client.syncConfig(projectId);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    await refreshProcesses(projectId);
+  }
+
+  function applyProcesses(next: ProcessView[]): void {
+    processes = next;
+    const selectedStillExists = next.some((process) => process.id === selectedProcessId);
+    if (!selectedStillExists) {
+      selectedProcessId =
+        next.find((process) => process.status === 'running')?.id ?? next[0]?.id ?? null;
+    }
+  }
+
+  async function processAction(
+    process: ProcessView,
+    operation: (processId: number) => Promise<ProcessView>
+  ): Promise<void> {
+    processActionId = process.id;
+    error = null;
+    selectedProcessId = process.id;
+    try {
+      await operation(process.id);
+      await refreshProcesses(process.project_id);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      processActionId = null;
+    }
+  }
+
+  async function openTrustReview(process: ProcessView): Promise<void> {
+    processActionId = process.id;
+    error = null;
+    try {
+      trustReview = await client.trustReview(process.id);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      processActionId = null;
+    }
+  }
+
+  async function approveTrust(): Promise<void> {
+    if (!trustReview || !selectedProject) return;
+    const review = trustReview;
+    trustBusy = true;
+    error = null;
+    try {
+      await client.trustYmlProcess(review.process_id, review.expected_hash);
+      trustReview = null;
+      selectedProcessId = review.process_id;
+      await refreshProcesses(selectedProject.id);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      try {
+        trustReview = await client.trustReview(review.process_id);
+      } catch {
+        trustReview = null;
+      }
+    } finally {
+      trustBusy = false;
+    }
+  }
+
+  async function spawnTerminal(): Promise<void> {
+    if (!selectedProject || processActionId !== null) return;
+    processActionId = -1;
+    error = null;
+    try {
+      const process = await client.spawnTerminal(selectedProject.id);
+      selectedProcessId = process.id;
+      await refreshProcesses(selectedProject.id);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      processActionId = null;
     }
   }
 
@@ -297,25 +393,18 @@
         <span></span>
         <small>{selectedProject.status}</small>
       </div>
-      {#if processes.length > 0}
-        <nav class="process-strip" aria-label="Project processes">
-          {#each processes as process (process.id)}
-            <button
-              type="button"
-              class:active={process.id === selectedProcessId}
-              aria-current={process.id === selectedProcessId ? 'true' : undefined}
-              onclick={() => (selectedProcessId = process.id)}
-            >
-              <span
-                class="process-light"
-                class:is-running={process.status === 'running'}
-                class:is-crashed={process.status === 'crashed'}
-              ></span>
-              <span><strong>{process.name}</strong><small>{process.kind}</small></span>
-            </button>
-          {/each}
-        </nav>
-      {/if}
+      <ProcessPanel
+        {processes}
+        selectedId={selectedProcessId}
+        busyId={processActionId}
+        connected={connection.status === 'connected'}
+        onSelect={(processId) => (selectedProcessId = processId)}
+        onStart={(process) => void processAction(process, (id) => client.startProcess(id))}
+        onStop={(process) => void processAction(process, (id) => client.stopProcess(id))}
+        onRestart={(process) => void processAction(process, (id) => client.restartProcess(id))}
+        onTrust={(process) => void openTrustReview(process)}
+        onSpawnTerminal={() => void spawnTerminal()}
+      />
       <div class="workspace-body">
         {#if selectedProcess}
           {#key selectedProcess.id}
@@ -343,3 +432,12 @@
     {/if}
   </section>
 </main>
+
+{#if trustReview}
+  <TrustReviewDialog
+    review={trustReview}
+    busy={trustBusy}
+    onApprove={() => void approveTrust()}
+    onClose={() => (trustReview = null)}
+  />
+{/if}

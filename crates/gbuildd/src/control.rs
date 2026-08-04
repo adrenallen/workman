@@ -3,7 +3,9 @@
 use std::{path::Path, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use gbuild_core::{Process, ProcessId, ProcessStatus, Project, ProjectId, Store};
+use gbuild_core::{
+    Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId, Store,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -90,6 +92,18 @@ struct WaitForPortParams {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TrustProcessParams {
+    process_id: ProcessId,
+    expected_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpawnTerminalParams {
+    project_id: ProjectId,
+    name: Option<String>,
+}
+
 /// Dispatch a control request, retaining todo-211's JSON echo behavior for non-RPC frames.
 pub(crate) async fn handle_text(text: &str, registry: &SharedProcessRegistry) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -172,6 +186,17 @@ async fn dispatch(
             rename_project(registry.store(), params.project_id, &params.name)?;
             return project_result(list_projects(registry.store()));
         }
+        "config.sync" => {
+            let params: ProjectParams = params_as(params)?;
+            let project = registry
+                .store()
+                .get_project(params.project_id)
+                .map_err(project_store_error)?
+                .ok_or(("project_not_found", "project not found".to_owned()))?;
+            return crate::lifecycle::sync_project_config(&mut registry, &project)
+                .map(|()| json!({ "project_id": params.project_id, "synced": true }))
+                .map_err(|error| ("config_error", error.to_string()));
+        }
         "process.raw_output" => {
             let params: OutputParams = params_as(params)?;
             let mut chunk = registry
@@ -248,6 +273,20 @@ async fn dispatch(
             let params: ProcessIdParams = params_as(params)?;
             registry.restart(params.process_id).map(json_value)
         }
+        "process.trust_review" => {
+            let params: ProcessIdParams = params_as(params)?;
+            registry.trust_review(params.process_id).map(json_value)
+        }
+        "process.trust_yml" => {
+            let params: TrustProcessParams = params_as(params)?;
+            registry
+                .trust_yml_process(params.process_id, &params.expected_hash)
+                .map(json_value)
+        }
+        "process.spawn_terminal" => {
+            let params: SpawnTerminalParams = params_as(params)?;
+            spawn_terminal(&mut registry, params).map(json_value)
+        }
         "process.close" | "process.delete" => {
             let params: ProcessIdParams = params_as(params)?;
             registry.close(params.process_id).map(json_value)
@@ -287,6 +326,58 @@ async fn dispatch(
         }
     };
     result.map_err(registry_error)
+}
+
+fn spawn_terminal(
+    registry: &mut crate::ProcessRegistry,
+    params: SpawnTerminalParams,
+) -> Result<Process, RegistryError> {
+    let project = registry
+        .store()
+        .get_project(params.project_id)?
+        .ok_or(RegistryError::NotFound(params.project_id))?;
+    let existing = registry.list(Some(params.project_id))?;
+    let requested = params
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let name = requested.map(str::to_owned).unwrap_or_else(|| {
+        let mut suffix = 1;
+        loop {
+            let candidate = if suffix == 1 {
+                "Terminal".to_owned()
+            } else {
+                format!("Terminal {suffix}")
+            };
+            if existing.iter().all(|process| process.name != candidate) {
+                break candidate;
+            }
+            suffix += 1;
+        }
+    });
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let process = registry.create(Process {
+        id: 0,
+        project_id: params.project_id,
+        kind: ProcessKind::Terminal,
+        name,
+        command: Some(shell),
+        working_dir: project.path,
+        env: Default::default(),
+        auto_start: false,
+        auto_restart: false,
+        restart_when_changed: Vec::new(),
+        source: ProcessSource::Local,
+        trust_hash: None,
+        status: ProcessStatus::Stopped,
+        pid: None,
+        exit_code: None,
+        exit_signal: None,
+        exited_at: None,
+        agent_tool_id: None,
+    })?;
+    registry.start(process.id)
 }
 
 fn process_param(params: Value) -> Result<Process, (&'static str, String)> {
