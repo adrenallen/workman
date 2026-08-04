@@ -23,13 +23,20 @@ printf '  ▸ Installing desktop dependencies\n'
 (
   cd "$repo_root/apps/desktop"
   npm install --no-audit --no-fund
-  npm run build
 )
 
 printf '\n  ▸ Building release binaries\n'
 (
   cd "$repo_root"
-  cargo build --release -p gbuild-cli -p gbuildd -p gbuild-desktop
+  cargo build --release -p gbuild-cli -p gbuildd
+)
+
+printf '\n  ▸ Building desktop application\n'
+(
+  cd "$repo_root/apps/desktop"
+  # The Tauri CLI runs beforeBuildCommand and embeds frontendDist in the binary.
+  # A separate Vite build followed by cargo build can reuse a stale Rust artifact.
+  npm run tauri -- build --no-bundle
 )
 
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
