@@ -216,12 +216,16 @@ struct AppState {
 }
 
 fn router(state: AppState) -> Router {
-    let mcp_service = mcp::streamable_http_service(state.registry.clone());
+    let (mcp_service, mcp_sessions) = mcp::streamable_http_service(state.registry.clone());
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
         .nest_service("/mcp", mcp_service)
         .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(
+            mcp_sessions,
+            mcp::require_known_session,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             authorize_local_request,

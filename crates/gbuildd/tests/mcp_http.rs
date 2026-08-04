@@ -14,6 +14,46 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn raw_mcp_post(port: u16, token: &str, session_id: &str) -> std::io::Result<String> {
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMcp-Session-Id: {session_id}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
+}
+
+#[tokio::test]
+async fn unknown_mcp_session_returns_404() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let server = DaemonServer::bind(DaemonConfig {
+        data_dir: temp.path().join("state"),
+        port: 0,
+    })
+    .await?;
+    let discovery = server.discovery().clone();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(server.serve_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let response = raw_mcp_post(discovery.port, &discovery.token, "bogus-session-id").await?;
+    assert!(
+        response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "unknown MCP session response was {response:?}"
+    );
+    assert!(response.contains("Session not found"));
+
+    let _ = shutdown_tx.send(());
+    server_task.await??;
+    Ok(())
+}
 
 fn arguments(value: Value) -> Map<String, Value> {
     value

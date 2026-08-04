@@ -2,10 +2,16 @@
 
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axum::http::request::Parts;
+use axum::{
+    extract::{Request, State},
+    http::{StatusCode, request::Parts},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use gbuild_core::{Actor, Process, ProcessId, ProcessStatus, Project, ProjectId};
 use rmcp::{
     ServerHandler,
@@ -13,7 +19,8 @@ use rmcp::{
     model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        session::local::LocalSessionManager,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -57,13 +64,51 @@ impl GbuildMcp {
 
 pub fn streamable_http_service(
     registry: SharedProcessRegistry,
-) -> StreamableHttpService<GbuildMcp, LocalSessionManager> {
+) -> (
+    StreamableHttpService<GbuildMcp, LocalSessionManager>,
+    Arc<LocalSessionManager>,
+) {
     let config = StreamableHttpServerConfig::default().with_json_response(true);
-    StreamableHttpService::new(
+    let sessions = Arc::new(LocalSessionManager::default());
+    let service = StreamableHttpService::new(
         move || Ok(GbuildMcp::new(registry.clone())),
-        LocalSessionManager::default().into(),
+        sessions.clone(),
         config,
-    )
+    );
+    (service, sessions)
+}
+
+/// Reject stale stateful MCP requests before rmcp can dispatch them.
+///
+/// Streamable HTTP clients use 404 as the signal to discard an unknown or
+/// expired session ID and perform a fresh initialize handshake.
+pub async fn require_known_session(
+    State(sessions): State<Arc<LocalSessionManager>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if path != "/mcp" && !path.starts_with("/mcp/") {
+        return next.run(request).await;
+    }
+    let Some(raw_session_id) = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return next.run(request).await;
+    };
+    let session_id: SessionId = raw_session_id.to_owned().into();
+
+    match sessions.has_session(&session_id).await {
+        Ok(true) => next.run(request).await,
+        Ok(false) => (StatusCode::NOT_FOUND, "Not Found: Session not found").into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to check MCP session: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
