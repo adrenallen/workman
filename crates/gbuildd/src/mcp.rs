@@ -26,6 +26,7 @@ mod agent_spawning;
 mod tools_lock;
 mod tools_process;
 mod tools_readiness;
+mod tools_scratchpad;
 mod tools_timer;
 mod tools_todo;
 
@@ -45,6 +46,7 @@ impl GbuildMcp {
         tool_router.merge(Self::agent_spawning_tool_router());
         tool_router.merge(Self::todo_tool_router());
         tool_router.merge(Self::lock_tool_router());
+        tool_router.merge(Self::scratchpad_tool_router());
         tool_router.merge(Self::timer_tool_router());
         Self {
             registry,

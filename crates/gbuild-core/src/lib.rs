@@ -3,6 +3,8 @@
 pub mod attention;
 pub mod domain;
 pub mod locks;
+/// Revision-guarded project scratchpads.
+pub mod scratchpads;
 pub mod store;
 pub mod terminal;
 pub mod todos;
@@ -12,6 +14,7 @@ pub mod pty;
 
 pub use domain::*;
 pub use locks::*;
+pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todos::*;
 
