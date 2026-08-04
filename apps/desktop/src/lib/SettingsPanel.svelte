@@ -85,13 +85,13 @@
 </section>
 
 <style>
-  .settings-panel { min-width: 0; padding: 22px clamp(20px, 3.6vw, 52px) 48px; }
+  .settings-panel { min-width: 0; padding: 12px 16px 24px; }
   .unavailable, .loading { display: flex; align-items: center; }
   .loading { font-family: 'JetBrains Mono Variable', monospace; }
 
-  .settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: 14px; align-items: start; }
+  .settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: 10px; align-items: start; }
   .mcp, .agents { grid-column: 1 / -1; }
-  .unavailable, .loading { min-height: 250px; justify-content: center; gap: 13px; border: 1px dashed #2c4651; border-radius: 5px; color: #68808a; }
+  .unavailable, .loading { min-height: 180px; justify-content: center; gap: 10px; border: 1px dashed var(--border-strong); border-radius: 4px; color: #9299a2; }
   .unavailable > span { color: #45636e; font-size: 30px; }
   .unavailable h2 { margin: 0; color: #a5b7bd; font-size: 14px; }
   .unavailable p { max-width: 430px; margin: 5px 0 0; font-size: 10px; line-height: 1.5; }

@@ -378,21 +378,20 @@
     grid-template-rows: auto auto minmax(0, 1fr);
     min-height: 0;
     overflow: hidden;
-    border: 1px solid #273638;
-    border-radius: 5px;
-    background: #0e1517;
-    box-shadow: 0 20px 50px rgb(6 12 13 / 28%);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #101214;
   }
 
   .terminal-toolbar {
     display: flex;
-    min-height: 42px;
+    min-height: 36px;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
-    padding: 0 12px 0 15px;
-    border-bottom: 1px solid #263638;
-    background: #162024;
+    gap: 12px;
+    padding: 0 9px 0 11px;
+    border-bottom: 1px solid var(--border);
+    background: #1a1d20;
   }
 
   .terminal-identity,
@@ -405,7 +404,7 @@
 
   .terminal-identity strong {
     overflow: hidden;
-    color: #edf4ef;
+    color: #f0f1f3;
     font: 620 12px/1.2 'Archivo Variable', sans-serif;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -414,7 +413,7 @@
   .terminal-identity > span:not(.signal-light),
   .renderer,
   .stream-gap {
-    color: #7f918d;
+    color: #8e959e;
     font: 500 9px/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -426,12 +425,10 @@
     flex: 0 0 auto;
     border-radius: 50%;
     background: #66716f;
-    box-shadow: 0 0 0 3px rgb(102 113 111 / 10%);
   }
 
   .signal-light.is-live {
-    background: #6fc6a4;
-    box-shadow: 0 0 0 3px rgb(111 198 164 / 12%), 0 0 13px rgb(111 198 164 / 30%);
+    background: var(--signal);
   }
 
   .stream-gap {
@@ -454,9 +451,9 @@
 
   .terminal-tools button:hover,
   .terminal-search button:hover {
-    border-color: #3a5150;
-    color: #e2ece6;
-    background: #213033;
+    border-color: #50565e;
+    color: #f0f1f3;
+    background: #292d32;
   }
 
   .terminal-search {
@@ -464,26 +461,25 @@
     align-items: center;
     justify-content: flex-end;
     gap: 4px;
-    padding: 6px 10px;
-    border-bottom: 1px solid #263638;
-    background: #121b1e;
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border);
+    background: #17191c;
   }
 
   .terminal-search input {
     width: min(280px, 45vw);
     height: 28px;
-    border: 1px solid #38504e;
+    border: 1px solid #464b52;
     border-radius: 3px;
     outline: none;
     padding: 0 9px;
-    color: #dce7e1;
-    background: #0c1315;
+    color: #e2e4e6;
+    background: #111315;
     font: 500 11px/1 'JetBrains Mono Variable', monospace;
   }
 
   .terminal-search input:focus {
-    border-color: #69b99f;
-    box-shadow: 0 0 0 2px rgb(105 185 159 / 14%);
+    border-color: #777e87;
   }
 
   .terminal-search > span {
@@ -496,7 +492,7 @@
   .terminal-host {
     min-width: 0;
     min-height: 0;
-    padding: 10px 8px 7px 12px;
+    padding: 7px 6px 5px 8px;
   }
 
   .terminal-host :global(.xterm) {

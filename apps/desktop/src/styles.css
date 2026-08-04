@@ -1,18 +1,25 @@
 :root {
   font-family: 'Archivo Variable', 'Avenir Next', sans-serif;
-  color: #d8e2e9;
-  background: #08131b;
+  color: #e5e7eb;
+  background: #111315;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --night: #08131b;
-  --rail: #0c1b25;
-  --panel: #10232e;
-  --slate: #1c3441;
-  --steel: #76909d;
-  --fog: #dce6ea;
-  --signal: #63d7c5;
-  --fault: #ef7d75;
-  --warning: #e4ae5b;
+  --night: #111315;
+  --rail: #17191c;
+  --panel: #1b1e22;
+  --slate: #30343a;
+  --steel: #9ca3ad;
+  --fog: #f3f4f6;
+  --signal: #55b989;
+  --fault: #dc6b6b;
+  --warning: #d6a24f;
+  --surface: #17191c;
+  --surface-raised: #1c1f23;
+  --border: #30343a;
+  --border-strong: #42474f;
+  --text: #e5e7eb;
+  --text-soft: #b3b8c0;
+  --muted: #7d848e;
 }
 
 * {
@@ -48,13 +55,13 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--signal);
+  outline: 2px solid #8a929d;
   outline-offset: 2px;
 }
 
 ::selection {
-  background: rgb(99 215 197 / 24%);
-  color: #f4fbfa;
+  background: rgb(122 130 140 / 34%);
+  color: #fff;
 }
 
 @media (prefers-reduced-motion: no-preference) {

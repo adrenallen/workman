@@ -230,7 +230,7 @@
 
   .board-heading {
     justify-content: space-between;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
   }
 
   .board-heading > div { gap: 11px; }
@@ -241,17 +241,17 @@
   .empty-board button,
   .detail-actions > button,
   .comment-form button {
-    border: 1px solid #3f6f68;
+    border: 1px solid #4a4f57;
     border-radius: 3px;
-    background: #14312c;
-    color: #d5e9e5;
+    background: #25282d;
+    color: #e1e3e6;
     font-size: 9px;
     font-weight: 650;
     cursor: pointer;
   }
 
-  .board-actions button { display: flex; align-items: center; gap: 6px; padding: 7px 9px; }
-  .board-actions button span, .empty-board button span { color: var(--signal); font: 12px 'JetBrains Mono Variable', monospace; }
+  .board-actions button { display: flex; align-items: center; gap: 5px; padding: 5px 8px; }
+  .board-actions button span, .empty-board button span { color: #a6acb4; font: 12px 'JetBrains Mono Variable', monospace; }
   .board-actions button:disabled,
   .empty-board button:disabled,
   .detail-actions > button:disabled,
@@ -259,8 +259,8 @@
 
   .board-heading h3 {
     margin: 0;
-    color: #dce7ea;
-    font-size: 19px;
+    color: #eceef0;
+    font-size: 17px;
     font-weight: 620;
   }
 
@@ -278,7 +278,7 @@
   }
 
   .eyebrow {
-    color: #6f8792;
+    color: #858c95;
     font-size: 8px;
     font-weight: 650;
     letter-spacing: 0.1em;
@@ -286,7 +286,7 @@
   }
 
   .count {
-    color: #5e7681;
+    color: #818892;
     font-size: 9px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -294,20 +294,20 @@
 
   .empty-board {
     display: grid;
-    min-height: 360px;
+    min-height: 240px;
     place-content: center;
     justify-items: center;
-    border: 1px dashed #2c4651;
+    border: 1px dashed #3b4047;
     border-radius: 4px;
-    padding: 34px;
-    background: rgb(9 24 32 / 46%);
+    padding: 22px;
+    background: #15171a;
     text-align: center;
   }
 
-  .empty-mark { color: var(--signal); font-size: 32px; }
-  .empty-board h4 { margin: 10px 0 0; color: #dbe6e9; font-size: 21px; }
-  .empty-board p { max-width: 420px; margin: 10px 0 19px; color: #687f89; font-size: 11px; line-height: 1.6; }
-  .empty-board button { display: flex; align-items: center; gap: 8px; padding: 9px 12px; }
+  .empty-mark { color: #9ca2aa; font-size: 24px; }
+  .empty-board h4 { margin: 7px 0 0; color: #e6e8ea; font-size: 18px; }
+  .empty-board p { max-width: 420px; margin: 7px 0 13px; color: #9198a1; font-size: 11px; line-height: 1.5; }
+  .empty-board button { display: flex; align-items: center; gap: 6px; padding: 6px 9px; }
 
   .columns {
     display: grid;
@@ -319,53 +319,53 @@
 
   .column {
     min-width: 155px;
-    border: 1px solid #263d48;
+    border: 1px solid var(--border);
     border-radius: 4px;
-    background: rgb(8 20 27 / 62%);
+    background: #17191c;
   }
 
   .column > header {
     gap: 7px;
-    min-height: 35px;
-    border-bottom: 1px solid #223641;
-    padding: 0 9px;
-    color: #8198a2;
+    min-height: 30px;
+    border-bottom: 1px solid var(--border);
+    padding: 0 8px;
+    color: #a0a6ae;
     font-size: 8px;
     letter-spacing: 0.07em;
     text-transform: uppercase;
   }
 
-  .column > header > span { color: var(--signal); font-size: 11px; }
+  .column > header > span { color: #aab0b8; font-size: 11px; }
   .column > header strong { font-weight: 620; }
   .column > header small { margin-left: auto; color: #516873; }
 
   .cards {
     display: grid;
     align-content: start;
-    gap: 6px;
+    gap: 4px;
     min-height: 115px;
     max-height: 250px;
     overflow-y: auto;
-    padding: 7px;
+    padding: 5px;
     scrollbar-color: #2c4652 transparent;
     scrollbar-width: thin;
   }
 
   .todo-card {
     display: grid;
-    gap: 7px;
-    border: 1px solid #29424e;
+    gap: 5px;
+    border: 1px solid #34383e;
     border-radius: 3px;
-    padding: 9px;
-    background: #0d2029;
-    color: #b9c9ce;
+    padding: 7px;
+    background: #1d2024;
+    color: #c9cdd2;
     text-align: left;
     cursor: pointer;
   }
 
-  .todo-card:hover { border-color: #47717b; transform: translateY(-1px); }
-  .todo-card.selected { border-color: var(--signal); box-shadow: inset 2px 0 var(--signal); }
-  .todo-card.blocked { background: linear-gradient(135deg, rgb(115 53 56 / 20%), #0d2029 55%); }
+  .todo-card:hover { border-color: #555b63; }
+  .todo-card.selected { border-color: #666d76; box-shadow: inset 2px 0 #7a818a; }
+  .todo-card.blocked { background: rgb(112 48 48 / 18%); }
   .todo-card > strong { font-size: 11px; line-height: 1.32; }
   .card-topline { justify-content: space-between; }
 
@@ -421,20 +421,20 @@
     display: grid;
     grid-template-columns: minmax(0, 1.6fr) minmax(220px, 0.8fr);
     margin-top: 10px;
-    border: 1px solid #29434e;
+    border: 1px solid var(--border);
     border-radius: 4px;
-    background: #0b1c24;
+    background: #17191c;
   }
 
-  .detail-copy { min-width: 0; padding: 16px 18px; }
+  .detail-copy { min-width: 0; padding: 11px 13px; }
   .detail > .detail-copy > header { justify-content: space-between; gap: 15px; }
-  .detail-copy h4 { margin: 3px 0 0; color: #e0e9ec; font-size: 16px; }
+  .detail-copy h4 { margin: 2px 0 0; color: #eceef0; font-size: 15px; }
   .detail-badges { display: flex; flex-wrap: wrap; gap: 8px; font-size: 7px; }
   .detail-actions { display: flex; align-items: center; gap: 9px; }
   .detail-actions > button { padding: 7px 9px; }
   .detail-actions > button.completed { border-color: #35515d; background: #10242d; color: #8da2aa; }
 
-  .todo-body { margin-top: 15px; }
+  .todo-body { margin-top: 10px; }
 
   .blocked-note {
     margin: 13px 0 0;
@@ -448,34 +448,34 @@
 
   .comments {
     min-width: 0;
-    border-left: 1px solid #29434e;
+    border-left: 1px solid var(--border);
   }
 
   .comments > header {
     justify-content: space-between;
-    min-height: 39px;
-    border-bottom: 1px solid #29434e;
-    padding: 0 12px;
-    color: #7f969f;
+    min-height: 34px;
+    border-bottom: 1px solid var(--border);
+    padding: 0 9px;
+    color: #9aa0a8;
     font-size: 8px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   .comment-list { max-height: 210px; overflow-y: auto; }
-  .comments article { border-bottom: 1px solid #21353e; padding: 11px 12px; }
+  .comments article { border-bottom: 1px solid #2d3136; padding: 8px 9px; }
   .comments article:last-child { border-bottom: 0; }
   .comments article header { justify-content: space-between; gap: 8px; font-size: 7px; }
   .comments article strong { overflow: hidden; color: #88d8cc; text-overflow: ellipsis; }
   .comments article time { flex: none; color: #536b76; }
   .comments article p { margin: 6px 0 0; color: #aebfc5; font-size: 10px; line-height: 1.45; white-space: pre-wrap; }
   .comment-list > .muted { padding: 12px; line-height: 1.5; }
-  .comment-form { display: grid; gap: 7px; border-top: 1px solid #29434e; padding: 9px; }
+  .comment-form { display: grid; gap: 6px; border-top: 1px solid var(--border); padding: 7px; }
   .comment-form textarea { width: 100%; resize: vertical; border: 1px solid #304b56; border-radius: 3px; padding: 8px; background: #081820; color: #d7e1e4; font-size: 10px; line-height: 1.4; outline: 0; }
   .comment-form textarea:focus { border-color: var(--signal); }
   .comment-form button { justify-self: end; padding: 7px 10px; }
   .muted, .detail-empty { color: #607680; font-size: 10px; }
-  .detail-empty { grid-column: 1 / -1; padding: 24px; font-family: 'JetBrains Mono Variable', monospace; }
+  .detail-empty { grid-column: 1 / -1; padding: 16px; font-family: 'JetBrains Mono Variable', monospace; }
 
   @media (max-width: 980px) {
     .columns { grid-template-columns: repeat(4, minmax(190px, 1fr)); }

@@ -114,14 +114,14 @@
     min-width: 0;
     min-height: 310px;
     grid-template-columns: minmax(190px, 0.32fr) minmax(0, 1fr);
-    border: 1px solid #29424d;
+    border: 1px solid var(--border);
     border-radius: 4px;
-    background: #0a1b23;
+    background: var(--surface);
   }
 
   .scratchpad-list {
     min-width: 0;
-    border-right: 1px solid #29424d;
+    border-right: 1px solid var(--border);
   }
 
   .scratchpad-list > header,
@@ -135,9 +135,9 @@
 
   .scratchpad-list > header {
     justify-content: space-between;
-    min-height: 43px;
-    border-bottom: 1px solid #263d47;
-    padding: 0 11px;
+    min-height: 36px;
+    border-bottom: 1px solid var(--border);
+    padding: 0 9px;
   }
 
   .scratchpad-list > header > div { gap: 7px; }
@@ -154,30 +154,29 @@
   }
 
   .scratchpad-list > header strong {
-    color: #b8c8cd;
-    font-size: 9px;
+    color: #c9cdd2;
+    font-size: 10px;
     letter-spacing: 0.05em;
     text-transform: uppercase;
   }
 
-  .scratchpad-list > header small { color: #5b737e; font-size: 8px; }
+  .scratchpad-list > header small { color: #7a818a; font-size: 8px; }
 
   .live-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--signal);
-    box-shadow: 0 0 0 3px rgb(99 215 197 / 9%), 0 0 10px rgb(99 215 197 / 45%);
   }
 
   .search {
     gap: 7px;
-    margin: 8px;
-    border: 1px solid #263e49;
+    margin: 6px;
+    border: 1px solid #3a3f46;
     border-radius: 3px;
-    padding: 0 8px;
-    background: #08171e;
-    color: #57717c;
+    padding: 0 7px;
+    background: #111315;
+    color: #858c95;
   }
 
   .search input {
@@ -185,9 +184,9 @@
     flex: 1;
     border: 0;
     outline: 0;
-    padding: 8px 0;
+    padding: 6px 0;
     background: transparent;
-    color: #b9c7cc;
+    color: #d1d4d8;
     font: inherit;
     font-size: 8px;
   }
@@ -197,7 +196,7 @@
   .list {
     max-height: 355px;
     overflow-y: auto;
-    padding: 0 7px 8px;
+    padding: 0 5px 6px;
     scrollbar-color: #29434f transparent;
     scrollbar-width: thin;
   }
@@ -207,71 +206,71 @@
     width: 100%;
     grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    gap: 9px;
+    gap: 7px;
     border: 0;
-    border-bottom: 1px solid #213640;
-    padding: 10px 7px;
+    border-bottom: 1px solid #2d3136;
+    padding: 7px 6px;
     background: transparent;
     color: #aebfc4;
     text-align: left;
     cursor: pointer;
   }
 
-  .list button:hover { background: rgb(72 107 120 / 10%); }
-  .list button.active { background: linear-gradient(90deg, rgb(99 215 197 / 10%), transparent); box-shadow: inset 2px 0 var(--signal); }
-  .note-mark { color: #54717c; font-size: 14px; }
-  .list button.active .note-mark { color: var(--signal); }
+  .list button:hover { background: #202328; }
+  .list button.active { background: #25282d; box-shadow: inset 2px 0 #747b84; }
+  .note-mark { color: #777e87; font-size: 13px; }
+  .list button.active .note-mark { color: #bdc1c7; }
   .note-copy { min-width: 0; }
-  .note-copy strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .note-copy small { display: block; overflow: hidden; margin-top: 4px; color: #607985; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
-  .empty-list { display: grid; justify-items: center; gap: 9px; padding: 24px 9px; color: #58707a; font-size: 8px; text-align: center; }
+  .note-copy strong { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .note-copy small { display: block; overflow: hidden; margin-top: 2px; color: #818892; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-list { display: grid; justify-items: center; gap: 7px; padding: 16px 7px; color: #858c95; font-size: 8px; text-align: center; }
   .empty-list button,
-  .viewer-empty button { border: 1px solid #3e6d66; border-radius: 3px; padding: 7px 10px; background: #14312c; color: #d2e7e3; font: 650 8px 'Archivo Variable', sans-serif; cursor: pointer; }
+  .viewer-empty button { border: 1px solid #4a4f57; border-radius: 3px; padding: 6px 9px; background: #25282d; color: #e0e2e5; font: 650 9px 'Archivo Variable', sans-serif; cursor: pointer; }
   .empty-list button:hover,
-  .viewer-empty button:hover { border-color: var(--signal); }
+  .viewer-empty button:hover { border-color: #707780; }
 
   .viewer { display: flex; min-width: 0; flex-direction: column; }
 
   .viewer > header {
     justify-content: space-between;
     gap: 15px;
-    min-height: 60px;
-    border-bottom: 1px solid #29424d;
-    padding: 0 18px;
+    min-height: 46px;
+    border-bottom: 1px solid var(--border);
+    padding: 0 12px;
   }
 
   .eyebrow {
-    color: #6d858f;
-    font-size: 7px;
+    color: #818892;
+    font-size: 8px;
     font-weight: 650;
     letter-spacing: 0.11em;
     text-transform: uppercase;
   }
 
-  .viewer h3 { margin: 3px 0 0; color: #dce6e9; font-size: 16px; }
-  .revision { flex: none; gap: 7px; color: #6d8791; font-size: 7px; text-transform: uppercase; }
+  .viewer h3 { margin: 2px 0 0; color: #eceef0; font-size: 15px; }
+  .revision { flex: none; gap: 6px; color: #858c95; font-size: 8px; text-transform: uppercase; }
 
   .tags {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
     border-bottom: 1px solid #203640;
-    padding: 7px 18px;
+    padding: 5px 12px;
   }
 
   .tags span {
     border: 1px solid #31505a;
     border-radius: 999px;
     padding: 2px 6px;
-    color: #78949d;
-    font-size: 7px;
+    color: #a0a6ae;
+    font-size: 8px;
   }
 
   .content {
     min-height: 0;
     flex: 1;
     overflow: auto;
-    padding: 20px 24px 32px;
+    padding: 14px 16px 24px;
     scrollbar-color: #2b4551 transparent;
     scrollbar-width: thin;
   }

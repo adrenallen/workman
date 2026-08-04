@@ -174,20 +174,20 @@
 </section>
 
 <style>
-  .card { position: relative; border: 1px solid #29444f; border-radius: 5px; background: rgb(10 28 36 / 91%); }
+  .card { position: relative; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
   .card > header, .card > header > div, .add, .tool-copy > div, .toggle, .row-actions, .editor > header, .editor footer, .editor footer > div, .empty { display: flex; align-items: center; }
-  .card > header { justify-content: space-between; gap: 15px; padding: 17px 18px 14px; }
+  .card > header { justify-content: space-between; gap: 12px; padding: 11px 12px 10px; }
   .card > header > div { flex-wrap: wrap; gap: 5px 10px; }
-  .card > header p { width: 100%; margin: 0; color: #6e8690; font-size: 10px; }
+  .card > header p { width: 100%; margin: 0; color: #969da6; font-size: 10px; }
   .eyebrow, .add, .tool-copy span, .tool-copy code, .toggle, .row-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
-  .eyebrow { color: #6f8994; font-size: 7px; font-weight: 650; letter-spacing: 0.1em; text-transform: uppercase; }
-  h2 { margin: 0; color: #e1ebed; font-size: 17px; }
-  .add { gap: 6px; border: 1px solid #3a5d66; border-radius: 3px; padding: 8px 10px; background: #112b35; color: #c2d1d5; font-size: 8px; font-weight: 650; cursor: pointer; }
-  .add span { color: var(--signal); font-size: 13px; }
+  .eyebrow { color: #858c95; font-size: 7px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+  h2 { margin: 0; color: #eceef0; font-size: 16px; }
+  .add { gap: 5px; border: 1px solid #484d54; border-radius: 3px; padding: 6px 8px; background: #25282d; color: #d7dadd; font-size: 8px; font-weight: 650; cursor: pointer; }
+  .add span { color: #a7adb5; font-size: 13px; }
   button:disabled { opacity: 0.42; cursor: default; }
 
   .tool-list { border-top: 1px solid #243e49; }
-  article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border-bottom: 1px solid #223b45; padding: 11px 14px; }
+  article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px; }
   article:last-child { border-bottom: 0; }
   article.disabled { opacity: 0.58; }
   .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: 11px; font-weight: 700; }

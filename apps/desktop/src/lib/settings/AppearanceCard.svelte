@@ -62,16 +62,16 @@
 
 <style>
   .card {
-    border: 1px solid #29444f;
-    border-radius: 5px;
-    background: rgb(10 28 36 / 91%);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
   }
 
-  header { padding: 17px 18px 13px; }
+  header { padding: 11px 12px 9px; }
   .eyebrow, .choice-copy small, .choice-state, footer { font-family: 'JetBrains Mono Variable', monospace; }
-  .eyebrow { color: #6f8994; font-size: 7px; font-weight: 650; letter-spacing: 0.1em; text-transform: uppercase; }
-  h2 { margin: 3px 0 0; color: #e1ebed; font-size: 17px; }
-  header p { margin: 4px 0 0; color: #6e8690; font-size: 10px; }
+  .eyebrow { color: #858c95; font-size: 7px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+  h2 { margin: 2px 0 0; color: #eceef0; font-size: 16px; }
+  header p { margin: 3px 0 0; color: #969da6; font-size: 10px; }
 
   .theme-options { border-top: 1px solid #243e49; }
 
@@ -83,7 +83,7 @@
     gap: 11px;
     border: 0;
     border-bottom: 1px solid #213943;
-    padding: 11px 14px;
+    padding: 8px 10px;
     background: transparent;
     color: #aebfc4;
     text-align: left;
@@ -91,8 +91,8 @@
   }
 
   .theme-options button:last-child { border-bottom: 0; }
-  .theme-options button:hover { background: rgb(92 130 141 / 8%); }
-  .theme-options button.active { background: linear-gradient(90deg, rgb(99 215 197 / 8%), transparent); box-shadow: inset 2px 0 var(--signal); }
+  .theme-options button:hover { background: #202328; }
+  .theme-options button.active { background: #25282d; box-shadow: inset 2px 0 #747b84; }
 
   .swatch {
     display: flex;
@@ -118,11 +118,11 @@
   .choice-copy strong, .choice-copy small { display: block; }
   .choice-copy strong { color: #b9c8cd; font-size: 10px; }
   .choice-copy small { margin-top: 3px; color: #5d7680; font-size: 7px; line-height: 1.35; }
-  .choice-state { min-width: 45px; color: var(--signal); font-size: 7px; text-align: right; text-transform: uppercase; }
+  .choice-state { min-width: 45px; color: #b4b9c0; font-size: 7px; text-align: right; text-transform: uppercase; }
 
   footer {
     border-top: 1px solid #243e49;
-    padding: 9px 14px;
+    padding: 7px 10px;
     color: #526b75;
     font-size: 7px;
     line-height: 1.45;

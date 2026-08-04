@@ -38,27 +38,26 @@
     place-items: center;
     align-content: center;
     margin: auto;
-    padding: 52px 32px;
-    color: #738b98;
+    padding: 28px 24px;
+    color: #90969f;
     text-align: center;
   }
 
   .route {
     display: grid;
-    width: 48px;
-    height: 48px;
+    width: 40px;
+    height: 40px;
     place-items: center;
-    margin-bottom: 20px;
-    border: 1px solid #31505d;
-    background: #0d202a;
-    color: var(--signal);
+    margin-bottom: 13px;
+    border: 1px solid #454a51;
+    background: #1b1e22;
+    color: #a8aeb6;
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 20px;
-    box-shadow: 7px 7px 0 #0a1820, 8px 8px 0 #203943;
+    font-size: 17px;
   }
 
   .eyebrow {
-    color: var(--signal);
+    color: #9198a1;
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 8px;
     font-weight: 700;
@@ -67,45 +66,45 @@
   }
 
   h2 {
-    margin: 9px 0 0;
-    color: #e4ecef;
-    font-size: clamp(22px, 3.2vw, 34px);
-    font-weight: 540;
+    margin: 6px 0 0;
+    color: #eef0f2;
+    font-size: clamp(20px, 2.8vw, 28px);
+    font-weight: 620;
     letter-spacing: -0.035em;
   }
 
   p {
     max-width: 390px;
-    margin: 12px 0 22px;
-    color: #6f8793;
-    font-size: 13px;
-    line-height: 1.6;
+    margin: 8px 0 15px;
+    color: #949ba4;
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   button {
     display: inline-flex;
     align-items: center;
-    gap: 9px;
-    min-height: 38px;
-    border: 1px solid #4d847b;
+    gap: 7px;
+    min-height: 32px;
+    border: 1px solid #4a4f57;
     border-radius: 3px;
-    padding: 0 16px;
-    background: #17372f;
-    color: #e1f2ee;
-    font-size: 11px;
+    padding: 0 11px;
+    background: #25282d;
+    color: #e6e8ea;
+    font-size: 10px;
     font-weight: 650;
     cursor: pointer;
   }
 
   button span {
-    color: var(--signal);
+    color: #a7adb5;
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 15px;
   }
 
   button:hover:not(:disabled) {
-    border-color: var(--signal);
-    background: #1b4137;
+    border-color: #707780;
+    background: #2d3136;
   }
 
   button:disabled {
