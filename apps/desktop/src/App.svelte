@@ -5,6 +5,12 @@
   import AgentsPanel from './lib/AgentsPanel.svelte';
   import CoordinationView from './lib/CoordinationView.svelte';
   import EmptyState from './lib/EmptyState.svelte';
+  import {
+    clampPanelWidth,
+    loadPanelPreference,
+    savePanelPreference,
+    startPanelResize
+  } from './lib/panelPreferences';
   import ProcessPanel from './lib/ProcessPanel.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import TerminalView from './lib/TerminalView.svelte';
@@ -23,6 +29,10 @@
   } from './lib/workspace';
 
   const client = new DaemonClient();
+  const projectRailBounds = { min: 176, max: 340 };
+  const sectionRailBounds = { min: 160, max: 300 };
+  const collapsedProjectRailWidth = 58;
+  const collapsedSectionRailWidth = 54;
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
   let connection = $state<ConnectionStatus>({
@@ -45,6 +55,10 @@
   let coordinationActionSignal = $state(0);
   let panelRefreshSignal = $state(0);
   let agentSpawnSignal = $state(0);
+  let projectRailWidth = $state(238);
+  let projectRailCollapsed = $state(false);
+  let sectionRailWidth = $state(198);
+  let sectionRailCollapsed = $state(false);
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
     processes.find((process) => process.id === selectedProcessId) ?? null
@@ -89,6 +103,23 @@
   });
 
   onMount(() => {
+    const projectRailPreference = loadPanelPreference(
+      'project-rail',
+      { collapsed: false, width: projectRailWidth },
+      projectRailBounds.min,
+      projectRailBounds.max
+    );
+    projectRailWidth = projectRailPreference.width;
+    projectRailCollapsed = projectRailPreference.collapsed;
+    const sectionRailPreference = loadPanelPreference(
+      'section-rail',
+      { collapsed: false, width: sectionRailWidth },
+      sectionRailBounds.min,
+      sectionRailBounds.max
+    );
+    sectionRailWidth = sectionRailPreference.width;
+    sectionRailCollapsed = sectionRailPreference.collapsed;
+
     let active = true;
     const stopProcessStatuses = client.onProcessStatuses((next) => {
       if (!active || !selectedProject) return;
@@ -120,7 +151,6 @@
   });
 
   function handleShortcut(event: KeyboardEvent): void {
-    if (!event.metaKey || event.altKey || event.shiftKey) return;
     const target = event.target as HTMLElement | null;
     if (
       target instanceof HTMLInputElement ||
@@ -129,11 +159,69 @@
     ) {
       return;
     }
+    if (event.metaKey && !event.altKey && event.key.toLowerCase() === 'b') {
+      event.preventDefault();
+      if (event.shiftKey) {
+        if (selectedProject) toggleSectionRail();
+      } else {
+        toggleProjectRail();
+      }
+      return;
+    }
+    if (!event.metaKey || event.altKey || event.shiftKey) return;
     const shortcut = Number(event.key);
     const section = workspaceSections.find((candidate) => candidate.shortcut === shortcut);
     if (!section || !selectedProject) return;
     event.preventDefault();
     workspaceSection = section.id;
+  }
+
+  function persistProjectRail(): void {
+    savePanelPreference('project-rail', {
+      collapsed: projectRailCollapsed,
+      width: projectRailWidth
+    });
+  }
+
+  function persistSectionRail(): void {
+    savePanelPreference('section-rail', {
+      collapsed: sectionRailCollapsed,
+      width: sectionRailWidth
+    });
+  }
+
+  function toggleProjectRail(): void {
+    projectRailCollapsed = !projectRailCollapsed;
+    persistProjectRail();
+  }
+
+  function toggleSectionRail(): void {
+    sectionRailCollapsed = !sectionRailCollapsed;
+    persistSectionRail();
+  }
+
+  function resizeRailFromKeyboard(
+    event: KeyboardEvent,
+    rail: 'project' | 'section'
+  ): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowLeft' ? -12 : 12;
+    if (rail === 'project') {
+      projectRailWidth = clampPanelWidth(
+        projectRailWidth + delta,
+        projectRailBounds.min,
+        projectRailBounds.max
+      );
+      persistProjectRail();
+    } else {
+      sectionRailWidth = clampPanelWidth(
+        sectionRailWidth + delta,
+        sectionRailBounds.min,
+        sectionRailBounds.max
+      );
+      persistSectionRail();
+    }
   }
 
   async function withProjects(operation: () => Promise<Project[]>): Promise<void> {
@@ -340,14 +428,25 @@
   <title>{selectedProject ? `${projectLabel(selectedProject)} · ${activeSection.label}` : 'gbuild'}</title>
 </svelte:head>
 
-<main class="app-shell">
-  <aside class="project-rail" aria-label="Projects">
+<main
+  class="app-shell"
+  class:no-project={selectedProject === null}
+  style={`--project-rail-width: ${projectRailCollapsed ? collapsedProjectRailWidth : projectRailWidth}px; --section-rail-width: ${sectionRailCollapsed ? collapsedSectionRailWidth : sectionRailWidth}px;`}
+>
+  <aside class="project-rail" class:collapsed={projectRailCollapsed} aria-label="Projects">
     <header class="brand" data-tauri-drag-region>
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div>
+      <div class="brand-copy">
         <strong>gbuild</strong>
         <span>local workspaces</span>
       </div>
+      <button
+        class="rail-toggle"
+        type="button"
+        aria-label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
+        title={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail (⌘B)`}
+        onclick={toggleProjectRail}
+      >{projectRailCollapsed ? '›' : '‹'}</button>
     </header>
 
     <div class="rail-label">
@@ -399,6 +498,9 @@
                 class:running={project.status === 'running'}
                 aria-hidden="true"
               ></span>
+              <span class="project-glyph" aria-hidden="true">
+                {projectLabel(project).slice(0, 1).toUpperCase()}
+              </span>
               <span class="project-copy">
                 <strong>{projectLabel(project)}</strong>
                 <small>{project.path}</small>
@@ -426,17 +528,47 @@
         onclick={() => void registerProject()}
       >
         <span aria-hidden="true">+</span>
-        Register project
+        <span class="button-copy">Register project</span>
       </button>
     </footer>
+    {#if !projectRailCollapsed}
+      <button
+        type="button"
+        class="resize-handle"
+        aria-label="Resize project rail"
+        title={`Resize project rail · ${projectRailWidth}px · arrow keys`}
+        onkeydown={(event) => resizeRailFromKeyboard(event, 'project')}
+        onpointerdown={(event) =>
+          startPanelResize(event, {
+            current: projectRailWidth,
+            min: projectRailBounds.min,
+            max: projectRailBounds.max,
+            onResize: (width) => (projectRailWidth = width),
+            onEnd: persistProjectRail
+          })}
+      ></button>
+    {/if}
   </aside>
 
   {#if selectedProject}
-    <aside class="section-rail" aria-label={`${projectLabel(selectedProject)} sections`}>
+    <aside
+      class="section-rail"
+      class:collapsed={sectionRailCollapsed}
+      aria-label={`${projectLabel(selectedProject)} sections`}
+    >
       <header class="project-context" data-tauri-drag-region>
-        <span>Current project</span>
-        <strong>{projectLabel(selectedProject)}</strong>
-        <small title={selectedProject.path}>{selectedProject.path}</small>
+        <div class="project-context-copy">
+          <span>Current project</span>
+          <strong>{projectLabel(selectedProject)}</strong>
+          <small title={selectedProject.path}>{selectedProject.path}</small>
+        </div>
+        <button
+          class="rail-toggle"
+          type="button"
+          aria-label={`${sectionRailCollapsed ? 'Expand' : 'Collapse'} section rail`}
+          title={`${sectionRailCollapsed ? 'Expand' : 'Collapse'} section rail (⌘⇧B)`}
+          onclick={toggleSectionRail}
+        >{sectionRailCollapsed ? '›' : '‹'}</button>
       </header>
 
       <nav class="section-nav" aria-label="Project sections">
@@ -445,8 +577,10 @@
             type="button"
             class:active={workspaceSection === section.id}
             aria-current={workspaceSection === section.id ? 'page' : undefined}
+            title={`${section.label} · ⌘${section.shortcut}`}
             onclick={() => (workspaceSection = section.id)}
           >
+            <span class="section-icon" aria-hidden="true">{section.icon}</span>
             <span class="shortcut">⌘{section.shortcut}</span>
             <span class="section-copy">
               <strong>{section.label}</strong>
@@ -464,6 +598,23 @@
           <small>{connection.port ? `127.0.0.1:${connection.port}` : 'Local control service'}</small>
         </div>
       </footer>
+      {#if !sectionRailCollapsed}
+        <button
+          type="button"
+          class="resize-handle"
+          aria-label="Resize section rail"
+          title={`Resize section rail · ${sectionRailWidth}px · arrow keys`}
+          onkeydown={(event) => resizeRailFromKeyboard(event, 'section')}
+          onpointerdown={(event) =>
+            startPanelResize(event, {
+              current: sectionRailWidth,
+              min: sectionRailBounds.min,
+              max: sectionRailBounds.max,
+              onResize: (width) => (sectionRailWidth = width),
+              onEnd: persistSectionRail
+            })}
+        ></button>
+      {/if}
     </aside>
   {/if}
 
@@ -635,8 +786,12 @@
     display: grid;
     width: 100%;
     height: 100%;
-    grid-template-columns: 238px 198px minmax(0, 1fr);
+    grid-template-columns: var(--project-rail-width) var(--section-rail-width) minmax(0, 1fr);
     background: var(--night);
+  }
+
+  .app-shell.no-project {
+    grid-template-columns: var(--project-rail-width) minmax(0, 1fr);
   }
 
   .project-rail,
@@ -647,6 +802,7 @@
   }
 
   .project-rail {
+    position: relative;
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border);
@@ -654,6 +810,7 @@
   }
 
   .brand {
+    position: relative;
     display: flex;
     min-height: 52px;
     align-items: center;
@@ -679,7 +836,48 @@
   .brand-mark span:nth-child(3) { height: 11px; }
   .brand strong, .brand span { display: block; }
   .brand strong { color: #f3f4f6; font-size: 14px; font-weight: 680; }
-  .brand > div:last-child > span { margin-top: 1px; color: #777e87; font-size: 9px; }
+  .brand-copy > span { margin-top: 1px; color: #777e87; font-size: 9px; }
+
+  .rail-toggle {
+    display: grid;
+    width: 24px;
+    height: 24px;
+    flex: none;
+    place-items: center;
+    margin-left: auto;
+    border: 1px solid #3b4047;
+    border-radius: 3px;
+    background: #1d2024;
+    color: #a3a9b1;
+    font: 600 14px/1 'JetBrains Mono Variable', monospace;
+    cursor: pointer;
+  }
+  .rail-toggle:hover { border-color: #656c75; background: #292d32; color: #fff; }
+
+  .resize-handle {
+    position: absolute;
+    z-index: 8;
+    top: 0;
+    right: -3px;
+    bottom: 0;
+    width: 6px;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .resize-handle::after {
+    position: absolute;
+    top: 0;
+    right: 2px;
+    bottom: 0;
+    width: 1px;
+    background: transparent;
+    content: '';
+  }
+  .resize-handle:hover::after,
+  .resize-handle:focus-visible::after { background: #7a818a; }
 
   .rail-label {
     display: flex;
@@ -704,6 +902,7 @@
   .status-dot.running { background: var(--signal); }
   .status-dot.error { background: var(--fault); }
   .project-copy { min-width: 0; }
+  .project-glyph { display: none; }
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: #d4d7dc; font-size: 12px; font-weight: 620; }
   .project-row.active .project-copy strong { color: #fff; }
@@ -727,13 +926,15 @@
   .register-button:disabled { cursor: not-allowed; opacity: 0.45; }
 
   .section-rail {
+    position: relative;
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border);
     background: #141619;
   }
 
-  .project-context { min-height: 68px; padding: 13px 12px 10px; border-bottom: 1px solid var(--border); }
+  .project-context { display: flex; min-height: 68px; align-items: center; gap: 8px; padding: 10px 9px 9px 12px; border-bottom: 1px solid var(--border); }
+  .project-context-copy { min-width: 0; flex: 1; }
   .project-context span, .project-context small { display: block; font-family: 'JetBrains Mono Variable', monospace; }
   .project-context span { color: #777e87; font-size: 8px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; }
   .project-context strong { display: block; overflow: hidden; margin-top: 4px; color: #eceef1; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
@@ -744,6 +945,7 @@
   .section-nav button:hover { border-color: #34383e; background: #1e2125; }
   .section-nav button.active { border-color: #42474f; background: #25282d; color: #f0f1f3; box-shadow: inset 2px 0 #777f89; }
   .shortcut { color: #707780; font: 8px 'JetBrains Mono Variable', monospace; }
+  .section-icon { display: none; }
   .section-nav button.active .shortcut { color: #b9bec5; }
   .section-copy { min-width: 0; }
   .section-copy strong, .section-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -797,21 +999,46 @@
   .onboarding button:disabled { cursor: not-allowed; opacity: 0.45; }
   .onboarding small { margin-top: 15px; color: #4d6874; font: 8px 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
 
+  .project-rail.collapsed .brand {
+    justify-content: flex-start;
+    padding-inline: 6px 4px;
+  }
+  .project-rail.collapsed .brand-mark { width: 24px; height: 24px; }
+  .project-rail.collapsed .brand-copy,
+  .project-rail.collapsed .rail-label span,
+  .project-rail.collapsed .project-copy,
+  .project-rail.collapsed .rename-button,
+  .project-rail.collapsed .button-copy,
+  .project-rail.collapsed .project-empty { display: none; }
+  .project-rail.collapsed .rail-toggle { width: 20px; height: 24px; margin-left: 2px; }
+  .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
+  .project-rail.collapsed .project-list { padding-inline: 5px; }
+  .project-rail.collapsed .project-row { min-height: 42px; }
+  .project-rail.collapsed .project-select { position: relative; justify-content: center; padding: 5px; }
+  .project-rail.collapsed .project-glyph { display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid #41464d; border-radius: 3px; color: #c5c9ce; background: #202328; font-size: 11px; font-weight: 680; }
+  .project-rail.collapsed .status-dot { position: absolute; z-index: 1; right: 7px; bottom: 7px; width: 6px; height: 6px; border: 1px solid #17191c; }
+  .project-rail.collapsed .project-footer { padding: 6px; }
+  .project-rail.collapsed .register-button { min-height: 30px; }
+
+  .section-rail.collapsed .project-context { justify-content: center; padding-inline: 0; }
+  .section-rail.collapsed .project-context-copy { display: none; }
+  .section-rail.collapsed .rail-toggle { margin: 0; }
+  .section-rail.collapsed .section-nav { padding-inline: 5px; }
+  .section-rail.collapsed .section-nav button { display: grid; min-height: 41px; grid-template-columns: 1fr; justify-items: center; padding: 5px; }
+  .section-rail.collapsed .section-icon { display: block; color: #a4aab2; font: 600 11px 'JetBrains Mono Variable', monospace; }
+  .section-rail.collapsed .shortcut,
+  .section-rail.collapsed .section-copy,
+  .section-rail.collapsed .section-nav i,
+  .section-rail.collapsed .daemon-state div { display: none; }
+  .section-rail.collapsed .section-nav button.active .section-icon { color: #f0f1f3; }
+  .section-rail.collapsed .daemon-state { justify-content: center; padding-inline: 0; }
+
   @media (max-width: 900px) {
-    .app-shell { grid-template-columns: 190px 172px minmax(0, 1fr); }
     .project-copy small, .section-copy small { display: none; }
-    .section-header { min-height: 104px; }
   }
 
   @media (max-width: 690px) {
-    .app-shell { grid-template-columns: 72px 154px minmax(0, 1fr); }
-    .brand > div:last-child, .rail-label span, .project-copy, .rename-button, .project-footer .register-button { display: none; }
-    .brand { justify-content: center; padding-inline: 0; }
-    .rail-label { justify-content: center; }
-    .project-row { min-height: 48px; }
-    .project-select { justify-content: center; }
-    .project-empty { display: none; }
-    .section-header { padding-inline: 20px; }
+    .section-header { padding-inline: 12px; }
     .section-header p { display: none; }
     .primary-action { padding-inline: 10px; }
   }

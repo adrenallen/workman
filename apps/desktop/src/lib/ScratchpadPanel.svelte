@@ -1,6 +1,14 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   import MarkdownView from './MarkdownView.svelte';
   import type { ScratchpadRead, ScratchpadSummary } from './coordination';
+  import {
+    clampPanelWidth,
+    loadPanelPreference,
+    savePanelPreference,
+    startPanelResize
+  } from './panelPreferences';
 
   interface Props {
     scratchpads: ScratchpadSummary[];
@@ -12,7 +20,11 @@
   }
 
   let { scratchpads, selectedId, read, loading, onSelect, onRefresh }: Props = $props();
+  const listBounds = { min: 190, max: 420 };
+  const collapsedListWidth = 44;
   let query = $state('');
+  let listWidth = $state(250);
+  let listCollapsed = $state(false);
   let filtered = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return scratchpads;
@@ -22,16 +34,77 @@
         scratchpad.tags.some((tag) => tag.toLowerCase().includes(needle))
     );
   });
+
+  onMount(() => {
+    const preference = loadPanelPreference(
+      'scratchpad-list',
+      { collapsed: false, width: listWidth },
+      listBounds.min,
+      listBounds.max
+    );
+    listWidth = preference.width;
+    listCollapsed = preference.collapsed;
+  });
+
+  function persistList(): void {
+    savePanelPreference('scratchpad-list', { collapsed: listCollapsed, width: listWidth });
+  }
+
+  function toggleList(): void {
+    listCollapsed = !listCollapsed;
+    persistList();
+  }
+
+  function handleShortcut(event: KeyboardEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (
+      !event.metaKey ||
+      !event.shiftKey ||
+      event.altKey ||
+      event.key.toLowerCase() !== 's' ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target?.isContentEditable
+    ) return;
+    event.preventDefault();
+    toggleList();
+  }
+
+  function resizeFromKeyboard(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    listWidth = clampPanelWidth(
+      listWidth + (event.key === 'ArrowLeft' ? -12 : 12),
+      listBounds.min,
+      listBounds.max
+    );
+    persistList();
+  }
 </script>
 
-<section class="scratchpads" aria-label="Live scratchpads">
-  <aside class="scratchpad-list">
+<svelte:window onkeydown={handleShortcut} />
+
+<section
+  class="scratchpads"
+  aria-label="Live scratchpads"
+  style={`--scratchpad-list-width: ${listCollapsed ? collapsedListWidth : listWidth}px;`}
+>
+  <aside class="scratchpad-list" class:collapsed={listCollapsed}>
     <header>
-      <div>
+      <div class="list-title">
         <span class="live-dot" aria-hidden="true"></span>
         <strong>Live scratchpads</strong>
       </div>
-      <small>{scratchpads.length.toString().padStart(2, '0')}</small>
+      <div class="list-actions">
+        <small>{scratchpads.length.toString().padStart(2, '0')}</small>
+        <button
+          class="panel-toggle"
+          type="button"
+          aria-label={`${listCollapsed ? 'Expand' : 'Collapse'} scratchpad list`}
+          title={`${listCollapsed ? 'Expand' : 'Collapse'} scratchpad list (⌘⇧S)`}
+          onclick={toggleList}
+        >{listCollapsed ? '›' : '‹'}</button>
+      </div>
     </header>
     <label class="search">
       <span aria-hidden="true">⌕</span>
@@ -43,6 +116,7 @@
           type="button"
           class:active={selectedId === scratchpad.id}
           aria-pressed={selectedId === scratchpad.id}
+          title={scratchpad.name}
           onclick={() => onSelect(scratchpad.id)}
         >
           <span class="note-mark" aria-hidden="true">▤</span>
@@ -61,6 +135,23 @@
         </div>
       {/each}
     </div>
+    {#if !listCollapsed}
+      <button
+        type="button"
+        class="resize-handle"
+        aria-label="Resize scratchpad list"
+        title={`Resize scratchpad list · ${listWidth}px · arrow keys`}
+        onkeydown={resizeFromKeyboard}
+        onpointerdown={(event) =>
+          startPanelResize(event, {
+            current: listWidth,
+            min: listBounds.min,
+            max: listBounds.max,
+            onResize: (width) => (listWidth = width),
+            onEnd: persistList
+          })}
+      ></button>
+    {/if}
   </aside>
 
   <article class="viewer" aria-live="polite">
@@ -113,13 +204,14 @@
     display: grid;
     min-width: 0;
     min-height: 310px;
-    grid-template-columns: minmax(190px, 0.32fr) minmax(0, 1fr);
+    grid-template-columns: var(--scratchpad-list-width) minmax(0, 1fr);
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--surface);
   }
 
   .scratchpad-list {
+    position: relative;
     min-width: 0;
     border-right: 1px solid var(--border);
   }
@@ -141,6 +233,38 @@
   }
 
   .scratchpad-list > header > div { gap: 7px; }
+  .list-actions { display: flex; align-items: center; gap: 5px; }
+
+  .panel-toggle {
+    display: grid;
+    width: 23px;
+    height: 23px;
+    place-items: center;
+    border: 1px solid #3b4047;
+    border-radius: 3px;
+    background: #1d2024;
+    color: #a3a9b1;
+    font: 600 13px/1 'JetBrains Mono Variable', monospace;
+    cursor: pointer;
+  }
+  .panel-toggle:hover { border-color: #656c75; color: #fff; }
+
+  .resize-handle {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    right: -3px;
+    bottom: 0;
+    width: 6px;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
+  .resize-handle:hover::after,
+  .resize-handle:focus-visible::after { background: #7a818a; }
 
   .scratchpad-list > header strong,
   .scratchpad-list > header small,
@@ -299,9 +423,18 @@
 
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  .scratchpad-list.collapsed > header { justify-content: center; padding-inline: 0; }
+  .scratchpad-list.collapsed .list-title,
+  .scratchpad-list.collapsed .list-actions small,
+  .scratchpad-list.collapsed .search,
+  .scratchpad-list.collapsed .note-copy,
+  .scratchpad-list.collapsed .empty-list { display: none; }
+  .scratchpad-list.collapsed .list-actions { display: flex; }
+  .scratchpad-list.collapsed .list { padding: 5px 4px; }
+  .scratchpad-list.collapsed .list button { grid-template-columns: 1fr; justify-items: center; padding: 7px 3px; }
+  .scratchpad-list.collapsed .note-mark { color: #a5abb3; }
+
   @media (max-width: 760px) {
-    .scratchpads { grid-template-columns: 1fr; }
-    .scratchpad-list { border-right: 0; border-bottom: 1px solid #29424d; }
-    .list { max-height: 180px; }
+    .scratchpads { min-width: 560px; }
   }
 </style>

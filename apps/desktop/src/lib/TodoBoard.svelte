@@ -1,6 +1,14 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   import MarkdownView from './MarkdownView.svelte';
   import type { TodoDetail, TodoStatus, TodoSummary } from './coordination';
+  import {
+    clampPanelWidth,
+    loadPanelPreference,
+    savePanelPreference,
+    startPanelResize
+  } from './panelPreferences';
 
   interface Props {
     todos: TodoSummary[];
@@ -20,6 +28,8 @@
     { status: 'in_progress', label: 'In motion', marker: '◒' },
     { status: 'completed', label: 'Done', marker: '●' }
   ];
+  const inspectorBounds = { min: 220, max: 460 };
+  const collapsedInspectorWidth = 42;
 
   let {
     todos,
@@ -33,6 +43,19 @@
     onComment
   }: Props = $props();
   let commentBody = $state('');
+  let inspectorWidth = $state(280);
+  let inspectorCollapsed = $state(false);
+
+  onMount(() => {
+    const preference = loadPanelPreference(
+      'todo-comments-inspector',
+      { collapsed: false, width: inspectorWidth },
+      inspectorBounds.min,
+      inspectorBounds.max
+    );
+    inspectorWidth = preference.width;
+    inspectorCollapsed = preference.collapsed;
+  });
 
   $effect(() => {
     selectedId;
@@ -56,7 +79,47 @@
       minute: '2-digit'
     }).format(new Date(epochMillis));
   }
+
+  function persistInspector(): void {
+    savePanelPreference('todo-comments-inspector', {
+      collapsed: inspectorCollapsed,
+      width: inspectorWidth
+    });
+  }
+
+  function toggleInspector(): void {
+    inspectorCollapsed = !inspectorCollapsed;
+    persistInspector();
+  }
+
+  function handleShortcut(event: KeyboardEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (
+      !event.metaKey ||
+      !event.shiftKey ||
+      event.altKey ||
+      event.key.toLowerCase() !== 'i' ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target?.isContentEditable
+    ) return;
+    event.preventDefault();
+    toggleInspector();
+  }
+
+  function resizeFromKeyboard(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    inspectorWidth = clampPanelWidth(
+      inspectorWidth + (event.key === 'ArrowLeft' ? 12 : -12),
+      inspectorBounds.min,
+      inspectorBounds.max
+    );
+    persistInspector();
+  }
 </script>
+
+<svelte:window onkeydown={handleShortcut} />
 
 <section class="todo-board" aria-label="Todo board">
   <header class="board-heading">
@@ -132,7 +195,11 @@
     </div>
 
     {#if selectedId !== null}
-      <aside class="detail" aria-live="polite">
+      <aside
+        class="detail"
+        aria-live="polite"
+        style={`--todo-inspector-width: ${inspectorCollapsed ? collapsedInspectorWidth : inspectorWidth}px;`}
+      >
         {#if detailLoading && detail?.todo.id !== selectedId}
           <div class="detail-empty">Reading task #{selectedId}…</div>
         {:else if detail}
@@ -173,10 +240,19 @@
               {/if}
             </div>
           </div>
-          <section class="comments" aria-label="Todo comments">
+          <section class="comments" class:collapsed={inspectorCollapsed} aria-label="Todo comments">
             <header>
-              <span>Thread</span>
-              <small>{detail.comment_total_count}</small>
+              <span class="thread-label">Thread</span>
+              <div class="thread-actions">
+                <small>{detail.comment_total_count}</small>
+                <button
+                  class="panel-toggle"
+                  type="button"
+                  aria-label={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comment inspector`}
+                  title={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comment inspector (⌘⇧I)`}
+                  onclick={toggleInspector}
+                >{inspectorCollapsed ? '‹' : '›'}</button>
+              </div>
             </header>
             <div class="comment-list">
               {#each detail.comments as comment (comment.id)}
@@ -204,6 +280,24 @@
               <textarea bind:value={commentBody} rows="2" placeholder="Add a comment" aria-label="Add a todo comment"></textarea>
               <button type="submit" disabled={busy || !commentBody.trim()}>Comment</button>
             </form>
+            {#if !inspectorCollapsed}
+              <button
+                type="button"
+                class="resize-handle"
+                aria-label="Resize comment inspector"
+                title={`Resize comment inspector · ${inspectorWidth}px · arrow keys`}
+                onkeydown={resizeFromKeyboard}
+                onpointerdown={(event) =>
+                  startPanelResize(event, {
+                    current: inspectorWidth,
+                    direction: -1,
+                    min: inspectorBounds.min,
+                    max: inspectorBounds.max,
+                    onResize: (width) => (inspectorWidth = width),
+                    onEnd: persistInspector
+                  })}
+              ></button>
+            {/if}
           </section>
         {/if}
       </aside>
@@ -419,7 +513,7 @@
 
   .detail {
     display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(220px, 0.8fr);
+    grid-template-columns: minmax(0, 1fr) var(--todo-inspector-width);
     margin-top: 10px;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -447,6 +541,7 @@
   }
 
   .comments {
+    position: relative;
     min-width: 0;
     border-left: 1px solid var(--border);
   }
@@ -461,6 +556,36 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
+  .thread-actions { display: flex; align-items: center; gap: 6px; }
+  .panel-toggle {
+    display: grid;
+    width: 22px;
+    height: 22px;
+    place-items: center;
+    border: 1px solid #3b4047;
+    border-radius: 3px;
+    background: #1d2024;
+    color: #a3a9b1;
+    font: 600 13px/1 'JetBrains Mono Variable', monospace;
+    cursor: pointer;
+  }
+  .panel-toggle:hover { border-color: #656c75; color: #fff; }
+  .resize-handle {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 6px;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .resize-handle::after { position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: transparent; content: ''; }
+  .resize-handle:hover::after,
+  .resize-handle:focus-visible::after { background: #7a818a; }
 
   .comment-list { max-height: 210px; overflow-y: auto; }
   .comments article { border-bottom: 1px solid #2d3136; padding: 8px 9px; }
@@ -477,9 +602,14 @@
   .muted, .detail-empty { color: #607680; font-size: 10px; }
   .detail-empty { grid-column: 1 / -1; padding: 16px; font-family: 'JetBrains Mono Variable', monospace; }
 
+  .comments.collapsed > header { height: 100%; min-height: 120px; align-items: center; flex-direction: column; justify-content: flex-start; gap: 8px; padding: 8px 0; }
+  .comments.collapsed .thread-label,
+  .comments.collapsed .comment-list,
+  .comments.collapsed .comment-form { display: none; }
+  .comments.collapsed .thread-actions { flex-direction: column-reverse; }
+
   @media (max-width: 980px) {
     .columns { grid-template-columns: repeat(4, minmax(190px, 1fr)); }
-    .detail { grid-template-columns: 1fr; }
-    .comments { border-top: 1px solid #29434e; border-left: 0; }
+    .detail { min-width: 620px; }
   }
 </style>

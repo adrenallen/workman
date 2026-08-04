@@ -40,6 +40,11 @@ body {
   background: var(--night);
 }
 
+body.resizing-panel {
+  cursor: col-resize;
+  user-select: none;
+}
+
 button,
 input,
 textarea,

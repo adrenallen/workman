@@ -28,6 +28,7 @@ export interface SettingsPanelProps {
 
 export interface WorkspaceSectionDefinition {
   id: WorkspaceSection;
+  icon: string;
   label: string;
   description: string;
   shortcut: number;
@@ -36,36 +37,42 @@ export interface WorkspaceSectionDefinition {
 export const workspaceSections: WorkspaceSectionDefinition[] = [
   {
     id: 'terminal',
+    icon: '>_',
     label: 'Terminal',
     description: 'Work in the selected session',
     shortcut: 1
   },
   {
     id: 'processes',
+    icon: '▤',
     label: 'Processes',
     description: 'Run project commands',
     shortcut: 2
   },
   {
     id: 'todos',
+    icon: '◇',
     label: 'Todos',
     description: 'Plan and coordinate work',
     shortcut: 3
   },
   {
     id: 'scratchpads',
+    icon: '≡',
     label: 'Scratchpads',
     description: 'Read shared notes',
     shortcut: 4
   },
   {
     id: 'agents',
+    icon: '◎',
     label: 'Agents',
     description: 'Spawn and direct agents',
     shortcut: 5
   },
   {
     id: 'settings',
+    icon: '⚙',
     label: 'Settings',
     description: 'Configure this workspace',
     shortcut: 6
