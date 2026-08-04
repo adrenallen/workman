@@ -1,9 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
+    time::{Duration, Instant},
 };
 
 use axum::http::{HeaderName, HeaderValue};
+use gbuild_core::attention::AttentionState;
 use gbuild_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use gbuildd::{DaemonConfig, DaemonServer, GBUILD_MCP_TOKEN_HEADER};
 use rmcp::{
@@ -62,6 +64,36 @@ fn process(id: i64, project: &Project, kind: ProcessKind, name: &str, command: &
     }
 }
 
+fn paste_sensitive_tui() -> &'static str {
+    r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; if ($chunk eq "\r") { print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } print "\r\nPASTED:$n\r\n"; }'"#
+}
+
+async fn wait_for_state(
+    registry: &gbuildd::SharedProcessRegistry,
+    process_id: i64,
+    expected: AttentionState,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let state = registry
+            .lock()
+            .await
+            .get_status(process_id)?
+            .agent_state
+            .state;
+        if state == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "process {process_id} did not reach {expected:?}; current state is {state:?}"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -116,6 +148,13 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
             ProcessKind::Command,
             "command-two",
             "sleep 30",
+        ))?;
+        registry.create(process(
+            5,
+            &project,
+            ProcessKind::Agent,
+            "paste-sensitive-agent",
+            paste_sensitive_tui(),
         ))?;
         registry.start(1)?;
         registry.store().connection().query_row(
@@ -174,10 +213,33 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     }
 
     let processes = call(&client, "list_processes", json!({})).await;
-    assert_eq!(processes.as_array().unwrap().len(), 4);
+    assert_eq!(processes.as_array().unwrap().len(), 5);
     let own_status = call(&client, "get_process_status", json!({})).await;
     assert_eq!(own_status["id"], 1);
     assert!(own_status["agent_state"].is_object());
+
+    call(&client, "start_process", json!({ "process_id": 5 })).await;
+    wait_for_state(&registry, 5, AttentionState::Idle).await?;
+    let short_prompt = "Reply with exactly PONG.";
+    assert!(short_prompt.len() < 100);
+    let paste_submit = call(
+        &client,
+        "send_input",
+        json!({
+            "process_id": 5,
+            "input": short_prompt,
+            "submit": true,
+            "wait_ms": 250
+        }),
+    )
+    .await;
+    assert!(
+        paste_submit["fresh_raw_output"]
+            .as_str()
+            .unwrap()
+            .contains("SUBMITTED")
+    );
+    assert_eq!(paste_submit["status"]["agent_state"]["state"], "working");
 
     let started = call(
         &client,

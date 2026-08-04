@@ -462,10 +462,11 @@ impl GbuildMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<SendInputArgs>,
     ) -> CallToolResult {
-        let data = match input_bytes(&args) {
-            Ok(data) => data,
+        let input = match prepared_input(&args) {
+            Ok(input) => input,
             Err(error) => return failure("invalid_input", error),
         };
+        let bytes_sent = input.data.len() + usize::from(input.submit);
         let (process_id, process_name, cursor) = {
             let mut registry = self.registry.lock().await;
             let target = ProcessTarget {
@@ -481,7 +482,12 @@ impl GbuildMcp {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),
             };
-            if let Err(error) = registry.send_input(process.id, &data) {
+            let sent = if input.submit {
+                registry.submit_input(process.id, &input.data)
+            } else {
+                registry.send_input(process.id, &input.data)
+            };
+            if let Err(error) = sent {
                 return registry_failure(error);
             }
             (process.id, process.name, cursor)
@@ -517,7 +523,7 @@ impl GbuildMcp {
         success(json!({
             "process_id": process_id,
             "process_name": process_name,
-            "bytes_sent": data.len(),
+            "bytes_sent": bytes_sent,
             "waited_ms": waited_ms,
             "output": output,
             "fresh_raw_output": fresh_raw_output,
@@ -741,18 +747,25 @@ async fn search(
     }
 }
 
-fn input_bytes(args: &SendInputArgs) -> Result<Vec<u8>, String> {
+struct PreparedInput {
+    data: Vec<u8>,
+    submit: bool,
+}
+
+fn prepared_input(args: &SendInputArgs) -> Result<PreparedInput, String> {
     if let Some(bytes) = &args.bytes {
-        return Ok(bytes.clone());
+        return Ok(PreparedInput {
+            data: bytes.clone(),
+            submit: false,
+        });
     }
     let Some(input) = &args.input else {
         return Err("pass input text or raw bytes".into());
     };
-    let mut data = input.as_bytes().to_vec();
-    if args.submit.unwrap_or(true) {
-        data.push(b'\r');
-    }
-    Ok(data)
+    Ok(PreparedInput {
+        data: input.as_bytes().to_vec(),
+        submit: args.submit.unwrap_or(true),
+    })
 }
 
 fn rendered_tail(
@@ -783,7 +796,7 @@ fn tail_lines(text: &str, lines: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendInputArgs, input_bytes};
+    use super::{SendInputArgs, prepared_input};
 
     #[test]
     fn submitted_text_preserves_multiline_content_and_ends_with_carriage_return() {
@@ -793,9 +806,9 @@ mod tests {
             ..SendInputArgs::default()
         };
 
-        let input = input_bytes(&args).unwrap();
-        assert_eq!(input, b"first line\nsecond line\n\r");
-        assert_eq!(input.last(), Some(&0x0d));
+        let input = prepared_input(&args).unwrap();
+        assert_eq!(input.data, b"first line\nsecond line\n");
+        assert!(input.submit);
     }
 
     #[test]
@@ -805,13 +818,17 @@ mod tests {
             submit: Some(true),
             ..SendInputArgs::default()
         };
-        assert_eq!(input_bytes(&raw).unwrap(), vec![0x0a, 0x0d]);
+        let raw = prepared_input(&raw).unwrap();
+        assert_eq!(raw.data, vec![0x0a, 0x0d]);
+        assert!(!raw.submit);
 
         let text = SendInputArgs {
             input: Some("partial\ntext".into()),
             submit: Some(false),
             ..SendInputArgs::default()
         };
-        assert_eq!(input_bytes(&text).unwrap(), b"partial\ntext");
+        let text = prepared_input(&text).unwrap();
+        assert_eq!(text.data, b"partial\ntext");
+        assert!(!text.submit);
     }
 }

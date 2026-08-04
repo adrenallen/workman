@@ -16,6 +16,8 @@ use gbuild_core::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(20);
+
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -735,6 +737,34 @@ impl ProcessRegistry {
             process_id,
             message: error.to_string(),
         })?;
+        self.require(process_id)
+    }
+
+    /// Type content and press Enter as distinct PTY writes.
+    ///
+    /// Raw-mode TUIs use burst boundaries to distinguish pasted content from
+    /// key presses. Keeping CR out of the content write prevents a short prompt
+    /// from absorbing Enter into a bracketed-paste/composer update.
+    pub fn submit_input(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let hosted = self
+            .running
+            .get_mut(&process_id)
+            .ok_or(RegistryError::NotRunning(process_id))?;
+        hosted
+            .write_all(content)
+            .and_then(|()| {
+                std::thread::sleep(SUBMIT_KEY_DELAY);
+                hosted.write_all(b"\r")
+            })
+            .map_err(|error| RegistryError::Pty {
+                process_id,
+                message: error.to_string(),
+            })?;
         self.require(process_id)
     }
 

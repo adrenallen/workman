@@ -396,10 +396,9 @@ impl<'a> TimerService<'a> {
             }
 
             let Some(reason) = reason else { continue };
-            let input = fresh_user_turn(&timer.body);
             if self
                 .registry
-                .send_input(timer.delivery_process_id, &input)
+                .submit_input(timer.delivery_process_id, timer.body.as_bytes())
                 .is_err()
             {
                 // Delivery is at-least-once. Keep the timer pending and retry after
@@ -659,14 +658,6 @@ fn idle_condition_satisfied(timer: &Timer, runtime: &TimerRuntime) -> bool {
     }
 }
 
-fn fresh_user_turn(body: &str) -> Vec<u8> {
-    let mut input = body.as_bytes().to_vec();
-    // Raw-mode TUI agents interpret CR as Enter. LF is content (typically a
-    // newline in the composer), so preserve every body byte and submit once.
-    input.push(b'\r');
-    input
-}
-
 fn persistence(error: impl fmt::Display) -> TimerError {
     TimerError::Persistence(error.to_string())
 }
@@ -718,6 +709,11 @@ mod tests {
     const PROJECT_ID: ProjectId = 1;
     const DELIVERY_ID: ProcessId = 10;
     const WORKER_ID: ProcessId = 11;
+    const PASTE_TUI_ID: ProcessId = 13;
+
+    fn paste_sensitive_tui() -> &'static str {
+        r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; if ($chunk eq "\r") { print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } print "\r\nPASTED:$n\r\n"; }'"#
+    }
 
     fn test_registry(start_worker: bool) -> ProcessRegistry {
         let store = Store::open_in_memory().unwrap();
@@ -859,6 +855,41 @@ mod tests {
             .list("actor-delay", PROJECT_ID, 10, 1_050)
             .unwrap();
         assert!(timers[0].timer.fired);
+    }
+
+    #[test]
+    fn short_timer_body_submits_outside_the_paste_burst_on_a_real_pty() {
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                PASTE_TUI_ID,
+                "paste-sensitive-agent",
+                paste_sensitive_tui(),
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(PASTE_TUI_ID).unwrap();
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Idle);
+
+        let body = "Reply with exactly WOKE.";
+        assert!(body.len() < 100);
+        TimerService::new(&mut registry)
+            .set_delay(
+                "actor-paste".into(),
+                PASTE_TUI_ID,
+                body.into(),
+                0,
+                false,
+                None,
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(
+            TimerService::new(&mut registry).tick(1_000).unwrap().len(),
+            1
+        );
+        wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Working);
     }
 
     #[test]
@@ -1119,12 +1150,5 @@ mod tests {
         assert!(!progress.satisfied);
         advance_watch_progress(&mut progress, true);
         assert!(progress.satisfied);
-    }
-
-    #[test]
-    fn fresh_user_turn_preserves_multiline_body_and_submits_with_carriage_return() {
-        let input = fresh_user_turn("first line\nsecond line\n");
-        assert_eq!(input, b"first line\nsecond line\n\r");
-        assert_eq!(input.last(), Some(&0x0d));
     }
 }
