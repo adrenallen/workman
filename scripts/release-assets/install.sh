@@ -5,7 +5,7 @@ BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 
 mkdir -p "$BIN_DIR"
-for program in awm awmd; do
+for program in wrk workmand; do
   source_path="$BUNDLE_DIR/bin/$program"
   if [[ ! -x "$source_path" ]]; then
     echo "missing bundled executable: $source_path" >&2
@@ -18,25 +18,25 @@ done
 case ":${PATH:-}:" in
   *":$BIN_DIR:"*) ;;
   *)
-    printf '\nAdd awm to your PATH (put this in ~/.zshrc or ~/.bashrc):\n'
+    printf '\nAdd Workman to your PATH (put this in ~/.zshrc or ~/.bashrc):\n'
     printf '  export PATH="$HOME/.local/bin:$PATH"\n'
     ;;
 esac
 
-if [[ -d "$BUNDLE_DIR/awm.app" && -t 0 ]]; then
+if [[ -d "$BUNDLE_DIR/Workman.app" && -t 0 ]]; then
   printf '\nCopy the desktop app to /Applications? [y/N] '
   read -r answer
   case "$answer" in
     y|Y|yes|YES)
       if [[ -w /Applications ]]; then
-        ditto "$BUNDLE_DIR/awm.app" /Applications/awm.app
+        ditto "$BUNDLE_DIR/Workman.app" /Applications/Workman.app
       else
         echo "Administrator permission is needed to write to /Applications."
-        sudo ditto "$BUNDLE_DIR/awm.app" /Applications/awm.app
+        sudo ditto "$BUNDLE_DIR/Workman.app" /Applications/Workman.app
       fi
-      echo "Copied awm.app to /Applications."
+      echo "Copied Workman.app to /Applications."
       ;;
   esac
 fi
 
-printf '\nReady. Run `awm --help`, or read GETTING-STARTED.md.\n'
+printf '\nReady. Run `wrk --help`, or read GETTING-STARTED.md.\n'

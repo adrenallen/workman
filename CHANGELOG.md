@@ -10,9 +10,10 @@ All notable changes to Workman are recorded here.
 - Added a non-destructive first-run migration chain that prefers awm state and falls back to
   gbuild, plus `workman.yml` compatibility reads for `awm.yml` and `gbuild.yml`.
 
-- Unified each platform's app, CLI, daemon, installer, and human getting-started guide into one
-  download. The next release keeps the old macOS binary tarball as a temporary v0.1.0 updater
-  compatibility asset while new updaters read `bin/` from the unified ZIP.
+- Unified each platform's Workman app, `wrk` CLI, `workmand` daemon, installer, and human
+  getting-started guide into one download. The next release keeps root-level, awm-named binary
+  and desktop aliases as temporary v0.1.0 updater compatibility assets while new updaters read
+  `bin/` from the unified Workman archives.
 - Moved cross-platform release builds and prerelease publishing to one local command, leaving
   GitHub Actions as a manual build-only fallback.
 - Added stable and latest update channels, prerelease-first publishing, and an explicit release

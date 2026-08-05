@@ -44,8 +44,8 @@ RUN set -eux; \
     test -n "$APPIMAGE"; \
     test -n "$DEB"; \
     mkdir -p /artifacts; \
-    install -m 755 "$APPIMAGE" "/artifacts/awm-desktop-linux-${LABEL}.AppImage"; \
-    install -m 644 "$DEB" "/artifacts/awm-desktop-linux-${LABEL}.deb"
+    install -m 755 "$APPIMAGE" "/artifacts/workman-desktop-linux-${LABEL}.AppImage"; \
+    install -m 644 "$DEB" "/artifacts/workman-desktop-linux-${LABEL}.deb"
 
 FROM scratch AS artifacts
 COPY --from=build /artifacts/ /

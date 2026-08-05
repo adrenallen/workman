@@ -13,20 +13,20 @@ cat > "$CARGO_BIN" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$@" > "$CARGO_TARGET_DIR/cargo-args"
 mkdir -p "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist"
-printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/awm-desktop"
-chmod +x "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/awm-desktop"
+printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/workman-desktop"
+chmod +x "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/workman-desktop"
 EOF
 chmod +x "$CARGO_BIN"
 
 "$REPO_ROOT/scripts/tauri-dist-runner.sh" \
   build --release --target aarch64-apple-darwin --features custom
 
-test -x "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/awm-desktop"
+test -x "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/workman-desktop"
 grep -qx -- '--profile' "$CARGO_TARGET_DIR/cargo-args"
 grep -qx -- 'dist' "$CARGO_TARGET_DIR/cargo-args"
 grep -qx -- 'aarch64-apple-darwin' "$CARGO_TARGET_DIR/cargo-args"
 grep -qx -- 'custom' "$CARGO_TARGET_DIR/cargo-args"
 ! grep -qx -- '--release' "$CARGO_TARGET_DIR/cargo-args"
 cmp \
-  "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/awm-desktop" \
-  "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/awm-desktop"
+  "$CARGO_TARGET_DIR/aarch64-apple-darwin/dist/workman-desktop" \
+  "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/workman-desktop"

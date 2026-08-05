@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/release.sh [--dry-run] <version>
 
-Build every awm release artifact locally. --dry-run builds and verifies the complete artifact
+Build every Workman release artifact locally. --dry-run builds and verifies the complete artifact
 set but does not create a tag, push, or publish a GitHub Release.
 EOF
 }
@@ -37,7 +37,7 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 TAG="v$VERSION"
-OUTPUT_DIR="${AWM_RELEASE_OUTPUT_DIR:-$REPO_ROOT/release/$TAG}"
+OUTPUT_DIR="${WORKMAN_RELEASE_OUTPUT_DIR:-$REPO_ROOT/release/$TAG}"
 WORK_DIR="$OUTPUT_DIR/.work"
 LOG_DIR="$OUTPUT_DIR/logs"
 TIMINGS_FILE="$OUTPUT_DIR/build-timings.tsv"
@@ -115,7 +115,12 @@ clear_obsolete_artifacts() {
     "$OUTPUT_DIR/awm-desktop-linux-arm64.AppImage" \
     "$OUTPUT_DIR/awm-desktop-linux-arm64.deb" \
     "$OUTPUT_DIR/awm-linux-x86_64.deb" \
-    "$OUTPUT_DIR/awm-linux-arm64.deb"
+    "$OUTPUT_DIR/awm-linux-arm64.deb" \
+    "$OUTPUT_DIR/workman-desktop-macos-arm64.zip" \
+    "$OUTPUT_DIR/workman-desktop-linux-x86_64.AppImage" \
+    "$OUTPUT_DIR/workman-desktop-linux-x86_64.deb" \
+    "$OUTPUT_DIR/workman-desktop-linux-arm64.AppImage" \
+    "$OUTPUT_DIR/workman-desktop-linux-arm64.deb"
 }
 
 add_bundle_guides() {
@@ -150,35 +155,41 @@ build_macos() {
   log "macOS arm64 binaries and desktop"
   npm --prefix apps/desktop ci
   npm --prefix apps/desktop run build
-  cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm
+  cargo build --locked --profile dist --target "$MACOS_TARGET" -p workmand -p workman-cli
   CARGO_TARGET_DIR="$REPO_ROOT/target" npm --prefix apps/desktop run tauri -- build --ci --no-sign \
     --config '{"build":{"beforeBuildCommand":""}}' \
     --runner "$REPO_ROOT/scripts/tauri-dist-runner.sh" \
     --target "$MACOS_TARGET" --bundles app
 
   local target_dir="$REPO_ROOT/target/$MACOS_TARGET/dist"
-  local app="$REPO_ROOT/target/$MACOS_TARGET/release/bundle/macos/awm.app"
-  "$target_dir/awm" --version
-  "$target_dir/awmd" --help >/dev/null
+  local app="$REPO_ROOT/target/$MACOS_TARGET/release/bundle/macos/Workman.app"
+  "$target_dir/wrk" --version
+  "$target_dir/workmand" --help >/dev/null
   test -d "$app"
 
   local package_dir="$WORK_DIR/macos-bundle"
   rm -rf "$package_dir"
   mkdir -p "$package_dir/bin"
-  install -m 755 "$target_dir/awm" "$package_dir/bin/awm"
-  install -m 755 "$target_dir/awmd" "$package_dir/bin/awmd"
-  ditto "$app" "$package_dir/awm.app"
+  install -m 755 "$target_dir/wrk" "$package_dir/bin/wrk"
+  install -m 755 "$target_dir/workmand" "$package_dir/bin/workmand"
+  ditto "$app" "$package_dir/Workman.app"
   add_bundle_guides "$package_dir" macos
 
-  rm -f "$OUTPUT_DIR/awm-macos-arm64.zip"
+  rm -f "$OUTPUT_DIR/workman-macos-arm64.zip"
   (
     cd "$package_dir"
-    COPYFILE_DISABLE=1 zip -qry --symlinks "$OUTPUT_DIR/awm-macos-arm64.zip" .
+    COPYFILE_DISABLE=1 zip -qry --symlinks "$OUTPUT_DIR/workman-macos-arm64.zip" .
   )
+  cp "$OUTPUT_DIR/workman-macos-arm64.zip" "$OUTPUT_DIR/awm-desktop-macos-arm64.zip"
 
   # One-release bridge: the updater shipped in v0.1.0 requests this old asset name and root
   # layout. New updater builds consume bin/ from the unified ZIP above.
-  tar -C "$package_dir/bin" -czf "$OUTPUT_DIR/awm-macos-arm64.tar.gz" awm awmd
+  local legacy_dir="$WORK_DIR/macos-legacy-v0.1.0"
+  rm -rf "$legacy_dir"
+  mkdir -p "$legacy_dir"
+  install -m 755 "$target_dir/wrk" "$legacy_dir/awm"
+  install -m 755 "$target_dir/workmand" "$legacy_dir/awmd"
+  tar -C "$legacy_dir" -czf "$OUTPUT_DIR/awm-macos-arm64.tar.gz" awm awmd
   record_stage macos "$started"
 }
 
@@ -203,23 +214,23 @@ build_linux_binaries() {
       x86_64-*) label=x86_64 ;;
       aarch64-*) label=arm64 ;;
     esac
-    cargo zigbuild --locked --profile dist --target "$target" -p awmd -p awm
+    cargo zigbuild --locked --profile dist --target "$target" -p workmand -p workman-cli
     target_dir="$REPO_ROOT/target/$target/dist"
-    verify_static_linux_binary "$target_dir/awm" "$label"
-    verify_static_linux_binary "$target_dir/awmd" "$label"
+    verify_static_linux_binary "$target_dir/wrk" "$label"
+    verify_static_linux_binary "$target_dir/workmand" "$label"
   done
   record_stage linux-static "$started"
 }
 
 build_linux_desktop() {
   local started=$SECONDS
-  log "Experimental Linux desktop bundles (best effort)"
+  log "Experimental Linux desktop bundles"
   rm -rf "$WORK_DIR/linux-x86_64-desktop" "$WORK_DIR/linux-arm64-desktop"
-  if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
-    warn "Docker/OrbStack is unavailable; skipping experimental Linux desktop bundles"
-    printf 'linux-desktop\tskipped\n' >> "$TIMINGS_FILE"
-    return 0
-  fi
+  require docker
+  docker info >/dev/null 2>&1 || {
+    echo "Docker/OrbStack is required for the complete Linux release set" >&2
+    exit 1
+  }
 
   local platform label destination log_file
   for platform in linux/arm64 linux/amd64; do
@@ -239,14 +250,21 @@ build_linux_desktop() {
       --progress plain \
       . >"$log_file" 2>&1; then
       install -m 755 \
-        "$destination/awm-desktop-linux-${label}.AppImage" \
-        "$destination/awm.AppImage"
+        "$destination/workman-desktop-linux-${label}.AppImage" \
+        "$destination/Workman.AppImage"
+      install -m 755 \
+        "$destination/workman-desktop-linux-${label}.AppImage" \
+        "$OUTPUT_DIR/workman-linux-${label}.AppImage"
+      install -m 755 \
+        "$destination/workman-desktop-linux-${label}.AppImage" \
+        "$OUTPUT_DIR/awm-desktop-linux-${label}.AppImage"
       install -m 644 \
-        "$destination/awm-desktop-linux-${label}.deb" \
-        "$OUTPUT_DIR/awm-linux-${label}.deb"
+        "$destination/workman-desktop-linux-${label}.deb" \
+        "$OUTPUT_DIR/workman-linux-${label}.deb"
       printf '    built Linux desktop %s\n' "$label"
     else
-      warn "Linux desktop $label build failed; see $log_file (continuing without it)"
+      echo "Linux desktop $label build failed; see $log_file" >&2
+      exit 1
     fi
   done
   record_stage linux-desktop "$started"
@@ -266,17 +284,21 @@ package_linux_bundles() {
     desktop_dir="$WORK_DIR/linux-$label-desktop"
     rm -rf "$package_dir"
     mkdir -p "$package_dir/bin"
-    install -m 755 "$REPO_ROOT/target/$target/dist/awm" "$package_dir/bin/awm"
-    install -m 755 "$REPO_ROOT/target/$target/dist/awmd" "$package_dir/bin/awmd"
+    install -m 755 "$REPO_ROOT/target/$target/dist/wrk" "$package_dir/bin/wrk"
+    install -m 755 "$REPO_ROOT/target/$target/dist/workmand" "$package_dir/bin/workmand"
     add_bundle_guides "$package_dir" linux
-    if [[ -f "$desktop_dir/awm.AppImage" ]]; then
-      install -m 755 "$desktop_dir/awm.AppImage" "$package_dir/awm.AppImage"
-    else
-      warn "Linux desktop $label was unavailable; portable bundle contains CLI/daemon only"
-    fi
-    entries=(GETTING-STARTED.md install.sh bin)
-    [[ -f "$package_dir/awm.AppImage" ]] && entries+=(awm.AppImage)
-    tar -C "$package_dir" -czf "$OUTPUT_DIR/awm-linux-${label}.tar.gz" "${entries[@]}"
+    install -m 755 "$desktop_dir/Workman.AppImage" "$package_dir/Workman.AppImage"
+    entries=(GETTING-STARTED.md install.sh bin Workman.AppImage)
+    tar -C "$package_dir" -czf "$OUTPUT_DIR/workman-linux-${label}.tar.gz" "${entries[@]}"
+
+    # One-release bridge for v0.1.0 clients. The old updater requires root-level awm/awmd
+    # entries and requests awm-linux-<arch>.tar.gz from the redirected repository API.
+    local legacy_dir="$WORK_DIR/linux-$label-legacy-v0.1.0"
+    rm -rf "$legacy_dir"
+    mkdir -p "$legacy_dir"
+    install -m 755 "$package_dir/bin/wrk" "$legacy_dir/awm"
+    install -m 755 "$package_dir/bin/workmand" "$legacy_dir/awmd"
+    tar -C "$legacy_dir" -czf "$OUTPUT_DIR/awm-linux-${label}.tar.gz" awm awmd
   done
   record_stage packaging "$started"
 }
@@ -286,34 +308,44 @@ verify_bundle_layouts() {
   log "Platform bundle layouts"
   local roots expected label entries mac_entries
 
-  mac_entries="$(unzip -Z1 "$OUTPUT_DIR/awm-macos-arm64.zip")"
+  mac_entries="$(unzip -Z1 "$OUTPUT_DIR/workman-macos-arm64.zip")"
   roots="$(printf '%s\n' "$mac_entries" | awk -F/ 'NF { print $1 }' | sort -u)"
-  expected="$(printf '%s\n' GETTING-STARTED.md awm.app bin install.sh | sort)"
+  expected="$(printf '%s\n' GETTING-STARTED.md Workman.app bin install.sh | sort)"
   [[ "$roots" == "$expected" ]] || {
     echo "macOS bundle has unexpected top-level entries:" >&2
     printf '%s\n' "$roots" >&2
     exit 1
   }
-  for entry in GETTING-STARTED.md install.sh bin/awm bin/awmd; do
+  for entry in GETTING-STARTED.md install.sh bin/wrk bin/workmand; do
     grep -qx "$entry" <<<"$mac_entries"
   done
-  grep -q '^awm\.app/' <<<"$mac_entries"
+  grep -q '^Workman\.app/' <<<"$mac_entries"
 
   for label in x86_64 arm64; do
-    entries="$(tar -tzf "$OUTPUT_DIR/awm-linux-${label}.tar.gz")"
+    entries="$(tar -tzf "$OUTPUT_DIR/workman-linux-${label}.tar.gz")"
     roots="$(printf '%s\n' "$entries" | awk -F/ 'NF { print $1 }' | sort -u)"
-    expected="$(printf '%s\n' GETTING-STARTED.md bin install.sh | sort)"
-    if grep -qx awm.AppImage <<<"$entries"; then
-      expected="$(printf '%s\n' "$expected" awm.AppImage | sort)"
-    fi
+    expected="$(printf '%s\n' GETTING-STARTED.md Workman.AppImage bin install.sh | sort)"
     [[ "$roots" == "$expected" ]] || {
       echo "Linux $label bundle has unexpected top-level entries:" >&2
       printf '%s\n' "$roots" >&2
       exit 1
     }
-    for entry in GETTING-STARTED.md install.sh bin/awm bin/awmd; do
+    for entry in GETTING-STARTED.md install.sh Workman.AppImage bin/wrk bin/workmand; do
       grep -qx "$entry" <<<"$entries"
     done
+  done
+
+  for legacy_archive in \
+    awm-macos-arm64.tar.gz \
+    awm-linux-x86_64.tar.gz \
+    awm-linux-arm64.tar.gz; do
+    entries="$(tar -tzf "$OUTPUT_DIR/$legacy_archive" | sort)"
+    expected="$(printf '%s\n' awm awmd | sort)"
+    [[ "$entries" == "$expected" ]] || {
+      echo "$legacy_archive does not match the v0.1.0 root-level binary contract" >&2
+      printf '%s\n' "$entries" >&2
+      exit 1
+    }
   done
   record_stage layouts "$started"
 }
@@ -322,17 +354,20 @@ write_release_metadata() {
   local started=$SECONDS
   log "Checksums and release notes"
   local artifacts=(
-    awm-macos-arm64.zip
+    workman-macos-arm64.zip
+    workman-linux-x86_64.tar.gz
+    workman-linux-arm64.tar.gz
+    workman-linux-x86_64.AppImage
+    workman-linux-arm64.AppImage
+    workman-linux-x86_64.deb
+    workman-linux-arm64.deb
     awm-macos-arm64.tar.gz
+    awm-desktop-macos-arm64.zip
     awm-linux-x86_64.tar.gz
     awm-linux-arm64.tar.gz
+    awm-desktop-linux-x86_64.AppImage
+    awm-desktop-linux-arm64.AppImage
   )
-  local optional
-  for optional in \
-    awm-linux-x86_64.deb \
-    awm-linux-arm64.deb; do
-    [[ -f "$OUTPUT_DIR/$optional" ]] && artifacts+=("$optional")
-  done
   local artifact
   for artifact in "${artifacts[@]}"; do test -f "$OUTPUT_DIR/$artifact"; done
 
@@ -350,14 +385,14 @@ write_release_metadata() {
   ' CHANGELOG.md > "$WORK_DIR/changelog-section.md"
 
   {
-    printf '# awm %s\n\n' "$TAG"
+    printf '# Workman %s\n\n' "$TAG"
     printf '## Pick one download\n\n'
-    printf -- '- **macOS Apple silicon:** `awm-macos-arm64.zip` — app, CLI, daemon, installer, and getting-started guide.\n'
-    printf -- '- **Linux x86_64 (portable, experimental):** `awm-linux-x86_64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
-    printf -- '- **Linux arm64 (portable, experimental):** `awm-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
+    printf -- '- **macOS Apple silicon:** `workman-macos-arm64.zip` — app, CLI, daemon, installer, and getting-started guide.\n'
+    printf -- '- **Linux x86_64 (portable, experimental):** `workman-linux-x86_64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
+    printf -- '- **Linux arm64 (portable, experimental):** `workman-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
     printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
     printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. The macOS app is unsigned, so its guide includes the Control-click and `xattr` first-run steps.\n\n'
-    printf '> `awm-macos-arm64.tar.gz` contains only the CLI and daemon as a temporary compatibility asset for the v0.1.0 updater. New installs should ignore it.\n\n'
+    printf '> The `awm-*.tar.gz` and `awm-desktop-*` files are one-release compatibility aliases solely so published v0.1.0 clients can make the hop and find the replacement desktop bundle. New installs must use the `workman-*` assets.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"
   } > "$OUTPUT_DIR/release-notes.md"
@@ -392,14 +427,14 @@ publish_release() {
   if gh release view "$TAG" >/dev/null 2>&1; then
     gh release upload "$TAG" "${assets[@]}" --clobber
     gh release edit "$TAG" \
-      --title "awm $TAG" \
+      --title "Workman $TAG" \
       --notes-file "$OUTPUT_DIR/release-notes.md" \
       --prerelease \
       --latest=false
   else
     gh release create "$TAG" "${assets[@]}" \
       --target "$(git rev-parse HEAD)" \
-      --title "awm $TAG" \
+      --title "Workman $TAG" \
       --notes-file "$OUTPUT_DIR/release-notes.md" \
       --prerelease \
       --latest=false \

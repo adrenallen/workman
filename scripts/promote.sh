@@ -14,4 +14,4 @@ if ! "$GH_BIN" release view "$TAG" >/dev/null 2>&1; then
 fi
 
 "$GH_BIN" release edit "$TAG" --prerelease=false --latest
-echo "Promoted $TAG to the stable channel and marked it latest."
+echo "Promoted Workman $TAG to the stable channel and marked it latest."

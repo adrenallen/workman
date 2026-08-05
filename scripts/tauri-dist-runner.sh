@@ -32,7 +32,7 @@ PROFILE_ROOT="$CARGO_TARGET_DIR"
 if [[ -n "$TARGET" ]]; then
   PROFILE_ROOT="$PROFILE_ROOT/$TARGET"
 fi
-BINARY="${AWM_TAURI_BINARY:-awm-desktop}"
+BINARY="${WORKMAN_TAURI_BINARY:-workman-desktop}"
 test -x "$PROFILE_ROOT/dist/$BINARY"
 mkdir -p "$PROFILE_ROOT/release"
 cp "$PROFILE_ROOT/dist/$BINARY" "$PROFILE_ROOT/release/$BINARY"

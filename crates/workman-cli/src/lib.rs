@@ -1069,13 +1069,21 @@ fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = env::var_os("WORKMAN_DAEMON") {
         return PathBuf::from(path);
     }
-    if let Ok(current) = env::current_exe() {
-        let sibling = current.with_file_name("workmand");
-        if sibling.is_file() {
-            return sibling;
-        }
+    if let Ok(current) = env::current_exe()
+        && let Some(sibling) = sibling_daemon_executable(&current)
+    {
+        return sibling;
     }
     PathBuf::from("workmand")
+}
+
+fn sibling_daemon_executable(current: &Path) -> Option<PathBuf> {
+    // The one-release v0.1.0 updater bridge installs the Workman daemon beneath the old filename.
+    // Prefer the canonical sibling, but keep that upgraded installation usable.
+    ["workmand", "awmd"]
+        .into_iter()
+        .map(|name| current.with_file_name(name))
+        .find(|path| path.is_file())
 }
 
 async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) -> Result<()> {
@@ -1494,5 +1502,18 @@ mod tests {
                 "env_http_headers = { \"Authorization\" = \"WORKMAN_MCP_AUTHORIZATION\" }"
             )
         );
+    }
+
+    #[test]
+    fn daemon_sibling_prefers_workmand_and_falls_back_to_transitional_awmd() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("awm");
+        let legacy = directory.path().join("awmd");
+        std::fs::write(&legacy, "legacy filename containing workmand").unwrap();
+        assert_eq!(sibling_daemon_executable(&cli), Some(legacy));
+
+        let canonical = directory.path().join("workmand");
+        std::fs::write(&canonical, "workmand").unwrap();
+        assert_eq!(sibling_daemon_executable(&cli), Some(canonical));
     }
 }

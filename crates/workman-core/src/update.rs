@@ -20,12 +20,12 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// GitHub's latest non-draft, non-prerelease endpoint for awm.
+/// GitHub's latest non-draft, non-prerelease endpoint for Workman.
 pub const DEFAULT_RELEASES_API: &str =
-    "https://api.github.com/repos/adrenallen/awm/releases/latest";
+    "https://api.github.com/repos/adrenallen/workman/releases/latest";
 /// GitHub's ordered release listing, including prereleases, for the latest channel.
 pub const LATEST_RELEASES_API: &str =
-    "https://api.github.com/repos/adrenallen/awm/releases?per_page=20";
+    "https://api.github.com/repos/adrenallen/workman/releases?per_page=20";
 /// Courtesy interval used by the optional startup checker.
 pub const UPDATE_CHECK_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -96,9 +96,11 @@ impl fmt::Display for UpdateError {
             Self::Json(error) => write!(formatter, "release response was not valid JSON: {error}"),
             Self::Version(error) => write!(formatter, "release version is invalid: {error}"),
             Self::UnsupportedPlatform(platform) => {
-                write!(formatter, "awm updates are not packaged for {platform}")
+                write!(formatter, "Workman updates are not packaged for {platform}")
             }
-            Self::InvalidRelease(message) => write!(formatter, "invalid awm release: {message}"),
+            Self::InvalidRelease(message) => {
+                write!(formatter, "invalid Workman release: {message}")
+            }
             Self::MissingAsset(asset) => write!(formatter, "release is missing {asset}"),
             Self::ChecksumMismatch {
                 asset,
@@ -196,7 +198,7 @@ impl UpdateCheck {
             prerelease: false,
             latest: current.clone(),
             current,
-            url: "https://github.com/adrenallen/awm/releases".to_owned(),
+            url: "https://github.com/adrenallen/workman/releases".to_owned(),
             notes: String::new(),
             available: false,
             checked_at: 0,
@@ -222,18 +224,18 @@ impl ReleaseTarget {
     pub fn for_platform(os: &str, arch: &str) -> UpdateResult<Self> {
         match (os, arch) {
             ("macos", "aarch64") => Ok(Self {
-                binary_asset_name: "awm-macos-arm64.zip".to_owned(),
-                desktop_asset_name: "awm-macos-arm64.zip".to_owned(),
+                binary_asset_name: "workman-macos-arm64.zip".to_owned(),
+                desktop_asset_name: "workman-macos-arm64.zip".to_owned(),
                 platform_label: "macOS arm64".to_owned(),
             }),
             ("linux", "x86_64") => Ok(Self {
-                binary_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
-                desktop_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
+                binary_asset_name: "workman-linux-x86_64.tar.gz".to_owned(),
+                desktop_asset_name: "workman-linux-x86_64.tar.gz".to_owned(),
                 platform_label: "Linux x86_64".to_owned(),
             }),
             ("linux", "aarch64") => Ok(Self {
-                binary_asset_name: "awm-linux-arm64.tar.gz".to_owned(),
-                desktop_asset_name: "awm-linux-arm64.tar.gz".to_owned(),
+                binary_asset_name: "workman-linux-arm64.tar.gz".to_owned(),
+                desktop_asset_name: "workman-linux-arm64.tar.gz".to_owned(),
                 platform_label: "Linux arm64".to_owned(),
             }),
             (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
@@ -284,7 +286,7 @@ impl UpdateClient {
         channel: UpdateChannel,
     ) -> UpdateResult<Self> {
         let http = Client::builder()
-            .user_agent(concat!("awm/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("workman/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             http,
@@ -365,7 +367,7 @@ impl UpdateClient {
         })
     }
 
-    /// Download, verify, extract, and atomically replace only the awm/awmd pair in install_dir.
+    /// Download, verify, extract, and atomically replace only the wrk/workmand pair in install_dir.
     ///
     /// The directory must already contain both binaries. This guard makes an accidental broad
     /// destination fail before a downloaded byte is installed.
@@ -389,10 +391,7 @@ impl UpdateClient {
             .as_ref()
             .ok_or_else(|| UpdateError::MissingAsset("SHA256SUMS".to_owned()))?;
         let install_dir = install_dir.as_ref().canonicalize()?;
-        let awm_target = install_dir.join(executable_name("awm"));
-        let awmd_target = install_dir.join(executable_name("awmd"));
-        ensure_existing_binary(&awm_target)?;
-        ensure_existing_binary(&awmd_target)?;
+        let (wrk_target, workmand_target) = installed_binary_targets(&install_dir)?;
 
         let sums = self.download(checksums_asset).await?;
         let sums = std::str::from_utf8(&sums)
@@ -412,31 +411,31 @@ impl UpdateClient {
         let staging = unique_staging_dir(&install_dir)?;
         let result = (|| -> UpdateResult<UpdateInstallReport> {
             extract_release_archive(&archive, &binary_asset.name, &staging)?;
-            let awm_source = staged_binary(&staging, "awm")?;
-            let awmd_source = staged_binary(&staging, "awmd")?;
-            ensure_staged_binary(&awm_source, &staging)?;
-            ensure_staged_binary(&awmd_source, &staging)?;
+            let wrk_source = staged_binary(&staging, "wrk")?;
+            let workmand_source = staged_binary(&staging, "workmand")?;
+            ensure_staged_binary(&wrk_source, &staging)?;
+            ensure_staged_binary(&workmand_source, &staging)?;
             let quarantine_cleared = clear_macos_quarantine(&staging);
-            atomic_replace(&awm_source, &awm_target)?;
-            atomic_replace(&awmd_source, &awmd_target)?;
+            atomic_replace(&wrk_source, &wrk_target)?;
+            atomic_replace(&workmand_source, &workmand_target)?;
 
             Ok(UpdateInstallReport {
                 current: check.current.clone(),
                 latest: check.latest.clone(),
                 install_dir: install_dir.to_string_lossy().into_owned(),
                 updated_files: vec![
-                    awm_target.to_string_lossy().into_owned(),
-                    awmd_target.to_string_lossy().into_owned(),
+                    wrk_target.to_string_lossy().into_owned(),
+                    workmand_target.to_string_lossy().into_owned(),
                 ],
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
                     if asset.name == binary_asset.name {
                         format!(
-                            "Desktop app: close awm, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
                             asset.name, asset.url
                         )
                     } else {
                         format!(
-                            "Desktop app: close awm, download {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
                             asset.name, asset.url
                         )
                     }
@@ -509,6 +508,26 @@ fn ensure_existing_binary(path: &Path) -> UpdateResult<()> {
     Ok(())
 }
 
+fn installed_binary_targets(install_dir: &Path) -> UpdateResult<(PathBuf, PathBuf)> {
+    let wrk = install_dir.join(executable_name("wrk"));
+    let workmand = install_dir.join(executable_name("workmand"));
+    if wrk.is_file() && workmand.is_file() {
+        return Ok((wrk, workmand));
+    }
+
+    // A v0.1.0 updater installs the transitional release beneath its original filenames. Keep
+    // that pair functional until the user replaces the installation with a Workman bundle.
+    let legacy_awm = install_dir.join(executable_name("awm"));
+    let legacy_awmd = install_dir.join(executable_name("awmd"));
+    if legacy_awm.is_file() && legacy_awmd.is_file() {
+        return Ok((legacy_awm, legacy_awmd));
+    }
+
+    ensure_existing_binary(&wrk)?;
+    ensure_existing_binary(&workmand)?;
+    unreachable!("existing Workman targets returned above")
+}
+
 fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
     if !path.is_file() {
         return Err(UpdateError::InvalidRelease(format!(
@@ -546,7 +565,7 @@ fn staged_binary(staging: &Path, name: &str) -> UpdateResult<PathBuf> {
 fn unique_staging_dir(install_dir: &Path) -> UpdateResult<PathBuf> {
     for attempt in 0..100_u32 {
         let path = install_dir.join(format!(
-            ".awm-update-{}-{}-{attempt}",
+            ".workman-update-{}-{}-{attempt}",
             std::process::id(),
             unix_timestamp()
         ));
@@ -623,7 +642,7 @@ fn atomic_replace(source: &Path, target: &Path) -> UpdateResult<()> {
         UpdateError::InvalidRelease(format!("{} has no file name", target.display()))
     })?;
     let temporary = parent.join(format!(
-        ".{}.awm-update-new-{}",
+        ".{}.workman-update-new-{}",
         name.to_string_lossy(),
         std::process::id()
     ));
@@ -747,8 +766,11 @@ mod tests {
     #[test]
     fn manifest_parser_accepts_common_sha256sum_forms() {
         let hash = "a".repeat(64);
-        let manifest = format!("{hash}  awm-macos-arm64.zip\n{hash} *other.tar.gz\n");
-        assert_eq!(checksum_for(&manifest, "awm-macos-arm64.zip"), Some(hash));
+        let manifest = format!("{hash}  workman-macos-arm64.zip\n{hash} *other.tar.gz\n");
+        assert_eq!(
+            checksum_for(&manifest, "workman-macos-arm64.zip"),
+            Some(hash)
+        );
         assert_eq!(checksum_for(&manifest, "missing"), None);
     }
 
@@ -760,26 +782,26 @@ mod tests {
     #[test]
     fn release_targets_cover_both_static_linux_archives() {
         let macos = ReleaseTarget::for_platform("macos", "aarch64").unwrap();
-        assert_eq!(macos.binary_asset_name, "awm-macos-arm64.zip");
+        assert_eq!(macos.binary_asset_name, "workman-macos-arm64.zip");
         assert_eq!(macos.desktop_asset_name, macos.binary_asset_name);
         assert_eq!(
             ReleaseTarget::for_platform("linux", "x86_64")
                 .unwrap()
                 .binary_asset_name,
-            "awm-linux-x86_64.tar.gz"
+            "workman-linux-x86_64.tar.gz"
         );
         assert_eq!(
             ReleaseTarget::for_platform("linux", "aarch64")
                 .unwrap()
                 .binary_asset_name,
-            "awm-linux-arm64.tar.gz"
+            "workman-linux-arm64.tar.gz"
         );
     }
 
     #[test]
     fn authenticated_assets_prefer_the_api_download_url() {
         let asset = ReleaseAsset {
-            name: "awm-macos-arm64.zip".to_owned(),
+            name: "workman-macos-arm64.zip".to_owned(),
             url: "https://github.com/example/download".to_owned(),
             api_url: Some("https://api.github.com/repos/example/assets/1".to_owned()),
         };

@@ -16,8 +16,8 @@ fn archive() -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = tar::Builder::new(encoder);
     for (name, body) in [
-        ("awm", b"new awm".as_slice()),
-        ("awmd", b"new awmd".as_slice()),
+        ("wrk", b"new wrk".as_slice()),
+        ("workmand", b"new workmand".as_slice()),
     ] {
         let mut header = tar::Header::new_gnu();
         header.set_path(name).unwrap();
@@ -35,8 +35,8 @@ fn unified_zip_archive() -> Vec<u8> {
         .compression_method(zip::CompressionMethod::Stored)
         .unix_permissions(0o755);
     for (name, body) in [
-        ("bin/awm", b"new awm".as_slice()),
-        ("bin/awmd", b"new awmd".as_slice()),
+        ("bin/wrk", b"new wrk".as_slice()),
+        ("bin/workmand", b"new workmand".as_slice()),
     ] {
         archive.start_file(name, options).unwrap();
         archive.write_all(body).unwrap();
@@ -54,8 +54,8 @@ impl Fixture {
         Self::start_named(
             archive,
             checksum,
-            "awm-fixture.tar.gz",
-            "awm-desktop-fixture.zip",
+            "workman-fixture.tar.gz",
+            "workman-desktop-fixture.zip",
             3,
         )
     }
@@ -137,8 +137,8 @@ fn fixture_client(base: &str) -> UpdateClient {
     UpdateClient::with_target(
         format!("{base}/latest"),
         ReleaseTarget {
-            binary_asset_name: "awm-fixture.tar.gz".to_owned(),
-            desktop_asset_name: "awm-desktop-fixture.zip".to_owned(),
+            binary_asset_name: "workman-fixture.tar.gz".to_owned(),
+            desktop_asset_name: "workman-desktop-fixture.zip".to_owned(),
             platform_label: "test".to_owned(),
         },
     )
@@ -147,13 +147,20 @@ fn fixture_client(base: &str) -> UpdateClient {
 
 fn fixture_target() -> ReleaseTarget {
     ReleaseTarget {
-        binary_asset_name: "awm-fixture.tar.gz".to_owned(),
-        desktop_asset_name: "awm-desktop-fixture.zip".to_owned(),
+        binary_asset_name: "workman-fixture.tar.gz".to_owned(),
+        desktop_asset_name: "workman-desktop-fixture.zip".to_owned(),
         platform_label: "test".to_owned(),
     }
 }
 
 fn seed_install() -> TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("wrk"), "old wrk").unwrap();
+    fs::write(directory.path().join("workmand"), "old workmand").unwrap();
+    directory
+}
+
+fn seed_v0_1_0_install() -> TempDir {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("awm"), "old awm").unwrap();
     fs::write(directory.path().join("awmd"), "old awmd").unwrap();
@@ -174,20 +181,42 @@ async fn local_release_is_checked_verified_and_swapped_in_temp_install_dir() {
     let report = client.install(&check, install.path()).await.unwrap();
 
     assert_eq!(
-        fs::read_to_string(install.path().join("awm")).unwrap(),
-        "new awm"
+        fs::read_to_string(install.path().join("wrk")).unwrap(),
+        "new wrk"
     );
     assert_eq!(
-        fs::read_to_string(install.path().join("awmd")).unwrap(),
-        "new awmd"
+        fs::read_to_string(install.path().join("workmand")).unwrap(),
+        "new workmand"
     );
     assert_eq!(report.updated_files.len(), 2);
     assert!(
         report
             .desktop_instruction
             .unwrap()
-            .contains("awm-desktop-fixture.zip")
+            .contains("workman-desktop-fixture.zip")
     );
+}
+
+#[tokio::test]
+async fn transitional_install_keeps_legacy_named_pair_updateable() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let install = seed_v0_1_0_install();
+    let client = fixture_client(&fixture.base);
+
+    let check = client.check("0.1.0").await.unwrap();
+    let report = client.install(&check, install.path()).await.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(install.path().join("awm")).unwrap(),
+        "new wrk"
+    );
+    assert_eq!(
+        fs::read_to_string(install.path().join("awmd")).unwrap(),
+        "new workmand"
+    );
+    assert_eq!(report.updated_files.len(), 2);
 }
 
 #[tokio::test]
@@ -209,18 +238,18 @@ async fn unified_macos_zip_updates_binaries_from_bin_directory() {
     let report = client.install(&check, install.path()).await.unwrap();
 
     assert_eq!(
-        fs::read_to_string(install.path().join("awm")).unwrap(),
-        "new awm"
+        fs::read_to_string(install.path().join("wrk")).unwrap(),
+        "new wrk"
     );
     assert_eq!(
-        fs::read_to_string(install.path().join("awmd")).unwrap(),
-        "new awmd"
+        fs::read_to_string(install.path().join("workmand")).unwrap(),
+        "new workmand"
     );
     assert!(
         report
             .desktop_instruction
             .unwrap()
-            .contains("platform bundle awm-macos-arm64.zip")
+            .contains("platform bundle workman-macos-arm64.zip")
     );
 }
 
@@ -230,7 +259,7 @@ async fn legacy_target_still_finds_transitional_macos_tarball() {
     let checksum = format!("{:x}", Sha256::digest(&archive));
     let target = ReleaseTarget {
         binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
-        desktop_asset_name: "awm-macos-arm64.zip".to_owned(),
+        desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
         platform_label: "legacy macOS updater".to_owned(),
     };
     let fixture = Fixture::start_named(
@@ -247,6 +276,75 @@ async fn legacy_target_still_finds_transitional_macos_tarball() {
 }
 
 #[tokio::test]
+async fn v0_1_0_api_route_follows_rename_and_finds_transitional_asset() {
+    let legacy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let canonical_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let legacy_base = format!("http://{}", legacy_listener.local_addr().unwrap());
+    let canonical_base = format!("http://{}", canonical_listener.local_addr().unwrap());
+    let canonical = format!("{canonical_base}/repos/adrenallen/workman/releases/latest");
+    let release = serde_json::json!({
+        "tag_name": "v0.1.1",
+        "html_url": format!("{canonical_base}/release/v0.1.1"),
+        "body": "Workman rename release",
+        "assets": [
+            {
+                "name": "awm-macos-arm64.tar.gz",
+                "browser_download_url": format!("{canonical_base}/awm-macos-arm64.tar.gz")
+            },
+            {
+                "name": "awm-desktop-macos-arm64.zip",
+                "browser_download_url": format!("{canonical_base}/awm-desktop-macos-arm64.zip")
+            }
+        ]
+    })
+    .to_string();
+    let legacy_thread = thread::spawn(move || {
+        let (mut stream, _) = legacy_listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: {canonical}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    });
+    let canonical_thread = thread::spawn(move || {
+        let (mut stream, _) = canonical_listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            release.len(),
+            release
+        )
+        .unwrap();
+    });
+    let target = ReleaseTarget {
+        binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
+        desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
+        platform_label: "published v0.1.0 macOS updater".to_owned(),
+    };
+    let client = UpdateClient::with_target(
+        format!("{legacy_base}/repos/adrenallen/awm/releases/latest"),
+        target,
+    )
+    .unwrap();
+
+    let check = client.check("0.1.0").await.unwrap();
+    legacy_thread.join().unwrap();
+    canonical_thread.join().unwrap();
+
+    assert!(client.api_url().contains("adrenallen/awm"));
+    assert_eq!(check.latest, "0.1.1");
+    assert_eq!(check.binary_asset.unwrap().name, "awm-macos-arm64.tar.gz");
+    assert_eq!(
+        check.desktop_asset.unwrap().name,
+        "awm-desktop-macos-arm64.zip"
+    );
+}
+
+#[tokio::test]
 async fn checksum_mismatch_leaves_both_installed_binaries_untouched() {
     let fixture = Fixture::start(archive(), "0".repeat(64));
     let install = seed_install();
@@ -256,12 +354,12 @@ async fn checksum_mismatch_leaves_both_installed_binaries_untouched() {
     let error = client.install(&check, install.path()).await.unwrap_err();
     assert!(matches!(error, UpdateError::ChecksumMismatch { .. }));
     assert_eq!(
-        fs::read_to_string(install.path().join("awm")).unwrap(),
-        "old awm"
+        fs::read_to_string(install.path().join("wrk")).unwrap(),
+        "old wrk"
     );
     assert_eq!(
-        fs::read_to_string(install.path().join("awmd")).unwrap(),
-        "old awmd"
+        fs::read_to_string(install.path().join("workmand")).unwrap(),
+        "old workmand"
     );
 }
 

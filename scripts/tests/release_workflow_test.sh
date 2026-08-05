@@ -10,7 +10,7 @@ if grep -q 'cargo test' "$WORKFLOW"; then
   exit 1
 fi
 [[ "$(grep -c 'cargo build --locked --profile dist' "$WORKFLOW")" == 2 ]]
-[[ "$(grep -c -- '-p awmd -p awm -p awm-desktop' "$WORKFLOW")" == 2 ]]
+[[ "$(grep -c -- '-p workmand -p workman-cli' "$WORKFLOW")" == 2 ]]
 [[ "$(grep -c 'scripts/tauri-dist-runner.sh' "$WORKFLOW")" == 2 ]]
 [[ "$(grep -c 'run: npm run build' "$WORKFLOW")" == 2 ]]
 [[ "$(grep -c 'beforeBuildCommand' "$WORKFLOW")" == 2 ]]
@@ -19,6 +19,12 @@ fi
 grep -q "save-if:.*workflow_dispatch.*refs/heads/main" "$WORKFLOW"
 grep -q 'workflow_dispatch:' "$WORKFLOW"
 grep -q 'workflow_dispatch:' "$CI_WORKFLOW"
+grep -q 'workman-macos-arm64.zip' "$WORKFLOW"
+grep -q 'workman-linux-x86_64.tar.gz' "$WORKFLOW"
+grep -q 'awm-macos-arm64.tar.gz' "$WORKFLOW"
+grep -q 'awm-desktop-macos-arm64.zip' "$WORKFLOW"
+grep -q 'awm-linux-x86_64.tar.gz' "$WORKFLOW"
+grep -q 'awm-desktop-linux-x86_64.AppImage' "$WORKFLOW"
 if grep -Eq '(^|[[:space:]])(push|pull_request|tags):' "$WORKFLOW" "$CI_WORKFLOW"; then
   echo "repository workflows must be dispatch-only" >&2
   exit 1
