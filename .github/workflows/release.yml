@@ -358,10 +358,15 @@ jobs:
             gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
             gh release edit "$RELEASE_TAG" \
               --title "awm $RELEASE_TAG" \
-              --notes-file release/release-notes.md
+              --notes-file release/release-notes.md \
+              --prerelease \
+              --latest=false
           else
             gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
               --target "$GITHUB_SHA" \
               --title "awm $RELEASE_TAG" \
-              --notes-file release/release-notes.md
+              --notes-file release/release-notes.md \
+              --prerelease \
+              --latest=false \
+              --verify-tag
           fi

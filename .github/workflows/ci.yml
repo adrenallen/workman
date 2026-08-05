@@ -1,13 +1,12 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  # Intentionally manual-only. Release builds are tag-only; routine pushes and PRs must not
+  # consume Actions minutes. Use this only when a maintainer explicitly wants remote CI.
+  workflow_dispatch:
 
 concurrency:
-  group: awm-ci-${{ github.event.pull_request.number || github.ref }}
+  group: awm-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

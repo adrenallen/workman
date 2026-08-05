@@ -1,4 +1,4 @@
-use std::{future::pending, path::PathBuf, time::Duration};
+use std::{fs, future::pending, path::PathBuf, time::Duration};
 
 use awmd::{DaemonConfig, DaemonServer, Discovery, discovery_path};
 use futures_util::{SinkExt, StreamExt};
@@ -52,9 +52,13 @@ impl TestServer {
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn rpc(socket: &mut Socket, id: &str, method: &str) -> Value {
+    rpc_params(socket, id, method, json!({})).await
+}
+
+async fn rpc_params(socket: &mut Socket, id: &str, method: &str, params: Value) -> Value {
     socket
         .send(Message::Text(
-            json!({ "id": id, "method": method, "params": {} })
+            json!({ "id": id, "method": method, "params": params })
                 .to_string()
                 .into(),
         ))
@@ -90,6 +94,7 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
     );
     assert!(info["uptime_ms"].as_u64().is_some());
     assert_eq!(info["update"]["automatic_checks"], true);
+    assert_eq!(info["update"]["channel"], "stable");
     assert_eq!(info["update"]["last_checked_at"], Value::Null);
     assert_eq!(
         info["update"]["check"]["current"],
@@ -138,6 +143,20 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
         hello["control_protocol_version"],
         awmd::CONTROL_PROTOCOL_VERSION
     );
+
+    let update = rpc_params(
+        &mut socket,
+        "channel",
+        "daemon.update_preferences",
+        json!({ "channel": "latest" }),
+    )
+    .await;
+    assert_eq!(update["channel"], "latest");
+    assert_eq!(update["check"]["channel"], "latest");
+    assert_eq!(update["last_checked_at"], Value::Null);
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(server.data_dir.join("updates.json")).unwrap()).unwrap();
+    assert_eq!(persisted["channel"], "latest");
 
     let restarted = rpc(&mut socket, "restart", "daemon.restart").await;
     assert_eq!(restarted["restarting"], true);

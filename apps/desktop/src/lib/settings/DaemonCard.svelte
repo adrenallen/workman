@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
 
   import type { ConnectionStatus } from '../daemon';
-  import type { DaemonSettingsInfo } from '../settings';
+  import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
   import CopyField from './CopyField.svelte';
 
   interface Props {
@@ -15,6 +15,7 @@
     onCheckUpdate: () => void;
     onUpdateNow: () => void;
     onAutomaticChecks: (enabled: boolean) => void;
+    onUpdateChannel: (channel: UpdateChannel) => void;
   }
 
   let {
@@ -26,7 +27,8 @@
     onRestart,
     onCheckUpdate,
     onUpdateNow,
-    onAutomaticChecks
+    onAutomaticChecks,
+    onUpdateChannel
   }: Props = $props();
   let observedAt = $state(Date.now());
   let now = $state(Date.now());
@@ -124,6 +126,19 @@
       </label>
       <span>Last checked: {formatChecked(info.update.last_checked_at)}</span>
     </div>
+    <div class="update-channel">
+      <label for="update-channel">Release channel</label>
+      <select
+        id="update-channel"
+        value={info.update.channel}
+        disabled={updateBusy !== null}
+        onchange={(event) => onUpdateChannel(event.currentTarget.value as UpdateChannel)}
+      >
+        <option value="stable">Stable (recommended)</option>
+        <option value="latest">Latest (includes prereleases)</option>
+      </select>
+      <span>{info.update.channel === 'stable' ? 'Only promoted releases.' : 'Newest release, including prereleases.'}</span>
+    </div>
   </section>
 
   <footer>
@@ -214,7 +229,7 @@
   .data-path p { margin: 6px 0 0; color: #627b85; font-size: 9px; }
 
   .updates { border-top: 1px solid var(--border); padding: 10px 12px; }
-  .update-heading, .update-actions, .update-preference { display: flex; align-items: center; }
+  .update-heading, .update-actions, .update-preference, .update-channel { display: flex; align-items: center; }
   .update-heading, .update-preference { justify-content: space-between; gap: 12px; }
   .update-heading strong, .update-heading span { display: block; }
   .update-heading strong { color: var(--text); font-size: 10px; }
@@ -236,6 +251,14 @@
   .update-preference { margin-top: 8px; }
   .update-preference label { display: flex; align-items: center; gap: 6px; color: var(--text-soft); }
   .update-preference input { margin: 0; accent-color: var(--signal); }
+  .update-channel { gap: 7px; margin-top: 8px; color: var(--text-soft); font: 8px/1.45 'JetBrains Mono Variable', monospace; }
+  .update-channel label { flex: none; }
+  .update-channel select {
+    height: 26px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 7px;
+    background: var(--surface-raised); color: var(--text-soft); font: inherit;
+  }
+  .update-channel select:disabled { opacity: .45; }
+  .update-channel span { color: var(--muted); }
 
   footer {
     justify-content: space-between;

@@ -6,8 +6,10 @@
     loadDaemonSettings,
     restartDaemon,
     setAutomaticUpdateChecks,
+    setUpdateChannel,
     type DaemonSettingsInfo,
-    type UpdateInstallReport
+    type UpdateInstallReport,
+    type UpdateChannel
   } from './settings';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
@@ -124,6 +126,21 @@
     }
   }
 
+  async function chooseUpdateChannel(channel: UpdateChannel): Promise<void> {
+    if (!info || updateBusy || channel === info.update.channel) return;
+    updateBusy = 'preference';
+    try {
+      info = { ...info, update: await setUpdateChannel(client, channel) };
+      updateMessage = channel === 'stable'
+        ? 'Stable channel selected. Prereleases are ignored.'
+        : 'Latest channel selected. Prereleases are included.';
+    } catch (cause) {
+      updateMessage = message(cause);
+    } finally {
+      updateBusy = null;
+    }
+  }
+
   async function updateNow(): Promise<void> {
     if (!info || updateBusy) return;
     if (!window.confirm('Update awm and restart the daemon? All running project processes will stop.')) return;
@@ -205,6 +222,7 @@
             onCheckUpdate={() => void checkUpdate()}
             onUpdateNow={() => void updateNow()}
             onAutomaticChecks={(enabled) => void toggleAutomaticChecks(enabled)}
+            onUpdateChannel={(channel) => void chooseUpdateChannel(channel)}
           />
         {:else}
           <SettingsConnectionCard

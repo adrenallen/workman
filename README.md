@@ -33,6 +33,23 @@ The old directory is left untouched. Repository commands belong in `awm.yml`; a 
 
 Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
+## Release channels
+
+Tag builds are published as prereleases first. This is the **latest** update channel, intended
+for people who want each newly built version before it is promoted. The default **stable**
+channel uses only promoted GitHub releases and therefore ignores prereleases.
+
+Choose a channel in Settings → Daemon, or on the CLI:
+
+```sh
+awm update --check --channel stable
+awm update --channel latest
+```
+
+The daemon persists the selected channel with its weekly-update preference in `updates.json`
+inside the awm data directory. Maintainers promote a verified release with
+`scripts/promote.sh vX.Y.Z`; promotion is deliberately separate from the tag build.
+
 The checkout itself may still be located at `/Users/g/Code/gbuild`. The product and GitHub
 repository are named awm, but that live working-directory path is intentionally not moved by
 the rename.

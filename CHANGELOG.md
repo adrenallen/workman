@@ -4,6 +4,11 @@ All notable changes to awm are recorded here.
 
 ## Unreleased
 
+- Added stable and latest update channels, prerelease-first publishing, and an explicit release
+  promotion command.
+- Made routine CI manual-only so builds run only when a maintainer requests them or pushes a
+  release tag.
+
 ## 0.1.0 - 2026-08-05
 
 The first awm preview is a native, Solo-style workspace for running coding agents beside a

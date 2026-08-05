@@ -514,20 +514,46 @@ async fn handle_session_control(
         });
     }
     if method == "daemon.update_preferences" {
-        let Some(enabled) = request
-            .get("params")
-            .and_then(|params| params.get("automatic_checks"))
-            .and_then(serde_json::Value::as_bool)
-        else {
+        let params = request.get("params").cloned().unwrap_or_default();
+        let automatic_checks = match params.get("automatic_checks") {
+            Some(value) => match value.as_bool() {
+                Some(enabled) => Some(enabled),
+                None => {
+                    return Some(json!({
+                        "id": id, "ok": false,
+                        "error": { "code": "invalid_params", "message": "automatic_checks must be a boolean" }
+                    }).to_string());
+                }
+            },
+            None => None,
+        };
+        let channel = match params.get("channel") {
+            Some(value) => match serde_json::from_value::<awm_core::UpdateChannel>(value.clone()) {
+                Ok(channel) => Some(channel),
+                Err(_) => {
+                    return Some(json!({
+                        "id": id, "ok": false,
+                        "error": { "code": "invalid_params", "message": "channel must be stable or latest" }
+                    }).to_string());
+                }
+            },
+            None => None,
+        };
+        if automatic_checks.is_none() && channel.is_none() {
             return Some(json!({
                 "id": id, "ok": false,
-                "error": { "code": "invalid_params", "message": "automatic_checks must be a boolean" }
+                "error": { "code": "invalid_params", "message": "automatic_checks or channel is required" }
             }).to_string());
-        };
-        return Some(match settings.updates().set_automatic_checks(enabled) {
-            Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
-            Err(error) => update_error_reply(id, error),
-        });
+        }
+        return Some(
+            match settings
+                .updates()
+                .set_preferences(automatic_checks, channel)
+            {
+                Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
+                Err(error) => update_error_reply(id, error),
+            },
+        );
     }
     if method == "daemon.update_apply" {
         return Some(match settings.updates().install().await {

@@ -36,6 +36,8 @@ export interface DaemonSettingsInfo {
 }
 
 export interface UpdateCheckInfo {
+  channel: UpdateChannel;
+  prerelease: boolean;
   current: string;
   latest: string;
   url: string;
@@ -46,9 +48,12 @@ export interface UpdateCheckInfo {
 
 export interface UpdateStatus {
   automatic_checks: boolean;
+  channel: UpdateChannel;
   last_checked_at: number | null;
   check: UpdateCheckInfo;
 }
+
+export type UpdateChannel = 'stable' | 'latest';
 
 export interface UpdateInstallReport {
   current: string;
@@ -82,6 +87,13 @@ export function setAutomaticUpdateChecks(
   return client.control<UpdateStatus>('daemon.update_preferences', {
     automatic_checks: automaticChecks
   });
+}
+
+export function setUpdateChannel(
+  client: DaemonClient,
+  channel: UpdateChannel
+): Promise<UpdateStatus> {
+  return client.control<UpdateStatus>('daemon.update_preferences', { channel });
 }
 
 export function applyUpdate(client: DaemonClient): Promise<UpdateInstallReport> {

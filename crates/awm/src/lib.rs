@@ -12,10 +12,12 @@ use std::{
 };
 
 use awm_core::{
-    DEFAULT_RELEASES_API, Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId,
-    UpdateClient, UpdateInstallReport, install_dir_from_executable,
+    DEFAULT_RELEASES_API, LATEST_RELEASES_API, Process, ProcessKind, ProcessSource, ProcessStatus,
+    ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, install_dir_from_executable,
 };
-use awmd::{DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service};
+use awmd::{
+    DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service, UpdateStatus,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -39,7 +41,7 @@ const HELLO_REQUEST_ID: &str = "__awm_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
 const HELP: &str = "\
-Usage: awm [--data-dir PATH] [--daemon PATH] [--version] [--update [--check]] [COMMAND]\n\
+Usage: awm [--data-dir PATH] [--daemon PATH] [--version] [--update [--check] [--channel stable|latest]] [COMMAND]\n\
 \n\
 Commands:\n\
   (none)\n\
@@ -52,8 +54,9 @@ Commands:\n\
       Stop trusted command processes for the current project.\n\
   app\n\
       Launch the awm desktop app.\n\
-  update [--check]\n\
-      Check GitHub Releases and securely update awm and awmd. --check reports only.\n\
+  update [--check] [--channel stable|latest]\n\
+      Check GitHub Releases and securely update awm and awmd. Stable is the default;\n\
+      latest includes prereleases. --check reports only.\n\
   mcp-setup [--client claude|codex|gemini|opencode|generic] [--run]\n\
       Print setup for one MCP client, or all supported clients by default.\n\
       --run executes the Claude setup command.\n\
@@ -81,9 +84,13 @@ pub async fn run_env() -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Update { check_only } = &cli.command {
+    if let Command::Update {
+        check_only,
+        channel,
+    } = &cli.command
+    {
         let data_dir = cli.data_dir.unwrap_or_else(awmd::default_data_dir);
-        return self_update(&data_dir, *check_only).await;
+        return self_update(&data_dir, *check_only, *channel).await;
     }
 
     let data_dir = cli.data_dir.unwrap_or_else(awmd::default_data_dir);
@@ -140,6 +147,7 @@ enum Command {
     App,
     Update {
         check_only: bool,
+        channel: UpdateChannel,
     },
     McpSetup {
         run: bool,
@@ -233,13 +241,22 @@ impl Cli {
 
 fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
     let mut check_only = false;
-    for arg in args.by_ref() {
+    let mut channel = UpdateChannel::Stable;
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" if !check_only => check_only = true,
+            "--channel" => {
+                channel = next_value(&mut args, &arg)?
+                    .parse()
+                    .map_err(|_| cli_error("--channel must be stable or latest"))?;
+            }
             _ => return Err(cli_error(format!("unknown update option {arg:?}"))),
         }
     }
-    Ok(Command::Update { check_only })
+    Ok(Command::Update {
+        check_only,
+        channel,
+    })
 }
 
 fn parse_add(mut args: impl Iterator<Item = String>) -> Result<Command> {
@@ -1061,11 +1078,34 @@ fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
     PathBuf::from("awmd")
 }
 
-async fn self_update(data_dir: &Path, check_only: bool) -> Result<()> {
-    let api_url =
-        env::var("AWM_RELEASES_API_URL").unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned());
-    let updater = UpdateClient::new(api_url)?;
-    let check = updater.check(env!("CARGO_PKG_VERSION")).await?;
+async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) -> Result<()> {
+    let api_url = match channel {
+        UpdateChannel::Stable => {
+            env::var("AWM_RELEASES_API_URL").unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned())
+        }
+        UpdateChannel::Latest => env::var("AWM_LATEST_RELEASES_API_URL")
+            .unwrap_or_else(|_| LATEST_RELEASES_API.to_owned()),
+    };
+    let updater = UpdateClient::new_for_channel(api_url, channel)?;
+    let mut daemon_client = if let Ok(discovery) = Discovery::read(data_dir)
+        && awmd::probe(&discovery).await
+    {
+        Some(Client::connect_discovery(discovery).await?)
+    } else {
+        None
+    };
+    let check = if let Some(client) = daemon_client.as_mut() {
+        let _: UpdateStatus = client
+            .rpc("daemon.update_preferences", json!({ "channel": channel }))
+            .await?;
+        client
+            .rpc::<UpdateStatus>("daemon.update_check", json!({ "force": true }))
+            .await?
+            .check
+    } else {
+        updater.check(env!("CARGO_PKG_VERSION")).await?
+    };
+    println!("Channel: {}", check.channel);
     println!("Current: {}", check.current);
     println!("Latest:  {}", check.latest);
     if !check.notes.trim().is_empty() {
@@ -1080,11 +1120,8 @@ async fn self_update(data_dir: &Path, check_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    let report = if let Ok(discovery) = Discovery::read(data_dir)
-        && awmd::probe(&discovery).await
-    {
+    let report = if let Some(client) = daemon_client.as_mut() {
         eprintln!("awm: warning: updating restarts awmd and stops all running project processes");
-        let mut client = Client::connect_discovery(discovery).await?;
         client.rpc("daemon.update_apply", json!({})).await?
     } else {
         let install_dir = match env::var_os("AWM_UPDATE_INSTALL_DIR") {
@@ -1347,9 +1384,32 @@ mod tests {
         assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
 
         let cli = Cli::parse(["awm", "update", "--check"].map(OsString::from)).unwrap();
-        assert!(matches!(cli.command, Command::Update { check_only: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Update {
+                check_only: true,
+                channel: UpdateChannel::Stable
+            }
+        ));
+        let cli =
+            Cli::parse(["awm", "update", "--channel", "latest", "--check"].map(OsString::from))
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Update {
+                check_only: true,
+                channel: UpdateChannel::Latest
+            }
+        ));
         let cli = Cli::parse(["awm", "--update"].map(OsString::from)).unwrap();
-        assert!(matches!(cli.command, Command::Update { check_only: false }));
+        assert!(matches!(
+            cli.command,
+            Command::Update {
+                check_only: false,
+                channel: UpdateChannel::Stable
+            }
+        ));
+        assert!(Cli::parse(["awm", "update", "--channel", "edge"].map(OsString::from)).is_err());
 
         let cli = Cli::parse(["awm", "add"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Add { path } if path == Path::new(".")));

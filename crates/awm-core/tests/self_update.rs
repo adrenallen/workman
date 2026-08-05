@@ -7,7 +7,7 @@ use std::{
     thread,
 };
 
-use awm_core::{ReleaseTarget, UpdateClient, UpdateError};
+use awm_core::{ReleaseTarget, UpdateChannel, UpdateClient, UpdateError};
 use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -104,6 +104,14 @@ fn fixture_client(base: &str) -> UpdateClient {
     .unwrap()
 }
 
+fn fixture_target() -> ReleaseTarget {
+    ReleaseTarget {
+        binary_asset_name: "awm-fixture.tar.gz".to_owned(),
+        desktop_asset_name: "awm-desktop-fixture.zip".to_owned(),
+        platform_label: "test".to_owned(),
+    }
+}
+
 fn seed_install() -> TempDir {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("awm"), "old awm").unwrap();
@@ -158,4 +166,75 @@ async fn checksum_mismatch_leaves_both_installed_binaries_untouched() {
         fs::read_to_string(install.path().join("awmd")).unwrap(),
         "old awmd"
     );
+}
+
+#[tokio::test]
+async fn stable_ignores_prereleases_while_latest_selects_them() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stable = serde_json::json!({
+        "tag_name": "v1.0.0",
+        "html_url": format!("{base}/release/v1.0.0"),
+        "body": "Stable",
+        "prerelease": false,
+        "assets": []
+    })
+    .to_string()
+    .into_bytes();
+    let latest = serde_json::json!([
+        {
+            "tag_name": "v1.1.0",
+            "html_url": format!("{base}/release/v1.1.0"),
+            "body": "Prerelease",
+            "draft": false,
+            "prerelease": true,
+            "assets": []
+        },
+        {
+            "tag_name": "v1.0.0",
+            "html_url": format!("{base}/release/v1.0.0"),
+            "body": "Stable",
+            "draft": false,
+            "prerelease": false,
+            "assets": []
+        }
+    ])
+    .to_string()
+    .into_bytes();
+    let responses = Arc::new(HashMap::from([
+        ("/stable".to_owned(), stable),
+        ("/latest-channel".to_owned(), latest),
+    ]));
+    let thread = thread::spawn(move || {
+        for stream in listener.incoming().flatten().take(2) {
+            respond(stream, &responses);
+        }
+    });
+
+    let stable = UpdateClient::with_target_for_channel(
+        format!("{base}/stable"),
+        fixture_target(),
+        UpdateChannel::Stable,
+    )
+    .unwrap()
+    .check("0.9.0")
+    .await
+    .unwrap();
+    let latest = UpdateClient::with_target_for_channel(
+        format!("{base}/latest-channel"),
+        fixture_target(),
+        UpdateChannel::Latest,
+    )
+    .unwrap()
+    .check("0.9.0")
+    .await
+    .unwrap();
+    thread.join().unwrap();
+
+    assert_eq!(stable.latest, "1.0.0");
+    assert_eq!(stable.channel, UpdateChannel::Stable);
+    assert!(!stable.prerelease);
+    assert_eq!(latest.latest, "1.1.0");
+    assert_eq!(latest.channel, UpdateChannel::Latest);
+    assert!(latest.prerelease);
 }

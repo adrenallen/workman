@@ -8,17 +8,18 @@ use std::{
 };
 
 use awm_core::{
-    DEFAULT_RELEASES_API, UPDATE_CHECK_INTERVAL_SECS, UpdateCheck, UpdateClient, UpdateError,
-    UpdateInstallReport, install_dir_from_executable,
+    DEFAULT_RELEASES_API, LATEST_RELEASES_API, UPDATE_CHECK_INTERVAL_SECS, UpdateChannel,
+    UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, install_dir_from_executable,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
 const CACHE_FILE: &str = "updates.json";
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UpdateStatus {
     pub automatic_checks: bool,
+    pub channel: UpdateChannel,
     pub last_checked_at: Option<i64>,
     pub check: UpdateCheck,
 }
@@ -27,6 +28,8 @@ pub struct UpdateStatus {
 struct UpdateCache {
     #[serde(default = "enabled")]
     automatic_checks: bool,
+    #[serde(default)]
+    channel: UpdateChannel,
     last_checked_at: Option<i64>,
     last_check: Option<UpdateCheck>,
 }
@@ -35,6 +38,7 @@ impl Default for UpdateCache {
     fn default() -> Self {
         Self {
             automatic_checks: true,
+            channel: UpdateChannel::Stable,
             last_checked_at: None,
             last_check: None,
         }
@@ -47,7 +51,8 @@ fn enabled() -> bool {
 
 #[derive(Clone)]
 pub(crate) struct UpdateService {
-    client: UpdateClient,
+    stable_client: UpdateClient,
+    latest_client: UpdateClient,
     current_version: &'static str,
     install_dir: PathBuf,
     cache_path: PathBuf,
@@ -57,9 +62,12 @@ pub(crate) struct UpdateService {
 
 impl UpdateService {
     pub(crate) fn new(data_dir: &Path) -> Result<Self, UpdateError> {
-        let api_url =
+        let stable_api_url =
             env::var("AWM_RELEASES_API_URL").unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned());
-        let client = UpdateClient::new(api_url)?;
+        let latest_api_url = env::var("AWM_LATEST_RELEASES_API_URL")
+            .unwrap_or_else(|_| LATEST_RELEASES_API.to_owned());
+        let stable_client = UpdateClient::new_for_channel(stable_api_url, UpdateChannel::Stable)?;
+        let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?;
         let install_dir = match env::var_os("AWM_UPDATE_INSTALL_DIR") {
             Some(path) => PathBuf::from(path),
             None => install_dir_from_executable(env::current_exe()?)?,
@@ -67,7 +75,8 @@ impl UpdateService {
         let cache_path = data_dir.join(CACHE_FILE);
         let cache = read_cache(&cache_path).unwrap_or_default();
         Ok(Self {
-            client,
+            stable_client,
+            latest_client,
             current_version: env!("CARGO_PKG_VERSION"),
             install_dir,
             cache_path,
@@ -90,24 +99,54 @@ impl UpdateService {
             }
         }
 
-        let check = self.client.check(self.current_version).await?;
+        let channel = self
+            .cache
+            .lock()
+            .expect("update cache lock poisoned")
+            .channel;
+        let check = self.client(channel).check(self.current_version).await?;
         let mut cache = self.cache.lock().expect("update cache lock poisoned");
+        if cache.channel != channel {
+            return Ok(status_from_cache(&cache, self.current_version));
+        }
         cache.last_checked_at = Some(check.checked_at);
         cache.last_check = Some(check);
         write_cache(&self.cache_path, &cache)?;
         Ok(status_from_cache(&cache, self.current_version))
     }
 
-    pub(crate) fn set_automatic_checks(&self, enabled: bool) -> Result<UpdateStatus, UpdateError> {
+    pub(crate) fn set_preferences(
+        &self,
+        automatic_checks: Option<bool>,
+        channel: Option<UpdateChannel>,
+    ) -> Result<UpdateStatus, UpdateError> {
         let mut cache = self.cache.lock().expect("update cache lock poisoned");
-        cache.automatic_checks = enabled;
+        if let Some(enabled) = automatic_checks {
+            cache.automatic_checks = enabled;
+        }
+        if let Some(channel) = channel {
+            if channel != cache.channel {
+                cache.channel = channel;
+                cache.last_checked_at = None;
+                cache.last_check = None;
+            }
+        }
         write_cache(&self.cache_path, &cache)?;
         Ok(status_from_cache(&cache, self.current_version))
     }
 
     pub(crate) async fn install(&self) -> Result<UpdateInstallReport, UpdateError> {
         let status = self.check(true).await?;
-        self.client.install(&status.check, &self.install_dir).await
+        self.client(status.channel)
+            .install(&status.check, &self.install_dir)
+            .await
+    }
+
+    fn client(&self, channel: UpdateChannel) -> &UpdateClient {
+        match channel {
+            UpdateChannel::Stable => &self.stable_client,
+            UpdateChannel::Latest => &self.latest_client,
+        }
     }
 }
 
@@ -121,11 +160,12 @@ fn automatic_check_due(cache: &UpdateCache, current_time: i64) -> bool {
 fn status_from_cache(cache: &UpdateCache, current_version: &str) -> UpdateStatus {
     UpdateStatus {
         automatic_checks: cache.automatic_checks,
+        channel: cache.channel,
         last_checked_at: cache.last_checked_at,
         check: cache
             .last_check
             .clone()
-            .unwrap_or_else(|| UpdateCheck::current(current_version)),
+            .unwrap_or_else(|| UpdateCheck::current_for(current_version, cache.channel)),
     }
 }
 
@@ -171,9 +211,29 @@ mod tests {
         let path = directory.path().join(CACHE_FILE);
         let mut cache = read_cache(&path).unwrap_or_default();
         assert!(cache.automatic_checks);
+        assert_eq!(cache.channel, UpdateChannel::Stable);
         cache.automatic_checks = false;
         write_cache(&path, &cache).unwrap();
         assert!(!read_cache(&path).unwrap().automatic_checks);
+    }
+
+    #[test]
+    fn switching_channels_invalidates_the_cached_weekly_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(CACHE_FILE);
+        let mut cache = UpdateCache {
+            last_checked_at: Some(123),
+            last_check: Some(UpdateCheck::current("0.1.0")),
+            ..UpdateCache::default()
+        };
+        cache.channel = UpdateChannel::Latest;
+        cache.last_checked_at = None;
+        cache.last_check = None;
+        write_cache(&path, &cache).unwrap();
+
+        let loaded = read_cache(&path).unwrap();
+        assert_eq!(loaded.channel, UpdateChannel::Latest);
+        assert!(automatic_check_due(&loaded, 123));
     }
 
     #[test]

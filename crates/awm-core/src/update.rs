@@ -8,6 +8,7 @@ use std::{
     io::{self, Cursor},
     path::{Path, PathBuf},
     process::Command,
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,11 +21,54 @@ use sha2::{Digest, Sha256};
 /// GitHub's latest non-draft, non-prerelease endpoint for awm.
 pub const DEFAULT_RELEASES_API: &str =
     "https://api.github.com/repos/adrenallen/awm/releases/latest";
+/// GitHub's ordered release listing, including prereleases, for the latest channel.
+pub const LATEST_RELEASES_API: &str =
+    "https://api.github.com/repos/adrenallen/awm/releases?per_page=20";
 /// Courtesy interval used by the optional startup checker.
 pub const UPDATE_CHECK_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 pub type UpdateResult<T> = Result<T, UpdateError>;
+
+/// Release stream used for update checks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    /// Published releases only. This is the safe default.
+    #[default]
+    Stable,
+    /// The newest published release, including prereleases.
+    Latest,
+}
+
+impl UpdateChannel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Latest => "latest",
+        }
+    }
+}
+
+impl fmt::Display for UpdateChannel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for UpdateChannel {
+    type Err = UpdateError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "latest" => Ok(Self::Latest),
+            _ => Err(UpdateError::InvalidRelease(format!(
+                "unknown update channel {value:?}; expected stable or latest"
+            ))),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum UpdateError {
@@ -110,6 +154,10 @@ pub struct ReleaseAsset {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UpdateCheck {
+    #[serde(default)]
+    pub channel: UpdateChannel,
+    #[serde(default)]
+    pub prerelease: bool,
     pub current: String,
     pub latest: String,
     pub url: String,
@@ -123,8 +171,14 @@ pub struct UpdateCheck {
 
 impl UpdateCheck {
     pub fn current(current: impl Into<String>) -> Self {
+        Self::current_for(current, UpdateChannel::Stable)
+    }
+
+    pub fn current_for(current: impl Into<String>, channel: UpdateChannel) -> Self {
         let current = current.into();
         Self {
+            channel,
+            prerelease: false,
             latest: current.clone(),
             current,
             url: "https://github.com/adrenallen/awm/releases".to_owned(),
@@ -169,18 +223,42 @@ pub struct UpdateClient {
     api_url: String,
     target: ReleaseTarget,
     token: Option<String>,
+    channel: UpdateChannel,
 }
 
 impl UpdateClient {
     pub fn github() -> UpdateResult<Self> {
-        Self::new(DEFAULT_RELEASES_API)
+        Self::github_for(UpdateChannel::Stable)
+    }
+
+    pub fn github_for(channel: UpdateChannel) -> UpdateResult<Self> {
+        let api_url = match channel {
+            UpdateChannel::Stable => DEFAULT_RELEASES_API,
+            UpdateChannel::Latest => LATEST_RELEASES_API,
+        };
+        Self::new_for_channel(api_url, channel)
     }
 
     pub fn new(api_url: impl Into<String>) -> UpdateResult<Self> {
-        Self::with_target(api_url, ReleaseTarget::current()?)
+        Self::new_for_channel(api_url, UpdateChannel::Stable)
+    }
+
+    pub fn new_for_channel(
+        api_url: impl Into<String>,
+        channel: UpdateChannel,
+    ) -> UpdateResult<Self> {
+        Self::with_target_for_channel(api_url, ReleaseTarget::current()?, channel)
     }
 
     pub fn with_target(api_url: impl Into<String>, target: ReleaseTarget) -> UpdateResult<Self> {
+        Self::with_target_for_channel(api_url, target, UpdateChannel::Stable)
+    }
+
+    pub fn with_target_for_channel(
+        api_url: impl Into<String>,
+        target: ReleaseTarget,
+        channel: UpdateChannel,
+    ) -> UpdateResult<Self> {
         let http = Client::builder()
             .user_agent(concat!("awm/", env!("CARGO_PKG_VERSION")))
             .build()?;
@@ -193,6 +271,7 @@ impl UpdateClient {
                 .or_else(|_| env::var("GH_TOKEN"))
                 .ok()
                 .filter(|token| !token.trim().is_empty()),
+            channel,
         })
     }
 
@@ -204,13 +283,29 @@ impl UpdateClient {
         &self.target
     }
 
+    pub fn channel(&self) -> UpdateChannel {
+        self.channel
+    }
+
     pub async fn check(&self, current: &str) -> UpdateResult<UpdateCheck> {
         let response = self
             .request(&self.api_url)
             .send()
             .await?
             .error_for_status()?;
-        let release: GithubRelease = response.json().await?;
+        let release: GithubRelease = match self.channel {
+            UpdateChannel::Stable => response.json().await?,
+            UpdateChannel::Latest => response
+                .json::<Vec<GithubRelease>>()
+                .await?
+                .into_iter()
+                .find(|release| !release.draft)
+                .ok_or_else(|| {
+                    UpdateError::InvalidRelease(
+                        "latest channel contains no published releases".to_owned(),
+                    )
+                })?,
+        };
         let current_version = parse_version(current)?;
         let latest_version = parse_version(&release.tag_name)?;
         let available = latest_version > current_version;
@@ -225,6 +320,8 @@ impl UpdateClient {
                 })
         };
         Ok(UpdateCheck {
+            channel: self.channel,
+            prerelease: release.prerelease,
             current: current_version.to_string(),
             latest: latest_version.to_string(),
             url: release.html_url,
@@ -531,6 +628,10 @@ struct GithubRelease {
     html_url: String,
     body: Option<String>,
     assets: Vec<GithubAsset>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
 
 #[derive(Deserialize)]
