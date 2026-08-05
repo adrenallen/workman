@@ -1133,11 +1133,7 @@ mod tests {
         assert!(preamble.contains("server named awm"));
         assert!(preamble.contains("never a globally configured Solo"));
         assert!(preamble.contains("Call whoami() through awm first"));
-        assert!(preamble.contains(
-            "Use worktree_list to inspect repository worktrees and worktree_create when parallel \
-             or isolated work should live on its own branch; each managed worktree becomes a \
-             separate awm project."
-        ));
+        assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
         assert!(preamble.contains(
             "Put shared notes, plans, briefs, and hand-offs in awm scratchpads with \
              scratchpad_write so they are visible in the app and verifiable; do not create \

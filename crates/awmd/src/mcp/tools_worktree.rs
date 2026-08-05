@@ -12,13 +12,18 @@ use rmcp::{
 use serde::Deserialize;
 
 use super::{AwmMcp, failure, scoped_project, success};
-use crate::worktrees::{self, AdoptWorktree, CreateWorktree, RemoveWorktree, WorktreeError};
+use crate::worktrees::{
+    self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, RemoveWorktree, WorktreeError,
+};
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct WorktreeListArgs {
     /// A project in the repository to inspect. Otherwise uses normal MCP project scope.
     #[serde(default)]
     project_id: Option<ProjectId>,
+    /// Bypass the five-minute daemon cache and ask GitHub for fresh PR/check status.
+    #[serde(default)]
+    refresh_pull_requests: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -37,6 +42,37 @@ struct WorktreeCreateArgs {
     /// Optional generic preferences remembered for this repository.
     #[serde(default)]
     preferences: BTreeMap<String, String>,
+    /// Copy or skip an ignored source .env. Required once when an .env exists and no repository preference is stored.
+    #[serde(default)]
+    env_policy: Option<EnvPortPolicy>,
+    /// Persist env_policy for this repository so future creates do not ask again.
+    #[serde(default)]
+    remember_env_policy: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct WorktreeForkArgs {
+    /// Selected source worktree. The new branch starts at this worktree's exact HEAD.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    /// Exact new branch name.
+    branch: String,
+    /// Optional repository-specific managed root override.
+    #[serde(default)]
+    managed_root: Option<String>,
+    #[serde(default)]
+    preferences: BTreeMap<String, String>,
+    #[serde(default)]
+    env_policy: Option<EnvPortPolicy>,
+    #[serde(default)]
+    remember_env_policy: bool,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+struct WorktreeForgetEnvArgs {
+    /// A project in the repository whose remembered .env choice should be cleared.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -81,7 +117,13 @@ impl AwmMcp {
             Ok(project_id) => project_id,
             Err(result) => return result,
         };
-        match worktrees::list_for_project(&self.registry, project_id).await {
+        match worktrees::list_for_project_refresh(
+            &self.registry,
+            project_id,
+            args.refresh_pull_requests,
+        )
+        .await
+        {
             Ok(list) => success(list),
             Err(error) => worktree_failure(error),
         }
@@ -107,6 +149,8 @@ impl AwmMcp {
                 from_ref: args.from_ref,
                 managed_root: args.managed_root.map(PathBuf::from),
                 preferences: args.preferences,
+                env_policy: args.env_policy,
+                remember_env_policy: args.remember_env_policy,
             },
         )
         .await
@@ -114,6 +158,61 @@ impl AwmMcp {
             Ok(created) => success(created),
             Err(error) => worktree_failure(error),
         }
+    }
+
+    #[tool(
+        description = "Fork again from a selected worktree's exact current HEAD into a new managed branch/project"
+    )]
+    async fn worktree_fork(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<WorktreeForkArgs>,
+    ) -> CallToolResult {
+        let project_id = match scoped_project_id(self, &parts, args.project_id).await {
+            Ok(project_id) => project_id,
+            Err(result) => return result,
+        };
+        match worktrees::fork(
+            &self.registry,
+            ForkWorktree {
+                source_project_id: project_id,
+                branch: args.branch,
+                managed_root: args.managed_root.map(PathBuf::from),
+                preferences: args.preferences,
+                env_policy: args.env_policy,
+                remember_env_policy: args.remember_env_policy,
+            },
+        )
+        .await
+        {
+            Ok(created) => success(created),
+            Err(error) => worktree_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "Forget the repository's remembered .env copy/skip choice so the next create asks again"
+    )]
+    async fn worktree_env_forget(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<WorktreeForgetEnvArgs>,
+    ) -> CallToolResult {
+        let project_id = match scoped_project_id(self, &parts, args.project_id).await {
+            Ok(project_id) => project_id,
+            Err(result) => return result,
+        };
+        match worktrees::forget_env_preference(&self.registry, project_id).await {
+            Ok(receipt) => success(receipt),
+            Err(error) => worktree_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "Check Git, GitHub CLI authentication, Laravel Herd parking, and managed-root readiness with fix hints"
+    )]
+    async fn worktree_health(&self) -> CallToolResult {
+        success(worktrees::health(&self.registry).await)
     }
 
     #[tool(

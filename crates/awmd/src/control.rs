@@ -89,6 +89,8 @@ struct ProjectReorderParams {
 struct WorktreeScopeParams {
     #[serde(default)]
     project_id: Option<ProjectId>,
+    #[serde(default)]
+    refresh_pull_requests: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +104,25 @@ struct WorktreeCreateParams {
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
+    #[serde(default)]
+    env_policy: Option<crate::worktrees::EnvPortPolicy>,
+    #[serde(default)]
+    remember_env_policy: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeForkParams {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    branch: String,
+    #[serde(default)]
+    managed_root: Option<String>,
+    #[serde(default)]
+    preferences: BTreeMap<String, String>,
+    #[serde(default)]
+    env_policy: Option<crate::worktrees::EnvPortPolicy>,
+    #[serde(default)]
+    remember_env_policy: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,10 +301,14 @@ async fn dispatch(
         "worktree.list" | "worktree_list" => {
             let params: WorktreeScopeParams = params_as(params)?;
             let project_id = control_worktree_project_id(registry, params.project_id).await?;
-            return crate::worktrees::list_for_project(registry, project_id)
-                .await
-                .map(json_value)
-                .map_err(worktree_error);
+            return crate::worktrees::list_for_project_refresh(
+                registry,
+                project_id,
+                params.refresh_pull_requests,
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
         }
         "worktree.create" | "worktree_create" => {
             let params: WorktreeCreateParams = params_as(params)?;
@@ -296,11 +321,42 @@ async fn dispatch(
                     from_ref: params.from_ref,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
+                    env_policy: params.env_policy,
+                    remember_env_policy: params.remember_env_policy,
                 },
             )
             .await
             .map(json_value)
             .map_err(worktree_error);
+        }
+        "worktree.fork" | "worktree_fork" => {
+            let params: WorktreeForkParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::fork(
+                registry,
+                crate::worktrees::ForkWorktree {
+                    source_project_id: project_id,
+                    branch: params.branch,
+                    managed_root: params.managed_root.map(PathBuf::from),
+                    preferences: params.preferences,
+                    env_policy: params.env_policy,
+                    remember_env_policy: params.remember_env_policy,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
+        "worktree.env_forget" | "worktree_env_forget" => {
+            let params: WorktreeScopeParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::forget_env_preference(registry, project_id)
+                .await
+                .map(json_value)
+                .map_err(worktree_error);
+        }
+        "worktree.health" | "worktree_health" => {
+            return Ok(json_value(crate::worktrees::health(registry).await));
         }
         "worktree.adopt" | "worktree_adopt" => {
             let params: WorktreeAdoptParams = params_as(params)?;

@@ -25,6 +25,7 @@
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
   import OpenersCard from './settings/OpenersCard.svelte';
   import RuntimeDoctor from './settings/RuntimeDoctor.svelte';
+  import WorktreeHealthCard from './settings/WorktreeHealthCard.svelte';
   import SettingsConnectionCard from './settings/SettingsConnectionCard.svelte';
   import SettingsSectionNav from './settings/SettingsSectionNav.svelte';
   import SettingsStatusStrip from './settings/SettingsStatusStrip.svelte';
@@ -214,6 +215,7 @@
         <div class="section-stack">
           <AgentToolsCard {client} connected={connection.status === 'connected'} {onError} />
           <RuntimeDoctor {client} {project} connected={connection.status === 'connected'} {onError} />
+          <WorktreeHealthCard {client} connected={connection.status === 'connected'} {onError} />
         </div>
       {:else if $settingsSection === 'tools'}
         <OpenersCard />

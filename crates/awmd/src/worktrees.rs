@@ -7,7 +7,8 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    env, fmt, io,
+    env, fmt, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Output},
     time::Duration,
@@ -16,10 +17,16 @@ use std::{
 use awm_core::{
     ProcessStatus, Project, ProjectId, ProjectWorktree, Store, StoreError, WorktreeRepository,
 };
-use serde::Serialize;
+use rmcp::schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio::{process::Command, time::timeout};
 
-use crate::{RegistryError, SharedProcessRegistry};
+use crate::{
+    RegistryError, SharedProcessRegistry,
+    worktree_integrations::{
+        self, HerdView, PullRequestCacheView, PullRequestView, WorktreeHealth,
+    },
+};
 
 pub const AWM_WORKTREE_ROOT_ENV: &str = "AWM_WORKTREE_ROOT";
 const LEGACY_SWM_ROOT_ENV: &str = "SWM_ROOT";
@@ -39,6 +46,9 @@ pub enum WorktreeError {
     Confirmation(String),
     Dirty(String),
     Foreign(String),
+    EnvPreference(String),
+    UnsafeEnvironment(String),
+    Integration { code: &'static str, message: String },
 }
 
 impl WorktreeError {
@@ -55,6 +65,9 @@ impl WorktreeError {
             Self::Confirmation(_) => "confirmation_required",
             Self::Dirty(_) => "dirty_worktree",
             Self::Foreign(_) => "foreign_worktree",
+            Self::EnvPreference(_) => "env_preference_required",
+            Self::UnsafeEnvironment(_) => "unsafe_env_file",
+            Self::Integration { code, .. } => code,
         }
     }
 }
@@ -71,8 +84,11 @@ impl fmt::Display for WorktreeError {
             | Self::Conflict(message)
             | Self::Confirmation(message)
             | Self::Dirty(message)
-            | Self::Foreign(message) => formatter.write_str(message),
+            | Self::Foreign(message)
+            | Self::EnvPreference(message)
+            | Self::UnsafeEnvironment(message) => formatter.write_str(message),
             Self::Git { operation, message } => write!(formatter, "{operation}: {message}"),
+            Self::Integration { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -117,6 +133,7 @@ pub struct RepositoryView {
     pub root_path: String,
     pub managed_root: String,
     pub preferences: BTreeMap<String, String>,
+    pub herd: HerdView,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,12 +151,15 @@ pub struct WorktreeEntry {
     pub can_remove: bool,
     pub locked: bool,
     pub prunable: bool,
+    pub site_url: Option<String>,
+    pub pull_request: Option<PullRequestView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeList {
     pub repository: RepositoryView,
     pub worktrees: Vec<WorktreeEntry>,
+    pub pull_requests: PullRequestCacheView,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -147,6 +167,7 @@ pub struct WorktreeMutation {
     pub repository: RepositoryView,
     pub project: ProjectEnvelope,
     pub worktree: WorktreeEntry,
+    pub environment: Option<EnvironmentPortResult>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +180,13 @@ pub struct WorktreeRemoval {
     pub branch_kept: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreePreferenceMutation {
+    pub repository_id: i64,
+    pub key: &'static str,
+    pub cleared: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateWorktree {
     pub source_project_id: ProjectId,
@@ -166,6 +194,52 @@ pub struct CreateWorktree {
     pub from_ref: Option<String>,
     pub managed_root: Option<PathBuf>,
     pub preferences: BTreeMap<String, String>,
+    pub env_policy: Option<EnvPortPolicy>,
+    pub remember_env_policy: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum EnvPortPolicy {
+    Copy,
+    Skip,
+}
+
+impl EnvPortPolicy {
+    fn preference(self) -> &'static str {
+        match self {
+            Self::Copy => "yes",
+            Self::Skip => "no",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EnvironmentPortResult {
+    pub source_present: bool,
+    pub policy: &'static str,
+    pub copied: bool,
+    pub remembered: bool,
+    pub app_name_rewritten: bool,
+    pub app_url_rewritten: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ForkWorktree {
+    pub source_project_id: ProjectId,
+    pub branch: String,
+    pub managed_root: Option<PathBuf>,
+    pub preferences: BTreeMap<String, String>,
+    pub env_policy: Option<EnvPortPolicy>,
+    pub remember_env_policy: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -198,6 +272,15 @@ struct GitWorktree {
     bare: bool,
     locked: bool,
     prunable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct EnvironmentPlan {
+    source: Option<PathBuf>,
+    contents: Option<Vec<u8>>,
+    permissions: Option<fs::Permissions>,
+    policy: Option<EnvPortPolicy>,
+    remembered: bool,
 }
 
 /// Root convention shared with SWM, with an awm-native override.
@@ -326,6 +409,14 @@ pub async fn list_for_project(
     registry: &SharedProcessRegistry,
     project_id: ProjectId,
 ) -> WorktreeResult<WorktreeList> {
+    list_for_project_refresh(registry, project_id, false).await
+}
+
+pub async fn list_for_project_refresh(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+    refresh_pull_requests: bool,
+) -> WorktreeResult<WorktreeList> {
     let (project, repository, registered, links) = {
         let registry = registry.lock().await;
         let project = registry.store().get_project(project_id)?.ok_or_else(|| {
@@ -352,7 +443,15 @@ pub async fn list_for_project(
     };
 
     let snapshot = snapshot_async(Path::new(&project.path)).await?;
-    list_from_snapshot(registry, repository, snapshot, registered, links).await
+    list_from_snapshot(
+        registry,
+        repository,
+        snapshot,
+        registered,
+        links,
+        refresh_pull_requests,
+    )
+    .await
 }
 
 pub async fn create(
@@ -360,6 +459,9 @@ pub async fn create(
     request: CreateWorktree,
 ) -> WorktreeResult<WorktreeMutation> {
     validate_branch(&request.branch).await?;
+    for key in request.preferences.keys() {
+        validate_preference_key(key)?;
+    }
     let source_project = {
         let registry = registry.lock().await;
         registry
@@ -376,13 +478,29 @@ pub async fn create(
 
     let mut repository = {
         let registry = registry.lock().await;
-        ensure_repository(registry.store(), &snapshot, request.managed_root.as_deref())?
+        ensure_repository(registry.store(), &snapshot, None)?
     };
-    let managed_root = if let Some(root) = request.managed_root {
-        root
-    } else {
-        PathBuf::from(&repository.managed_root)
+
+    let remembered_preferences = {
+        let registry = registry.lock().await;
+        registry.store().worktree_preferences(repository.id)?
     };
+    let requested_env_policy = request
+        .env_policy
+        .or(parse_env_preference(request.preferences.get("copy_env"))?);
+    let remembered_env_policy = parse_env_preference(remembered_preferences.get("copy_env"))?;
+    let env_plan = prepare_environment(
+        Path::new(&source_project.path),
+        requested_env_policy.or(remembered_env_policy),
+        request.remember_env_policy || remembered_env_policy.is_some(),
+    )
+    .await?;
+
+    // Resolve the per-request root only after every `.env` safety check and
+    // one-time preference decision, so a rejected port leaves no directory.
+    let managed_root = request
+        .managed_root
+        .unwrap_or_else(|| PathBuf::from(&repository.managed_root));
     std::fs::create_dir_all(&managed_root)?;
     let managed_root = std::fs::canonicalize(&managed_root)?;
     repository.managed_root = managed_root.to_string_lossy().into_owned();
@@ -420,6 +538,30 @@ pub async fn create(
             existing.path.display()
         )));
     }
+
+    // SWM asks Herd to park the managed parent once, then relies on Herd's
+    // wildcard `<folder>.<tld>` routing. It never writes per-site vhosts.
+    let herd_enabled = request
+        .preferences
+        .get("herd_enabled")
+        .or_else(|| remembered_preferences.get("herd_enabled"))
+        .is_none_or(|value| !matches!(value.as_str(), "no" | "false" | "off"));
+    let herd = if herd_enabled {
+        worktree_integrations::herd_for_root(&managed_root, true)
+            .await
+            .map_err(|error| WorktreeError::Integration {
+                code: error.code,
+                message: error.message,
+            })?
+    } else {
+        HerdView {
+            available: false,
+            parked: false,
+            tld: None,
+            error: Some("disabled by the repository herd_enabled preference".into()),
+        }
+    };
+    let site_url = worktree_integrations::site_url(&slug, &herd);
 
     match branch_state {
         BranchState::Local => {
@@ -488,6 +630,54 @@ pub async fn create(
         }
     }
 
+    if env_plan.policy == Some(EnvPortPolicy::Copy) && env_plan.source.is_some() {
+        match git_success(&destination, ["check-ignore", "-q", "--", ".env"]).await {
+            Ok(true) => {}
+            Ok(false) => {
+                rollback_created_worktree(
+                    &snapshot.root_path,
+                    &destination,
+                    &request.branch,
+                    branch_state == BranchState::Missing,
+                )
+                .await;
+                return Err(WorktreeError::UnsafeEnvironment(
+                    "refusing to copy .env because the target branch does not ignore it".into(),
+                ));
+            }
+            Err(error) => {
+                rollback_created_worktree(
+                    &snapshot.root_path,
+                    &destination,
+                    &request.branch,
+                    branch_state == BranchState::Missing,
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    }
+
+    let environment = match port_environment(
+        &env_plan,
+        &destination,
+        &slug,
+        site_url.as_deref(),
+        request.remember_env_policy,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            rollback_created_worktree(
+                &snapshot.root_path,
+                &destination,
+                &request.branch,
+                branch_state == BranchState::Missing,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
     let project = {
         let registry = registry.lock().await;
         registry.store().put_worktree_repository(&repository)?;
@@ -497,6 +687,15 @@ pub async fn create(
                 .store()
                 .set_worktree_preference(repository.id, key, Some(value))?;
         }
+        if request.remember_env_policy {
+            if let Some(policy) = env_plan.policy {
+                registry.store().set_worktree_preference(
+                    repository.id,
+                    "copy_env",
+                    Some(policy.preference()),
+                )?;
+            }
+        }
         register_project(
             registry.store(),
             &repository,
@@ -505,7 +704,44 @@ pub async fn create(
             true,
         )?
     };
-    mutation_for_project(registry, project.id).await
+    mutation_for_project(registry, project.id, Some(environment)).await
+}
+
+/// SWM's "fork again": create from the selected worktree's exact HEAD, not
+/// from its branch name (which may have advanced elsewhere).
+pub async fn fork(
+    registry: &SharedProcessRegistry,
+    request: ForkWorktree,
+) -> WorktreeResult<WorktreeMutation> {
+    let source = {
+        let registry = registry.lock().await;
+        registry
+            .store()
+            .get_project(request.source_project_id)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidProject(format!(
+                    "project {} was not found",
+                    request.source_project_id
+                ))
+            })?
+    };
+    let snapshot = snapshot_async(Path::new(&source.path)).await?;
+    let record = matching_record(&snapshot, Path::new(&source.path)).ok_or_else(|| {
+        WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", source.path))
+    })?;
+    create(
+        registry,
+        CreateWorktree {
+            source_project_id: request.source_project_id,
+            branch: request.branch,
+            from_ref: Some(record.head.clone()),
+            managed_root: request.managed_root,
+            preferences: request.preferences,
+            env_policy: request.env_policy,
+            remember_env_policy: request.remember_env_policy,
+        },
+    )
+    .await
 }
 
 pub async fn adopt(
@@ -545,7 +781,7 @@ pub async fn adopt(
         let registry = registry.lock().await;
         register_project(registry.store(), &repository, &top, &branch, false)?
     };
-    mutation_for_project(registry, project.id).await
+    mutation_for_project(registry, project.id, None).await
 }
 
 pub async fn remove(
@@ -694,6 +930,250 @@ pub async fn remove(
     })
 }
 
+pub async fn forget_env_preference(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+) -> WorktreeResult<WorktreePreferenceMutation> {
+    let repository_id = {
+        let registry = registry.lock().await;
+        if registry.store().get_project_worktree(project_id)?.is_none() {
+            reconcile_existing_projects(registry.store())?;
+        }
+        registry
+            .store()
+            .get_project_worktree(project_id)?
+            .map(|link| link.repository_id)
+            .ok_or_else(|| {
+                WorktreeError::InvalidPath(format!("project {project_id} is not a Git worktree"))
+            })?
+    };
+    {
+        let registry = registry.lock().await;
+        set_preference(registry.store(), repository_id, "copy_env", None)?;
+    }
+    Ok(WorktreePreferenceMutation {
+        repository_id,
+        key: "copy_env",
+        cleared: true,
+    })
+}
+
+pub async fn health(registry: &SharedProcessRegistry) -> WorktreeHealth {
+    let roots = {
+        let registry = registry.lock().await;
+        registry
+            .store()
+            .list_worktree_repositories()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|repository| PathBuf::from(repository.managed_root))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    worktree_integrations::health(roots).await
+}
+
+async fn prepare_environment(
+    source_worktree: &Path,
+    policy: Option<EnvPortPolicy>,
+    remembered: bool,
+) -> WorktreeResult<EnvironmentPlan> {
+    let source = source_worktree.join(".env");
+    let metadata = match fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(EnvironmentPlan {
+                source: None,
+                contents: None,
+                permissions: None,
+                policy,
+                remembered,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let Some(policy) = policy else {
+        return Err(WorktreeError::EnvPreference(format!(
+            "{} has an ignored .env; choose env_policy=copy or env_policy=skip and set remember_env_policy=true to ask only once for this repository",
+            source_worktree.display()
+        )));
+    };
+    if policy == EnvPortPolicy::Skip {
+        return Ok(EnvironmentPlan {
+            source: Some(source),
+            contents: None,
+            permissions: None,
+            policy: Some(policy),
+            remembered,
+        });
+    }
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(WorktreeError::UnsafeEnvironment(format!(
+            "refusing to copy {} because it is not a regular file",
+            source.display()
+        )));
+    }
+    if git_success(
+        source_worktree,
+        ["ls-files", "--error-unmatch", "--", ".env"],
+    )
+    .await?
+    {
+        return Err(WorktreeError::UnsafeEnvironment(
+            "refusing to copy .env because Git tracks it".into(),
+        ));
+    }
+    if !git_success(source_worktree, ["check-ignore", "-q", "--", ".env"]).await? {
+        return Err(WorktreeError::UnsafeEnvironment(
+            "refusing to copy .env because Git does not ignore it".into(),
+        ));
+    }
+    let contents = fs::read(&source)?;
+    if std::str::from_utf8(&contents).is_err() {
+        return Err(WorktreeError::UnsafeEnvironment(
+            "refusing to rewrite .env because it is not valid UTF-8".into(),
+        ));
+    }
+    Ok(EnvironmentPlan {
+        source: Some(source),
+        contents: Some(contents),
+        permissions: Some(metadata.permissions()),
+        policy: Some(policy),
+        remembered,
+    })
+}
+
+fn port_environment(
+    plan: &EnvironmentPlan,
+    destination: &Path,
+    app_name: &str,
+    app_url: Option<&str>,
+    remember_requested: bool,
+) -> WorktreeResult<EnvironmentPortResult> {
+    let source_present = plan.source.is_some();
+    if plan.policy != Some(EnvPortPolicy::Copy) || !source_present {
+        return Ok(EnvironmentPortResult {
+            source_present,
+            policy: plan
+                .policy
+                .map(EnvPortPolicy::label)
+                .unwrap_or("not_present"),
+            copied: false,
+            remembered: plan.remembered || remember_requested,
+            app_name_rewritten: false,
+            app_url_rewritten: false,
+        });
+    }
+    let contents = plan.contents.as_deref().ok_or_else(|| {
+        WorktreeError::UnsafeEnvironment("the approved .env contents disappeared".into())
+    })?;
+    let source = std::str::from_utf8(contents).map_err(|_| {
+        WorktreeError::UnsafeEnvironment("the approved .env is not valid UTF-8".into())
+    })?;
+    let (rewritten, app_name_rewritten, app_url_rewritten) =
+        rewrite_environment(source, app_name, app_url);
+    let target = destination.join(".env");
+    if target.exists() {
+        return Err(WorktreeError::UnsafeEnvironment(format!(
+            "refusing to overwrite existing {}",
+            target.display()
+        )));
+    }
+    let temporary = destination.join(format!(".env.awm-{}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(&temporary)?;
+    file.write_all(rewritten.as_bytes())?;
+    file.sync_all()?;
+    if let Some(permissions) = &plan.permissions {
+        fs::set_permissions(&temporary, permissions.clone())?;
+    }
+    fs::rename(&temporary, &target)?;
+    Ok(EnvironmentPortResult {
+        source_present: true,
+        policy: "copy",
+        copied: true,
+        remembered: plan.remembered || remember_requested,
+        app_name_rewritten,
+        app_url_rewritten,
+    })
+}
+
+fn rewrite_environment(
+    source: &str,
+    app_name: &str,
+    app_url: Option<&str>,
+) -> (String, bool, bool) {
+    let trailing_newline = source.ends_with('\n');
+    let mut lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+    set_environment_value(&mut lines, "APP_NAME", &format!("\"{app_name}\""));
+    let app_name_rewritten = true;
+    let app_url_rewritten = if let Some(app_url) = app_url {
+        set_environment_value(&mut lines, "APP_URL", app_url);
+        true
+    } else {
+        false
+    };
+    let mut lines = lines.join("\n");
+    if trailing_newline {
+        lines.push('\n');
+    }
+    (lines, app_name_rewritten, app_url_rewritten)
+}
+
+fn set_environment_value(lines: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    let mut found = false;
+    lines.retain_mut(|line| {
+        if !line.starts_with(&prefix) {
+            return true;
+        }
+        if found {
+            return false;
+        }
+        *line = format!("{prefix}{value}");
+        found = true;
+        true
+    });
+    if !found {
+        lines.push(format!("{prefix}{value}"));
+    }
+}
+
+fn parse_env_preference(value: Option<&String>) -> WorktreeResult<Option<EnvPortPolicy>> {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        None => Ok(None),
+        Some(value) if matches!(value.as_str(), "yes" | "true" | "copy") => {
+            Ok(Some(EnvPortPolicy::Copy))
+        }
+        Some(value) if matches!(value.as_str(), "no" | "false" | "skip") => {
+            Ok(Some(EnvPortPolicy::Skip))
+        }
+        Some(value) => Err(WorktreeError::InvalidPath(format!(
+            "copy_env preference must be yes/copy or no/skip, got {value:?}"
+        ))),
+    }
+}
+
+async fn rollback_created_worktree(
+    repository: &Path,
+    destination: &Path,
+    branch: &str,
+    branch_was_created: bool,
+) {
+    let destination = destination.to_string_lossy().into_owned();
+    let _ = git_output(
+        repository,
+        ["worktree", "remove", "--force", destination.as_str()],
+        GIT_NETWORK_TIMEOUT,
+    )
+    .await;
+    if branch_was_created {
+        let _ = git_output(repository, ["branch", "-D", branch], GIT_NETWORK_TIMEOUT).await;
+    }
+}
+
 pub fn set_preference(
     store: &Store,
     repository_id: i64,
@@ -713,6 +1193,7 @@ pub fn set_preference(
 async fn mutation_for_project(
     registry: &SharedProcessRegistry,
     project_id: ProjectId,
+    environment: Option<EnvironmentPortResult>,
 ) -> WorktreeResult<WorktreeMutation> {
     let list = list_for_project(registry, project_id).await?;
     let worktree = list
@@ -732,6 +1213,7 @@ async fn mutation_for_project(
         repository: list.repository,
         project,
         worktree,
+        environment,
     })
 }
 
@@ -741,7 +1223,18 @@ async fn list_from_snapshot(
     snapshot: RepositorySnapshot,
     projects: Vec<Project>,
     links: Vec<ProjectWorktree>,
+    refresh_pull_requests: bool,
 ) -> WorktreeResult<WorktreeList> {
+    let herd = worktree_integrations::herd_for_root(Path::new(&repository.managed_root), false)
+        .await
+        .unwrap_or_else(|error| HerdView {
+            available: true,
+            parked: false,
+            tld: None,
+            error: Some(error.message),
+        });
+    let (pull_requests, pull_request_cache) =
+        worktree_integrations::pull_requests(&snapshot.root_path, refresh_pull_requests).await;
     let project_by_path = projects
         .iter()
         .map(|project| (canonical_display(Path::new(&project.path)), project))
@@ -759,6 +1252,18 @@ async fn list_from_snapshot(
         let project = project_by_path.get(&path_key).copied();
         let link = project.and_then(|project| link_by_project.get(&project.id).copied());
         let branch = display_branch(&record);
+        let site_name = record
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(site_slug)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| site_slug(&branch));
+        let is_herd_site = record
+            .path
+            .parent()
+            .is_some_and(|parent| same_path(parent, Path::new(&repository.managed_root)));
+        let pull_request = pull_requests.get(&branch).cloned();
         let is_main = same_path(&record.path, &snapshot.root_path);
         let registered = project.is_some();
         let managed = link.is_some_and(|link| link.managed);
@@ -788,6 +1293,10 @@ async fn list_from_snapshot(
             can_remove: managed && !is_main,
             locked: record.locked,
             prunable: record.prunable,
+            site_url: is_herd_site
+                .then(|| worktree_integrations::site_url(&site_name, &herd))
+                .flatten(),
+            pull_request,
         });
     }
     let preferences = {
@@ -801,8 +1310,10 @@ async fn list_from_snapshot(
             root_path: repository.root_path,
             managed_root: repository.managed_root,
             preferences,
+            herd,
         },
         worktrees: entries,
+        pull_requests: pull_request_cache,
     })
 }
 
@@ -1322,5 +1833,19 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1].branch.as_deref(), Some("feature/x"));
         assert!(parsed[1].locked);
+    }
+
+    #[test]
+    fn env_rewrite_adds_missing_keys_and_deduplicates_existing_ones() {
+        let (rewritten, name, url) = rewrite_environment(
+            "SECRET=fixture\nAPP_NAME=old\nAPP_NAME=duplicate\n",
+            "feature-name",
+            Some("http://feature-name.test"),
+        );
+        assert!(name && url);
+        assert_eq!(
+            rewritten,
+            "SECRET=fixture\nAPP_NAME=\"feature-name\"\nAPP_URL=http://feature-name.test\n"
+        );
     }
 }

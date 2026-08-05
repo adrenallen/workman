@@ -100,6 +100,9 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
     for expected in [
         "worktree_list",
         "worktree_create",
+        "worktree_fork",
+        "worktree_env_forget",
+        "worktree_health",
         "worktree_adopt",
         "worktree_remove",
     ] {
@@ -112,6 +115,16 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
     let listed = call(&client, "worktree_list", json!({ "project_id": 1 })).await;
     assert_eq!(listed["repository"]["name"], "rpc-repo");
     assert_eq!(listed["worktrees"].as_array().unwrap().len(), 2);
+    assert!(listed["repository"]["herd"]["available"].is_boolean());
+    assert!(listed["pull_requests"]["available"].is_boolean());
+    assert!(listed["pull_requests"]["checked_at"].is_number());
+
+    let health = call(&client, "worktree_health", json!({})).await;
+    assert!(health["all_required_ready"].is_boolean());
+    assert_eq!(health["checks"].as_array().unwrap().len(), 4);
+    assert!(health["checks"].as_array().unwrap().iter().all(|check| {
+        check["detail"].is_string() && check["fix_hint"].is_string() || check["fix_hint"].is_null()
+    }));
 
     let adopted = call(
         &client,
@@ -130,7 +143,8 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
             "project_id": 1,
             "branch": "rpc-created",
             "from_ref": "main",
-            "managed_root": managed
+            "managed_root": managed,
+            "preferences": { "herd_enabled": "no" }
         }),
     )
     .await;

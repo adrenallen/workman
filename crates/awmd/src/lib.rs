@@ -51,6 +51,7 @@ mod timers;
 mod updates;
 mod user_config;
 mod version;
+mod worktree_integrations;
 pub mod worktrees;
 
 pub use config::{

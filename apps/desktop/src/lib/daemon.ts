@@ -66,6 +66,22 @@ export interface ConnectionStatus {
   version_compatible: boolean;
 }
 
+export interface WorktreeHealthCheck {
+  id: string;
+  label: string;
+  required: boolean;
+  status: 'ready' | 'attention' | 'missing';
+  detail: string;
+  version: string | null;
+  fix_hint: string | null;
+}
+
+export interface WorktreeHealth {
+  summary: string;
+  all_required_ready: boolean;
+  checks: WorktreeHealthCheck[];
+}
+
 export class DaemonRequestError extends Error {
   constructor(
     readonly method: string,
@@ -347,6 +363,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   agentToolsHealth(): Promise<AgentToolsHealth> {
     return this.request('agent_tools.health');
+  }
+
+  worktreeHealth(): Promise<WorktreeHealth> {
+    return this.request('worktree.health');
   }
 
   previewAgentToolConfig(agentToolId: number): Promise<AgentToolConfigPreview> {

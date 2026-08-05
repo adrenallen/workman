@@ -11,7 +11,7 @@ use std::{
 use awm_core::{Project, Store};
 use awmd::{
     ProcessRegistry, SharedProcessRegistry,
-    worktrees::{self, AdoptWorktree, CreateWorktree, RemoveWorktree},
+    worktrees::{self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, RemoveWorktree},
 };
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -101,7 +101,12 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             branch: "feature/new-ui".into(),
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
-            preferences: BTreeMap::from([("copy_env".into(), "no".into())]),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
         },
     )
     .await?;
@@ -115,6 +120,38 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         "feature-new-ui"
     );
     assert_eq!(created.repository.preferences["copy_env"], "no");
+
+    // "Fork again" must use the selected child worktree's exact HEAD, even
+    // when that commit exists on neither the root branch nor a remote.
+    std::fs::write(
+        Path::new(&created.worktree.path).join("child-only.txt"),
+        "selected HEAD\n",
+    )?;
+    git(
+        Path::new(&created.worktree.path),
+        &["add", "child-only.txt"],
+    )?;
+    git(
+        Path::new(&created.worktree.path),
+        &["commit", "-m", "child head"],
+    )?;
+    let selected_head = git(Path::new(&created.worktree.path), &["rev-parse", "HEAD"])?;
+    let forked = worktrees::fork(
+        &fixture.registry,
+        ForkWorktree {
+            source_project_id: created.project.project.id,
+            branch: "feature/fork-again".into(),
+            managed_root: None,
+            preferences: BTreeMap::new(),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(
+        git(Path::new(&forked.worktree.path), &["rev-parse", "HEAD"])?.trim(),
+        selected_head.trim()
+    );
 
     // Existing SWM projects were registered before awm knew about worktree
     // metadata. An exact managed-root/branch-slug layout is linked back to the
@@ -165,7 +202,9 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             branch: "remote-only".into(),
             from_ref: None,
             managed_root: None,
-            preferences: BTreeMap::new(),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
         },
     )
     .await?;
@@ -278,6 +317,129 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
 
     // The remote stays a local fixture throughout the test; no user repository is touched.
     assert!(fixture.origin.join("HEAD").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    std::fs::write(fixture.main.join(".gitignore"), ".env\n")?;
+    git(&fixture.main, &["add", ".gitignore"])?;
+    git(&fixture.main, &["commit", "-m", "ignore local env"])?;
+    git(&fixture.main, &["push", "origin", "main"])?;
+    std::fs::write(
+        fixture.main.join(".env"),
+        "APP_NAME=Original\nAPP_URL=http://original.test\nSECRET=fixture\n",
+    )?;
+
+    let required = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "env/needs-choice".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("the first ignored .env requires a repository choice");
+    assert_eq!(required.code(), "env_preference_required");
+    assert!(!fixture.managed.join("env-needs-choice").exists());
+
+    let initial_head = git(&fixture.main, &["rev-parse", "HEAD^"])?;
+    git(
+        &fixture.main,
+        &["branch", "env-target-does-not-ignore", initial_head.trim()],
+    )?;
+    let target_unsafe = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "env-target-does-not-ignore".into(),
+            from_ref: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: Some(EnvPortPolicy::Copy),
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("target branches that do not ignore .env must be rolled back");
+    assert_eq!(target_unsafe.code(), "unsafe_env_file");
+    assert!(target_unsafe.to_string().contains("target branch"));
+    assert!(!fixture.managed.join("env-target-does-not-ignore").exists());
+
+    let copied = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "env/copied".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: Some(EnvPortPolicy::Copy),
+            remember_env_policy: true,
+        },
+    )
+    .await?;
+    let copied_env = std::fs::read_to_string(Path::new(&copied.worktree.path).join(".env"))?;
+    assert!(copied_env.contains("APP_NAME=\"env-copied\""));
+    assert!(copied_env.contains("APP_URL=http://original.test"));
+    assert!(copied_env.contains("SECRET=fixture"));
+    let result = copied.environment.expect("environment receipt");
+    assert!(result.copied && result.app_name_rewritten && !result.app_url_rewritten);
+    assert_eq!(copied.repository.preferences["copy_env"], "yes");
+
+    let receipt = worktrees::forget_env_preference(&fixture.registry, 1).await?;
+    assert!(receipt.cleared);
+    let listed = worktrees::list_for_project(&fixture.registry, 1).await?;
+    assert!(!listed.repository.preferences.contains_key("copy_env"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    std::fs::write(fixture.main.join(".env"), "APP_NAME=Unsafe\n")?;
+    let nonignored = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "env/nonignored".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: Some(EnvPortPolicy::Copy),
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("nonignored .env must be refused");
+    assert_eq!(nonignored.code(), "unsafe_env_file");
+    assert!(nonignored.to_string().contains("does not ignore"));
+
+    git(&fixture.main, &["add", ".env"])?;
+    git(&fixture.main, &["commit", "-m", "tracked env fixture"])?;
+    let tracked = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "env/tracked".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: Some(EnvPortPolicy::Copy),
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("tracked .env must be refused");
+    assert_eq!(tracked.code(), "unsafe_env_file");
+    assert!(tracked.to_string().contains("tracks"));
     Ok(())
 }
 

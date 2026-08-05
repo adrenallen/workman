@@ -40,7 +40,7 @@ mod tools_worktree;
 
 pub const AWM_MCP_TOKEN_HEADER: &str = "x-awm-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in awm scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
-pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and worktree_create when parallel or isolated work should live on its own branch; each managed worktree becomes a separate awm project.";
+pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate awm project.";
 
 #[derive(Clone)]
 pub struct AwmMcp {
