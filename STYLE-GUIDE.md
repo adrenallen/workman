@@ -15,7 +15,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - The base UI text is 14px. Navigation, tree rows, controls, and secondary copy must never be smaller than `--font-size-xs` (12px); primary row labels use at least `--font-size-sm` (13px).
 - Use the 4px spacing grid (`--space-1` through `--space-4`). Keep rows compact, normally 28–36px high. Density comes from alignment and hierarchy, not tiny text.
 - Use `--background`, `--card`, and `--popover` for the surface stack; `--border-token` and `--input` for edges; `--foreground` and `--muted-foreground` for copy.
-- Blue `--ring` is focus only. Green `--success` means running/healthy, amber `--warning-token` means attention, and red `--destructive` means crashed/destructive. Do not use semantic colors as decoration.
+- Blue `--ring` is focus only. Green `--success` means active work/healthy, amber `--warning-token` means attention, red `--destructive` means exited/crashed/destructive, and `--information` is reserved for a deliberate waiting/timer state. Do not use semantic colors as decoration.
 - The standard radius is `--radius`. Avoid pills unless the value is genuinely a compact status or count.
 - The signature treatment is a crisp blue focus frame on an otherwise quiet, low-contrast chrome. Do not add glow, gradients, glass effects, or ornamental motion.
 
@@ -24,6 +24,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Use Lucide Svelte icons from `@lucide/svelte/icons/*`, normally 14–16px with `strokeWidth={1.8}`. Do not use Unicode glyphs as interface icons.
 - Icon-only controls must use `IconButton` and provide an action label plus any shortcut. Visible text wins when an action would be ambiguous.
 - Every dot, badge, count, health light, or attention marker must have an exact tooltip and accessible label. Use `StatusIndicator`; never add a bare colored circle.
+- Agent state always uses `AgentStatusIndicator`: gray static circle = idle, spinning green loader = working, amber alert = needs input, blue clock = waiting/timer, and red exit icon = exited. Exit tooltips distinguish clean exits from crashes.
 - Status copy should answer what and why: “Daemon connected · port 62749”, “Agent needs input”, or “3 running of 5 terminals”. Avoid generic labels like “online” without a subject.
 
 ## Interaction contract

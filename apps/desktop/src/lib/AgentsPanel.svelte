@@ -1,6 +1,9 @@
 <script lang="ts">
+  import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import { onMount } from 'svelte';
 
+  import { agentStatusPresentation } from './agentStatus';
+  import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import TerminalView from './TerminalView.svelte';
   import {
     getAgentToolsStore,
@@ -204,10 +207,7 @@
   }
 
   function stateLabel(agent: ProcessView): string {
-    if (agent.agent_state.needs_input) return 'Needs input';
-    if (agent.agent_state.working) return 'Working';
-    if (agent.agent_state.idle) return 'Idle';
-    return agent.status === 'crashed' ? 'Crashed' : 'Exited';
+    return agentStatusPresentation(agent).shortLabel;
   }
 </script>
 
@@ -273,7 +273,7 @@
         <strong>{activeAgents} active</strong>
       </div>
       {#if attentionCount > 0}
-        <span class="attention-summary" title={`${attentionCount} agents need input`}><i aria-hidden="true"></i>{attentionCount} waiting</span>
+        <span class="attention-summary" title={`${attentionCount} agents need input`}><CircleAlertIcon size={12} aria-hidden="true" />{attentionCount} need input</span>
       {:else}
         <span class="quiet-summary">All clear</span>
       {/if}
@@ -291,21 +291,12 @@
         {#each agents as agent (agent.id)}
           <article class="agent-row" class:selected={agent.id === selectedProcessId}>
             <button class="agent-primary" type="button" onclick={() => onSelectProcess(agent.id)}>
-              <span
-                class="attention-orbit"
-                class:working={agent.agent_state.working}
-                class:waiting={agent.agent_state.needs_input}
-                class:idle={agent.agent_state.idle}
-                class:exited={agent.agent_state.exited}
-                title={`${agent.name} · ${stateLabel(agent)}`}
-                role="status"
-                aria-label={`${agent.name} · ${stateLabel(agent)}`}
-              ><i></i></span>
+              <AgentStatusIndicator process={agent} size="lg" />
               <span class="agent-copy">
                 <strong>{agent.name}</strong>
                 <small>{agent.agent_state.tool_type?.replaceAll('_', ' ') ?? 'agent'} · #{agent.id}</small>
               </span>
-              <span class:waiting-label={agent.agent_state.needs_input} class="agent-state">{stateLabel(agent)}</span>
+              <span class="agent-state" data-state={agentStatusPresentation(agent).state}>{stateLabel(agent)}</span>
             </button>
             <button
               class="close-agent"
@@ -707,13 +698,6 @@
     color: #dfb46b;
   }
 
-  .attention-summary i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #e4ae5b;
-  }
-
   .agent-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 34px;
@@ -741,57 +725,6 @@
 
   .agent-primary:hover {
     background: var(--popover);
-  }
-
-  .attention-orbit {
-    position: relative;
-    display: grid;
-    width: 25px;
-    height: 25px;
-    place-items: center;
-    border: 1px solid #354c53;
-    border-radius: 50%;
-  }
-
-  .attention-orbit i {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #66767b;
-  }
-
-  .attention-orbit.working {
-    border-color: #376960;
-    border-right-color: var(--signal);
-    animation: orbit 1.1s linear infinite;
-  }
-
-  .attention-orbit.working i {
-    background: var(--signal);
-  }
-
-  .attention-orbit.waiting {
-    border-color: #8a6939;
-  }
-
-  .attention-orbit.waiting i {
-    background: #e4ae5b;
-  }
-
-  .attention-orbit.idle i {
-    background: #708f91;
-  }
-
-  .attention-orbit.exited {
-    border-color: #303f45;
-  }
-
-  .attention-orbit.exited i {
-    background: #46575d;
-  }
-
-  @keyframes orbit {
-    to { transform: rotate(360deg); }
   }
 
   .agent-copy,
@@ -825,9 +758,10 @@
     text-transform: uppercase;
   }
 
-  .agent-state.waiting-label {
-    color: #dfb46b;
-  }
+  .agent-state[data-state='working'] { color: var(--success); }
+  .agent-state[data-state='needs_input'] { color: var(--warning-token); }
+  .agent-state[data-state='waiting'] { color: var(--information); }
+  .agent-state[data-state='exited'] { color: var(--destructive); }
 
   .close-agent {
     align-self: center;
@@ -1194,10 +1128,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .attention-orbit.working {
-      animation: none;
-    }
-
     .toggle span,
     .tool-card {
       transition: none;

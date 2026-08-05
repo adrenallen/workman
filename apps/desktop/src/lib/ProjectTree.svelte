@@ -16,6 +16,7 @@
   import CountBadge from './CountBadge.svelte';
   import InlineTreeRename from './InlineTreeRename.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
+  import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import IconButton from './components/ds/IconButton.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import TooltipLabel from './components/ds/TooltipLabel.svelte';
@@ -258,10 +259,11 @@
     }
   }
 
-  function lineageTone(rollup: AgentAttentionRollup): 'attention' | 'working' | 'error' | 'idle' {
+  function lineageTone(rollup: AgentAttentionRollup): 'attention' | 'working' | 'waiting' | 'error' | 'idle' {
     if (rollup.needsInput > 0) return 'attention';
     if (rollup.crashed > 0) return 'error';
     if (rollup.working > 0) return 'working';
+    if (rollup.waiting > 0) return 'waiting';
     return 'idle';
   }
 
@@ -269,6 +271,7 @@
     const states = [];
     if (rollup.needsInput > 0) states.push(`${rollup.needsInput} need input`);
     if (rollup.working > 0) states.push(`${rollup.working} working`);
+    if (rollup.waiting > 0) states.push(`${rollup.waiting} waiting for timer`);
     if (rollup.crashed > 0) states.push(`${rollup.crashed} crashed`);
     const suffix = states.length > 0 ? ` · ${states.join(', ')}` : '';
     return `${rollup.total} nested agent${rollup.total === 1 ? '' : 's'}${suffix}`;
@@ -502,7 +505,7 @@
                     onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                   >
                     {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
-                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
+                    <AgentStatusIndicator {process} />
                     <span class="row-copy"><strong>{process.name}</strong></span>
                     {#if row.rollup.total > 0 || stats}
                       <span class="row-badges">
@@ -665,6 +668,7 @@
   .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .lineage-rollup.attention { border-color: color-mix(in srgb, var(--warning) 48%, var(--border)); color: var(--warning); }
   .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, var(--border)); color: var(--signal); }
+  .lineage-rollup.waiting { border-color: color-mix(in srgb, var(--information) 42%, var(--border)); color: var(--information); }
   .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, var(--border)); color: var(--fault); }
   .scratchpad-icon { color: var(--muted-foreground); }
   .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: var(--muted-foreground); font-size: var(--font-size-sm); }

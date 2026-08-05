@@ -4,6 +4,7 @@ export interface AgentAttentionRollup {
   total: number;
   needsInput: number;
   working: number;
+  waiting: number;
   crashed: number;
 }
 
@@ -94,6 +95,7 @@ function attentionRollup(
     total: 0,
     needsInput: 0,
     working: 0,
+    waiting: 0,
     crashed: 0
   };
   const pending = [...(childrenById.get(processId) ?? [])];
@@ -105,6 +107,7 @@ function attentionRollup(
     rollup.total += 1;
     rollup.needsInput += Number(child.agent_state.needs_input);
     rollup.working += Number(child.agent_state.working);
+    rollup.waiting += Number(String(child.agent_state.state) === 'waiting');
     rollup.crashed += Number(child.status === 'crashed');
     pending.push(...(childrenById.get(child.id) ?? []));
   }

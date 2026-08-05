@@ -1,5 +1,7 @@
 <script lang="ts">
+  import AgentStatusIndicator from '$lib/components/ds/AgentStatusIndicator.svelte';
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
+  import { agentStatusPresentation } from './agentStatus';
   import type { ProcessView } from './daemon';
 
   interface Props {
@@ -47,7 +49,7 @@
 
   function stateLabel(process: ProcessView): string {
     if (needsTrust(process)) return 'review';
-    if (process.agent_state.needs_input) return 'needs input';
+    if (process.kind === 'agent') return agentStatusPresentation(process).shortLabel.toLowerCase();
     return process.status;
   }
 
@@ -100,7 +102,11 @@
             title={process.kind === 'command' && !isActive(process) ? `Run ${process.name}` : `Open ${process.name}`}
             onclick={() => runOrSelect(process)}
           >
-            <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
+            {#if process.kind === 'agent'}
+              <AgentStatusIndicator {process} />
+            {:else}
+              <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
+            {/if}
             <span class="process-copy">
               <span class="process-title">
                 <strong>{process.name}</strong>
@@ -109,14 +115,6 @@
               <span class="command">{process.command ?? process.working_dir}</span>
             </span>
             <span class="state">
-              {#if process.kind === 'agent'}
-                <i
-                  class:working={process.agent_state.working}
-                  class:waiting={process.agent_state.needs_input}
-                  class:idle={process.agent_state.idle}
-                  aria-hidden="true"
-                ></i>
-              {/if}
               {stateLabel(process)}
             </span>
           </button>
@@ -324,17 +322,6 @@
     text-transform: uppercase;
     white-space: nowrap;
   }
-
-  .state i {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: #526874;
-  }
-
-  .state i.working { background: var(--signal); }
-  .state i.waiting { background: #e4ae5b; }
-  .state i.idle { background: #7690a0; }
 
   .actions {
     display: flex;

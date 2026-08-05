@@ -24,6 +24,8 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { onMount } from 'svelte';
 
+  import { agentStatusPresentation } from './agentStatus';
+  import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import * as Popover from './components/ui/popover';
   import { liveStats, type DescendantProcessStats } from './liveStats';
@@ -185,13 +187,6 @@
     return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
   }
 
-  function attentionWord(): string {
-    if (process.agent_state.needs_input) return 'Needs input';
-    if (process.agent_state.working) return 'Working';
-    if (process.agent_state.idle) return 'Idle';
-    return 'Exited';
-  }
-
   function childCommand(child: DescendantProcessStats): string {
     return child.command?.trim() || child.name;
   }
@@ -338,21 +333,18 @@
     <span class="metric secondary-metric" title={`Memory usage: ${formatMemory(stats?.memory_bytes)}`}>
       <span class="metric-label">MEM</span><span>{formatMemory(stats?.memory_bytes)}</span>
     </span>
-    <span
-      class="attention"
-      class:waiting={process.agent_state.needs_input}
-      class:working={process.agent_state.working}
-      title={`Agent attention: ${attentionWord()}`}
-      ><i aria-hidden="true"></i><span class="attention-word">{attentionWord()}</span></span
-    >
-    <span
-      class:active-run={process.status === 'running'}
-      class:fault={process.status === 'crashed'}
-      class="run-state"
-      title={`Process status: ${process.status}`}
-    >
-      <i aria-hidden="true"></i><span class="state-word">{process.status}</span>
-    </span>
+    {#if process.kind === 'agent'}
+      <span class="agent-attention"><AgentStatusIndicator {process} showLabel={statusWidth > 1_040} /></span>
+    {:else}
+      <span
+        class:active-run={process.status === 'running'}
+        class:fault={process.status === 'crashed'}
+        class="run-state"
+        title={`Process status: ${process.status}`}
+      >
+        <i aria-hidden="true"></i><span class="state-word">{process.status}</span>
+      </span>
+    {/if}
 
     <span class="daemon-connection">
       <ServerIcon size={13} strokeWidth={1.8} aria-hidden="true" />
@@ -392,7 +384,7 @@
             <div><dt>Uptime</dt><dd>{formatDuration(stats?.uptime_seconds)}</dd></div>
             <div><dt>CPU</dt><dd>{(stats?.cpu_percent ?? 0).toFixed(1)}%</dd></div>
             <div><dt>Memory</dt><dd>{formatMemory(stats?.memory_bytes)}</dd></div>
-            <div><dt>Attention</dt><dd>{attentionWord()}</dd></div>
+            {#if process.kind === 'agent'}<div><dt>Agent state</dt><dd>{agentStatusPresentation(process).shortLabel}</dd></div>{/if}
             <div><dt>State</dt><dd>{process.status}</dd></div>
             <div><dt>PID</dt><dd>{process.pid ?? '—'}</dd></div>
           </dl>
@@ -559,29 +551,6 @@
   .branch {
     color: var(--signal);
     font-size: 12px;
-  }
-
-  .attention {
-    gap: 6px;
-    color: #979da6;
-    font-weight: 650;
-    text-transform: uppercase;
-  }
-
-  .attention i {
-    width: 5px;
-    height: 5px;
-    flex: 0 0 auto;
-    border-radius: 50%;
-    background: currentColor;
-  }
-
-  .attention.waiting {
-    color: var(--warning);
-  }
-
-  .attention.working {
-    color: var(--signal);
   }
 
   .run-state {
@@ -996,7 +965,6 @@
   .stage-medium .nav-label,
   .stage-medium .uptime-prefix,
   .stage-medium .metric-label,
-  .stage-medium .attention-word,
   .stage-medium .subprocess-label,
   .stage-medium .process-name,
   .stage-medium .daemon-port {
@@ -1025,7 +993,7 @@
     margin-left: auto;
   }
 
-  .stage-narrow .attention,
+  .stage-narrow .agent-attention,
   .stage-narrow .run-state {
     padding-right: 8px;
     padding-left: 8px;
@@ -1034,7 +1002,7 @@
   .stage-tiny .uptime,
   .stage-tiny .secondary-metric,
   .stage-tiny .process-name,
-  .stage-tiny .attention,
+  .stage-tiny .agent-attention,
   .stage-tiny .subprocess-trigger {
     display: none;
   }
