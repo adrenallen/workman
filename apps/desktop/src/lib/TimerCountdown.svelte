@@ -17,7 +17,6 @@
       .filter((timer) => timer.delivery_process_id === processId && !timer.fired)
       .sort((left, right) => left.due_at - right.due_at)
   );
-  const timer = $derived(timers[0] ?? null);
 
   onMount(() => {
     const interval = window.setInterval(() => (now = Date.now()), 250);
@@ -36,27 +35,59 @@
     return `${minutes}:${(seconds % 60).toString().padStart(2, '0')}`;
   }
 
-  function label(value: TimerView): string {
-    if (value.paused) return 'paused';
-    if (value.kind !== 'delay') return 'idle';
-    return value.repeating ? 'repeat' : 'timer';
+  function formatInterval(milliseconds: number | null): string {
+    const seconds = Math.max(1, Math.ceil((milliseconds ?? 0) / 1_000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${(seconds % 60).toString().padStart(2, '0')}`;
   }
 
-  function description(value: TimerView): string {
-    const purpose = value.kind === 'delay' ? 'next delivery' : 'idle timer max-wait ceiling';
-    const extra = timers.length > 1 ? `; ${timers.length - 1} more timer(s)` : '';
-    return `${purpose} in ${formatRemaining(value)}${extra}`;
+  function kindName(value: TimerView): string {
+    if (value.kind === 'idle_any') return 'Idle-any timer';
+    if (value.kind === 'idle_all') return 'Idle-all timer';
+    return value.repeating ? 'Repeating delay timer' : 'One-shot delay timer';
+  }
+
+  function scheduleLabel(value: TimerView): string {
+    const remaining = formatRemaining(value);
+    if (value.paused) return `paused · ${remaining} left`;
+    if (value.kind !== 'delay') return `waiting for idle · ${remaining} max`;
+    if (value.repeating) return `next fire in ${remaining}`;
+    return `fires in ${remaining}`;
+  }
+
+  function detail(value: TimerView): string {
+    const watchList = value.watch_process_ids.length
+      ? value.watch_process_ids.map((id) => `process #${id}`).join(', ')
+      : 'none';
+    const schedule = value.kind === 'delay' ? 'Next fire' : 'Maximum wait deadline';
+    const lines = [
+      `${kindName(value)} #${value.id}`,
+      `Status: ${scheduleLabel(value)}`,
+      `${schedule}: ${new Date(value.due_at).toLocaleString()}`,
+      `Watch list: ${watchList}`,
+      `Delivery target: process #${value.delivery_process_id}`,
+      `Created by: ${value.owner_actor}`,
+      `Created: ${new Date(value.created_at).toLocaleString()}`,
+      `Message: ${value.body}`
+    ];
+    if (value.repeating) lines.splice(3, 0, `Repeat interval: ${formatInterval(value.interval_ms)}`);
+    return lines.join('\n');
   }
 </script>
 
-{#if timer}
-  <span class:paused={timer.paused} class="countdown" title={description(timer)}>
-    <i aria-hidden="true"></i>
-    <strong>{label(timer)}</strong>
-    <span>{formatRemaining(timer)}</span>
-    {#if timers.length > 1}<em>+{timers.length - 1}</em>{/if}
+{#each timers as timer (timer.id)}
+  <span
+    class:idle={timer.kind !== 'delay'}
+    class:paused={timer.paused}
+    class="countdown"
+    title={detail(timer)}
+    aria-label={scheduleLabel(timer)}
+  >
+    <span class="direction" aria-hidden="true">↓</span>
+    <span class="copy">{scheduleLabel(timer)}</span>
   </span>
-{/if}
+{/each}
 
 <style>
   .countdown {
@@ -71,36 +102,27 @@
     white-space: nowrap;
   }
 
-  i {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--signal);
-  }
-
-  strong {
-    color: #aeb5bd;
-    font-size: 8px;
+  .direction {
+    color: var(--signal);
+    font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
+    line-height: 1;
   }
 
-  span {
+  .copy {
     color: #d6dae0;
+    font-weight: 600;
   }
 
-  em {
+  .idle .direction {
+    color: var(--warning);
+  }
+
+  .paused .direction {
     color: var(--muted);
-    font-size: 7px;
-    font-style: normal;
   }
 
-  .paused i {
-    background: var(--muted);
-  }
-
-  .paused span,
-  .paused strong {
+  .paused .copy {
     color: var(--muted);
   }
 </style>

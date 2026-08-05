@@ -188,7 +188,10 @@
   </nav>
 
   <div class="telemetry">
-    <span class="metric uptime" title="Process uptime">{formatDuration(stats?.uptime_seconds)}</span>
+    <span class="metric uptime" title={`Process uptime: ${formatDuration(stats?.uptime_seconds)}`}>
+      <span class="clock" aria-hidden="true">◷</span>
+      <span>up {formatDuration(stats?.uptime_seconds)}</span>
+    </span>
     <TimerCountdown processId={process.id} />
     <strong class="process-name" title={process.name}>{process.name}</strong>
 
@@ -378,7 +381,13 @@
   }
 
   .uptime {
+    gap: 5px;
     color: #a7adb5;
+  }
+
+  .clock {
+    color: #737b85;
+    font-size: 11px;
   }
 
   .process-name {
