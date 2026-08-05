@@ -128,7 +128,7 @@ build_macos() {
   log "macOS arm64 binaries and desktop"
   npm --prefix apps/desktop ci
   npm --prefix apps/desktop run build
-  cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm -p awm-desktop
+  cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm
   CARGO_TARGET_DIR="$REPO_ROOT/target" npm --prefix apps/desktop run tauri -- build --ci --no-sign \
     --config '{"build":{"beforeBuildCommand":""}}' \
     --runner "$REPO_ROOT/scripts/tauri-dist-runner.sh" \

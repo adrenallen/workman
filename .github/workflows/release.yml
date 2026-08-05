@@ -113,8 +113,8 @@ jobs:
         working-directory: apps/desktop
         run: npm run build
 
-      - name: Build shipping Rust packages once
-        run: cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm -p awm-desktop
+      - name: Build CLI and daemon with the shared dist profile
+        run: cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm
 
       - name: Build unsigned desktop application
         working-directory: apps/desktop
@@ -209,8 +209,8 @@ jobs:
         working-directory: apps/desktop
         run: npm run build
 
-      - name: Build shipping Rust packages once
-        run: cargo build --locked --profile dist --target "$LINUX_TARGET" -p awmd -p awm -p awm-desktop
+      - name: Build CLI and daemon with the shared dist profile
+        run: cargo build --locked --profile dist --target "$LINUX_TARGET" -p awmd -p awm
 
       - name: Build experimental desktop bundles
         working-directory: apps/desktop

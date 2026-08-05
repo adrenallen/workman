@@ -28,7 +28,6 @@ WORKDIR /workspace
 COPY . .
 
 RUN cd apps/desktop && npm ci && npm run build
-RUN cargo build --locked --profile dist -p awm-desktop
 RUN cd apps/desktop && npm run tauri -- build --ci \
     --config '{"build":{"beforeBuildCommand":""}}' \
     --runner /workspace/scripts/tauri-dist-runner.sh \
