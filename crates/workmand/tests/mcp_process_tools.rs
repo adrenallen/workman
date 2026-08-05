@@ -83,7 +83,7 @@ fn process(id: i64, project: &Project, kind: ProcessKind, name: &str, command: &
 }
 
 fn paste_sensitive_tui() -> &'static str {
-    r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; if ($chunk eq "\r") { print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } print "\r\nPASTED:$n\r\n"; }'"#
+    r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; my $draft=""; my $enters=0; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; my $redraw=0; for my $character (split //, $chunk) { if ($character eq "\r") { $enters++; next if $enters == 1; print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } $draft .= $character; $redraw=1; } print "\r\e[2K❯ DRAFT:$draft" if $redraw; }'"#
 }
 
 async fn wait_for_state(
@@ -248,7 +248,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
             "process_id": 5,
             "input": short_prompt,
             "submit": true,
-            "wait_ms": 250
+            "wait_ms": 2_000
         }),
     )
     .await;
@@ -260,6 +260,13 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     );
     assert_eq!(paste_submit["status"]["agent_state"]["state"], "working");
     assert!(paste_submit["status"]["agent_state"]["last_input_at"].is_number());
+    assert!(
+        paste_submit["status"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "submit_retry")
+    );
 
     let started = call(
         &client,

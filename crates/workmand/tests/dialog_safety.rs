@@ -1,5 +1,16 @@
-use std::{error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
+use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, CallToolResult, ClientInfo},
@@ -9,10 +20,44 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
-use workman_core::{AgentTool, AgentToolSource, Project};
-use workmand::{DaemonConfig, DaemonServer};
+use workman_core::{AgentTool, AgentToolSource, Project, attention::AttentionState};
+use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
+
+struct HostLoad {
+    keep_running: Arc<AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl HostLoad {
+    fn start(thread_count: usize) -> Self {
+        let keep_running = Arc::new(AtomicBool::new(true));
+        let threads = (0..thread_count)
+            .map(|_| {
+                let keep_running = Arc::clone(&keep_running);
+                std::thread::spawn(move || {
+                    while keep_running.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self {
+            keep_running,
+            threads,
+        }
+    }
+}
+
+impl Drop for HostLoad {
+    fn drop(&mut self) {
+        self.keep_running.store(false, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
 
 fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().expect("arguments are an object").clone()
@@ -87,6 +132,57 @@ async fn wait_for_dialog(
             return Err("process did not render a recognized dialog".into());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_idle(
+    registry: &workmand::SharedProcessRegistry,
+    process_id: i64,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = registry.lock().await.get_status(process_id)?;
+        if status.agent_state.state == AttentionState::Idle {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "process {process_id} did not become idle; current state is {:?}",
+                status.agent_state.state
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_actual_response(
+    registry: &workmand::SharedProcessRegistry,
+    process_id: i64,
+    expected: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (status, rendered) = {
+            let mut registry = registry.lock().await;
+            (
+                registry.get_status(process_id)?,
+                registry.rendered_output(process_id)?.text,
+            )
+        };
+        if rendered.contains(expected) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Codex left the submitted text as a draft instead of answering {expected:?}; state={:?}, output={rendered:?}",
+                status.agent_state.state
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -255,7 +351,7 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
 /// exercises the same brand-new-directory race reported by the user.
 #[tokio::test]
 #[ignore = "requires an installed Codex CLI"]
-async fn installed_codex_in_brand_new_directory_accepts_immediate_mission()
+async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions()
 -> Result<(), Box<dyn Error>> {
     if std::process::Command::new("codex")
         .arg("--version")
@@ -332,31 +428,61 @@ async fn installed_codex_in_brand_new_directory_accepts_immediate_mission()
             .any(|event| { event["kind"] == "dialog_auto_acknowledged" })
     );
 
-    let mission = "Mission 2 stays intact; wait for more input.";
+    wait_for_idle(&registry, process_id, Duration::from_secs(10)).await?;
+    let process_token = {
+        let registry = registry.lock().await;
+        registry.store().connection().query_row(
+            "SELECT token FROM process_mcp_tokens WHERE process_id = ?1",
+            [process_id],
+            |row| row.get::<_, String>(0),
+        )?
+    };
+    let timer_transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!(
+            "http://127.0.0.1:{}/mcp",
+            discovery.port
+        ))
+        .custom_headers(HashMap::from([(
+            HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
+            HeaderValue::from_str(&process_token)?,
+        )])),
+    );
+    let timer_client = ClientInfo::default().serve(timer_transport).await?;
+
+    // Scheduled delivery, short enough to reproduce the atomic-write failure.
     call(
-        &client,
-        "send_input",
+        &timer_client,
+        "timer_set",
         json!({
-            "project_id": 8,
-            "process_id": process_id,
-            "input": mission,
-            "submit": true
+            "delay_ms": 20,
+            "body": "Decode this ROT13 text and print only the decoded word: SBHE"
         }),
     )
     .await;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let output = registry.lock().await.rendered_output(process_id)?;
-        if output.text.contains(mission) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Codex did not render the intact immediate mission: {}",
-            output.text
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_for_actual_response(&registry, process_id, "FOUR", Duration::from_secs(60)).await?;
+    wait_for_idle(&registry, process_id, Duration::from_secs(30)).await?;
+
+    // Already-satisfied delivery while the host is busy and the payload is
+    // large enough to exercise a different PTY packetization pattern.
+    let host_load = HostLoad::start(4);
+    let body = format!(
+        "Ignore this padding and decode the final ROT13 word, printing only the decoded word. {} RVTUG",
+        "padding ".repeat(1_024)
+    );
+    let immediate = call(
+        &timer_client,
+        "timer_fire_when_idle_all",
+        json!({
+            "processes": [process_id],
+            "max_wait_ms": 30_000,
+            "body": body
+        }),
+    )
+    .await;
+    drop(host_load);
+    assert_eq!(immediate["already_satisfied"], true);
+    assert_eq!(immediate["delivered_immediately"], true);
+    wait_for_actual_response(&registry, process_id, "EIGHT", Duration::from_secs(60)).await?;
     assert_eq!(status["status"], "running");
 
     call(
@@ -365,6 +491,7 @@ async fn installed_codex_in_brand_new_directory_accepts_immediate_mission()
         json!({ "project_id": 8, "process_id": process_id }),
     )
     .await;
+    let _ = timer_client.cancel().await;
     let _ = client.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;

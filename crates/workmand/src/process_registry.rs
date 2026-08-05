@@ -17,14 +17,18 @@ use workman_core::{
     attention::{AgentState, AttentionTracker, PendingDialog, pending_dialog},
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
-        PtySpawnOptions, RawOutput,
+        PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput},
 };
 
-// Empirical PTY trials found 0-1ms always coalesced the Enter byte with short
-// content and 2ms was flaky; 3ms+ was reliable. Keep a small safety margin.
+// Preserve a minimum packet boundary; the process-local worker additionally
+// waits for the composer redraw to settle and verifies that Enter starts a turn.
 const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(5);
+/// A healthy interactive agent redraws its busy state promptly after Enter.
+const SUBMIT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Initial Enter plus two bounded bare-CR recovery attempts.
+const SUBMIT_MAX_ATTEMPTS: usize = 3;
 
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
@@ -930,16 +934,27 @@ impl ProcessRegistry {
         key_delay: Duration,
     ) -> RegistryResult<Process> {
         self.refresh_exits()?;
+        let process = self.require(process_id)?;
         let hosted = self
             .running
             .get(&process_id)
             .ok_or(RegistryError::NotRunning(process_id))?;
-        hosted
-            .submit_input(content, key_delay)
-            .map_err(|error| RegistryError::Pty {
-                process_id,
-                message: error.to_string(),
-            })?;
+        let queued = if process.kind == ProcessKind::Agent {
+            hosted.submit_input_verified(
+                content,
+                key_delay,
+                PtySubmissionVerification {
+                    timeout: SUBMIT_VERIFY_TIMEOUT,
+                    max_attempts: SUBMIT_MAX_ATTEMPTS,
+                },
+            )
+        } else {
+            hosted.submit_input(content, key_delay)
+        };
+        queued.map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
         if let Some(output) = self.outputs.get(&process_id) {
             output.attention.observe_input();
         }
@@ -1025,6 +1040,7 @@ impl ProcessRegistry {
     }
 
     fn refresh_exits(&mut self) -> RegistryResult<()> {
+        self.drain_submission_events();
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();
         for process_id in process_ids {
             let status = self
@@ -1050,6 +1066,48 @@ impl ProcessRegistry {
             self.store.put_process(&process)?;
         }
         Ok(())
+    }
+
+    fn drain_submission_events(&mut self) {
+        let events = self
+            .running
+            .iter()
+            .flat_map(|(process_id, hosted)| {
+                hosted
+                    .submission_events()
+                    .into_iter()
+                    .map(|event| (*process_id, event))
+            })
+            .collect::<Vec<_>>();
+        for (process_id, event) in events {
+            let (kind, message) = match event.kind {
+                PtySubmissionEventKind::Retried => (
+                    "submit_retry",
+                    format!(
+                        "No turn-start output after {} ms; retried Enter ({}/{})",
+                        event.timeout.as_millis(),
+                        event.attempt,
+                        event.max_attempts
+                    ),
+                ),
+                PtySubmissionEventKind::Unverified => (
+                    "submit_unverified",
+                    format!(
+                        "Could not verify turn start after {} Enter attempts",
+                        event.max_attempts
+                    ),
+                ),
+            };
+            let process_event = ProcessEvent {
+                at: now_millis(),
+                kind: kind.into(),
+                message,
+            };
+            if let Some(output) = self.outputs.get_mut(&process_id) {
+                output.events.push(process_event.clone());
+            }
+            eprintln!("process {process_id}: {}", process_event.message);
+        }
     }
 
     fn reconcile_stale_processes(&mut self) -> RegistryResult<()> {

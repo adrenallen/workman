@@ -366,6 +366,7 @@ impl fmt::Debug for AttentionTracker {
 fn adapter_for(tool_type: Option<&str>) -> Box<dyn ToolAttentionAdapter> {
     match tool_type.map(normalize_tool_type).as_deref() {
         Some("claude") | Some("claude_code") => Box::new(ClaudeCodeAdapter),
+        Some("codex") | Some("codex_cli") => Box::new(CodexAdapter),
         _ => Box::new(PromptAdapter),
     }
 }
@@ -437,6 +438,58 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
             && !planning
             && (lowercase.contains("thinking") || (spinner_at.is_some() && !explicitly_running));
 
+        AdapterFlags {
+            busy,
+            needs_input,
+            resting_prompt,
+            thinking,
+            planning,
+            classification: if needs_input {
+                Some("permission_dialog".into())
+            } else if planning {
+                Some("planning".into())
+            } else if busy {
+                Some("busy_spinner".into())
+            } else if resting_prompt {
+                Some("resting_prompt".into())
+            } else if observation.alternate_screen {
+                Some("alternate_screen".into())
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// Codex CLI adapter for its composer, activity line, and confirmation menus.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CodexAdapter;
+
+impl ToolAttentionAdapter for CodexAdapter {
+    fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
+        let rendered = observation.rendered;
+        let lowercase = rendered.to_lowercase();
+        let permission_at = last_pattern(
+            &lowercase,
+            &[
+                "do you trust the contents of this directory?",
+                "would you like to run",
+                "press enter to continue",
+                "yes, continue",
+                "no, quit",
+            ],
+        );
+        let busy_at = last_pattern(
+            &lowercase,
+            &["esc to interrupt", "working (", "thinking (", "running ("],
+        );
+        let resting_at = last_codex_resting_prompt(rendered);
+
+        let needs_input = is_latest(permission_at, &[busy_at, resting_at]);
+        let busy = !needs_input && is_latest(busy_at, &[permission_at, resting_at]);
+        let resting_prompt = !needs_input && !busy && resting_at.is_some();
+        let thinking = busy && lowercase.contains("thinking");
+        let planning = busy && lowercase.contains("planning");
         AdapterFlags {
             busy,
             needs_input,
@@ -584,6 +637,14 @@ fn last_claude_resting_prompt(rendered: &str) -> Option<usize> {
         })
 }
 
+fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
+    nonempty_lines(rendered)
+        .into_iter()
+        .rev()
+        .take(8)
+        .find_map(|(offset, line)| line.starts_with('›').then_some(offset))
+}
+
 fn is_claude_dialog_choice(text: &str) -> bool {
     let Some((number, choice)) = text.split_once('.') else {
         return false;
@@ -670,6 +731,17 @@ mod tests {
             }
         }
 
+        fn codex() -> Self {
+            Self {
+                terminal: TerminalEmulator::new(12, 80, 100),
+                tracker: AttentionTracker::new_at(
+                    Some("codex".into()),
+                    AttentionConfig::default(),
+                    1_000,
+                ),
+            }
+        }
+
         fn emit(&mut self, at: i64, bytes: &[u8]) {
             self.terminal.feed(bytes);
             let rendered = self
@@ -678,6 +750,23 @@ mod tests {
             self.tracker
                 .observe_output_at(bytes, &rendered.text(), rendered.alternate_screen, at);
         }
+    }
+
+    #[test]
+    fn codex_adapter_distinguishes_a_visible_draft_from_a_started_turn() {
+        let mut session = ScriptedSession::codex();
+        session.emit(1_100, "\x1b[2J\x1b[H› queued wake body".as_bytes());
+        let draft = session.tracker.snapshot_at(1_700);
+        assert_eq!(draft.state, AttentionState::Idle);
+        assert_eq!(draft.classification.as_deref(), Some("resting_prompt"));
+
+        session.emit(
+            1_800,
+            "\x1b[2J\x1b[H• Working (0s • esc to interrupt)".as_bytes(),
+        );
+        let working = session.tracker.snapshot_at(2_400);
+        assert_eq!(working.state, AttentionState::Working);
+        assert_eq!(working.classification.as_deref(), Some("busy_spinner"));
     }
 
     #[test]

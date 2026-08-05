@@ -364,6 +364,7 @@ pub struct PtyProcess {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     submission_tx: Option<mpsc::Sender<PtySubmission>>,
+    submission_event_rx: mpsc::Receiver<PtySubmissionEvent>,
     child: Option<Box<dyn Child + Send + Sync>>,
     exit_status: Option<ExitStatus>,
     raw_output: RawOutput,
@@ -378,6 +379,33 @@ pub struct PtyProcess {
 struct PtySubmission {
     content: Vec<u8>,
     key_delay: Duration,
+    verification: Option<PtySubmissionVerification>,
+}
+
+/// Verification policy for an interactive-agent submission.
+#[derive(Clone, Copy, Debug)]
+pub struct PtySubmissionVerification {
+    /// How long to wait for terminal evidence that Enter started a turn.
+    pub timeout: Duration,
+    /// Total Enter attempts, including the initial keypress.
+    pub max_attempts: usize,
+}
+
+/// A retry/failure notice emitted by the process-local input worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PtySubmissionEventKind {
+    Retried,
+    Unverified,
+}
+
+/// Non-sensitive submission event suitable for a daemon process event log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PtySubmissionEvent {
+    pub kind: PtySubmissionEventKind,
+    /// Enter attempt that was (or would have been) made.
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub timeout: Duration,
 }
 
 impl PtyProcess {
@@ -470,10 +498,20 @@ impl PtyProcess {
         let writer = Arc::new(Mutex::new(writer));
         let submission_writer = Arc::clone(&writer);
         let (submission_tx, submission_rx) = mpsc::channel();
+        let (submission_event_tx, submission_event_rx) = mpsc::channel();
+        let submission_output = raw_output.clone();
+        let submission_attention = attention.clone();
         let submission_thread = match thread::Builder::new()
             .name(format!("workman-pty-{}-input", options.process_id))
-            .spawn(move || process_submissions(submission_writer, submission_rx))
-        {
+            .spawn(move || {
+                process_submissions(
+                    submission_writer,
+                    submission_rx,
+                    submission_output,
+                    submission_attention,
+                    submission_event_tx,
+                )
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 let _ = signal_process_group(pid, Signal::SIGKILL);
@@ -489,6 +527,7 @@ impl PtyProcess {
             master: Some(pair.master),
             writer: Some(writer),
             submission_tx: Some(submission_tx),
+            submission_event_rx,
             child: Some(child),
             exit_status: None,
             raw_output,
@@ -565,6 +604,26 @@ impl PtyProcess {
     /// The input worker owns the boundary delay, so callers do not block while
     /// the terminal distinguishes pasted content from the Enter keypress.
     pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
+        self.queue_submission(content, key_delay, None)
+    }
+
+    /// Queue a submission whose Enter keypress is retried when the terminal
+    /// remains at its resting composer without producing turn-start output.
+    pub fn submit_input_verified(
+        &self,
+        content: &[u8],
+        key_delay: Duration,
+        verification: PtySubmissionVerification,
+    ) -> io::Result<()> {
+        self.queue_submission(content, key_delay, Some(verification))
+    }
+
+    fn queue_submission(
+        &self,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+    ) -> io::Result<()> {
         if self.writer.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -577,8 +636,14 @@ impl PtyProcess {
             .send(PtySubmission {
                 content: content.to_vec(),
                 key_delay,
+                verification,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
+    }
+
+    /// Drain retry/failure notices produced since the previous read.
+    pub fn submission_events(&self) -> Vec<PtySubmissionEvent> {
+        self.submission_event_rx.try_iter().collect()
     }
 
     /// Resize the PTY, causing the kernel to deliver SIGWINCH as appropriate.
@@ -738,22 +803,131 @@ impl Drop for PtyProcess {
 fn process_submissions(
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     submissions: mpsc::Receiver<PtySubmission>,
+    raw_output: RawOutput,
+    attention: AttentionTracker,
+    events: mpsc::Sender<PtySubmissionEvent>,
 ) {
     for submission in submissions {
-        let mut writer = writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let result = writer
-            .write_all(&submission.content)
-            .and_then(|()| writer.flush())
-            .and_then(|()| {
-                thread::sleep(submission.key_delay);
-                writer.write_all(b"\r")
-            })
-            .and_then(|()| writer.flush());
-        if result.is_err() {
+        let output_before_content = raw_output.total_bytes_seen();
+        if write_and_flush(&writer, &submission.content).is_err() {
             break;
         }
+        thread::sleep(submission.key_delay);
+        if submission.verification.is_some() {
+            // Interactive composers redraw asynchronously after receiving the
+            // pasted body. Establish the Enter baseline only after that redraw
+            // settles, otherwise late draft output can masquerade as a turn.
+            wait_for_output_quiet(&raw_output, output_before_content);
+        }
+
+        let attempts = submission
+            .verification
+            .map(|verification| verification.max_attempts.max(1))
+            .unwrap_or(1);
+        for attempt in 1..=attempts {
+            let output_before_enter = raw_output.total_bytes_seen();
+            if write_and_flush(&writer, b"\r").is_err() {
+                return;
+            }
+            let Some(verification) = submission.verification else {
+                break;
+            };
+            if wait_for_turn_start(
+                &raw_output,
+                &attention,
+                output_before_enter,
+                verification.timeout,
+            ) {
+                break;
+            }
+            if attempt < attempts {
+                let _ = events.send(PtySubmissionEvent {
+                    kind: PtySubmissionEventKind::Retried,
+                    attempt: attempt + 1,
+                    max_attempts: attempts,
+                    timeout: verification.timeout,
+                });
+            } else {
+                let _ = events.send(PtySubmissionEvent {
+                    kind: PtySubmissionEventKind::Unverified,
+                    attempt,
+                    max_attempts: attempts,
+                    timeout: verification.timeout,
+                });
+            }
+        }
+    }
+}
+
+fn write_and_flush(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> io::Result<()> {
+    let mut writer = writer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
+fn wait_for_turn_start(
+    raw_output: &RawOutput,
+    attention: &AttentionTracker,
+    output_before_enter: u64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut last_total = output_before_enter;
+    let mut first_change_at = None;
+    loop {
+        let total = raw_output.total_bytes_seen();
+        if total > output_before_enter {
+            let now = Instant::now();
+            if total != last_total {
+                first_change_at.get_or_insert(now);
+                last_total = total;
+            }
+            let status = attention.snapshot();
+            // A draft redraw still classifies as the resting composer. Busy,
+            // permission, generic output, and exit output all prove that the
+            // Enter key reached the application rather than its paste buffer.
+            if status.classification.as_deref() != Some("resting_prompt") {
+                return true;
+            }
+            // Codex keeps its composer row rendered while a turn runs. In that
+            // layout the adapter still sees a resting prompt, so sustained PTY
+            // activity (rather than a one-off draft redraw) is the proof.
+            if first_change_at
+                .is_some_and(|started| now.duration_since(started) >= Duration::from_millis(50))
+            {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10).min(timeout));
+    }
+}
+
+fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
+    const QUIET_FOR: Duration = Duration::from_millis(50);
+    const MAX_SETTLE: Duration = Duration::from_millis(500);
+
+    let started = Instant::now();
+    let mut last_total = raw_output.total_bytes_seen();
+    let mut last_change = started;
+    loop {
+        let total = raw_output.total_bytes_seen();
+        if total != last_total {
+            last_total = total;
+            last_change = Instant::now();
+        }
+        let saw_redraw = last_total > before_content;
+        if saw_redraw && last_change.elapsed() >= QUIET_FOR {
+            return;
+        }
+        if started.elapsed() >= MAX_SETTLE {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 

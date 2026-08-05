@@ -785,7 +785,7 @@ mod tests {
     const PASTE_TUI_ID: ProcessId = 13;
 
     fn paste_sensitive_tui() -> &'static str {
-        r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; if ($chunk eq "\r") { print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } print "\r\nPASTED:$n\r\n"; }'"#
+        r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; my $draft=""; my $enters=0; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; my $redraw=0; for my $character (split //, $chunk) { if ($character eq "\r") { $enters++; next if $enters == 1; print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } $draft .= $character; $redraw=1; } print "\r\e[2K❯ DRAFT:$draft" if $redraw; }'"#
     }
 
     fn test_registry(start_worker: bool) -> ProcessRegistry {
@@ -966,7 +966,15 @@ mod tests {
             1
         );
         wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
-        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Working);
+        let status = registry.get_status(PASTE_TUI_ID).unwrap();
+        assert_eq!(status.agent_state.state, AttentionState::Working);
+        assert!(
+            status
+                .events
+                .iter()
+                .any(|event| event.kind == "submit_retry"),
+            "draft-visible-but-idle must trigger a verified bare-CR retry"
+        );
     }
 
     #[test]
@@ -1005,7 +1013,15 @@ mod tests {
             }
         ));
         wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
-        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Working);
+        let status = registry.get_status(PASTE_TUI_ID).unwrap();
+        assert_eq!(status.agent_state.state, AttentionState::Working);
+        assert!(
+            status
+                .events
+                .iter()
+                .any(|event| event.kind == "submit_retry"),
+            "already-satisfied delivery must recover a visible idle draft"
+        );
         assert!(
             TimerService::new(&mut registry)
                 .list("actor-immediate", PROJECT_ID, 10, 2_000)
