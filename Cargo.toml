@@ -14,3 +14,10 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 awm-core = { path = "crates/awm-core" }
+
+# Shipping builds use a separate, cache-friendly profile without changing local --release builds.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+strip = true

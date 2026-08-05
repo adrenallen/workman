@@ -50,6 +50,11 @@ The daemon persists the selected channel with its weekly-update preference in `u
 inside the awm data directory. Maintainers promote a verified release with
 `scripts/promote.sh vX.Y.Z`; promotion is deliberately separate from the tag build.
 
+Release jobs restore dependency and target caches warmed from the default branch. Because
+GitHub scopes cache writes by ref, a maintainer can manually dispatch the Release workflow on
+`main` before the first tag after a large dependency change; tag builds read that cache but do
+not write tag-local Rust caches. This warm path never publishes a release.
+
 The checkout itself may still be located at `/Users/g/Code/gbuild`. The product and GitHub
 repository are named awm, but that live working-directory path is intentionally not moved by
 the rename.

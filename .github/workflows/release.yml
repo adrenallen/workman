@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Version label for a build-only dry run
+        description: Version label for a build-only cache warm on the selected branch
         required: true
         default: v0.1.0
 
@@ -19,9 +19,8 @@ permissions:
   contents: read
 
 env:
-  # Cargo.lock currently includes darling 0.23, whose MSRV is Rust 1.88.
-  RUST_VERSION: "1.88.0"
   NODE_VERSION: "22"
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   MACOS_TARGET: aarch64-apple-darwin
   LINUX_TARGET: x86_64-unknown-linux-gnu
   MACOS_BIN_ARCHIVE: awm-macos-arm64.tar.gz
@@ -103,23 +102,37 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Install Rust target
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$MACOS_TARGET"
-          rustup override set "$RUST_VERSION"
+      # This immutable action revision is the generated dtolnay/rust-toolchain 1.88.0 branch.
+      - name: Install pinned Rust 1.88.0
+        uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b
+        with:
+          targets: ${{ env.MACOS_TARGET }}
+
+      - name: Restore shared Rust release cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: release-${{ env.MACOS_TARGET }}
+          workspaces: . -> target
+          cache-targets: true
+          cache-on-failure: false
+          # Tag refs can read main's cache but cannot share caches with later tags. A manual
+          # workflow_dispatch on main is therefore the only path that writes the warm cache.
+          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Build daemon and CLI
-        run: cargo build --locked --release --target "$MACOS_TARGET" -p awmd -p awm
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Build shipping Rust packages once
+        run: cargo build --locked --profile dist --target "$MACOS_TARGET" -p awmd -p awm -p awm-desktop
 
       - name: Build unsigned desktop application
         working-directory: apps/desktop
-        run: npm run tauri -- build --ci --no-sign --target "$MACOS_TARGET" --bundles app
+        run: npm run tauri -- build --ci --no-sign --config '{"build":{"beforeBuildCommand":""}}' --runner "$GITHUB_WORKSPACE/scripts/tauri-dist-runner.sh" --target "$MACOS_TARGET" --bundles app
 
       - name: Ad-hoc sign and package macOS artifacts
         shell: bash
@@ -127,16 +140,17 @@ jobs:
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/release"
           BIN_DIR="$RUNNER_TEMP/awm-macos-bin"
-          TARGET_DIR="target/$MACOS_TARGET/release"
-          APP="$TARGET_DIR/bundle/macos/awm.app"
+          BIN_TARGET_DIR="target/$MACOS_TARGET/dist"
+          BUNDLE_TARGET_DIR="target/$MACOS_TARGET/release"
+          APP="$BUNDLE_TARGET_DIR/bundle/macos/awm.app"
 
-          test -x "$TARGET_DIR/awm"
-          test -x "$TARGET_DIR/awmd"
+          test -x "$BIN_TARGET_DIR/awm"
+          test -x "$BIN_TARGET_DIR/awmd"
           test -d "$APP"
 
           mkdir -p "$RELEASE_DIR" "$BIN_DIR"
-          install -m 755 "$TARGET_DIR/awm" "$BIN_DIR/awm"
-          install -m 755 "$TARGET_DIR/awmd" "$BIN_DIR/awmd"
+          install -m 755 "$BIN_TARGET_DIR/awm" "$BIN_DIR/awm"
+          install -m 755 "$BIN_TARGET_DIR/awmd" "$BIN_DIR/awmd"
           tar -C "$BIN_DIR" -czf "$RELEASE_DIR/$MACOS_BIN_ARCHIVE" awm awmd
 
           codesign --force --deep --sign - --timestamp=none "$APP"
@@ -186,23 +200,35 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Install Rust target
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$LINUX_TARGET"
-          rustup override set "$RUST_VERSION"
+      # This immutable action revision is the generated dtolnay/rust-toolchain 1.88.0 branch.
+      - name: Install pinned Rust 1.88.0
+        uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b
+        with:
+          targets: ${{ env.LINUX_TARGET }}
+
+      - name: Restore shared Rust release cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: release-${{ env.LINUX_TARGET }}
+          workspaces: . -> target
+          cache-targets: true
+          cache-on-failure: false
+          save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Build daemon and CLI
-        run: cargo build --locked --release --target "$LINUX_TARGET" -p awmd -p awm
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Build shipping Rust packages once
+        run: cargo build --locked --profile dist --target "$LINUX_TARGET" -p awmd -p awm -p awm-desktop
 
       - name: Build experimental desktop bundles
         working-directory: apps/desktop
-        run: npm run tauri -- build --ci --target "$LINUX_TARGET" --bundles appimage,deb
+        run: npm run tauri -- build --ci --config '{"build":{"beforeBuildCommand":""}}' --runner "$GITHUB_WORKSPACE/scripts/tauri-dist-runner.sh" --target "$LINUX_TARGET" --bundles appimage,deb
 
       - name: Package Linux artifacts with stable names
         shell: bash
@@ -210,19 +236,19 @@ jobs:
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/release"
           BIN_DIR="$RUNNER_TEMP/awm-linux-bin"
-          TARGET_DIR="target/$LINUX_TARGET/release"
-          BUNDLE_DIR="$TARGET_DIR/bundle"
+          BIN_TARGET_DIR="target/$LINUX_TARGET/dist"
+          BUNDLE_DIR="target/$LINUX_TARGET/release/bundle"
           APPIMAGE="$(find "$BUNDLE_DIR/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
           DEB="$(find "$BUNDLE_DIR/deb" -type f -name '*.deb' -print -quit)"
 
-          test -x "$TARGET_DIR/awm"
-          test -x "$TARGET_DIR/awmd"
+          test -x "$BIN_TARGET_DIR/awm"
+          test -x "$BIN_TARGET_DIR/awmd"
           test -n "$APPIMAGE"
           test -n "$DEB"
 
           mkdir -p "$RELEASE_DIR" "$BIN_DIR"
-          install -m 755 "$TARGET_DIR/awm" "$BIN_DIR/awm"
-          install -m 755 "$TARGET_DIR/awmd" "$BIN_DIR/awmd"
+          install -m 755 "$BIN_TARGET_DIR/awm" "$BIN_DIR/awm"
+          install -m 755 "$BIN_TARGET_DIR/awmd" "$BIN_DIR/awmd"
           tar -C "$BIN_DIR" -czf "$RELEASE_DIR/$LINUX_BIN_ARCHIVE" awm awmd
           install -m 755 "$APPIMAGE" "$RELEASE_DIR/$LINUX_APPIMAGE"
           install -m 644 "$DEB" "$RELEASE_DIR/$LINUX_DEB"

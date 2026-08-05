@@ -8,6 +8,7 @@ All notable changes to awm are recorded here.
   promotion command.
 - Made routine CI manual-only so builds run only when a maintainer requests them or pushes a
   release tag.
+- Reduced release compilation work with a shared dist profile and default-branch Rust/npm caches.
 
 ## 0.1.0 - 2026-08-05
 
