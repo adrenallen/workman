@@ -8,6 +8,7 @@ import {
   type OpenersState
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
+import type { WorktreeEntry, WorktreeRepository } from './worktrees';
 
 export type ContextActionId =
   | 'select'
@@ -33,7 +34,15 @@ export type ContextActionId =
   | 'open-in-editor'
   | 'open-in-finder'
   | 'open-custom'
-  | 'copy-path';
+  | 'copy-path'
+  | 'new-worktree'
+  | 'adopt-worktree'
+  | 'fork-worktree'
+  | 'remove-worktree'
+  | 'refresh-worktrees'
+  | 'refresh-pull-request'
+  | 'open-pull-request'
+  | 'open-herd-site';
 
 export interface ContextMenuItem {
   id: ContextActionId;
@@ -46,7 +55,12 @@ export interface ContextMenuItem {
 }
 
 export type ContextMenuTarget =
-  | { kind: 'project'; project: Project }
+  | {
+      kind: 'project';
+      project: Project;
+      repository?: WorktreeRepository | null;
+      worktree?: WorktreeEntry | null;
+    }
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
   | { kind: 'scratchpad'; scratchpad: ContextScratchpad; selection: ProjectTreeSelection };
@@ -123,9 +137,15 @@ export function describeContextMenu(
   switch (target.kind) {
     case 'project':
       return {
-        title: target.project.display_name?.trim() || target.project.name,
-        subtitle: `PROJECT · ${target.project.id}`,
-        items: projectItems(target.project, openers)
+        title: target.worktree && target.repository
+          ? `${target.repository.name}: ${target.worktree.branch}`
+          : target.project.display_name?.trim() || target.project.name,
+        subtitle: target.worktree?.kind === 'main'
+          ? `REPOSITORY · ${target.project.id}`
+          : target.worktree
+            ? `WORKTREE · ${target.worktree.kind.toUpperCase()}`
+            : `PROJECT · ${target.project.id}`,
+        items: projectItems(target, openers)
       };
     case 'process':
       return {
@@ -167,7 +187,11 @@ export function describeContextMenu(
   }
 }
 
-function projectItems(project: Project, openers: OpenersState | null): ContextMenuItem[] {
+function projectItems(
+  target: Extract<ContextMenuTarget, { kind: 'project' }>,
+  openers: OpenersState | null
+): ContextMenuItem[] {
+  const { project, repository, worktree } = target;
   const openerItems: ContextMenuItem[] = openers ? [
     ...(openers.config.sidebar.editorEnabled
       ? [{ id: 'open-in-editor' as const, label: editorActionLabel(openers.config, openers.editors) }]
@@ -184,20 +208,57 @@ function projectItems(project: Project, openers: OpenersState | null): ContextMe
   ];
   if (openerItems[0]) openerItems[0].separatorBefore = true;
 
+  const worktreeItems: ContextMenuItem[] = [];
+  if (repository && worktree?.kind === 'main') {
+    worktreeItems.push(
+      { id: 'new-worktree', label: 'New worktree…', detail: `Managed under ${repository.managed_root}` },
+      { id: 'adopt-worktree', label: 'Adopt existing…', detail: 'Register in place' },
+      { id: 'refresh-worktrees', label: 'Refresh worktrees and PRs' }
+    );
+  } else if (repository && worktree) {
+    worktreeItems.push({
+      id: 'fork-worktree',
+      label: 'Fork again…',
+      detail: `Start at exact HEAD ${worktree.head.slice(0, 10)}`
+    });
+    if (worktree.site_url) {
+      worktreeItems.push({ id: 'open-herd-site', label: 'Open Herd site', detail: worktree.site_url });
+    }
+    if (worktree.pull_request) {
+      worktreeItems.push({
+        id: 'open-pull-request',
+        label: `Open pull request #${worktree.pull_request.number}`,
+        detail: `${worktree.pull_request.state} · checks ${worktree.pull_request.checks}`
+      });
+    }
+    worktreeItems.push({ id: 'refresh-pull-request', label: 'Refresh pull request status' });
+  }
+
+  const removal: ContextMenuItem = worktree?.can_remove
+    ? {
+        id: 'remove-worktree',
+        label: 'Remove worktree…',
+        detail: 'Deletes managed folder · keeps branch',
+        destructive: true,
+        separatorBefore: true
+      }
+    : {
+        id: 'remove-project',
+        label: 'Remove from awm…',
+        detail: 'Keeps files on disk',
+        destructive: true,
+        separatorBefore: true
+      };
+
   return [
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
     { id: 'rename', label: 'Rename' },
+    ...worktreeItems.map((item, index) => ({ ...item, separatorBefore: index === 0 })),
     { id: 'start-all-commands', label: 'Start all commands', separatorBefore: true },
     { id: 'stop-all-commands', label: 'Stop all commands' },
     ...openerItems,
     { id: 'copy-path', label: 'Copy path', separatorBefore: openerItems.length === 0 },
-    {
-      id: 'remove-project',
-      label: 'Remove from awm…',
-      detail: 'Keeps files on disk',
-      destructive: true,
-      separatorBefore: true
-    }
+    removal
   ];
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -26,6 +27,10 @@
   import TerminalView from './lib/TerminalView.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
+  import WorktreeDialog from './lib/WorktreeDialog.svelte';
+  import WorktreeImportDialog from './lib/WorktreeImportDialog.svelte';
+  import WorktreeRemoveDialog from './lib/WorktreeRemoveDialog.svelte';
+  import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
   import type { AgentTool } from './lib/agentTools';
   import type {
     CoordinationSnapshot,
@@ -91,18 +96,32 @@
     type ProjectTreeSelection
   } from './lib/projectTree';
   import {
-    moveOrderedId,
+    moveTreeOrderBlock,
     reorderItem,
+    siblingTarget,
     type ReorderDirection,
     type ReorderDrop
   } from './lib/reorder';
   import { openSettingsSection } from './lib/settingsSections';
+  import {
+    buildProjectRailGroups,
+    projectBranchLabel,
+    projectRepositoryTitle,
+    projectStatusRollupLabel,
+    rollupProjectStatus,
+    type ProjectRailGroup,
+    type WorktreeDialogSubmission,
+    type WorktreeEntry,
+    type WorktreeList,
+    type WorktreeRepository
+  } from './lib/worktrees';
 
   const client = new DaemonClient();
   const projectRailBounds = { min: 176, max: 340 };
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
   const collapsedTreeRailWidth = 54;
+  const worktreeCollapseStorageKey = 'awm.worktree.repository-collapse.v1';
 
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
@@ -161,8 +180,33 @@
   let processReorderBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
+  let worktreeLists = $state<Record<number, WorktreeList>>({});
+  let worktreeRefreshingRepositoryId = $state<number | null>(null);
+  let collapsedRepositories = $state<Record<number, boolean>>({});
+  let worktreeDialog = $state<{
+    mode: 'create' | 'fork' | 'adopt';
+    sourceProject: Project;
+    repository: WorktreeRepository;
+    sourceEntry: WorktreeEntry | null;
+  } | null>(null);
+  let worktreeDialogBusy = $state(false);
+  let worktreeDialogError = $state<string | null>(null);
+  let originBranches = $state<string[]>([]);
+  let originBranchesLoading = $state(false);
+  let removeWorktreeDialog = $state<{
+    project: Project;
+    repository: WorktreeRepository;
+    entry: WorktreeEntry;
+  } | null>(null);
+  let removeWorktreeBusy = $state(false);
+  let removeWorktreeError = $state<string | null>(null);
+  let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
+  let importBusyPath = $state<string | null>(null);
+  let importError = $state<string | null>(null);
+  const offeredImportRepositories = new Set<number>();
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
+  let projectRailGroups = $derived(buildProjectRailGroups(projects));
   let selectedProcess = $derived(
     selection && isProcessSelection(selection)
       ? processes.find((process) => process.id === selection?.id) ?? null
@@ -209,6 +253,12 @@
   });
 
   onMount(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(worktreeCollapseStorageKey) ?? '{}');
+      if (saved && typeof saved === 'object') collapsedRepositories = saved;
+    } catch {
+      collapsedRepositories = {};
+    }
     const projectPreference = loadPanelPreference(
       'project-rail',
       { collapsed: false, width: projectRailWidth },
@@ -541,6 +591,9 @@
         case 'settings':
           if (selectedProject) settingsOpen = true;
           return;
+        case 'new-worktree':
+          if (selectedProject) await openWorktreeDialog('create', selectedProject);
+          return;
         case 'new-terminal':
           await spawnTerminal();
           return;
@@ -596,6 +649,10 @@
       settingsOpen = false;
       await tick();
       await loadProject(projectId);
+      await refreshWorktreeMetadata(projects);
+      const activeProject = projects.find((project) => project.id === projectId);
+      const activeList = activeProject ? worktreeListFor(activeProject) : null;
+      if (activeList) maybeOfferExistingWorktrees(activeList);
       return selectedProject?.id === projectId;
     } finally {
       busy = false;
@@ -616,10 +673,74 @@
     }
   }
 
+  function rootProjectFor(project: Project): Project | null {
+    if (project.repository_id === null) return null;
+    return projects.find((candidate) =>
+      candidate.repository_id === project.repository_id && candidate.parent_project_id === null
+    ) ?? null;
+  }
+
+  function worktreeListFor(project: Project): WorktreeList | null {
+    return project.repository_id === null ? null : worktreeLists[project.repository_id] ?? null;
+  }
+
+  function worktreeEntryFor(project: Project): WorktreeEntry | null {
+    return worktreeListFor(project)?.worktrees.find((entry) => entry.project_id === project.id) ?? null;
+  }
+
+  function worktreeRepositoryFor(project: Project): WorktreeRepository | null {
+    return worktreeListFor(project)?.repository ?? null;
+  }
+
+  async function refreshWorktreeMetadata(
+    projectList: Project[],
+    refreshPullRequests = false,
+    force = false,
+    onlyRepositoryId: number | null = null
+  ): Promise<void> {
+    const roots = projectList.filter((project) =>
+      project.repository_id !== null &&
+      project.parent_project_id === null &&
+      (onlyRepositoryId === null || project.repository_id === onlyRepositoryId)
+    );
+    for (const root of roots) {
+      const repositoryId = root.repository_id!;
+      if (!force && worktreeLists[repositoryId]) continue;
+      worktreeRefreshingRepositoryId = repositoryId;
+      try {
+        const list = await client.worktrees(root.id, refreshPullRequests);
+        worktreeLists = { ...worktreeLists, [repositoryId]: list };
+        maybeOfferExistingWorktrees(list, projectList);
+      } catch (cause) {
+        console.warn(`awm worktree metadata failed for project ${root.id}`, cause);
+      } finally {
+        if (worktreeRefreshingRepositoryId === repositoryId) worktreeRefreshingRepositoryId = null;
+      }
+    }
+  }
+
+  function maybeOfferExistingWorktrees(list: WorktreeList, projectList = projects): void {
+    if (offeredImportRepositories.has(list.repository.id)) return;
+    const selected = projectList.find((project) => project.selected);
+    if (!selected || selected.repository_id !== list.repository.id || selected.parent_project_id !== null) return;
+    const entries = list.worktrees.filter((entry) => entry.can_adopt);
+    if (entries.length === 0) return;
+    offeredImportRepositories.add(list.repository.id);
+    importError = null;
+    importOffer = { repository: list.repository, entries };
+  }
+
+  async function refreshWorktreeRepository(project: Project, refreshPullRequests = true): Promise<void> {
+    const root = rootProjectFor(project);
+    if (!root || root.repository_id === null) return;
+    await refreshWorktreeMetadata(projects, refreshPullRequests, true, root.repository_id);
+  }
+
   async function refreshProjects(): Promise<void> {
     busy = true;
     try {
       projects = await client.projects();
+      void refreshWorktreeMetadata(projects);
       void refreshQuickJumpIndex(false);
     } catch (cause) {
       reportError(cause);
@@ -956,10 +1077,177 @@
     busy = true;
     try {
       projects = await client.register(path);
+      await refreshWorktreeMetadata(projects, false, true);
     } catch (cause) {
       reportError(cause);
     } finally {
       busy = false;
+    }
+  }
+
+  async function openWorktreeDialog(
+    mode: 'create' | 'fork' | 'adopt',
+    sourceProject: Project
+  ): Promise<void> {
+    const root = rootProjectFor(sourceProject) ?? sourceProject;
+    if (root.repository_id === null) {
+      reportError(new Error(`${projectLabel(sourceProject)} is not linked to a Git worktree repository`));
+      return;
+    }
+    if (!worktreeLists[root.repository_id]) {
+      await refreshWorktreeMetadata(projects, false, true, root.repository_id);
+    }
+    const list = worktreeLists[root.repository_id];
+    if (!list) {
+      reportError(new Error(`Could not load worktrees for ${projectLabel(root)}`));
+      return;
+    }
+    worktreeDialogError = null;
+    originBranches = [];
+    worktreeDialog = {
+      mode,
+      sourceProject: mode === 'create' || mode === 'adopt' ? root : sourceProject,
+      repository: list.repository,
+      sourceEntry: mode === 'fork' ? worktreeEntryFor(sourceProject) : null
+    };
+  }
+
+  function closeWorktreeDialog(): void {
+    if (worktreeDialogBusy) return;
+    worktreeDialog = null;
+    worktreeDialogError = null;
+    originBranches = [];
+  }
+
+  async function loadOriginBranches(): Promise<void> {
+    const state = worktreeDialog;
+    if (!state || originBranchesLoading) return;
+    originBranchesLoading = true;
+    worktreeDialogError = null;
+    try {
+      const response = await client.originWorktreeBranches(state.sourceProject.id);
+      originBranches = response.branches;
+    } catch (cause) {
+      worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      originBranchesLoading = false;
+    }
+  }
+
+  async function submitWorktreeDialog(submission: WorktreeDialogSubmission): Promise<void> {
+    const state = worktreeDialog;
+    if (!state || worktreeDialogBusy) return;
+    worktreeDialogBusy = true;
+    worktreeDialogError = null;
+    try {
+      const mutation = submission.mode === 'create'
+        ? await client.createWorktree({
+            project_id: state.sourceProject.id,
+            branch: submission.branch,
+            from_ref: submission.fromRef,
+            env_policy: submission.envPolicy,
+            remember_env_policy: submission.rememberEnvPolicy
+          })
+        : submission.mode === 'fork'
+          ? await client.forkWorktree({
+              project_id: state.sourceProject.id,
+              branch: submission.branch,
+              env_policy: submission.envPolicy,
+              remember_env_policy: submission.rememberEnvPolicy
+            })
+          : await client.adoptWorktree(submission.path);
+      worktreeDialog = null;
+      projects = await client.projects();
+      await refreshWorktreeMetadata(projects, true, true, mutation.repository.id);
+      appNavigation.navigate({ type: 'project', projectId: mutation.project.id }, 'api');
+    } catch (cause) {
+      worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      worktreeDialogBusy = false;
+    }
+  }
+
+  function openRemoveWorktree(project: Project): void {
+    const repository = worktreeRepositoryFor(project);
+    const entry = worktreeEntryFor(project);
+    if (!repository || !entry?.can_remove) {
+      reportError(new Error('Only an awm-managed linked worktree can be removed here'));
+      return;
+    }
+    removeWorktreeError = null;
+    removeWorktreeDialog = { project, repository, entry };
+  }
+
+  async function confirmRemoveWorktree(forceDirty: boolean, confirmBranch?: string): Promise<void> {
+    const state = removeWorktreeDialog;
+    if (!state || removeWorktreeBusy) return;
+    removeWorktreeBusy = true;
+    removeWorktreeError = null;
+    try {
+      await client.removeWorktree({
+        project_id: state.project.id,
+        confirm_remove: true,
+        confirm_stop_running: true,
+        force_dirty: forceDirty,
+        confirm_branch: confirmBranch
+      });
+      removeWorktreeDialog = null;
+      projects = await client.projects();
+      await refreshWorktreeMetadata(projects, true, true, state.repository.id);
+      const root = projects.find((project) =>
+        project.repository_id === state.repository.id && project.parent_project_id === null
+      );
+      if (root) appNavigation.navigate({ type: 'project', projectId: root.id }, 'api');
+    } catch (cause) {
+      removeWorktreeError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      removeWorktreeBusy = false;
+    }
+  }
+
+  async function adoptImportPath(path: string, navigate = true): Promise<number | null> {
+    if (!importOffer) return null;
+    const repositoryId = importOffer.repository.id;
+    importBusyPath = path;
+    importError = null;
+    try {
+      const mutation = await client.adoptWorktree(path);
+      projects = await client.projects();
+      await refreshWorktreeMetadata(projects, true, true, repositoryId);
+      const list = worktreeLists[repositoryId];
+      const remaining = list?.worktrees.filter((entry) => entry.can_adopt) ?? [];
+      importOffer = remaining.length > 0 && list
+        ? { repository: list.repository, entries: remaining }
+        : null;
+      if (navigate) appNavigation.navigate({ type: 'project', projectId: mutation.project.id }, 'api');
+      return mutation.project.id;
+    } catch (cause) {
+      importError = cause instanceof Error ? cause.message : String(cause);
+      return null;
+    } finally {
+      importBusyPath = null;
+    }
+  }
+
+  async function adoptAllImports(): Promise<void> {
+    const offer = importOffer;
+    if (!offer || importBusyPath) return;
+    importBusyPath = '*';
+    importError = null;
+    let lastProjectId: number | null = null;
+    try {
+      for (const entry of offer.entries) {
+        const mutation = await client.adoptWorktree(entry.path);
+        lastProjectId = mutation.project.id;
+      }
+      projects = await client.projects();
+      await refreshWorktreeMetadata(projects, true, true, offer.repository.id);
+      importOffer = null;
+      if (lastProjectId !== null) appNavigation.navigate({ type: 'project', projectId: lastProjectId }, 'api');
+    } catch (cause) {
+      importError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      importBusyPath = null;
     }
   }
 
@@ -969,8 +1257,11 @@
   }
 
   function handleProjectDrop(drop: ReorderDrop): void {
-    const orderedIds = moveOrderedId(
-      projects.map((project) => project.id),
+    const orderedIds = moveTreeOrderBlock(
+      projects.map((project) => ({
+        id: project.id,
+        parentId: project.parent_project_id ?? null
+      })),
       drop.sourceId,
       drop.targetId,
       drop.placement
@@ -979,10 +1270,12 @@
   }
 
   function moveProjectFromKeyboard(projectId: number, direction: ReorderDirection): void {
-    const orderedIds = projects.map((project) => project.id);
-    const index = orderedIds.indexOf(projectId);
-    const targetId = orderedIds[index + direction];
-    if (targetId === undefined) return;
+    const order = projects.map((project) => ({
+      id: project.id,
+      parentId: project.parent_project_id ?? null
+    }));
+    const targetId = siblingTarget(order, projectId, direction);
+    if (targetId === null) return;
     handleProjectDrop({
       sourceId: projectId,
       targetId,
@@ -1068,12 +1361,21 @@
     contextRequest = request;
   }
 
+  function projectContextTarget(project: Project): Extract<ContextMenuTarget, { kind: 'project' }> {
+    return {
+      kind: 'project',
+      project,
+      repository: worktreeRepositoryFor(project),
+      worktree: worktreeEntryFor(project)
+    };
+  }
+
   function showProjectPointerMenu(event: MouseEvent, project: Project): void {
-    showContextMenu(contextMenuRequest(event, { kind: 'project', project }));
+    showContextMenu(contextMenuRequest(event, projectContextTarget(project)));
   }
 
   function showProjectKeyboardMenu(event: KeyboardEvent, project: Project): void {
-    const request = keyboardContextMenuRequest(event, { kind: 'project', project });
+    const request = keyboardContextMenuRequest(event, projectContextTarget(project));
     if (request) showContextMenu(request);
   }
 
@@ -1143,6 +1445,32 @@
         return;
       case 'rename':
         beginRename(project);
+        return;
+      case 'new-worktree':
+        await openWorktreeDialog('create', project);
+        return;
+      case 'adopt-worktree':
+        await openWorktreeDialog('adopt', project);
+        return;
+      case 'fork-worktree':
+        await openWorktreeDialog('fork', project);
+        return;
+      case 'remove-worktree':
+        openRemoveWorktree(project);
+        return;
+      case 'refresh-worktrees':
+      case 'refresh-pull-request':
+        await refreshWorktreeRepository(project, true);
+        return;
+      case 'open-pull-request':
+        if (target.worktree?.pull_request?.url) {
+          window.open(target.worktree.pull_request.url, '_blank', 'noopener,noreferrer');
+        }
+        return;
+      case 'open-herd-site':
+        if (target.worktree?.site_url) {
+          window.open(target.worktree.site_url, '_blank', 'noopener,noreferrer');
+        }
         return;
       case 'start-all-commands':
       case 'stop-all-commands': {
@@ -1353,6 +1681,36 @@
     return project.display_name ?? project.name;
   }
 
+  function projectRailLabel(project: Project, nested = false): string {
+    return nested ? projectBranchLabel(project) : projectLabel(project);
+  }
+
+  function projectTitle(project: Project): string {
+    return projectRepositoryTitle(project, worktreeRepositoryFor(project));
+  }
+
+  function projectReorderGroup(project: Project): string {
+    return project.parent_project_id === null
+      ? 'project-roots'
+      : `project-children:${project.parent_project_id}`;
+  }
+
+  function repositoryCollapsed(repositoryId: number | null): boolean {
+    return repositoryId !== null && collapsedRepositories[repositoryId] === true;
+  }
+
+  function toggleRepository(repositoryId: number): void {
+    collapsedRepositories = {
+      ...collapsedRepositories,
+      [repositoryId]: !collapsedRepositories[repositoryId]
+    };
+    try {
+      localStorage.setItem(worktreeCollapseStorageKey, JSON.stringify(collapsedRepositories));
+    } catch {
+      // Collapsing stays functional when webview storage is unavailable.
+    }
+  }
+
   function persistProjectRail(): void {
     savePanelPreference('project-rail', { collapsed: projectRailCollapsed, width: projectRailWidth });
   }
@@ -1436,6 +1794,106 @@
   </section>
 {/if}
 
+{#snippet projectRailRow(project: Project, nested: boolean, group: ProjectRailGroup)}
+  {@const repository = worktreeRepositoryFor(project)}
+  {@const worktree = worktreeEntryFor(project)}
+  {@const groupProjects = [group.root, ...group.children]}
+  {@const rowStatus = !nested && group.grouped ? rollupProjectStatus(groupProjects) : project.status}
+  {@const rowLabel = projectRailLabel(project, nested)}
+  {@const fullTitle = projectTitle(project)}
+  <article
+    class:active={project.selected || (!nested && group.children.some((child) => child.selected))}
+    class:nested
+    class:repository-root={!nested && project.repository_id !== null}
+    class="project-row group/project group/repository"
+  >
+    {#if !nested && group.grouped && group.repositoryId !== null && !projectRailCollapsed}
+      <IconButton
+        class="ml-0.5 size-7 shrink-0"
+        label={`${repositoryCollapsed(group.repositoryId) ? 'Expand' : 'Collapse'} ${repository?.name ?? rowLabel} worktrees`}
+        aria-expanded={!repositoryCollapsed(group.repositoryId)}
+        onclick={() => toggleRepository(group.repositoryId!)}
+      >
+        {#snippet icon()}
+          {#if repositoryCollapsed(group.repositoryId)}<ChevronRightIcon size={13} />{:else}<ChevronDownIcon size={13} />{/if}
+        {/snippet}
+      </IconButton>
+    {/if}
+    {#if renameId === project.id}
+      <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
+        <input aria-label="Project name" bind:value={renameValue} use:focusRename onkeydown={(event) => { if (event.key === 'Escape') cancelRename(); }} />
+        <Button size="sm" type="submit">Save</Button>
+      </form>
+    {:else}
+      <button
+        class="project-select"
+        type="button"
+        title={fullTitle}
+        aria-current={project.selected ? 'page' : undefined}
+        aria-label={!nested && group.grouped
+          ? projectStatusRollupLabel(repository?.name ?? rowLabel, groupProjects)
+          : `${fullTitle} · ${project.status}`}
+        use:reorderItem={{
+          id: project.id,
+          group: projectReorderGroup(project),
+          disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
+          label: fullTitle,
+          onDrop: handleProjectDrop,
+          onKeyboardMove: moveProjectFromKeyboard
+        }}
+        onclick={() => selectProject(project)}
+        oncontextmenu={(event) => showProjectPointerMenu(event, project)}
+        onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+        data-context-kind="project"
+        data-context-id={project.id}
+      >
+        <StatusIndicator
+          class={projectRailCollapsed ? 'absolute right-1 bottom-1' : ''}
+          tone={rowStatus === 'error' ? 'danger' : rowStatus === 'running' ? 'success' : 'neutral'}
+          label={!nested && group.grouped
+            ? projectStatusRollupLabel(repository?.name ?? rowLabel, groupProjects)
+            : `${fullTitle} · ${project.status}`}
+        />
+        <span class="project-glyph" aria-hidden="true">{rowLabel.slice(0, 1).toUpperCase()}</span>
+        <span class="project-copy">
+          <strong>{rowLabel}</strong>
+          <small>{nested ? fullTitle : project.path}</small>
+        </span>
+      </button>
+      {#if repository && !projectRailCollapsed}
+        <WorktreeRowMeta
+          entry={worktree}
+          repositoryName={repository.name}
+          refreshing={worktreeRefreshingRepositoryId === repository.id}
+          showRefresh={!nested}
+          onRefresh={() => void refreshWorktreeRepository(project, true)}
+        />
+      {/if}
+      <ProjectOpeners
+        path={project.path}
+        projectName={fullTitle}
+        collapsed={projectRailCollapsed}
+        onError={reportError}
+      />
+      <IconButton
+        class="size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
+        label={`Actions for ${fullTitle}`}
+        onclick={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          showContextMenu({
+            target: projectContextTarget(project),
+            x: bounds.right,
+            y: bounds.bottom,
+            restoreFocus: event.currentTarget
+          });
+        }}
+      >
+        {#snippet icon()}<MoreHorizontalIcon size={14} />{/snippet}
+      </IconButton>
+    {/if}
+  </article>
+{/snippet}
+
 <main
   class="app-shell"
   class:no-project={selectedProject === null}
@@ -1469,56 +1927,15 @@
       {#if projects.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button></div>
       {/if}
-      {#each projects as project (project.id)}
-        <article class:active={project.selected} class="project-row group/project">
-          {#if renameId === project.id}
-            <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
-              <input aria-label="Project name" bind:value={renameValue} use:focusRename onkeydown={(event) => { if (event.key === 'Escape') cancelRename(); }} />
-              <Button size="sm" type="submit">Save</Button>
-            </form>
-          {:else}
-            <button
-              class="project-select"
-              type="button"
-              aria-current={project.selected ? 'page' : undefined}
-              aria-label={`${projectLabel(project)}, ${project.status}`}
-              use:reorderItem={{
-                id: project.id,
-                group: 'projects',
-                disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
-                label: projectLabel(project),
-                onDrop: handleProjectDrop,
-                onKeyboardMove: moveProjectFromKeyboard
-              }}
-              onclick={() => selectProject(project)}
-              oncontextmenu={(event) => showProjectPointerMenu(event, project)}
-              onkeydown={(event) => showProjectKeyboardMenu(event, project)}
-              data-context-kind="project"
-              data-context-id={project.id}
-            >
-              <StatusIndicator
-                class={projectRailCollapsed ? 'absolute right-1 bottom-1' : ''}
-                tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
-                label={`${projectLabel(project)} · ${project.status}`}
-              />
-              <span class="project-glyph" aria-hidden="true">{projectLabel(project).slice(0, 1).toUpperCase()}</span>
-              <span class="project-copy"><strong>{projectLabel(project)}</strong><small>{project.path}</small></span>
-            </button>
-            <ProjectOpeners
-              path={project.path}
-              projectName={projectLabel(project)}
-              collapsed={projectRailCollapsed}
-              onError={reportError}
-            />
-            <IconButton
-              class="size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
-              label={`Rename ${projectLabel(project)}`}
-              onclick={() => beginRename(project)}
-            >
-              {#snippet icon()}<MoreHorizontalIcon size={14} />{/snippet}
-            </IconButton>
-          {/if}
-        </article>
+      {#each projectRailGroups as group (group.key)}
+        {@render projectRailRow(group.root, false, group)}
+        {#if group.grouped && !projectRailCollapsed && !repositoryCollapsed(group.repositoryId)}
+          <div class="repository-children" aria-label={`${worktreeRepositoryFor(group.root)?.name ?? projectLabel(group.root)} worktrees`}>
+            {#each group.children as child (child.id)}
+              {@render projectRailRow(child, true, group)}
+            {/each}
+          </div>
+        {/if}
       {/each}
     </div>
     <footer class="project-footer">
@@ -1544,7 +1961,7 @@
   {#if selectedProject}
     <aside
       class="tree-rail"
-      aria-label={`${projectLabel(selectedProject)} items`}
+      aria-label={`${projectTitle(selectedProject)} items`}
       data-app-panel="tree"
       tabindex="-1"
     >
@@ -1596,7 +2013,7 @@
     {#if selectedProject}
       <header class="document-title" data-tauri-drag-region>
         <div class="title-side"><span>{selection?.kind ?? 'project'}</span></div>
-        <h1>{projectLabel(selectedProject)} - {frameItemLabel}</h1>
+        <h1>{projectTitle(selectedProject)} - {frameItemLabel}</h1>
         <div class="title-side right">
           {#if settingsOpen}<Button variant="outline" size="sm" onclick={() => (settingsOpen = false)}>Done</Button>{/if}
         </div>
@@ -1681,6 +2098,45 @@
   <KeyboardShortcuts onClose={closeShortcuts} />
 {/if}
 
+{#if worktreeDialog}
+  <WorktreeDialog
+    mode={worktreeDialog.mode}
+    sourceProject={worktreeDialog.sourceProject}
+    repository={worktreeDialog.repository}
+    sourceEntry={worktreeDialog.sourceEntry}
+    {originBranches}
+    branchesLoading={originBranchesLoading}
+    busy={worktreeDialogBusy}
+    error={worktreeDialogError}
+    onLoadBranches={() => void loadOriginBranches()}
+    onSubmit={(submission) => void submitWorktreeDialog(submission)}
+    onClose={closeWorktreeDialog}
+  />
+{/if}
+
+{#if removeWorktreeDialog}
+  <WorktreeRemoveDialog
+    repository={removeWorktreeDialog.repository}
+    entry={removeWorktreeDialog.entry}
+    busy={removeWorktreeBusy}
+    error={removeWorktreeError}
+    onConfirm={(forceDirty, confirmBranch) => void confirmRemoveWorktree(forceDirty, confirmBranch)}
+    onClose={() => { if (!removeWorktreeBusy) removeWorktreeDialog = null; }}
+  />
+{/if}
+
+{#if importOffer}
+  <WorktreeImportDialog
+    repository={importOffer.repository}
+    entries={importOffer.entries}
+    busyPath={importBusyPath}
+    error={importError}
+    onAdopt={(path) => void adoptImportPath(path)}
+    onAdoptAll={() => void adoptAllImports()}
+    onClose={() => { if (!importBusyPath) importOffer = null; }}
+  />
+{/if}
+
 {#if dialog && dialog !== 'command'}
   <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
     {#if dialog === 'todo'}
@@ -1754,14 +2210,18 @@
   .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .project-row { position: relative; display: flex; min-height: 40px; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row { position: relative; display: flex; min-height: 40px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
   .project-select { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
+  .repository-children { margin-left: 12px; border-left: 1px solid var(--border-token); padding-left: 3px; }
+  .project-row.nested { min-height: 34px; }
+  .project-row.nested .project-select { padding-block: 3px; }
+  .project-row.nested .project-copy small { color: var(--muted-foreground); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
-  .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }
+  .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-glyph { display: none; }

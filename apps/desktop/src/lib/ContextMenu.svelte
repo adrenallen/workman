@@ -6,6 +6,9 @@
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import FolderIcon from '@lucide/svelte/icons/folder';
   import GitBranchIcon from '@lucide/svelte/icons/git-branch';
+  import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
+  import GitForkIcon from '@lucide/svelte/icons/git-fork';
+  import ImportIcon from '@lucide/svelte/icons/import';
   import MessageSquareIcon from '@lucide/svelte/icons/message-square';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import PlayIcon from '@lucide/svelte/icons/play';
@@ -38,13 +41,16 @@
     if (id.startsWith('copy-')) return ClipboardIcon;
     if (id === 'start' || id === 'start-all-commands' || id === 'reopen-todo') return PlayIcon;
     if (id === 'stop' || id === 'stop-all-commands') return SquareIcon;
-    if (id === 'restart') return RefreshCwIcon;
+    if (id === 'restart' || id === 'refresh-worktrees' || id === 'refresh-pull-request') return RefreshCwIcon;
+    if (id === 'new-worktree') return GitBranchPlusIcon;
+    if (id === 'adopt-worktree') return ImportIcon;
+    if (id === 'fork-worktree') return GitForkIcon;
     if (id === 'rename') return PencilIcon;
     if (id === 'complete-todo' || id === 'select') return CheckIcon;
     if (id === 'send-prompt') return MessageSquareIcon;
     if (id === 'view-parent') return GitBranchIcon;
     if (id === 'reveal-config') return FileCodeIcon;
-    if (id === 'open-in-editor' || id === 'open-custom') return ExternalLinkIcon;
+    if (id === 'open-in-editor' || id === 'open-custom' || id === 'open-pull-request' || id === 'open-herd-site') return ExternalLinkIcon;
     if (id === 'open-in-finder') return FolderIcon;
     if (id === 'archive-scratchpad') return ArchiveIcon;
     return Trash2Icon;

@@ -310,6 +310,14 @@ async fn dispatch(
             .map(json_value)
             .map_err(worktree_error);
         }
+        "worktree.branches" | "worktree_branches" => {
+            let params: WorktreeScopeParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::origin_branches_for_project(registry, project_id)
+                .await
+                .map(json_value)
+                .map_err(worktree_error);
+        }
         "worktree.create" | "worktree_create" => {
             let params: WorktreeCreateParams = params_as(params)?;
             let project_id = control_worktree_project_id(registry, params.project_id).await?;

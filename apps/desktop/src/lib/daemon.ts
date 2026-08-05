@@ -35,6 +35,15 @@ import {
   type TimerLifecycleEvent,
   type TimerView
 } from './timerLifecycle';
+import type {
+  CreateWorktreeInput,
+  ForkWorktreeInput,
+  OriginBranchList,
+  RemoveWorktreeInput,
+  WorktreeList,
+  WorktreeMutation,
+  WorktreeRemoval
+} from './worktrees';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -51,6 +60,11 @@ export interface Project {
   selected: boolean;
   sort_order: number;
   status: ProjectStatus;
+  repository_id: number | null;
+  repository_root: string | null;
+  parent_project_id: number | null;
+  branch: string | null;
+  worktree_managed: boolean;
 }
 
 export interface ConnectionStatus {
@@ -369,6 +383,33 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('worktree.health');
   }
 
+  worktrees(projectId: number, refreshPullRequests = false): Promise<WorktreeList> {
+    return this.request('worktree.list', {
+      project_id: projectId,
+      refresh_pull_requests: refreshPullRequests
+    });
+  }
+
+  originWorktreeBranches(projectId: number): Promise<OriginBranchList> {
+    return this.request('worktree.branches', { project_id: projectId });
+  }
+
+  createWorktree(input: CreateWorktreeInput): Promise<WorktreeMutation> {
+    return this.request('worktree.create', { ...input });
+  }
+
+  forkWorktree(input: ForkWorktreeInput): Promise<WorktreeMutation> {
+    return this.request('worktree.fork', { ...input });
+  }
+
+  adoptWorktree(path: string): Promise<WorktreeMutation> {
+    return this.request('worktree.adopt', { path });
+  }
+
+  removeWorktree(input: RemoveWorktreeInput): Promise<WorktreeRemoval> {
+    return this.request('worktree.remove', { ...input });
+  }
+
   previewAgentToolConfig(agentToolId: number): Promise<AgentToolConfigPreview> {
     return this.request('agent_tools.configure_preview', { agent_tool_id: agentToolId });
   }
@@ -506,10 +547,15 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     const id = `desktop-${Date.now()}-${++this.sequence}`;
     const message = JSON.stringify({ id, method: type, params: fields });
     const response = new Promise<T>((resolve, reject) => {
+      const requestTimeout = type.startsWith('daemon.update_')
+        ? 180_000
+        : type.startsWith('worktree.')
+          ? 60_000
+          : 5_000;
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error('The daemon did not answer in time'));
-      }, type.startsWith('daemon.update_') ? 180_000 : 5000);
+      }, requestTimeout);
       this.pending.set(id, {
         method: type,
         resolve: (result) => resolve(result as T),

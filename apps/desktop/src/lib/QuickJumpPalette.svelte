@@ -2,6 +2,7 @@
   import BotIcon from '@lucide/svelte/icons/bot';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import FolderIcon from '@lucide/svelte/icons/folder';
+  import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SearchIcon from '@lucide/svelte/icons/search';
@@ -92,6 +93,18 @@
 
     for (const project of projects) {
       const name = projectLabel(project);
+      if (project.repository_id !== null && project.parent_project_id === null) {
+        next.push({
+          key: `action:new-worktree:${project.id}`,
+          kind: 'action',
+          label: `New worktree in ${name}`,
+          detail: 'Create a branch workspace and jump to it',
+          projectName: name,
+          searchText: `new create worktree branch fork ${name} ${project.name} ${project.path}`,
+          target: { type: 'new-worktree', projectId: project.id },
+          creation: true
+        });
+      }
       next.push(
         {
           key: `action:new-terminal:${project.id}`,
@@ -292,6 +305,7 @@
   function entryIcon(entry: PaletteEntry) {
     if (entry.kind === 'action') {
       if (entry.target.type === 'new-terminal') return SquareTerminalIcon;
+      if (entry.target.type === 'new-worktree') return GitBranchPlusIcon;
       if (entry.target.type === 'add-command') return PlayIcon;
       if (entry.target.type === 'new-todo') return CircleCheckIcon;
       if (entry.target.type === 'new-scratchpad') return NotebookTextIcon;
@@ -361,7 +375,7 @@
         aria-activedescendant={activeEntry ? `quick-jump-option-${selectedIndex}` : undefined}
         autocomplete="off"
         spellcheck="false"
-        placeholder="Jump to a project, agent, terminal, command, todo, or scratchpad"
+        placeholder="Jump or create a project, worktree, agent, terminal, command, todo, or scratchpad"
         oninput={() => (selectedIndex = 0)}
         onkeydown={handleKeydown}
       />

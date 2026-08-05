@@ -6,7 +6,7 @@
 //! reserved for worktrees awm (or a faithfully detected SWM predecessor) owns.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -160,6 +160,12 @@ pub struct WorktreeList {
     pub repository: RepositoryView,
     pub worktrees: Vec<WorktreeEntry>,
     pub pull_requests: PullRequestCacheView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OriginBranchList {
+    pub repository_id: i64,
+    pub branches: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -452,6 +458,60 @@ pub async fn list_for_project_refresh(
         refresh_pull_requests,
     )
     .await
+}
+
+/// Lists origin branches that are not currently checked out in any linked
+/// worktree. This is intentionally fetched on demand for the desktop branch
+/// picker so normal project/worktree polling never adds remote Git traffic.
+pub async fn origin_branches_for_project(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+) -> WorktreeResult<OriginBranchList> {
+    let (project, repository_id) = {
+        let registry = registry.lock().await;
+        let project = registry.store().get_project(project_id)?.ok_or_else(|| {
+            WorktreeError::InvalidProject(format!("project {project_id} was not found"))
+        })?;
+        if registry.store().get_project_worktree(project_id)?.is_none() {
+            reconcile_existing_projects(registry.store())?;
+        }
+        let link = registry
+            .store()
+            .get_project_worktree(project_id)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidPath(format!("{} is not a Git worktree", project.path))
+            })?;
+        (project, link.repository_id)
+    };
+
+    let snapshot = snapshot_async(Path::new(&project.path)).await?;
+    if !git_success(&snapshot.root_path, ["remote", "get-url", "origin"]).await? {
+        return Ok(OriginBranchList {
+            repository_id,
+            branches: Vec::new(),
+        });
+    }
+    let output = git_required(
+        &snapshot.root_path,
+        ["ls-remote", "--heads", "origin"],
+        "list origin branches",
+    )
+    .await?;
+    let checked_out = snapshot
+        .worktrees
+        .iter()
+        .map(display_branch)
+        .collect::<HashSet<_>>();
+    let mut branches = parse_origin_branches(&output)
+        .into_iter()
+        .filter(|branch| !checked_out.contains(branch))
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    Ok(OriginBranchList {
+        repository_id,
+        branches,
+    })
 }
 
 pub async fn create(
@@ -1690,6 +1750,16 @@ fn display_branch(record: &GitWorktree) -> String {
     })
 }
 
+fn parse_origin_branches(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(|reference| reference.strip_prefix("refs/heads/"))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn is_swm_managed_path(path: &Path, managed_root: &str, branch: &str) -> bool {
     let managed_root = absolute_path(PathBuf::from(managed_root));
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| absolute_path(path.to_path_buf()));
@@ -1833,6 +1903,14 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1].branch.as_deref(), Some("feature/x"));
         assert!(parsed[1].locked);
+    }
+
+    #[test]
+    fn origin_branch_parser_preserves_nested_names() {
+        let parsed = parse_origin_branches(
+            "aaaa\trefs/heads/main\nbbbb\trefs/heads/feature/worktree-ui\ninvalid\trefs/tags/v1\n",
+        );
+        assert_eq!(parsed, vec!["main", "feature/worktree-ui"]);
     }
 
     #[test]
