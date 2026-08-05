@@ -49,7 +49,7 @@ export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
 export type ProcessKind = 'command' | 'terminal' | 'agent';
 export type ProcessSource = 'yml' | 'local';
-export type AttentionState = 'working' | 'needs_input' | 'idle' | 'exited';
+export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'exited';
 
 export interface Project {
   id: number;
@@ -139,6 +139,7 @@ export interface AgentState {
   state: AttentionState;
   working: boolean;
   needs_input: boolean;
+  waiting?: boolean;
   idle: boolean;
   exited: boolean;
   thinking: boolean;
@@ -149,6 +150,21 @@ export interface AgentState {
   last_output_at: number | null;
   last_content_change_at: number | null;
   classification: string | null;
+  waiting_on?: AgentWaitingReason[];
+}
+
+export interface AgentWaitingProcess {
+  process_id: number;
+  process_name: string;
+}
+
+export interface AgentWaitingReason {
+  timer_id: number;
+  kind: 'delay' | 'idle_any' | 'idle_all';
+  due_at: number;
+  remaining_ms: number;
+  paused: boolean;
+  watch_processes: AgentWaitingProcess[];
 }
 
 export interface TrustFields {

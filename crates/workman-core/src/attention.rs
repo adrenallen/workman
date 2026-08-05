@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{ProcessId, TimerId, TimerKind};
+
 /// Short output-silence window before a recognized resting prompt is idle.
 pub const DEFAULT_QUIESCENCE: Duration = Duration::from_millis(500);
 
@@ -21,8 +23,27 @@ pub const RECENT_INPUT_GRACE: Duration = Duration::from_secs(2);
 pub enum AttentionState {
     Working,
     NeedsInput,
+    Waiting,
     Idle,
     Exited,
+}
+
+/// A named process participating in an idle-watch condition.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWaitingProcess {
+    pub process_id: ProcessId,
+    pub process_name: String,
+}
+
+/// Durable timer metadata explaining why an otherwise-idle agent is parked.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWaitingReason {
+    pub timer_id: TimerId,
+    pub kind: TimerKind,
+    pub due_at: i64,
+    pub remaining_ms: i64,
+    pub paused: bool,
+    pub watch_processes: Vec<AgentWaitingProcess>,
 }
 
 /// Tool-specific facts found in the rendered terminal.
@@ -68,6 +89,9 @@ pub struct AgentState {
     /// Compatibility booleans mirroring Solo's agent-state payload.
     pub working: bool,
     pub needs_input: bool,
+    /// True only when an idle process has a pending timer or idle watch.
+    #[serde(default)]
+    pub waiting: bool,
     pub idle: bool,
     pub exited: bool,
     pub thinking: bool,
@@ -90,6 +114,9 @@ pub struct AgentState {
     pub last_input_seconds: Option<f64>,
     /// Adapter explanation such as `busy_spinner` or `permission_dialog`.
     pub classification: Option<String>,
+    /// Raw pending timers/watches used to derive `waiting`.
+    #[serde(default)]
+    pub waiting_on: Vec<AgentWaitingReason>,
 }
 
 impl AgentState {
@@ -109,6 +136,7 @@ impl AgentState {
             state,
             working: state == AttentionState::Working,
             needs_input: state == AttentionState::NeedsInput,
+            waiting: state == AttentionState::Waiting,
             idle: state == AttentionState::Idle,
             exited: state == AttentionState::Exited,
             thinking: flags.thinking,
@@ -121,7 +149,21 @@ impl AgentState {
             last_input_at,
             last_input_seconds: last_input_at.map(|at| elapsed_seconds(now_ms, at)),
             classification: flags.classification.clone(),
+            waiting_on: Vec::new(),
         }
+    }
+
+    /// Refine an idle snapshot with durable timer state without weakening
+    /// working, needs-input, or exited attention semantics.
+    pub fn refine_waiting(&mut self, waiting_on: Vec<AgentWaitingReason>) {
+        if self.state == AttentionState::Idle && !waiting_on.is_empty() {
+            self.state = AttentionState::Waiting;
+            self.waiting = true;
+            // Waiting is intentionally a refinement of idle for compatibility
+            // with existing idle-transition orchestration.
+            self.idle = true;
+        }
+        self.waiting_on = waiting_on;
     }
 
     /// Construct the best available status for a process without a live tracker.
@@ -767,6 +809,35 @@ mod tests {
         let working = session.tracker.snapshot_at(2_400);
         assert_eq!(working.state, AttentionState::Working);
         assert_eq!(working.classification.as_deref(), Some("busy_spinner"));
+    }
+
+    #[test]
+    fn waiting_refines_only_idle_and_keeps_idle_compatibility() {
+        let reason = AgentWaitingReason {
+            timer_id: 42,
+            kind: TimerKind::IdleAll,
+            due_at: 10_000,
+            remaining_ms: 9_000,
+            paused: false,
+            watch_processes: vec![AgentWaitingProcess {
+                process_id: 7,
+                process_name: "codex-w2".into(),
+            }],
+        };
+        let tracker = AttentionTracker::new_at(None, AttentionConfig::default(), 1_000);
+        let mut idle = tracker.snapshot_at(10_000);
+        assert_eq!(idle.state, AttentionState::Idle);
+        idle.refine_waiting(vec![reason.clone()]);
+        assert_eq!(idle.state, AttentionState::Waiting);
+        assert!(idle.waiting);
+        assert!(idle.idle);
+        assert!(!idle.needs_input);
+        assert_eq!(idle.waiting_on, [reason.clone()]);
+
+        let mut working = tracker.snapshot_at(1_100);
+        working.refine_waiting(vec![reason]);
+        assert_eq!(working.state, AttentionState::Working);
+        assert!(!working.waiting);
     }
 
     #[test]

@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use workman_core::{
     Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store, StoreError,
-    attention::{AgentState, AttentionTracker, PendingDialog, pending_dialog},
+    TimerKind,
+    attention::{
+        AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionTracker, PendingDialog,
+        pending_dialog,
+    },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
         PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
@@ -391,11 +395,14 @@ impl ProcessRegistry {
     /// Attach attention state to an already-loaded process record.
     pub fn status_view(&self, process: Process) -> RegistryResult<ProcessStatusView> {
         let tool_type = self.tool_type_for(&process)?;
-        let agent_state = self
+        let mut agent_state = self
             .outputs
             .get(&process.id)
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        if process.kind == ProcessKind::Agent {
+            agent_state.refine_waiting(self.waiting_reasons(process.id)?);
+        }
         let events = self
             .outputs
             .get(&process.id)
@@ -406,6 +413,90 @@ impl ProcessRegistry {
             agent_state,
             events,
         })
+    }
+
+    fn waiting_reasons(&self, process_id: ProcessId) -> RegistryResult<Vec<AgentWaitingReason>> {
+        let rows = {
+            let mut statement = self
+                .store
+                .connection()
+                .prepare(
+                    "SELECT timer.id,
+                            timer.kind,
+                            COALESCE(runtime.due_at, timer.max_wait_deadline, timer.created_at),
+                            timer.paused,
+                            runtime.paused_at,
+                            timer.watch_list
+                     FROM timers AS timer
+                     LEFT JOIN timer_runtime AS runtime ON runtime.timer_id = timer.id
+                     WHERE timer.fired = 0
+                       AND (
+                         timer.delivery_process_id = ?1
+                         OR (
+                           timer.kind IN ('idle_any', 'idle_all')
+                           AND EXISTS (
+                             SELECT 1 FROM actors AS actor
+                             WHERE actor.id = timer.owner_actor
+                               AND actor.process_id = ?1
+                           )
+                         )
+                       )
+                     ORDER BY timer.paused ASC,
+                              COALESCE(runtime.due_at, timer.max_wait_deadline, timer.created_at),
+                              timer.id",
+                )
+                .map_err(StoreError::from)?;
+            let mapped = statement
+                .query_map([process_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, TimerKind>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })
+                .map_err(StoreError::from)?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                rows.push(row.map_err(StoreError::from)?);
+            }
+            rows
+        };
+
+        let now = now_millis();
+        let mut reasons = Vec::with_capacity(rows.len());
+        for (timer_id, kind, due_at, paused, paused_at, watch_list) in rows {
+            let watch_process_ids: Vec<ProcessId> =
+                serde_json::from_str(&watch_list).map_err(StoreError::from)?;
+            let mut watch_processes = Vec::with_capacity(watch_process_ids.len());
+            for watched_id in watch_process_ids {
+                let process_name = self
+                    .store
+                    .get_process(watched_id)?
+                    .map(|process| process.name)
+                    .unwrap_or_else(|| format!("process #{watched_id}"));
+                watch_processes.push(AgentWaitingProcess {
+                    process_id: watched_id,
+                    process_name,
+                });
+            }
+            let clock = if paused {
+                paused_at.unwrap_or(now)
+            } else {
+                now
+            };
+            reasons.push(AgentWaitingReason {
+                timer_id,
+                kind,
+                due_at,
+                remaining_ms: due_at.saturating_sub(clock).max(0),
+                paused,
+                watch_processes,
+            });
+        }
+        Ok(reasons)
     }
 
     pub fn start(&mut self, process_id: ProcessId) -> RegistryResult<Process> {

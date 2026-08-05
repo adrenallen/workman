@@ -641,7 +641,10 @@ impl<'a> TimerService<'a> {
 
     fn process_is_idle(&mut self, process_id: ProcessId) -> TimerResult<bool> {
         match self.registry.get_status(process_id) {
-            Ok(status) => Ok(status.agent_state.state == AttentionState::Idle),
+            Ok(status) => Ok(matches!(
+                status.agent_state.state,
+                AttentionState::Idle | AttentionState::Waiting
+            )),
             Err(RegistryError::NotFound(_)) => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -774,7 +777,7 @@ mod tests {
     use std::{collections::BTreeMap, thread, time::Instant};
 
     use workman_core::{
-        AgentTool, Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store,
+        Actor, AgentTool, Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store,
     };
 
     use super::*;
@@ -1028,6 +1031,143 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pending_timer_refines_idle_to_waiting_until_delivery_starts_work() {
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                PASTE_TUI_ID,
+                "parked-agent",
+                paste_sensitive_tui(),
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(PASTE_TUI_ID).unwrap();
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Idle);
+
+        let now = now_millis();
+        let timer_id = TimerService::new(&mut registry)
+            .set_delay(
+                "parked-actor".into(),
+                PASTE_TUI_ID,
+                "wake parked agent".into(),
+                100,
+                false,
+                None,
+                now,
+            )
+            .unwrap()
+            .timer
+            .id;
+        let waiting_status = registry.get_status(PASTE_TUI_ID).unwrap();
+        let payload = serde_json::to_value(&waiting_status).unwrap();
+        let waiting = waiting_status.agent_state;
+        assert_eq!(waiting.state, AttentionState::Waiting);
+        assert!(waiting.waiting);
+        assert!(waiting.idle, "waiting must retain idle compatibility");
+        assert!(!waiting.needs_input);
+        assert_eq!(waiting.waiting_on.len(), 1);
+        assert_eq!(waiting.waiting_on[0].timer_id, timer_id);
+        assert!(waiting.waiting_on[0].remaining_ms <= 100);
+        assert_eq!(payload["agent_state"]["state"], "waiting");
+        assert_eq!(payload["agent_state"]["waiting"], true);
+        assert_eq!(payload["agent_state"]["waiting_on"][0]["timer_id"], timer_id);
+
+        assert_eq!(
+            TimerService::new(&mut registry)
+                .tick(now.saturating_add(100))
+                .unwrap()
+                .len(),
+            1
+        );
+        let working = registry.get_status(PASTE_TUI_ID).unwrap().agent_state;
+        assert_eq!(working.state, AttentionState::Working);
+        assert!(!working.waiting);
+        assert!(working.waiting_on.is_empty());
+        wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
+    }
+
+    #[test]
+    fn idle_watch_owner_is_waiting_even_when_delivery_targets_another_process() {
+        let mut registry = test_registry(true);
+        registry
+            .create(process(
+                PASTE_TUI_ID,
+                "orchestrator-agent",
+                "true claude; printf '❯ '; sleep 30",
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(PASTE_TUI_ID).unwrap();
+        wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Idle);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        registry
+            .store()
+            .put_actor(&Actor {
+                id: "watch-owner".into(),
+                session_id: "watch-session".into(),
+                process_id: Some(PASTE_TUI_ID),
+                selected_project_id: Some(PROJECT_ID),
+                created_at: 1_000,
+                last_seen_at: 1_000,
+            })
+            .unwrap();
+
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "watch-owner".into(),
+                DELIVERY_ID,
+                "other delivery".into(),
+                TimerKind::IdleAny,
+                vec![WORKER_ID],
+                10_000,
+                1_000,
+            )
+            .unwrap();
+        assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
+        let waiting = registry.get_status(PASTE_TUI_ID).unwrap().agent_state;
+        assert_eq!(waiting.state, AttentionState::Waiting);
+        assert_eq!(waiting.waiting_on[0].kind, TimerKind::IdleAny);
+        assert_eq!(
+            waiting.waiting_on[0].watch_processes[0].process_name,
+            "worker"
+        );
+    }
+
+    #[test]
+    fn pending_timer_never_overrides_needs_input() {
+        const DIALOG_ID: ProcessId = 14;
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                DIALOG_ID,
+                "permission-agent",
+                "printf 'Do you want to proceed?\\n❯ 1. Yes, allow\\n  2. No, and tell Claude\\n'; sleep 30",
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(DIALOG_ID).unwrap();
+        wait_for_state(&mut registry, DIALOG_ID, AttentionState::NeedsInput);
+        TimerService::new(&mut registry)
+            .set_delay(
+                "permission-owner".into(),
+                DIALOG_ID,
+                "do not hide the dialog".into(),
+                10_000,
+                false,
+                None,
+                1_000,
+            )
+            .unwrap();
+
+        let status = registry.get_status(DIALOG_ID).unwrap().agent_state;
+        assert_eq!(status.state, AttentionState::NeedsInput);
+        assert!(status.needs_input);
+        assert!(!status.waiting);
+        assert!(!status.idle);
+        assert_eq!(status.waiting_on.len(), 1);
     }
 
     #[test]

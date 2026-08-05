@@ -42,7 +42,7 @@ export function agentStatusPresentation(process: ProcessView): AgentStatusPresen
     return {
       state: 'waiting',
       shortLabel: 'Waiting',
-      label: `${process.name} · waiting for timer`
+      label: waitingLabel(process)
     };
   }
   if (process.agent_state.working || attention === 'working') {
@@ -57,6 +57,29 @@ export function agentStatusPresentation(process: ProcessView): AgentStatusPresen
     shortLabel: 'Idle',
     label: `${process.name} · idle`
   };
+}
+
+function waitingLabel(process: ProcessView): string {
+  const [reason, ...additional] = process.agent_state.waiting_on ?? [];
+  if (!reason) return `${process.name} · waiting for timer`;
+  const more = additional.length > 0 ? ` · +${additional.length} more` : '';
+  if (reason.paused) {
+    return `${process.name} · waiting: timer #${reason.timer_id} paused${more}`;
+  }
+  if (reason.kind === 'delay') {
+    return `${process.name} · waiting: timer #${reason.timer_id} fires in ${formatRemaining(reason.remaining_ms)}${more}`;
+  }
+  const names = reason.watch_processes.map((watched) => watched.process_name);
+  const joiner = reason.kind === 'idle_all' ? ' and ' : ' or ';
+  const watched = names.length > 0 ? names.join(joiner) : 'watched processes';
+  return `${process.name} · waiting: watching ${watched} for idle${more}`;
+}
+
+function formatRemaining(milliseconds: number): string {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${(seconds % 60).toString().padStart(2, '0')}`;
 }
 
 function exitLabel(process: ProcessView): string {
