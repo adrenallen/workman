@@ -37,6 +37,7 @@
   let loadingChildren = $state(false);
   let confirmingPid = $state<number | null>(null);
   let killingPid = $state<number | null>(null);
+  let activeProcessId = $state<number | null>(null);
 
   const stats = $derived($liveStats.processes[process.id] ?? null);
   const childCount = $derived(popoverOpen ? freshChildren.length : (stats?.descendant_count ?? 0));
@@ -61,15 +62,22 @@
   });
 
   $effect(() => {
-    process.id;
+    // Status ticks replace `process`; transient UI resets only when selection really changes.
+    const nextProcessId = process.id;
+    if (activeProcessId === null) {
+      activeProcessId = nextProcessId;
+      return;
+    }
+    if (nextProcessId === activeProcessId) return;
+    activeProcessId = nextProcessId;
     popoverOpen = false;
     freshChildren = [];
     confirmingPid = null;
   });
 
   $effect(() => {
-    if (!popoverOpen || !connected) return;
-    const processId = process.id;
+    if (!popoverOpen || !connected || activeProcessId === null) return;
+    const processId = activeProcessId;
     queueMicrotask(() => void refreshChildren(processId));
     const timer = window.setInterval(() => void refreshChildren(processId), 2_000);
     return () => window.clearInterval(timer);
@@ -84,9 +92,8 @@
     loadingChildren = true;
     try {
       const result = await listSubprocesses(client, processId);
-      if (result.process_id === process.id) freshChildren = result.subprocesses;
+      if (result.process_id === activeProcessId) freshChildren = result.subprocesses;
     } catch (cause) {
-      closePopover();
       reportCause(cause);
     } finally {
       loadingChildren = false;
@@ -107,12 +114,12 @@
   }
 
   async function confirmKill(child: DescendantProcessStats): Promise<void> {
-    if (killingPid !== null) return;
+    if (killingPid !== null || activeProcessId === null) return;
     killingPid = child.pid;
     try {
-      await killSubprocess(client, process.id, child.pid);
+      await killSubprocess(client, activeProcessId, child.pid);
       confirmingPid = null;
-      await refreshChildren(process.id);
+      await refreshChildren(activeProcessId);
     } catch (cause) {
       reportCause(cause);
     } finally {
