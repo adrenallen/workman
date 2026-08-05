@@ -48,6 +48,7 @@ mod settings;
 mod subprocesses;
 mod timer_events;
 mod timers;
+mod updates;
 mod user_config;
 mod version;
 
@@ -79,6 +80,7 @@ pub use settings::{
     DaemonSettingsInfo, McpClient, McpClientSetup, McpConnectionInfo, McpSetupField,
     McpSetupFormat, mcp_connection_info,
 };
+pub use updates::UpdateStatus;
 pub use user_config::{
     AWM_CONFIG_ENV, AgentToolSyncReport, USER_CONFIG_FILE, UserAgentTool, UserConfig,
     UserConfigError, parse_user_config, sync_user_agent_tools, sync_user_config_file,
@@ -156,6 +158,7 @@ pub struct DaemonServer {
     registry: SharedProcessRegistry,
     data_dir: PathBuf,
     started_at: Instant,
+    updates: updates::UpdateService,
 }
 
 impl DaemonServer {
@@ -176,6 +179,9 @@ impl DaemonServer {
         let registry = Arc::new(Mutex::new(
             ProcessRegistry::new(store).map_err(registry_io_error)?,
         ));
+        // Build the HTTP update client before publishing discovery so readiness never advertises
+        // a listener that is still loading platform TLS state.
+        let updates = updates::UpdateService::new(&config.data_dir).map_err(io::Error::other)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
         let port = listener.local_addr()?.port();
         let discovery = Discovery {
@@ -192,6 +198,7 @@ impl DaemonServer {
             registry,
             data_dir: config.data_dir,
             started_at,
+            updates,
         })
     }
 
@@ -233,6 +240,7 @@ impl DaemonServer {
             self.data_dir,
             self.discovery.clone(),
             self.started_at,
+            self.updates,
         );
         let state = AppState {
             token: self.discovery.token.clone(),
@@ -466,6 +474,9 @@ async fn handle_session_control(
         "daemon.hello"
             | "daemon.info"
             | "daemon.restart"
+            | "daemon.update_check"
+            | "daemon.update_preferences"
+            | "daemon.update_apply"
             | "terminal.attach"
             | "terminal.detach"
             | "process.status_subscribe"
@@ -490,6 +501,46 @@ async fn handle_session_control(
             let _ = shutdown_request.send(true);
         });
         return Some(json!({ "id": id, "ok": true, "result": { "restarting": true } }).to_string());
+    }
+    if method == "daemon.update_check" {
+        let force = request
+            .get("params")
+            .and_then(|params| params.get("force"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        return Some(match settings.updates().check(force).await {
+            Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
+            Err(error) => update_error_reply(id, error),
+        });
+    }
+    if method == "daemon.update_preferences" {
+        let Some(enabled) = request
+            .get("params")
+            .and_then(|params| params.get("automatic_checks"))
+            .and_then(serde_json::Value::as_bool)
+        else {
+            return Some(json!({
+                "id": id, "ok": false,
+                "error": { "code": "invalid_params", "message": "automatic_checks must be a boolean" }
+            }).to_string());
+        };
+        return Some(match settings.updates().set_automatic_checks(enabled) {
+            Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
+            Err(error) => update_error_reply(id, error),
+        });
+    }
+    if method == "daemon.update_apply" {
+        return Some(match settings.updates().install().await {
+            Ok(result) => {
+                let shutdown_request = shutdown_request.clone();
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(150)).await;
+                    let _ = shutdown_request.send(true);
+                });
+                json!({ "id": id, "ok": true, "result": result }).to_string()
+            }
+            Err(error) => update_error_reply(id, error),
+        });
     }
     if matches!(
         method,
@@ -563,6 +614,15 @@ async fn handle_session_control(
             .to_string(),
         ),
     }
+}
+
+fn update_error_reply(id: serde_json::Value, error: awm_core::UpdateError) -> String {
+    json!({
+        "id": id,
+        "ok": false,
+        "error": { "code": "update_failed", "message": error.to_string() }
+    })
+    .to_string()
 }
 
 async fn terminal_output_frames(

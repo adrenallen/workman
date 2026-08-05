@@ -10,9 +10,24 @@
     connection: ConnectionStatus;
     restarting: boolean;
     onRestart: () => void;
+    updateBusy: 'check' | 'apply' | 'preference' | null;
+    updateMessage: string | null;
+    onCheckUpdate: () => void;
+    onUpdateNow: () => void;
+    onAutomaticChecks: (enabled: boolean) => void;
   }
 
-  let { info, connection, restarting, onRestart }: Props = $props();
+  let {
+    info,
+    connection,
+    restarting,
+    updateBusy,
+    updateMessage,
+    onRestart,
+    onCheckUpdate,
+    onUpdateNow,
+    onAutomaticChecks
+  }: Props = $props();
   let observedAt = $state(Date.now());
   let now = $state(Date.now());
   let uptime = $derived(info.uptime_ms + Math.max(0, now - observedAt));
@@ -38,6 +53,11 @@
     if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
+  }
+
+  function formatChecked(timestamp: number | null): string {
+    if (!timestamp) return 'Never';
+    return new Date(timestamp * 1000).toLocaleString();
   }
 </script>
 
@@ -65,6 +85,46 @@
     <CopyField label="Data directory" value={info.data_dir} />
     <p>Projects, process metadata, todos, and scratchpads are stored here.</p>
   </div>
+
+  <section class="updates" aria-labelledby="updates-title">
+    <div class="update-heading">
+      <div>
+        <strong id="updates-title">About &amp; updates</strong>
+        <span>Current {info.update.check.current} · Latest {info.update.check.latest}</span>
+      </div>
+      <div class="update-actions">
+        <button
+          type="button"
+          disabled={connection.status !== 'connected' || updateBusy !== null}
+          onclick={onCheckUpdate}
+        >{updateBusy === 'check' ? 'Checking…' : 'Check for updates'}</button>
+        {#if info.update.check.available}
+          <button
+            type="button"
+            class="update-now"
+            disabled={connection.status !== 'connected' || updateBusy !== null}
+            onclick={onUpdateNow}
+          >{updateBusy === 'apply' ? 'Updating…' : `Update to ${info.update.check.latest}`}</button>
+        {/if}
+      </div>
+    </div>
+    {#if info.update.check.available && info.update.check.notes}
+      <p class="release-notes">{info.update.check.notes}</p>
+    {/if}
+    {#if updateMessage}<p class="update-message" aria-live="polite">{updateMessage}</p>{/if}
+    <div class="update-preference">
+      <label>
+        <input
+          type="checkbox"
+          checked={info.update.automatic_checks}
+          disabled={updateBusy !== null}
+          onchange={(event) => onAutomaticChecks(event.currentTarget.checked)}
+        />
+        Check weekly when awm starts
+      </label>
+      <span>Last checked: {formatChecked(info.update.last_checked_at)}</span>
+    </div>
+  </section>
 
   <footer>
     <div>
@@ -152,6 +212,30 @@
 
   .data-path { padding: 10px 12px; }
   .data-path p { margin: 6px 0 0; color: #627b85; font-size: 9px; }
+
+  .updates { border-top: 1px solid var(--border); padding: 10px 12px; }
+  .update-heading, .update-actions, .update-preference { display: flex; align-items: center; }
+  .update-heading, .update-preference { justify-content: space-between; gap: 12px; }
+  .update-heading strong, .update-heading span { display: block; }
+  .update-heading strong { color: var(--text); font-size: 10px; }
+  .update-heading span, .update-preference, .update-message, .release-notes {
+    color: var(--muted);
+    font: 8px/1.45 'JetBrains Mono Variable', monospace;
+  }
+  .update-heading span { margin-top: 2px; }
+  .update-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .update-actions button {
+    border: 1px solid var(--border-strong); border-radius: 3px; padding: 5px 7px;
+    background: var(--surface-raised); color: var(--text-soft); font: 8px 'JetBrains Mono Variable', monospace;
+    cursor: pointer;
+  }
+  .update-actions .update-now { border-color: var(--signal); color: var(--text); }
+  .update-actions button:disabled { opacity: .45; cursor: default; }
+  .release-notes { max-height: 74px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; }
+  .update-message { margin: 7px 0 0; color: var(--text-soft); }
+  .update-preference { margin-top: 8px; }
+  .update-preference label { display: flex; align-items: center; gap: 6px; color: var(--text-soft); }
+  .update-preference input { margin: 0; accent-color: var(--signal); }
 
   footer {
     justify-content: space-between;

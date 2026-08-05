@@ -1,0 +1,561 @@
+//! GitHub Release checks and verified, same-directory binary replacement.
+
+use std::{
+    env,
+    error::Error,
+    fmt,
+    fs::{self, File, OpenOptions},
+    io::{self, Cursor},
+    path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use flate2::read::GzDecoder;
+use reqwest::{Client, Response};
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// GitHub's latest non-draft, non-prerelease endpoint for awm.
+pub const DEFAULT_RELEASES_API: &str =
+    "https://api.github.com/repos/adrenallen/awm/releases/latest";
+/// Courtesy interval used by the optional startup checker.
+pub const UPDATE_CHECK_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+pub type UpdateResult<T> = Result<T, UpdateError>;
+
+#[derive(Debug)]
+pub enum UpdateError {
+    Http(reqwest::Error),
+    Io(io::Error),
+    Json(serde_json::Error),
+    Version(semver::Error),
+    UnsupportedPlatform(String),
+    InvalidRelease(String),
+    MissingAsset(String),
+    ChecksumMismatch {
+        asset: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl fmt::Display for UpdateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(error) => write!(formatter, "release request failed: {error}"),
+            Self::Io(error) => write!(formatter, "update file operation failed: {error}"),
+            Self::Json(error) => write!(formatter, "release response was not valid JSON: {error}"),
+            Self::Version(error) => write!(formatter, "release version is invalid: {error}"),
+            Self::UnsupportedPlatform(platform) => {
+                write!(formatter, "awm updates are not packaged for {platform}")
+            }
+            Self::InvalidRelease(message) => write!(formatter, "invalid awm release: {message}"),
+            Self::MissingAsset(asset) => write!(formatter, "release is missing {asset}"),
+            Self::ChecksumMismatch {
+                asset,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "SHA256 mismatch for {asset}: expected {expected}, got {actual}"
+            ),
+        }
+    }
+}
+
+impl Error for UpdateError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Version(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<reqwest::Error> for UpdateError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error)
+    }
+}
+
+impl From<io::Error> for UpdateError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for UpdateError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<semver::Error> for UpdateError {
+    fn from(error: semver::Error) -> Self {
+        Self::Version(error)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateCheck {
+    pub current: String,
+    pub latest: String,
+    pub url: String,
+    pub notes: String,
+    pub available: bool,
+    pub checked_at: i64,
+    pub binary_asset: Option<ReleaseAsset>,
+    pub desktop_asset: Option<ReleaseAsset>,
+    pub checksums_asset: Option<ReleaseAsset>,
+}
+
+impl UpdateCheck {
+    pub fn current(current: impl Into<String>) -> Self {
+        let current = current.into();
+        Self {
+            latest: current.clone(),
+            current,
+            url: "https://github.com/adrenallen/awm/releases".to_owned(),
+            notes: String::new(),
+            available: false,
+            checked_at: 0,
+            binary_asset: None,
+            desktop_asset: None,
+            checksums_asset: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseTarget {
+    pub binary_asset_name: String,
+    pub desktop_asset_name: String,
+    pub platform_label: String,
+}
+
+impl ReleaseTarget {
+    pub fn current() -> UpdateResult<Self> {
+        match (env::consts::OS, env::consts::ARCH) {
+            ("macos", "aarch64") => Ok(Self {
+                binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
+                desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
+                platform_label: "macOS arm64".to_owned(),
+            }),
+            ("linux", "x86_64") => Ok(Self {
+                binary_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
+                desktop_asset_name: "awm-desktop-linux-x86_64.AppImage".to_owned(),
+                platform_label: "Linux x86_64".to_owned(),
+            }),
+            (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct UpdateClient {
+    http: Client,
+    api_url: String,
+    target: ReleaseTarget,
+    token: Option<String>,
+}
+
+impl UpdateClient {
+    pub fn github() -> UpdateResult<Self> {
+        Self::new(DEFAULT_RELEASES_API)
+    }
+
+    pub fn new(api_url: impl Into<String>) -> UpdateResult<Self> {
+        Self::with_target(api_url, ReleaseTarget::current()?)
+    }
+
+    pub fn with_target(api_url: impl Into<String>, target: ReleaseTarget) -> UpdateResult<Self> {
+        let http = Client::builder()
+            .user_agent(concat!("awm/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        Ok(Self {
+            http,
+            api_url: api_url.into(),
+            target,
+            token: env::var("AWM_GITHUB_TOKEN")
+                .or_else(|_| env::var("GITHUB_TOKEN"))
+                .or_else(|_| env::var("GH_TOKEN"))
+                .ok()
+                .filter(|token| !token.trim().is_empty()),
+        })
+    }
+
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    pub fn target(&self) -> &ReleaseTarget {
+        &self.target
+    }
+
+    pub async fn check(&self, current: &str) -> UpdateResult<UpdateCheck> {
+        let response = self
+            .request(&self.api_url)
+            .send()
+            .await?
+            .error_for_status()?;
+        let release: GithubRelease = response.json().await?;
+        let current_version = parse_version(current)?;
+        let latest_version = parse_version(&release.tag_name)?;
+        let available = latest_version > current_version;
+        let asset = |name: &str| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name == name)
+                .map(|asset| ReleaseAsset {
+                    name: asset.name.clone(),
+                    url: asset.browser_download_url.clone(),
+                })
+        };
+        Ok(UpdateCheck {
+            current: current_version.to_string(),
+            latest: latest_version.to_string(),
+            url: release.html_url,
+            notes: release.body.unwrap_or_default(),
+            available,
+            checked_at: unix_timestamp(),
+            binary_asset: asset(&self.target.binary_asset_name),
+            desktop_asset: asset(&self.target.desktop_asset_name),
+            checksums_asset: asset("SHA256SUMS"),
+        })
+    }
+
+    /// Download, verify, extract, and atomically replace only the awm/awmd pair in install_dir.
+    ///
+    /// The directory must already contain both binaries. This guard makes an accidental broad
+    /// destination fail before a downloaded byte is installed.
+    pub async fn install(
+        &self,
+        check: &UpdateCheck,
+        install_dir: impl AsRef<Path>,
+    ) -> UpdateResult<UpdateInstallReport> {
+        if !check.available {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} is already current",
+                check.current
+            )));
+        }
+        let binary_asset = check
+            .binary_asset
+            .as_ref()
+            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
+        let checksums_asset = check
+            .checksums_asset
+            .as_ref()
+            .ok_or_else(|| UpdateError::MissingAsset("SHA256SUMS".to_owned()))?;
+        let install_dir = install_dir.as_ref().canonicalize()?;
+        let awm_target = install_dir.join(executable_name("awm"));
+        let awmd_target = install_dir.join(executable_name("awmd"));
+        ensure_existing_binary(&awm_target)?;
+        ensure_existing_binary(&awmd_target)?;
+
+        let sums = self.download(checksums_asset).await?;
+        let sums = std::str::from_utf8(&sums)
+            .map_err(|_| UpdateError::InvalidRelease("SHA256SUMS is not UTF-8".to_owned()))?;
+        let expected = checksum_for(sums, &binary_asset.name)
+            .ok_or_else(|| UpdateError::MissingAsset(format!("{} checksum", binary_asset.name)))?;
+        let archive = self.download(binary_asset).await?;
+        let actual = sha256_hex(&archive);
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(UpdateError::ChecksumMismatch {
+                asset: binary_asset.name.clone(),
+                expected,
+                actual,
+            });
+        }
+
+        let staging = unique_staging_dir(&install_dir)?;
+        let result = (|| -> UpdateResult<UpdateInstallReport> {
+            extract_tar_gz(&archive, &staging)?;
+            let awm_source = staging.join(executable_name("awm"));
+            let awmd_source = staging.join(executable_name("awmd"));
+            ensure_staged_binary(&awm_source, &staging)?;
+            ensure_staged_binary(&awmd_source, &staging)?;
+            let quarantine_cleared = clear_macos_quarantine(&staging);
+            atomic_replace(&awm_source, &awm_target)?;
+            atomic_replace(&awmd_source, &awmd_target)?;
+
+            Ok(UpdateInstallReport {
+                current: check.current.clone(),
+                latest: check.latest.clone(),
+                install_dir: install_dir.to_string_lossy().into_owned(),
+                updated_files: vec![
+                    awm_target.to_string_lossy().into_owned(),
+                    awmd_target.to_string_lossy().into_owned(),
+                ],
+                desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
+                    format!(
+                        "Desktop app: close awm, download {} from {}, and replace the installed app. The running app is not replaced in place.",
+                        asset.name, asset.url
+                    )
+                }),
+                quarantine_cleared,
+            })
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    async fn download(&self, asset: &ReleaseAsset) -> UpdateResult<Vec<u8>> {
+        let response = self.request(&asset.url).send().await?.error_for_status()?;
+        limited_body(response).await
+    }
+
+    fn request(&self, url: &str) -> reqwest::RequestBuilder {
+        let request = self
+            .http
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(token) = &self.token {
+            request.bearer_auth(token)
+        } else {
+            request
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateInstallReport {
+    pub current: String,
+    pub latest: String,
+    pub install_dir: String,
+    pub updated_files: Vec<String>,
+    pub desktop_instruction: Option<String>,
+    pub quarantine_cleared: bool,
+}
+
+/// Resolve the directory containing the actual executable target. current_exe generally
+/// resolves launcher symlinks; canonicalization makes that behavior explicit for installers.
+pub fn install_dir_from_executable(executable: impl AsRef<Path>) -> UpdateResult<PathBuf> {
+    let executable = executable.as_ref().canonicalize()?;
+    executable
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| UpdateError::InvalidRelease("executable has no parent directory".to_owned()))
+}
+
+fn parse_version(value: &str) -> UpdateResult<Version> {
+    Ok(Version::parse(value.trim().trim_start_matches('v'))?)
+}
+
+fn executable_name(name: &str) -> String {
+    format!("{name}{}", env::consts::EXE_SUFFIX)
+}
+
+fn ensure_existing_binary(path: &Path) -> UpdateResult<()> {
+    if !path.is_file() {
+        return Err(UpdateError::InvalidRelease(format!(
+            "refusing to update: installed binary is missing at {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
+    if !path.is_file() {
+        return Err(UpdateError::InvalidRelease(format!(
+            "{} does not contain a root {} binary",
+            staging.display(),
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )));
+    }
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(staging.canonicalize()?) {
+        return Err(UpdateError::InvalidRelease(format!(
+            "archive entry escapes the staging directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn unique_staging_dir(install_dir: &Path) -> UpdateResult<PathBuf> {
+    for attempt in 0..100_u32 {
+        let path = install_dir.join(format!(
+            ".awm-update-{}-{}-{attempt}",
+            std::process::id(),
+            unix_timestamp()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(UpdateError::InvalidRelease(
+        "could not allocate a unique update staging directory".to_owned(),
+    ))
+}
+
+fn extract_tar_gz(bytes: &[u8], destination: &Path) -> UpdateResult<()> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.unpack_in(destination)? {
+            return Err(UpdateError::InvalidRelease(
+                "archive contains a path outside its root".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn atomic_replace(source: &Path, target: &Path) -> UpdateResult<()> {
+    let parent = target.parent().ok_or_else(|| {
+        UpdateError::InvalidRelease(format!("{} has no parent", target.display()))
+    })?;
+    let name = target.file_name().ok_or_else(|| {
+        UpdateError::InvalidRelease(format!("{} has no file name", target.display()))
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.awm-update-new-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&temporary);
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    set_executable(&temporary)?;
+    fs::rename(&temporary, target)?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn set_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+fn clear_macos_quarantine(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn checksum_for(manifest: &str, asset_name: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let checksum = fields.next()?;
+        let name = fields.next()?.trim_start_matches('*');
+        (name == asset_name && checksum.len() == 64).then(|| checksum.to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+async fn limited_body(response: Response) -> UpdateResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)
+    {
+        return Err(UpdateError::InvalidRelease(format!(
+            "asset exceeds the {} MiB update limit",
+            MAX_DOWNLOAD_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(UpdateError::InvalidRelease(format!(
+            "asset exceeds the {} MiB update limit",
+            MAX_DOWNLOAD_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parser_accepts_common_sha256sum_forms() {
+        let hash = "a".repeat(64);
+        let manifest = format!("{hash}  awm-macos-arm64.tar.gz\n{hash} *other.tar.gz\n");
+        assert_eq!(
+            checksum_for(&manifest, "awm-macos-arm64.tar.gz"),
+            Some(hash)
+        );
+        assert_eq!(checksum_for(&manifest, "missing"), None);
+    }
+
+    #[test]
+    fn semver_comparison_ignores_tag_prefix() {
+        assert!(parse_version("v0.2.0").unwrap() > parse_version("0.1.9").unwrap());
+    }
+}

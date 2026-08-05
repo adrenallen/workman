@@ -12,6 +12,7 @@
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
+  import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
   import TerminalView from './lib/TerminalView.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
@@ -132,6 +133,8 @@
   let agentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
   let versionRestarting = $state(false);
+  let startupUpdate = $state<UpdateStatus | null>(null);
+  let startupUpdatePort = $state<number | null>(null);
   let quickJumpOpen = $state(false);
   let shortcutsOpen = $state(false);
   let quickJumpLoading = $state(false);
@@ -161,6 +164,8 @@
   let versionSkew = $derived(
     connection.status === 'connected' && !connection.version_compatible
   );
+  let updateAvailable = $derived(startupUpdate?.check.available === true);
+  let showVersionBanner = $derived(versionSkew || updateAvailable);
 
   $effect(() => {
     const projectId = selectedProject?.id ?? null;
@@ -260,10 +265,24 @@
           `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
       );
       if (status.version_compatible) versionRestarting = false;
+      if (status.version_compatible && status.port !== startupUpdatePort) {
+        startupUpdatePort = status.port;
+        void startupUpdateCheck();
+      }
+    } else {
+      startupUpdatePort = null;
     }
     if (reconnected) {
       void client.subscribeProcessStatuses().catch(reportError);
       void refreshProjects();
+    }
+  }
+
+  async function startupUpdateCheck(): Promise<void> {
+    try {
+      startupUpdate = await checkForUpdates(client, false);
+    } catch (cause) {
+      console.warn('awm startup update check failed', cause);
     }
   }
 
@@ -1337,6 +1356,20 @@
       reportError(cause);
     }
   }
+
+  async function applyAvailableUpdate(): Promise<void> {
+    if (versionRestarting || !startupUpdate?.check.available) return;
+    if (!window.confirm('Update awm and restart the daemon? All running project processes will stop.')) return;
+    versionRestarting = true;
+    try {
+      const report = await applyUpdate(client);
+      startupUpdate = null;
+      if (report.desktop_instruction) error = report.desktop_instruction;
+    } catch (cause) {
+      versionRestarting = false;
+      reportError(cause);
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleShortcut} />
@@ -1345,15 +1378,15 @@
   <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'awm'}</title>
 </svelte:head>
 
-{#if versionSkew}
+{#if showVersionBanner}
   <section class="version-banner" aria-live="assertive">
     <div>
-      <strong>awm daemon is running an older version</strong>
-      <span>Restarting loads this app’s control protocol and agent config. All running project processes will stop.</span>
+      <strong>{versionSkew ? 'awm daemon is running an older version' : `awm ${startupUpdate?.check.latest} is available`}</strong>
+      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : 'The release is downloaded and SHA256 verified before awm and awmd are replaced.'} All running project processes will stop.</span>
     </div>
-    <small>app {connection.app_build_id || 'current'} · daemon {connection.daemon_build_id ?? 'legacy'}</small>
-    <button type="button" disabled={versionRestarting} onclick={() => void restartOutdatedDaemon()}>
-      {versionRestarting ? 'Restarting daemon…' : 'Restart daemon'}
+    <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
+    <button type="button" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
+      {versionRestarting ? 'Restarting daemon…' : versionSkew ? 'Restart daemon' : 'Update now'}
     </button>
   </section>
 {/if}
@@ -1361,7 +1394,7 @@
 <main
   class="app-shell"
   class:no-project={selectedProject === null}
-  class:with-version-banner={versionSkew}
+  class:with-version-banner={showVersionBanner}
   style={`--project-rail-width: ${projectRailCollapsed ? collapsedProjectRailWidth : projectRailWidth}px; --tree-rail-width: ${treeRailCollapsed ? collapsedTreeRailWidth : treeRailWidth}px;`}
 >
   <aside

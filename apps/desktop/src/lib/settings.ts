@@ -32,6 +32,31 @@ export interface DaemonSettingsInfo {
   control_protocol_version: number;
   uptime_ms: number;
   mcp: McpConnectionInfo;
+  update: UpdateStatus;
+}
+
+export interface UpdateCheckInfo {
+  current: string;
+  latest: string;
+  url: string;
+  notes: string;
+  available: boolean;
+  checked_at: number;
+}
+
+export interface UpdateStatus {
+  automatic_checks: boolean;
+  last_checked_at: number | null;
+  check: UpdateCheckInfo;
+}
+
+export interface UpdateInstallReport {
+  current: string;
+  latest: string;
+  install_dir: string;
+  updated_files: string[];
+  desktop_instruction: string | null;
+  quarantine_cleared: boolean;
 }
 
 export interface DaemonRestartResult {
@@ -44,4 +69,21 @@ export function loadDaemonSettings(client: DaemonClient): Promise<DaemonSettings
 
 export function restartDaemon(client: DaemonClient): Promise<DaemonRestartResult> {
   return client.restartDaemon();
+}
+
+export function checkForUpdates(client: DaemonClient, force = true): Promise<UpdateStatus> {
+  return client.control<UpdateStatus>('daemon.update_check', { force });
+}
+
+export function setAutomaticUpdateChecks(
+  client: DaemonClient,
+  automaticChecks: boolean
+): Promise<UpdateStatus> {
+  return client.control<UpdateStatus>('daemon.update_preferences', {
+    automatic_checks: automaticChecks
+  });
+}
+
+export function applyUpdate(client: DaemonClient): Promise<UpdateInstallReport> {
+  return client.control<UpdateInstallReport>('daemon.update_apply');
 }

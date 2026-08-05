@@ -1,6 +1,14 @@
 <script lang="ts">
   import type { SettingsPanelProps } from './workspace';
-  import { loadDaemonSettings, restartDaemon, type DaemonSettingsInfo } from './settings';
+  import {
+    applyUpdate,
+    checkForUpdates,
+    loadDaemonSettings,
+    restartDaemon,
+    setAutomaticUpdateChecks,
+    type DaemonSettingsInfo,
+    type UpdateInstallReport
+  } from './settings';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
@@ -21,6 +29,8 @@
   let loading = $state(false);
   let restarting = $state(false);
   let sawRestartDisconnect = $state(false);
+  let updateBusy = $state<'check' | 'apply' | 'preference' | null>(null);
+  let updateMessage = $state<string | null>(null);
   let loadedConnection = $state<string | null>(null);
   let viewport = $state<HTMLDivElement>();
   let request = 0;
@@ -85,6 +95,52 @@
     }
   }
 
+  async function checkUpdate(): Promise<void> {
+    if (!info || updateBusy) return;
+    updateBusy = 'check';
+    updateMessage = null;
+    try {
+      info = { ...info, update: await checkForUpdates(client, true) };
+      updateMessage = info.update.check.available
+        ? `awm ${info.update.check.latest} is available.`
+        : `awm ${info.update.check.current} is current.`;
+    } catch (cause) {
+      updateMessage = message(cause);
+    } finally {
+      updateBusy = null;
+    }
+  }
+
+  async function toggleAutomaticChecks(enabled: boolean): Promise<void> {
+    if (!info || updateBusy) return;
+    updateBusy = 'preference';
+    try {
+      info = { ...info, update: await setAutomaticUpdateChecks(client, enabled) };
+      updateMessage = enabled ? 'Weekly update checks enabled.' : 'Automatic checks disabled.';
+    } catch (cause) {
+      updateMessage = message(cause);
+    } finally {
+      updateBusy = null;
+    }
+  }
+
+  async function updateNow(): Promise<void> {
+    if (!info || updateBusy) return;
+    if (!window.confirm('Update awm and restart the daemon? All running project processes will stop.')) return;
+    updateBusy = 'apply';
+    updateMessage = 'Downloading and verifying the update…';
+    try {
+      const report: UpdateInstallReport = await applyUpdate(client);
+      updateMessage = report.desktop_instruction ?? `Updated to awm ${report.latest}. Reconnecting…`;
+      restarting = true;
+      sawRestartDisconnect = false;
+    } catch (cause) {
+      updateMessage = message(cause);
+    } finally {
+      updateBusy = null;
+    }
+  }
+
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
@@ -139,7 +195,17 @@
         {/if}
       {:else if $settingsSection === 'daemon'}
         {#if info}
-          <DaemonCard {info} {connection} {restarting} onRestart={() => void restart()} />
+          <DaemonCard
+            {info}
+            {connection}
+            {restarting}
+            {updateBusy}
+            {updateMessage}
+            onRestart={() => void restart()}
+            onCheckUpdate={() => void checkUpdate()}
+            onUpdateNow={() => void updateNow()}
+            onAutomaticChecks={(enabled) => void toggleAutomaticChecks(enabled)}
+          />
         {:else}
           <SettingsConnectionCard
             title="Daemon settings"

@@ -89,6 +89,12 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
         awmd::CONTROL_PROTOCOL_VERSION
     );
     assert!(info["uptime_ms"].as_u64().is_some());
+    assert_eq!(info["update"]["automatic_checks"], true);
+    assert_eq!(info["update"]["last_checked_at"], Value::Null);
+    assert_eq!(
+        info["update"]["check"]["current"],
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
         info["mcp"]["endpoint"],
         format!("http://127.0.0.1:{}/mcp", server.discovery.port)

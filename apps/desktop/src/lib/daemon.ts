@@ -489,7 +489,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error('The daemon did not answer in time'));
-      }, 5000);
+      }, type.startsWith('daemon.update_') ? 180_000 : 5000);
       this.pending.set(id, {
         method: type,
         resolve: (result) => resolve(result as T),

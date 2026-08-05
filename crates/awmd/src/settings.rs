@@ -7,6 +7,7 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::Discovery;
+use crate::{UpdateStatus, updates::UpdateService};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct McpConnectionInfo {
@@ -102,6 +103,7 @@ pub struct DaemonSettingsInfo {
     pub control_protocol_version: u32,
     pub uptime_ms: u64,
     pub mcp: McpConnectionInfo,
+    pub update: UpdateStatus,
 }
 
 #[derive(Clone)]
@@ -109,14 +111,21 @@ pub(crate) struct DaemonRuntimeSettings {
     data_dir: PathBuf,
     discovery: Discovery,
     started_at: Instant,
+    updates: UpdateService,
 }
 
 impl DaemonRuntimeSettings {
-    pub(crate) fn new(data_dir: PathBuf, discovery: Discovery, started_at: Instant) -> Self {
+    pub(crate) fn new(
+        data_dir: PathBuf,
+        discovery: Discovery,
+        started_at: Instant,
+        updates: UpdateService,
+    ) -> Self {
         Self {
             data_dir,
             discovery,
             started_at,
+            updates,
         }
     }
 
@@ -135,7 +144,12 @@ impl DaemonRuntimeSettings {
                 .try_into()
                 .unwrap_or(u64::MAX),
             mcp: mcp_connection_info(&self.discovery),
+            update: self.updates.status(),
         }
+    }
+
+    pub(crate) fn updates(&self) -> &UpdateService {
+        &self.updates
     }
 }
 

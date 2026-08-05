@@ -11,7 +11,10 @@ use std::{
     time::Duration,
 };
 
-use awm_core::{Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId};
+use awm_core::{
+    DEFAULT_RELEASES_API, Process, ProcessKind, ProcessSource, ProcessStatus, ProjectId,
+    UpdateClient, UpdateInstallReport, install_dir_from_executable,
+};
 use awmd::{DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
@@ -36,7 +39,7 @@ const HELLO_REQUEST_ID: &str = "__awm_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
 const HELP: &str = "\
-Usage: awm [--data-dir PATH] [--daemon PATH] [--version] [COMMAND]\n\
+Usage: awm [--data-dir PATH] [--daemon PATH] [--version] [--update [--check]] [COMMAND]\n\
 \n\
 Commands:\n\
   (none)\n\
@@ -49,6 +52,8 @@ Commands:\n\
       Stop trusted command processes for the current project.\n\
   app\n\
       Launch the awm desktop app.\n\
+  update [--check]\n\
+      Check GitHub Releases and securely update awm and awmd. --check reports only.\n\
   mcp-setup [--client claude|codex|gemini|opencode|generic] [--run]\n\
       Print setup for one MCP client, or all supported clients by default.\n\
       --run executes the Claude setup command.\n\
@@ -76,6 +81,11 @@ pub async fn run_env() -> Result<()> {
         return Ok(());
     }
 
+    if let Command::Update { check_only } = &cli.command {
+        let data_dir = cli.data_dir.unwrap_or_else(awmd::default_data_dir);
+        return self_update(&data_dir, *check_only).await;
+    }
+
     let data_dir = cli.data_dir.unwrap_or_else(awmd::default_data_dir);
     let daemon = daemon_executable(cli.daemon);
 
@@ -98,7 +108,11 @@ pub async fn run_env() -> Result<()> {
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
         Command::Stop { process_id } => stop(&mut client, process_id).await,
-        Command::App | Command::McpSetup { .. } | Command::Help | Command::Version => {
+        Command::App
+        | Command::McpSetup { .. }
+        | Command::Update { .. }
+        | Command::Help
+        | Command::Version => {
             unreachable!()
         }
     }
@@ -124,6 +138,9 @@ enum Command {
         project_id: Option<ProjectId>,
     },
     App,
+    Update {
+        check_only: bool,
+    },
     McpSetup {
         run: bool,
         client: Option<McpClient>,
@@ -180,6 +197,7 @@ impl Cli {
                     require_no_args(args, "--version")?;
                     break Command::Version;
                 }
+                "--update" | "update" => break parse_update(args)?,
                 "add" => break parse_add(args)?,
                 "up" => break parse_project_action(args, true)?,
                 "down" => break parse_project_action(args, false)?,
@@ -211,6 +229,17 @@ impl Cli {
             command,
         })
     }
+}
+
+fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let mut check_only = false;
+    for arg in args.by_ref() {
+        match arg.as_str() {
+            "--check" if !check_only => check_only = true,
+            _ => return Err(cli_error(format!("unknown update option {arg:?}"))),
+        }
+    }
+    Ok(Command::Update { check_only })
 }
 
 fn parse_add(mut args: impl Iterator<Item = String>) -> Result<Command> {
@@ -1032,6 +1061,55 @@ fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
     PathBuf::from("awmd")
 }
 
+async fn self_update(data_dir: &Path, check_only: bool) -> Result<()> {
+    let api_url =
+        env::var("AWM_RELEASES_API_URL").unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned());
+    let updater = UpdateClient::new(api_url)?;
+    let check = updater.check(env!("CARGO_PKG_VERSION")).await?;
+    println!("Current: {}", check.current);
+    println!("Latest:  {}", check.latest);
+    if !check.notes.trim().is_empty() {
+        println!("\n{}", check.notes.trim());
+    }
+    if !check.available {
+        println!("\nawm is up to date.");
+        return Ok(());
+    }
+    println!("\nRelease: {}", check.url);
+    if check_only {
+        return Ok(());
+    }
+
+    let report = if let Ok(discovery) = Discovery::read(data_dir)
+        && awmd::probe(&discovery).await
+    {
+        eprintln!("awm: warning: updating restarts awmd and stops all running project processes");
+        let mut client = Client::connect_discovery(discovery).await?;
+        client.rpc("daemon.update_apply", json!({})).await?
+    } else {
+        let install_dir = match env::var_os("AWM_UPDATE_INSTALL_DIR") {
+            Some(path) => PathBuf::from(path),
+            None => install_dir_from_executable(env::current_exe()?)?,
+        };
+        updater.install(&check, install_dir).await?
+    };
+    print_update_report(&report);
+    Ok(())
+}
+
+fn print_update_report(report: &UpdateInstallReport) {
+    println!("Updated awm {} → {}", report.current, report.latest);
+    for path in &report.updated_files {
+        println!("  {path}");
+    }
+    if report.quarantine_cleared {
+        println!("Cleared macOS quarantine attributes from the verified update.");
+    }
+    if let Some(instruction) = &report.desktop_instruction {
+        println!("\n{instruction}");
+    }
+}
+
 struct Client {
     socket: Socket,
     next_id: u64,
@@ -1042,6 +1120,10 @@ struct Client {
 impl Client {
     async fn connect(data_dir: &Path, daemon: &Path) -> Result<Self> {
         let discovery = awmd::discover_or_spawn(data_dir, daemon, DAEMON_WAIT).await?;
+        Self::connect_discovery(discovery).await
+    }
+
+    async fn connect_discovery(discovery: Discovery) -> Result<Self> {
         let mut request = format!("ws://127.0.0.1:{}/ws", discovery.port).into_client_request()?;
         request.headers_mut().insert(
             header::AUTHORIZATION,
@@ -1263,6 +1345,11 @@ mod tests {
         let cli = Cli::parse(["awm", "--version"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Version));
         assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
+
+        let cli = Cli::parse(["awm", "update", "--check"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::Update { check_only: true }));
+        let cli = Cli::parse(["awm", "--update"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::Update { check_only: false }));
 
         let cli = Cli::parse(["awm", "add"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Add { path } if path == Path::new(".")));
