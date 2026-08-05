@@ -4,7 +4,8 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -129,6 +130,145 @@ pub fn sync_user_config_file(
     sync_user_agent_tools(store, &config.agent_tools)
 }
 
+/// Update one config-managed registry row at its source-of-truth YAML file.
+///
+/// This is only called for an explicit Settings edit/toggle. Unknown top-level
+/// YAML values are retained and local database tools remain untouched.
+pub(crate) fn update_config_managed_agent_tool(
+    store: &Store,
+    agent_tool_id: i64,
+    name: String,
+    command: String,
+    tool_type: String,
+    enabled: bool,
+) -> Result<AgentTool, UserConfigError> {
+    update_config_managed_agent_tool_at(
+        store,
+        &user_config_path(),
+        agent_tool_id,
+        name,
+        command,
+        tool_type,
+        enabled,
+    )
+}
+
+fn update_config_managed_agent_tool_at(
+    store: &Store,
+    path: &Path,
+    agent_tool_id: i64,
+    name: String,
+    command: String,
+    tool_type: String,
+    enabled: bool,
+) -> Result<AgentTool, UserConfigError> {
+    let existing = store.get_agent_tool(agent_tool_id)?.ok_or_else(|| {
+        UserConfigError::Invalid(format!("agent tool {agent_tool_id} was not found"))
+    })?;
+    if existing.source != AgentToolSource::Config {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool {agent_tool_id} is not managed by the per-user config file"
+        )));
+    }
+    if store
+        .list_agent_tools()?
+        .iter()
+        .any(|tool| tool.id != agent_tool_id && tool.name == name)
+    {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool name {name:?} is already registered"
+        )));
+    }
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
+    let root = yaml.as_mapping_mut().ok_or_else(|| {
+        UserConfigError::Invalid("per-user config must contain a YAML mapping".to_owned())
+    })?;
+    let entries = root
+        .get_mut(serde_yaml::Value::String("agent_tools".to_owned()))
+        .and_then(serde_yaml::Value::as_sequence_mut)
+        .ok_or_else(|| {
+            UserConfigError::Invalid("per-user config has no agent_tools list".to_owned())
+        })?;
+    let entry = entries
+        .iter_mut()
+        .find(|entry| {
+            entry
+                .as_mapping()
+                .and_then(|entry| entry.get(serde_yaml::Value::String("name".to_owned())))
+                .and_then(serde_yaml::Value::as_str)
+                == Some(existing.name.as_str())
+        })
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or_else(|| {
+            UserConfigError::Invalid(format!(
+                "agent tool {:?} was not found in {}",
+                existing.name,
+                path.display()
+            ))
+        })?;
+    for (key, value) in [
+        ("name", serde_yaml::Value::String(name.clone())),
+        ("command", serde_yaml::Value::String(command.clone())),
+        ("tool_type", serde_yaml::Value::String(tool_type.clone())),
+        ("enabled", serde_yaml::Value::Bool(enabled)),
+    ] {
+        entry.insert(serde_yaml::Value::String(key.to_owned()), value);
+    }
+
+    let rendered = serde_yaml::to_string(&yaml)?;
+    let parsed = parse_user_config(&rendered)?;
+    validate_user_agent_tools(&parsed.agent_tools)?;
+    write_private_atomic(path, rendered.as_bytes())?;
+
+    let updated = AgentTool {
+        id: agent_tool_id,
+        name,
+        command,
+        tool_type,
+        enabled,
+        source: AgentToolSource::Config,
+    };
+    store.put_agent_tool(&updated)?;
+    Ok(updated)
+}
+
+fn validate_user_agent_tools(configured: &[UserAgentTool]) -> Result<(), UserConfigError> {
+    let scratch = Store::open_in_memory()?;
+    sync_user_agent_tools(&scratch, configured).map(|_| ())
+}
+
+fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(
+        ".{}.gbuild-{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Reconcile config-managed rows by stable name while preserving local database rows.
 pub fn sync_user_agent_tools(
     store: &Store,
@@ -235,7 +375,10 @@ fn infer_tool_type(command: &str) -> String {
 mod tests {
     use gbuild_core::{AgentTool, AgentToolSource, Store};
 
-    use super::{UserAgentTool, parse_user_config, sync_user_agent_tools};
+    use super::{
+        UserAgentTool, parse_user_config, sync_user_agent_tools,
+        update_config_managed_agent_tool_at,
+    };
 
     fn configured(name: &str, command: &str, tool_type: Option<&str>) -> UserAgentTool {
         UserAgentTool {
@@ -310,6 +453,50 @@ mod tests {
         assert_eq!(
             config.agent_tools[0].tool_type.as_deref(),
             Some("future_v9")
+        );
+    }
+
+    #[test]
+    fn explicit_settings_edit_updates_config_source_and_preserves_unknown_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "theme: night\nagent_tools:\n  - name: Fixture OpenCode\n    command: opencode\n    tool_type: opencode\n    enabled: true\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 17,
+                name: "Fixture OpenCode".to_owned(),
+                command: "opencode".to_owned(),
+                tool_type: "opencode".to_owned(),
+                enabled: true,
+                source: AgentToolSource::Config,
+            })
+            .unwrap();
+
+        let updated = update_config_managed_agent_tool_at(
+            &store,
+            &path,
+            17,
+            "Fixture OpenCode nightly".to_owned(),
+            "opencode --model nightly".to_owned(),
+            "opencode".to_owned(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(updated.id, 17);
+        assert!(!updated.enabled);
+        let yaml = std::fs::read_to_string(path).unwrap();
+        assert!(yaml.contains("theme: night"));
+        let parsed = parse_user_config(&yaml).unwrap();
+        assert_eq!(parsed.agent_tools[0].name, "Fixture OpenCode nightly");
+        assert!(!parsed.agent_tools[0].enabled);
+        assert_eq!(
+            store.get_agent_tool(17).unwrap().unwrap().command,
+            "opencode --model nightly"
         );
     }
 }

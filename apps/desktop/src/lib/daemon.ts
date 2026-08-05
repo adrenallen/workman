@@ -14,6 +14,10 @@ import type {
 } from './coordination';
 import type {
   AgentTool,
+  AgentToolConfigPreview,
+  AgentToolConfigWrite,
+  AgentToolDeepCheck,
+  AgentToolsHealth,
   AgentToolInput,
   AgentToolsClient,
   DeleteAgentToolResult,
@@ -325,6 +329,32 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   listAgentTools(): Promise<AgentTool[]> {
     return this.requestOptional('agent_tools.list', {}, []);
+  }
+
+  agentToolsHealth(): Promise<AgentToolsHealth> {
+    return this.request('agent_tools.health');
+  }
+
+  previewAgentToolConfig(agentToolId: number): Promise<AgentToolConfigPreview> {
+    return this.request('agent_tools.configure_preview', { agent_tool_id: agentToolId });
+  }
+
+  configureAgentTool(
+    agentToolId: number,
+    expectedPreviewSha256: string
+  ): Promise<AgentToolConfigWrite> {
+    return this.request('agent_tools.configure', {
+      agent_tool_id: agentToolId,
+      confirm_write: true,
+      expected_preview_sha256: expectedPreviewSha256
+    });
+  }
+
+  deepCheckAgentTool(projectId: number, agentToolId: number): Promise<AgentToolDeepCheck> {
+    return this.request('agent_tools.deep_check', {
+      project_id: projectId,
+      agent_tool_id: agentToolId
+    });
   }
 
   saveAgentTool(tool: AgentToolInput): Promise<AgentTool> {

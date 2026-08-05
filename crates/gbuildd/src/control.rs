@@ -163,6 +163,21 @@ struct AgentToolIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentToolConfigWriteParams {
+    agent_tool_id: AgentToolId,
+    confirm_write: bool,
+    expected_preview_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentToolDeepCheckParams {
+    project_id: ProjectId,
+    agent_tool_id: AgentToolId,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SpawnAgentParams {
     project_id: ProjectId,
     agent_tool_id: AgentToolId,
@@ -241,6 +256,57 @@ async fn dispatch(
                 .await
                 .map(json_value)
                 .map_err(readiness_error);
+        }
+        "agent_tools.health" => {
+            let tools = {
+                let registry = registry.lock().await;
+                crate::mcp::agent_spawning::load_agent_tools(&registry)
+                    .map_err(|error| ("agent_tool_error", error))?
+            };
+            return Ok(json_value(
+                crate::runtime_doctor::check_agent_tools(tools).await,
+            ));
+        }
+        "agent_tools.configure_preview" => {
+            let params: AgentToolIdParams = params_as(params)?;
+            let tool = {
+                let registry = registry.lock().await;
+                crate::mcp::agent_spawning::load_agent_tool(&registry, params.agent_tool_id)
+                    .map_err(|error| ("agent_tool_error", error))?
+            };
+            return crate::runtime_doctor::config_preview(&tool, mcp_url)
+                .map(json_value)
+                .map_err(|error| ("agent_config_error", error));
+        }
+        "agent_tools.configure" => {
+            let params: AgentToolConfigWriteParams = params_as(params)?;
+            let tool = {
+                let registry = registry.lock().await;
+                crate::mcp::agent_spawning::load_agent_tool(&registry, params.agent_tool_id)
+                    .map_err(|error| ("agent_tool_error", error))?
+            };
+            return crate::runtime_doctor::apply_config(
+                &tool,
+                mcp_url,
+                params.confirm_write,
+                &params.expected_preview_sha256,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_config_error", error));
+        }
+        "agent_tools.deep_check" => {
+            let params: AgentToolDeepCheckParams = params_as(params)?;
+            return crate::mcp::agent_spawning::deep_check_registered_agent(
+                registry.clone(),
+                params.project_id,
+                params.agent_tool_id,
+                mcp_url,
+                params.timeout_ms,
+                None,
+            )
+            .await
+            .map(json_value)
+            .map_err(|error| ("deep_check_failed", error));
         }
         _ => {}
     }
@@ -410,7 +476,7 @@ async fn dispatch(
         }
         "agent_tools.save" => {
             let params: AgentToolParams = params_as(params)?;
-            return crate::mcp::agent_spawning::save_agent_tool(
+            return crate::mcp::agent_spawning::save_agent_tool_from_settings(
                 &registry,
                 params.tool.id,
                 params.tool.name,

@@ -42,6 +42,7 @@ mod mcp;
 mod process_registry;
 pub mod process_stats;
 pub mod readiness;
+pub mod runtime_doctor;
 mod settings;
 mod subprocesses;
 mod timer_events;

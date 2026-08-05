@@ -17,6 +17,58 @@ export interface AgentToolInput {
   enabled: boolean;
 }
 
+export interface AgentToolHealth extends AgentTool {
+  found_on_path: boolean;
+  resolved_binary: string | null;
+  version: string | null;
+  version_error: string | null;
+  config_path: string;
+  config_exists: boolean;
+  launch_ready: boolean;
+  install_url: string | null;
+  configuration_mode: 'per_launch' | 'self_config';
+  configuration_note: string;
+}
+
+export interface AgentToolsHealth {
+  checked_at: number;
+  ready_count: number;
+  total_count: number;
+  enabled_ready_count: number;
+  enabled_count: number;
+  all_enabled_ready: boolean;
+  summary: string;
+  tools: AgentToolHealth[];
+}
+
+export interface AgentToolConfigPreview {
+  agent_tool_id: number;
+  tool_type: string;
+  automatic_wiring: boolean;
+  can_write: boolean;
+  requires_consent: boolean;
+  path: string;
+  preview: string | null;
+  preview_sha256: string | null;
+  already_configured: boolean;
+  message: string;
+}
+
+export interface AgentToolConfigWrite {
+  agent_tool_id: number;
+  path: string;
+  written: boolean;
+  preview_sha256: string;
+}
+
+export interface AgentToolDeepCheck {
+  agent_tool_id: number;
+  process_id: number | null;
+  success: boolean;
+  elapsed_ms: number;
+  message: string;
+}
+
 export interface SpawnAgentInput {
   project_id: number;
   agent_tool_id: number;
@@ -39,6 +91,13 @@ export interface DeleteAgentToolResult {
 
 export interface AgentToolsClient {
   listAgentTools(): Promise<AgentTool[]>;
+  agentToolsHealth(): Promise<AgentToolsHealth>;
+  previewAgentToolConfig(agentToolId: number): Promise<AgentToolConfigPreview>;
+  configureAgentTool(
+    agentToolId: number,
+    expectedPreviewSha256: string
+  ): Promise<AgentToolConfigWrite>;
+  deepCheckAgentTool(projectId: number, agentToolId: number): Promise<AgentToolDeepCheck>;
   saveAgentTool(tool: AgentToolInput): Promise<AgentTool>;
   deleteAgentTool(agentToolId: number): Promise<DeleteAgentToolResult>;
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult>;

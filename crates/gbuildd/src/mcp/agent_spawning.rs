@@ -74,6 +74,31 @@ struct SpawnAgentArgs {
     auto_acknowledge_dialogs: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AgentToolConfigArgs {
+    agent_tool_id: AgentToolId,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AgentToolConfigWriteArgs {
+    agent_tool_id: AgentToolId,
+    /// Must be true after the complete resulting config has been shown to the user.
+    confirm_write: bool,
+    /// SHA-256 returned by agent_tool_configure_preview; prevents stale writes.
+    expected_preview_sha256: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AgentToolDeepCheckArgs {
+    /// Explicit project override. Otherwise selected project, then owning project is used.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    agent_tool_id: AgentToolId,
+    /// Hard deadline for the ephemeral whoami roundtrip (default 30s, maximum 60s).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -98,6 +123,95 @@ impl GbuildMcp {
         match load_agent_tools(&registry) {
             Ok(tools) => success(json!({ "agent_tools": tools })),
             Err(error) => failure("store_error", error),
+        }
+    }
+
+    #[tool(
+        description = "Run cheap PATH, version, and config-presence checks for every agent runtime"
+    )]
+    async fn agent_tools_health(&self) -> CallToolResult {
+        let tools = {
+            let registry = self.registry.lock().await;
+            match load_agent_tools(&registry) {
+                Ok(tools) => tools,
+                Err(error) => return failure("store_error", error),
+            }
+        };
+        success(crate::runtime_doctor::check_agent_tools(tools).await)
+    }
+
+    #[tool(
+        description = "Preview the complete consent-gated gbuild MCP config for one agent runtime"
+    )]
+    async fn agent_tool_configure_preview(
+        &self,
+        Parameters(args): Parameters<AgentToolConfigArgs>,
+    ) -> CallToolResult {
+        let tool = {
+            let registry = self.registry.lock().await;
+            match load_agent_tool(&registry, args.agent_tool_id) {
+                Ok(tool) => tool,
+                Err(error) => return failure("agent_tool_error", error),
+            }
+        };
+        match crate::runtime_doctor::config_preview(&tool, &self.mcp_url) {
+            Ok(preview) => success(preview),
+            Err(error) => failure("agent_config_error", error),
+        }
+    }
+
+    #[tool(
+        description = "Write a previously previewed agent MCP config after explicit confirmation"
+    )]
+    async fn agent_tool_configure(
+        &self,
+        Parameters(args): Parameters<AgentToolConfigWriteArgs>,
+    ) -> CallToolResult {
+        let tool = {
+            let registry = self.registry.lock().await;
+            match load_agent_tool(&registry, args.agent_tool_id) {
+                Ok(tool) => tool,
+                Err(error) => return failure("agent_tool_error", error),
+            }
+        };
+        match crate::runtime_doctor::apply_config(
+            &tool,
+            &self.mcp_url,
+            args.confirm_write,
+            &args.expected_preview_sha256,
+        ) {
+            Ok(result) => success(result),
+            Err(error) => failure("agent_config_error", error),
+        }
+    }
+
+    #[tool(
+        description = "Optionally spawn one ephemeral agent and verify its gbuild whoami roundtrip"
+    )]
+    async fn agent_tool_deep_check(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<AgentToolDeepCheckArgs>,
+    ) -> CallToolResult {
+        let (project_id, spawned_by_process_id) = {
+            let mut registry = self.registry.lock().await;
+            match scoped_project(&mut registry, &parts, args.project_id) {
+                Ok((project, actor)) => (project.id, actor.process_id),
+                Err(error) => return failure("project_scope_error", error),
+            }
+        };
+        match deep_check_registered_agent(
+            self.registry.clone(),
+            project_id,
+            args.agent_tool_id,
+            &self.mcp_url,
+            args.timeout_ms,
+            spawned_by_process_id,
+        )
+        .await
+        {
+            Ok(result) => success(result),
+            Err(error) => failure("deep_check_failed", error),
         }
     }
 
@@ -263,6 +377,49 @@ pub(crate) fn save_agent_tool(
     Ok(tool)
 }
 
+pub(crate) fn save_agent_tool_from_settings(
+    registry: &ProcessRegistry,
+    id: Option<AgentToolId>,
+    name: String,
+    command: String,
+    tool_type: String,
+    enabled: bool,
+) -> Result<AgentTool, String> {
+    let name = name.trim().to_owned();
+    let command = command.trim().to_owned();
+    let tool_type = tool_type.trim().to_owned();
+    if name.is_empty() {
+        return Err("agent tool name cannot be empty".to_owned());
+    }
+    if command.is_empty() {
+        return Err("agent tool command cannot be empty".to_owned());
+    }
+    if command.contains('\0') {
+        return Err("agent tool command may not contain NUL bytes".to_owned());
+    }
+    if tool_type.is_empty() {
+        return Err("agent tool type cannot be empty".to_owned());
+    }
+    if let Some(id) = id {
+        let existing = registry
+            .store()
+            .get_agent_tool(id)
+            .map_err(|error| error.to_string())?;
+        if existing.is_some_and(|tool| tool.source == AgentToolSource::Config) {
+            return crate::user_config::update_config_managed_agent_tool(
+                registry.store(),
+                id,
+                name,
+                command,
+                tool_type,
+                enabled,
+            )
+            .map_err(|error| error.to_string());
+        }
+    }
+    save_agent_tool(registry, id, name, command, tool_type, enabled)
+}
+
 pub(crate) fn delete_agent_tool(
     registry: &ProcessRegistry,
     agent_tool_id: AgentToolId,
@@ -297,7 +454,7 @@ pub(crate) fn delete_agent_tool(
         .map_err(|error| error.to_string())
 }
 
-fn load_agent_tool(
+pub(crate) fn load_agent_tool(
     registry: &ProcessRegistry,
     agent_tool_id: AgentToolId,
 ) -> Result<AgentTool, String> {
@@ -350,6 +507,149 @@ pub(crate) fn spawn_registered_agent(
         auto_acknowledge_initial_dialog(registry, result.process_id)?;
     }
     Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentToolDeepCheckResult {
+    pub agent_tool_id: AgentToolId,
+    pub process_id: Option<ProcessId>,
+    pub success: bool,
+    pub elapsed_ms: u64,
+    pub message: String,
+}
+
+pub(crate) async fn deep_check_registered_agent(
+    registry: crate::SharedProcessRegistry,
+    project_id: ProjectId,
+    agent_tool_id: AgentToolId,
+    mcp_url: &str,
+    timeout_ms: Option<u64>,
+    spawned_by_process_id: Option<ProcessId>,
+) -> Result<AgentToolDeepCheckResult, String> {
+    let started = Instant::now();
+    let (tool, project) = {
+        let registry = registry.lock().await;
+        let tool = load_agent_tool(&registry, agent_tool_id)?;
+        let project = registry
+            .store()
+            .get_project(project_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("project {project_id} was not found"))?;
+        (tool, project)
+    };
+    let health = crate::runtime_doctor::check_agent_tools(vec![tool.clone()]).await;
+    if !health
+        .tools
+        .first()
+        .is_some_and(|health| health.found_on_path)
+    {
+        return Ok(AgentToolDeepCheckResult {
+            agent_tool_id,
+            process_id: None,
+            success: false,
+            elapsed_ms: elapsed_millis(started),
+            message: "Runtime binary was not found on PATH; no process was spawned.".to_owned(),
+        });
+    }
+
+    let prompt = "Use only the MCP server named gbuild. Call whoami once. When it identifies you, print exactly GBUILD_DEEP_CHECK_OK and exit.";
+    let normalized = normalize_tool_type(&tool.tool_type);
+    let (extra_args, submit_prompt) = match normalized.as_str() {
+        "claude" | "claude_code" => (
+            vec![
+                "--print".to_owned(),
+                "--output-format".to_owned(),
+                "text".to_owned(),
+                prompt.to_owned(),
+            ],
+            false,
+        ),
+        "codex" => (
+            vec![
+                "exec".to_owned(),
+                "--skip-git-repo-check".to_owned(),
+                prompt.to_owned(),
+            ],
+            false,
+        ),
+        "gemini" | "gemini_cli" => (vec!["--prompt".to_owned(), prompt.to_owned()], false),
+        "opencode" | "open_code" => (vec!["run".to_owned(), prompt.to_owned()], false),
+        _ => (Vec::new(), true),
+    };
+    let process_id = {
+        let mut registry = registry.lock().await;
+        let spawned = spawn_registered_agent(
+            &mut registry,
+            &project,
+            agent_tool_id,
+            None,
+            extra_args,
+            mcp_url,
+            true,
+            spawned_by_process_id,
+        )?;
+        if submit_prompt {
+            if let Err(error) = registry.submit_input(spawned.process_id, prompt.as_bytes()) {
+                let _ = registry.close(spawned.process_id);
+                return Err(error.to_string());
+            }
+        }
+        spawned.process_id
+    };
+
+    let deadline =
+        Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 60_000));
+    let mut success = false;
+    let mut message = "The agent did not call whoami before the deep-check deadline.".to_owned();
+    loop {
+        let (identified, output) = {
+            let mut registry = registry.lock().await;
+            let _ = registry.get_status(process_id);
+            let identified = registry
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM actors WHERE process_id = ?1)",
+                    [process_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let output = registry
+                .rendered_output(process_id)
+                .map(|output| output.text)
+                .unwrap_or_default();
+            (identified, output)
+        };
+        if identified {
+            success = true;
+            message = if output.contains("GBUILD_DEEP_CHECK_OK") {
+                "Ephemeral agent called whoami through this daemon and confirmed the roundtrip."
+                    .to_owned()
+            } else {
+                "Ephemeral agent called whoami through this daemon.".to_owned()
+            };
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    {
+        let mut registry = registry.lock().await;
+        let _ = registry.close(process_id);
+    }
+    Ok(AgentToolDeepCheckResult {
+        agent_tool_id,
+        process_id: Some(process_id),
+        success,
+        elapsed_ms: elapsed_millis(started),
+        message,
+    })
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn supports_first_run_dialog_ack(tool_type: &str) -> bool {
