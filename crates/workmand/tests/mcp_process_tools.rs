@@ -237,6 +237,32 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     assert_eq!(own_status["id"], 1);
     assert!(own_status["agent_state"].is_object());
 
+    let created_todo = call(
+        &client,
+        "todo_create",
+        json!({ "title": "Surface the active claim" }),
+    )
+    .await;
+    let claimed_todo_id = created_todo["todo_id"]
+        .as_i64()
+        .expect("todo_create must return a todo id");
+    call(&client, "todo_lock", json!({ "todo_id": claimed_todo_id })).await;
+    let claimed_status = call(&client, "get_process_status", json!({})).await;
+    assert_eq!(claimed_status["claimed_todos"][0]["id"], claimed_todo_id);
+    assert_eq!(
+        claimed_status["claimed_todos"][0]["title"],
+        "Surface the active claim"
+    );
+    assert!(claimed_status["claimed_todos"][0]["claimed_at"].is_number());
+    call(
+        &client,
+        "todo_unlock",
+        json!({ "todo_id": claimed_todo_id }),
+    )
+    .await;
+    let released_status = call(&client, "get_process_status", json!({})).await;
+    assert_eq!(released_status["claimed_todos"], json!([]));
+
     call(&client, "start_process", json!({ "process_id": 5 })).await;
     wait_for_state(&registry, 5, AttentionState::Idle).await?;
     let short_prompt = "Reply with exactly PONG.";

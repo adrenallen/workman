@@ -50,6 +50,7 @@ import {
   type WorktreeOperation,
   type WorktreeOperationAck
 } from './worktreeProgress';
+import type { ClaimedTodo } from './claimedTodos';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -139,6 +140,7 @@ export interface ProcessView {
   spawned_by_process_id: number | null;
   sort_order: number;
   agent_state: AgentState;
+  claimed_todos?: ClaimedTodo[];
 }
 
 export interface AgentState {

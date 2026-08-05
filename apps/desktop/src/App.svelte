@@ -18,6 +18,7 @@
   import { Button } from './lib/components/ui/button';
   import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
+  import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
@@ -39,6 +40,7 @@
   import WorktreeRemoveDialog from './lib/WorktreeRemoveDialog.svelte';
   import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
   import type { AgentTool } from './lib/agentTools';
+  import type { ClaimedTodo } from './lib/claimedTodos';
   import type {
     CoordinationSnapshot,
     NewTodoInput,
@@ -939,6 +941,16 @@
         else await startProcess(process);
       }
     }
+  }
+
+  function openClaimedTodo(claim: ClaimedTodo): void {
+    appNavigation.navigate(
+      {
+        type: 'item',
+        selection: projectTreeSelection('todo', claim.id, claim.project_id, claim.title)
+      },
+      'api'
+    );
   }
 
   async function loadTodo(todoId: number): Promise<void> {
@@ -2308,7 +2320,10 @@
           />
         {:else if selectedProcess}
           {#key selectedProcess.id}
-            <div class="terminal-view"><TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} /></div>
+            <div class="terminal-view">
+              <TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} />
+              <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
+            </div>
           {/key}
         {:else if todoBrowserOpen}
           <TodoBrowser
@@ -2546,7 +2561,7 @@
   .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; border-bottom: 1px solid rgb(220 107 107 / 38%); padding: 5px 8px; background: rgb(120 44 44 / 18%); color: #efa5a5; font-size: var(--font-size-sm); text-align: left; cursor: pointer; }
   .error-banner strong { font-size: var(--font-size-xs); }
   .item-viewer { width: 100%; height: 100%; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden; }
-  .terminal-view { width: 100%; height: 100%; min-height: 0; max-height: 100%; overflow: hidden; padding: 5px; }
+  .terminal-view { position: relative; width: 100%; height: 100%; min-height: 0; max-height: 100%; overflow: hidden; padding: 5px; }
   .terminal-view > :global(.terminal-frame) { width: 100%; height: 100%; }
   .onboarding { display: grid; width: min(440px, calc(100% - 36px)); place-items: start; align-content: center; margin: auto; }
   .onboarding > span { color: var(--muted); font-size: var(--font-size-sm); text-transform: uppercase; }

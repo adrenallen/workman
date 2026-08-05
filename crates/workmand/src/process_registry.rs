@@ -13,8 +13,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use workman_core::{
-    Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store, StoreError,
-    TimerKind,
+    ClaimedTodo, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store,
+    StoreError, TimerKind,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionTracker, PendingDialog,
         pending_dialog,
@@ -234,6 +234,8 @@ pub struct ProcessStatusView {
     pub agent_state: AgentState,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
+    /// Unexpired todo leases held by MCP actors attached to this process.
+    pub claimed_todos: Vec<ClaimedTodo>,
 }
 
 /// A visible event produced by daemon-side process orchestration.
@@ -408,10 +410,14 @@ impl ProcessRegistry {
             .get(&process.id)
             .map(|output| output.events.clone())
             .unwrap_or_default();
+        let claimed_todos = self
+            .store
+            .claimed_todos_for_process(process.id, now_millis())?;
         Ok(ProcessStatusView {
             process,
             agent_state,
             events,
+            claimed_todos,
         })
     }
 

@@ -588,7 +588,14 @@ impl<'store> TodoService<'store> {
             .checked_add(lease_ttl_ms)
             .ok_or_else(|| TodoServiceError::InvalidInput("lease duration is too large".into()))?;
         let changed = self.store.connection().execute(
-            "UPDATE todos SET lock_actor = ?1, lock_expiry = ?2
+            "UPDATE todos SET
+                 lock_acquired_at = CASE
+                   WHEN lock_actor = ?1 AND lock_expiry > ?5
+                     THEN COALESCE(lock_acquired_at, ?5)
+                   ELSE ?5
+                 END,
+                 lock_actor = ?1,
+                 lock_expiry = ?2
              WHERE id = ?3 AND project_id = ?4
                AND (lock_actor IS NULL OR lock_expiry IS NULL OR lock_expiry <= ?5 OR lock_actor = ?1)",
             params![actor, expiry, todo_id, project_id, now_ms],
@@ -612,7 +619,7 @@ impl<'store> TodoService<'store> {
     ) -> TodoServiceResult<TodoView> {
         self.require_todo(project_id, todo_id, now_ms)?;
         let changed = self.store.connection().execute(
-            "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL
+            "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL, lock_acquired_at = NULL
              WHERE id = ?1 AND project_id = ?2 AND lock_actor = ?3",
             params![todo_id, project_id, actor],
         )?;
@@ -642,7 +649,10 @@ impl<'store> TodoService<'store> {
         self.store.connection().execute(
             "UPDATE todos SET completed = ?1, status = ?2,
                  lock_actor = CASE WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_actor END,
-                 lock_expiry = CASE WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_expiry END
+                 lock_expiry = CASE WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_expiry END,
+                 lock_acquired_at = CASE
+                   WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_acquired_at
+                 END
              WHERE id = ?5 AND project_id = ?6",
             params![completed, status, release_lock, actor, todo_id, project_id],
         )?;
@@ -671,7 +681,8 @@ impl<'store> TodoService<'store> {
             [todo_id],
         )?;
         transaction.execute(
-            "UPDATE todos SET project_id = ?1, lock_actor = NULL, lock_expiry = NULL WHERE id = ?2",
+            "UPDATE todos SET project_id = ?1, lock_actor = NULL, lock_expiry = NULL,
+                 lock_acquired_at = NULL WHERE id = ?2",
             params![target_project_id, todo_id],
         )?;
         transaction.commit()?;
@@ -715,7 +726,7 @@ impl<'store> TodoService<'store> {
     fn hydrate(&self, mut todo: Todo, now_ms: i64) -> TodoServiceResult<TodoView> {
         if todo.lock_expiry.is_some_and(|expiry| expiry <= now_ms) {
             self.store.connection().execute(
-                "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL
+                "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL, lock_acquired_at = NULL
                  WHERE id = ?1 AND lock_expiry <= ?2",
                 params![todo.id, now_ms],
             )?;

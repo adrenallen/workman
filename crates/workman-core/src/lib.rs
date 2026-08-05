@@ -9,6 +9,7 @@ mod output_spill;
 pub mod scratchpads;
 pub mod store;
 pub mod terminal;
+pub mod todo_claims;
 pub mod todos;
 /// Authenticated release checks and verified atomic self-updates.
 pub mod update;
@@ -20,6 +21,7 @@ pub use domain::*;
 pub use locks::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
+pub use todo_claims::*;
 pub use todos::*;
 pub use update::*;
 

@@ -48,10 +48,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "worktrees",
         include_str!("../migrations/0008_worktrees.sql"),
     ),
+    (
+        9,
+        "todo_claims",
+        include_str!("../migrations/0009_todo_claims.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 8;
+pub const LATEST_SCHEMA_VERSION: i64 = 9;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
