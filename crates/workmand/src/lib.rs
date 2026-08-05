@@ -52,6 +52,7 @@ mod updates;
 mod user_config;
 mod version;
 mod worktree_integrations;
+mod worktree_operations;
 pub mod worktrees;
 
 pub use config::{
@@ -235,6 +236,7 @@ impl DaemonServer {
         let lifecycle_task =
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
         let timer_events = timer_events::TimerLifecycleHub::default();
+        let worktree_operations = worktree_operations::WorktreeOperationHub::default();
         let timer_task = timers::spawn_timer_scheduler(
             self.registry.clone(),
             timer_events.clone(),
@@ -262,6 +264,7 @@ impl DaemonServer {
             registry: self.registry,
             live_stats,
             timer_events,
+            worktree_operations,
         };
         let app = router(state);
         let listener = self.listener;
@@ -298,6 +301,7 @@ struct AppState {
     registry: SharedProcessRegistry,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
+    worktree_operations: worktree_operations::WorktreeOperationHub,
 }
 
 fn router(state: AppState) -> Router {
@@ -339,6 +343,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
             state.registry,
             state.live_stats,
             state.timer_events,
+            state.worktree_operations,
         )
     })
 }
@@ -351,6 +356,7 @@ async fn control_session(
     registry: SharedProcessRegistry,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
+    worktree_operations: worktree_operations::WorktreeOperationHub,
 ) {
     let mcp_url = settings.info().mcp.endpoint;
     let _live_stats_client = live_stats.client_connected();
@@ -388,6 +394,7 @@ async fn control_session(
                                 &shutdown_request,
                                 &mut terminal,
                                 &mut status_subscribed,
+                                &worktree_operations,
                             ).await {
                                 Some(response) => response,
                                 None => control::handle_text(&text, &registry, &mcp_url).await,
@@ -448,12 +455,14 @@ async fn control_session(
                     let (latest_timer_event, lifecycle_events) =
                         timer_events.events_since(timer_event_cursor);
                     timer_event_cursor = latest_timer_event;
+                    let worktree_operations = worktree_operations.snapshot();
                     let event = json!({
                         "event": "process.statuses",
                         "processes": processes,
                         "stats": stats,
                         "timers": timers,
                         "timer_events": lifecycle_events,
+                        "worktree_operations": worktree_operations,
                     });
                     if socket.send(Message::Text(event.to_string().into())).await.is_err() {
                         break;
@@ -477,6 +486,7 @@ async fn handle_session_control(
     shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
     status_subscribed: &mut bool,
+    worktree_operations: &worktree_operations::WorktreeOperationHub,
 ) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(text).ok()?;
     let method = request.get("method")?.as_str()?;
@@ -492,11 +502,38 @@ async fn handle_session_control(
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
+            | "worktree.create_async"
+            | "worktree.fork_async"
+            | "worktree.adopt_async"
     ) {
         return None;
     }
 
     let id = request.get("id").cloned().unwrap_or_default();
+    if matches!(
+        method,
+        "worktree.create_async" | "worktree.fork_async" | "worktree.adopt_async"
+    ) {
+        let params = request.get("params").cloned().unwrap_or_default();
+        return Some(
+            match worktree_operations::start(
+                method,
+                params,
+                registry.clone(),
+                worktree_operations.clone(),
+            )
+            .await
+            {
+                Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
+                Err(error) => json!({
+                    "id": id,
+                    "ok": false,
+                    "error": { "code": error.code, "message": error.message }
+                })
+                .to_string(),
+            },
+        );
+    }
     if method == "daemon.hello" {
         return Some(
             json!({ "id": id, "ok": true, "result": DaemonVersion::current() }).to_string(),

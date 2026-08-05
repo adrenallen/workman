@@ -44,6 +44,12 @@ import type {
   WorktreeMutation,
   WorktreeRemoval
 } from './worktrees';
+import {
+  replaceWorktreeOperations,
+  resetWorktreeOperations,
+  type WorktreeOperation,
+  type WorktreeOperationAck
+} from './worktreeProgress';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -216,6 +222,7 @@ interface ProcessStatusesEvent {
   stats?: LiveStatsSnapshot;
   timers?: TimerView[];
   timer_events?: TimerLifecycleEvent[];
+  worktree_operations?: WorktreeOperation[];
 }
 
 interface PendingRequest {
@@ -414,12 +421,30 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('worktree.create', { ...input });
   }
 
+  createWorktreeAsync(
+    operationId: string,
+    input: CreateWorktreeInput
+  ): Promise<WorktreeOperationAck> {
+    return this.request('worktree.create_async', { operation_id: operationId, ...input });
+  }
+
   forkWorktree(input: ForkWorktreeInput): Promise<WorktreeMutation> {
     return this.request('worktree.fork', { ...input });
   }
 
+  forkWorktreeAsync(
+    operationId: string,
+    input: ForkWorktreeInput
+  ): Promise<WorktreeOperationAck> {
+    return this.request('worktree.fork_async', { operation_id: operationId, ...input });
+  }
+
   adoptWorktree(path: string): Promise<WorktreeMutation> {
     return this.request('worktree.adopt', { path });
+  }
+
+  adoptWorktreeAsync(operationId: string, path: string): Promise<WorktreeOperationAck> {
+    return this.request('worktree.adopt_async', { operation_id: operationId, path });
   }
 
   removeWorktree(input: RemoveWorktreeInput): Promise<WorktreeRemoval> {
@@ -535,6 +560,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     this.processListeners.clear();
     resetLiveStats();
     resetTimerLifecycle();
+    resetWorktreeOperations();
   }
 
   /** Typed escape hatch for small control-channel surfaces owned by feature modules. */
@@ -611,6 +637,9 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
           Array.isArray(event.timers) ? event.timers : undefined,
           Array.isArray(event.timer_events) ? event.timer_events : []
         );
+      }
+      if (Array.isArray(event.worktree_operations)) {
+        replaceWorktreeOperations(event.worktree_operations);
       }
       for (const listener of this.processListeners) listener(event.processes);
       return;

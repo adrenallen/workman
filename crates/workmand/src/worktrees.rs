@@ -26,6 +26,7 @@ use crate::{
     worktree_integrations::{
         self, HerdView, PullRequestCacheView, PullRequestView, WorktreeHealth,
     },
+    worktree_operations::{WorktreeOperationReporter, WorktreeStepId},
 };
 
 pub const WORKMAN_WORKTREE_ROOT_ENV: &str = "WORKMAN_WORKTREE_ROOT";
@@ -556,6 +557,20 @@ pub async fn create(
     registry: &SharedProcessRegistry,
     request: CreateWorktree,
 ) -> WorktreeResult<WorktreeMutation> {
+    create_with_progress(registry, request, None).await
+}
+
+pub(crate) async fn create_with_progress(
+    registry: &SharedProcessRegistry,
+    request: CreateWorktree,
+    progress: Option<&WorktreeOperationReporter>,
+) -> WorktreeResult<WorktreeMutation> {
+    if let Some(progress) = progress {
+        progress.running(
+            WorktreeStepId::Branch,
+            Some(format!("Checking {}", request.branch)),
+        );
+    }
     validate_branch(&request.branch).await?;
     for key in request.preferences.keys() {
         validate_preference_key(key)?;
@@ -637,6 +652,17 @@ pub async fn create(
         )));
     }
 
+    if let Some(progress) = progress {
+        let detail = match branch_state {
+            BranchState::Missing => format!("Creating {}", request.branch),
+            BranchState::Local => format!("Using local branch {}", request.branch),
+            BranchState::Remote | BranchState::RemoteUnfetched => {
+                format!("Tracking origin/{}", request.branch)
+            }
+        };
+        progress.completed(WorktreeStepId::Branch, Some(detail));
+    }
+
     // SWM asks Herd to park the managed parent once, then relies on Herd's
     // wildcard `<folder>.<tld>` routing. It never writes per-site vhosts.
     let herd_enabled = request
@@ -645,12 +671,18 @@ pub async fn create(
         .or_else(|| remembered_preferences.get("herd_enabled"))
         .is_none_or(|value| !matches!(value.as_str(), "no" | "false" | "off"));
     let herd = if herd_enabled {
-        worktree_integrations::herd_for_root(&managed_root, true)
-            .await
-            .map_err(|error| WorktreeError::Integration {
-                code: error.code,
-                message: error.message,
-            })?
+        match worktree_integrations::herd_for_root(&managed_root, true).await {
+            Ok(herd) => herd,
+            Err(error) => {
+                if let Some(progress) = progress {
+                    progress.running(WorktreeStepId::Herd, Some(error.message.clone()));
+                }
+                return Err(WorktreeError::Integration {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        }
     } else {
         HerdView {
             available: false,
@@ -660,6 +692,13 @@ pub async fn create(
         }
     };
     let site_url = worktree_integrations::site_url(&slug, &herd);
+
+    if let Some(progress) = progress {
+        progress.running(
+            WorktreeStepId::Worktree,
+            Some(destination.to_string_lossy().into_owned()),
+        );
+    }
 
     match branch_state {
         BranchState::Local => {
@@ -728,6 +767,14 @@ pub async fn create(
         }
     }
 
+    if let Some(progress) = progress {
+        progress.completed(
+            WorktreeStepId::Worktree,
+            Some(destination.to_string_lossy().into_owned()),
+        );
+        progress.running(WorktreeStepId::Environment, None);
+    }
+
     if env_plan.policy == Some(EnvPortPolicy::Copy) && env_plan.source.is_some() {
         match git_success(&destination, ["check-ignore", "-q", "--", ".env"]).await {
             Ok(true) => {}
@@ -776,6 +823,38 @@ pub async fn create(
         }
     };
 
+    if let Some(progress) = progress {
+        if environment.policy == "copy" {
+            progress.completed(
+                WorktreeStepId::Environment,
+                Some(if environment.copied {
+                    ".env copied safely".into()
+                } else {
+                    "No source .env to copy".into()
+                }),
+            );
+        } else {
+            progress.skipped(
+                WorktreeStepId::Environment,
+                Some("Environment copy skipped".into()),
+            );
+        }
+        if herd.parked {
+            progress.completed(
+                WorktreeStepId::Herd,
+                herd.tld
+                    .as_ref()
+                    .map(|tld| format!("Wildcard .{tld} routing ready")),
+            );
+        } else {
+            progress.skipped(
+                WorktreeStepId::Herd,
+                herd.error.clone().or(Some("Herd is unavailable".into())),
+            );
+        }
+        progress.running(WorktreeStepId::Registered, None);
+    }
+
     let project = {
         let registry = registry.lock().await;
         registry.store().put_worktree_repository(&repository)?;
@@ -802,6 +881,12 @@ pub async fn create(
             true,
         )?
     };
+    if let Some(progress) = progress {
+        progress.completed(
+            WorktreeStepId::Registered,
+            Some(format!("Project {} registered", project.id)),
+        );
+    }
     mutation_for_project(registry, project.id, Some(environment)).await
 }
 
@@ -810,6 +895,14 @@ pub async fn create(
 pub async fn fork(
     registry: &SharedProcessRegistry,
     request: ForkWorktree,
+) -> WorktreeResult<WorktreeMutation> {
+    fork_with_progress(registry, request, None).await
+}
+
+pub(crate) async fn fork_with_progress(
+    registry: &SharedProcessRegistry,
+    request: ForkWorktree,
+    progress: Option<&WorktreeOperationReporter>,
 ) -> WorktreeResult<WorktreeMutation> {
     let source = {
         let registry = registry.lock().await;
@@ -827,7 +920,7 @@ pub async fn fork(
     let record = matching_record(&snapshot, Path::new(&source.path)).ok_or_else(|| {
         WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", source.path))
     })?;
-    create(
+    create_with_progress(
         registry,
         CreateWorktree {
             source_project_id: request.source_project_id,
@@ -838,6 +931,7 @@ pub async fn fork(
             env_policy: request.env_policy,
             remember_env_policy: request.remember_env_policy,
         },
+        progress,
     )
     .await
 }
@@ -846,6 +940,20 @@ pub async fn adopt(
     registry: &SharedProcessRegistry,
     request: AdoptWorktree,
 ) -> WorktreeResult<WorktreeMutation> {
+    adopt_with_progress(registry, request, None).await
+}
+
+pub(crate) async fn adopt_with_progress(
+    registry: &SharedProcessRegistry,
+    request: AdoptWorktree,
+    progress: Option<&WorktreeOperationReporter>,
+) -> WorktreeResult<WorktreeMutation> {
+    if let Some(progress) = progress {
+        progress.running(
+            WorktreeStepId::Branch,
+            Some(request.path.to_string_lossy().into_owned()),
+        );
+    }
     let canonical_input = std::fs::canonicalize(&request.path).map_err(|error| {
         WorktreeError::InvalidPath(format!(
             "could not open {}: {error}",
@@ -864,6 +972,16 @@ pub async fn adopt(
         WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", top.display()))
     })?;
     let branch = display_branch(record);
+    if let Some(progress) = progress {
+        progress.completed(
+            WorktreeStepId::Branch,
+            Some(format!("Verified branch {branch}")),
+        );
+        progress.running(
+            WorktreeStepId::Worktree,
+            Some("Linking repository metadata".into()),
+        );
+    }
     let repository = {
         let registry = registry.lock().await;
         let repository = ensure_repository(registry.store(), &snapshot, None)?;
@@ -879,6 +997,25 @@ pub async fn adopt(
         let registry = registry.lock().await;
         register_project(registry.store(), &repository, &top, &branch, false)?
     };
+    if let Some(progress) = progress {
+        progress.completed(
+            WorktreeStepId::Worktree,
+            Some(top.to_string_lossy().into_owned()),
+        );
+        progress.skipped(
+            WorktreeStepId::Environment,
+            Some("Existing environment left unchanged".into()),
+        );
+        progress.skipped(
+            WorktreeStepId::Herd,
+            Some("Existing site configuration left unchanged".into()),
+        );
+        progress.running(WorktreeStepId::Registered, None);
+        progress.completed(
+            WorktreeStepId::Registered,
+            Some(format!("Project {} registered", project.id)),
+        );
+    }
     mutation_for_project(registry, project.id, None).await
 }
 

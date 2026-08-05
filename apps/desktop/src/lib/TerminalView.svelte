@@ -39,6 +39,7 @@
   let searchTerm = $state('');
   let searchResult = $state({ index: -1, count: 0 });
   let streamGap = $state<number | null>(null);
+  let hasOutput = $state(false);
   let expectedOffset = 0;
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
@@ -197,6 +198,7 @@
     instance.reset();
     expectedOffset = 0;
     streamGap = null;
+    hasOutput = false;
     if (!isConnected) return;
 
     let cancelled = false;
@@ -219,6 +221,7 @@
 
   function handleTerminalFrame(frame: TerminalFrame): void {
     if (frame.process_id !== process.id || !terminal) return;
+    if (frame.data.length > 0) hasOutput = true;
     if (frame.gap || frame.start_offset !== expectedOffset) streamGap = frame.start_offset;
     expectedOffset = frame.start_offset + frame.data.length;
     terminal.write(Uint8Array.from(frame.data));
@@ -407,6 +410,12 @@
   {/if}
 
   <div class="terminal-host" bind:this={host} aria-label={`${process.name} terminal`}></div>
+  {#if process.status === 'running' && !hasOutput}
+    <div class="terminal-starting" aria-live="polite">
+      <span aria-hidden="true"></span>
+      <strong>Waiting for first output…</strong>
+    </div>
+  {/if}
   {#if process.status !== 'running'}
     <div class="terminal-state">{process.status} · retained output</div>
   {/if}
@@ -427,6 +436,29 @@
   .terminal-frame.search-open {
     grid-template-rows: auto auto minmax(0, 1fr);
   }
+
+  .terminal-starting {
+    position: absolute;
+    top: 48px;
+    left: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #8e959e;
+    font: 500 var(--font-size-sm)/1 var(--terminal-font-family);
+    pointer-events: none;
+  }
+
+  .terminal-starting span {
+    width: 10px;
+    height: 10px;
+    border: 1px solid #56605f;
+    border-top-color: var(--signal);
+    border-radius: 50%;
+    animation: terminal-waiting-spin 800ms linear infinite;
+  }
+
+  @keyframes terminal-waiting-spin { to { transform: rotate(360deg); } }
 
   .terminal-toolbar {
     display: flex;

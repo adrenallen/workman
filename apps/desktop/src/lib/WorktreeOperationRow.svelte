@@ -1,0 +1,55 @@
+<script lang="ts">
+  import CheckIcon from '@lucide/svelte/icons/check';
+  import CircleXIcon from '@lucide/svelte/icons/circle-x';
+  import GitBranchIcon from '@lucide/svelte/icons/git-branch';
+  import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+
+  import type { WorktreeOperation } from './worktreeProgress';
+
+  interface Props {
+    operation: WorktreeOperation;
+    collapsed: boolean;
+    onSelect: () => void;
+  }
+
+  let { operation, collapsed, onSelect }: Props = $props();
+  let stateLabel = $derived(
+    operation.status === 'failed' ? 'Failed' : operation.status === 'completed' ? 'Ready' : 'Creating'
+  );
+</script>
+
+<article class="operation-row" data-status={operation.status}>
+  <button
+    type="button"
+    title={`${operation.label} · ${stateLabel}`}
+    aria-label={`${operation.label} · ${stateLabel}`}
+    onclick={onSelect}
+  >
+    <span class="state-icon" aria-hidden="true">
+      {#if operation.status === 'failed'}<CircleXIcon size={13} />
+      {:else if operation.status === 'completed'}<CheckIcon size={13} />
+      {:else}<LoaderCircleIcon class="spinner" size={13} />{/if}
+    </span>
+    <GitBranchIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+    {#if !collapsed}
+      <span class="copy"><strong>{operation.label}</strong><small>{stateLabel.toLowerCase()}…</small></span>
+    {/if}
+  </button>
+</article>
+
+<style>
+  .operation-row { min-width: 0; }
+  button { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 17px minmax(0, 1fr); align-items: center; gap: 6px; border: 0; border-left: 2px solid var(--information); padding: 4px 7px; background: color-mix(in srgb, var(--information) 6%, transparent); color: var(--foreground); text-align: left; cursor: pointer; }
+  button:active { transform: translateY(1px); }
+  .state-icon { display: inline-flex; color: var(--information); }
+  .copy { min-width: 0; }
+  .copy strong, .copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .copy strong { font-size: var(--font-size-sm); font-weight: 570; }
+  .copy small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs)/1 var(--terminal-font-family); }
+  [data-status='failed'] button { border-left-color: var(--destructive); background: color-mix(in srgb, var(--destructive) 7%, transparent); }
+  [data-status='failed'] .state-icon { color: var(--destructive); }
+  [data-status='completed'] button { border-left-color: var(--success); background: color-mix(in srgb, var(--success) 5%, transparent); }
+  [data-status='completed'] .state-icon { color: var(--success); }
+  :global(.spinner) { animation: spin 800ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>

@@ -20,6 +20,7 @@
   import ContextMenu from './lib/ContextMenu.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
+  import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectOpeners from './lib/ProjectOpeners.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
@@ -33,6 +34,8 @@
   import TrustReviewDialog from './lib/TrustReview.svelte';
   import WorktreeDialog from './lib/WorktreeDialog.svelte';
   import WorktreeImportDialog from './lib/WorktreeImportDialog.svelte';
+  import WorktreeOperationRow from './lib/WorktreeOperationRow.svelte';
+  import WorktreeProgressPanel from './lib/WorktreeProgressPanel.svelte';
   import WorktreeRemoveDialog from './lib/WorktreeRemoveDialog.svelte';
   import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
   import type { AgentTool } from './lib/agentTools';
@@ -108,6 +111,11 @@
   } from './lib/reorder';
   import { openSettingsSection } from './lib/settingsSections';
   import {
+    createOptimisticProcess,
+    failOptimisticProcess,
+    type OptimisticProcess
+  } from './lib/optimisticProcesses';
+  import {
     buildProjectRailGroups,
     projectBranchLabel,
     projectRepositoryTitle,
@@ -118,6 +126,13 @@
     type WorktreeList,
     type WorktreeRepository
   } from './lib/worktrees';
+  import {
+    beginWorktreeOperation,
+    dismissWorktreeOperation,
+    failWorktreeOperation,
+    worktreeOperations,
+    type WorktreeOperation
+  } from './lib/worktreeProgress';
 
   const client = new DaemonClient();
   const projectRailBounds = { min: 176, max: 340 };
@@ -128,6 +143,8 @@
 
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
+  let optimisticProcesses = $state<OptimisticProcess[]>([]);
+  let nextOptimisticProcessId = -1;
   let coordination = $state<CoordinationSnapshot | null>(null);
   let connection = $state<ConnectionStatus>({
     status: 'connecting',
@@ -197,6 +214,8 @@
   let worktreeDialogError = $state<string | null>(null);
   let branchOptions = $state<WorktreeBranchOption[]>([]);
   let originBranchesLoading = $state(false);
+  let activeWorktreeOperationId = $state<string | null>(null);
+  const reconciledWorktreeOperations = new Set<string>();
   let removeWorktreeDialog = $state<{
     project: Project;
     repository: WorktreeRepository;
@@ -211,18 +230,42 @@
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let projectRailGroups = $derived(buildProjectRailGroups(projects));
+  let visibleProcesses = $derived([
+    ...processes,
+    ...optimisticProcesses.map((optimistic) => optimistic.process)
+  ]);
   let selectedProcess = $derived(
     selection && isProcessSelection(selection)
-      ? processes.find((process) => process.id === selection?.id) ?? null
+      ? visibleProcesses.find((process) => process.id === selection?.id) ?? null
       : null
   );
+  let selectedOptimisticProcess = $derived(
+    selection && isProcessSelection(selection)
+      ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
+      : null
+  );
+  let activeWorktreeOperation = $derived(
+    $worktreeOperations.find((operation) => operation.id === activeWorktreeOperationId) ?? null
+  );
+  let projectRailCount = $derived(
+    projects.length
+      + $worktreeOperations.filter((operation) =>
+        operation.status === 'pending' || operation.status === 'running'
+      ).length
+  );
   let treeProcesses = $derived([
-    ...processes.filter((process) => process.kind === 'agent'),
-    ...processes.filter((process) => process.kind === 'terminal'),
-    ...processes.filter((process) => process.kind === 'command')
+    ...visibleProcesses.filter((process) => process.kind === 'agent'),
+    ...visibleProcesses.filter((process) => process.kind === 'terminal'),
+    ...visibleProcesses.filter((process) => process.kind === 'command')
   ]);
   let frameItemLabel = $derived(
-    settingsOpen ? 'Settings' : todoBrowserOpen ? 'Todos' : (selection?.label ?? 'Project')
+    settingsOpen
+      ? 'Settings'
+      : activeWorktreeOperation
+        ? activeWorktreeOperation.label
+        : todoBrowserOpen
+          ? 'Todos'
+          : (selection?.label ?? 'Project')
   );
   let contextMenuDescriptor = $derived(
     contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
@@ -234,28 +277,45 @@
   let showVersionBanner = $derived(versionSkew || updateAvailable);
 
   $effect(() => {
+    for (const operation of $worktreeOperations) {
+      if (
+        operation.status === 'completed'
+        && operation.project
+        && !reconciledWorktreeOperations.has(operation.id)
+      ) {
+        reconciledWorktreeOperations.add(operation.id);
+        void reconcileCompletedWorktree(operation);
+      }
+    }
+  });
+
+  $effect(() => {
     const projectId = selectedProject?.id ?? null;
     const connected = connection.status === 'connected';
     if (!connected || projectId === null) {
       processes = [];
+      optimisticProcesses = [];
       coordination = null;
       selection = null;
       todoDetail = null;
       scratchpadRead = null;
       settingsOpen = false;
       todoBrowserOpen = false;
+      activeWorktreeOperationId = null;
       loadedProjectId = null;
       return;
     }
     if (loadedProjectId !== projectId) {
       loadedProjectId = projectId;
       processes = [];
+      optimisticProcesses = [];
       coordination = null;
       selection = null;
       todoDetail = null;
       scratchpadRead = null;
       settingsOpen = false;
       todoBrowserOpen = false;
+      activeWorktreeOperationId = null;
       void loadProject(projectId);
     }
   });
@@ -704,6 +764,60 @@
     return worktreeListFor(project)?.repository ?? null;
   }
 
+  function worktreeOperationsFor(repositoryId: number | null): WorktreeOperation[] {
+    if (repositoryId === null) return [];
+    return $worktreeOperations.filter((operation) =>
+      operation.repository_id === repositoryId
+      && (
+        operation.status !== 'completed'
+        || !operation.project
+        || !projects.some((project) => project.id === operation.project?.id)
+      )
+    );
+  }
+
+  async function reconcileCompletedWorktree(operation: WorktreeOperation): Promise<void> {
+    if (!operation.project) return;
+    const optimisticProject: Project = {
+      ...operation.project,
+      status: operation.project.status ?? 'idle'
+    };
+    if (!projects.some((project) => project.id === optimisticProject.id)) {
+      projects = [...projects, optimisticProject].sort(
+        (left, right) => left.sort_order - right.sort_order || left.id - right.id
+      );
+    }
+    await tick();
+    appNavigation.navigate({ type: 'project', projectId: optimisticProject.id }, 'api');
+  }
+
+  function showWorktreeOperation(operation: WorktreeOperation): void {
+    activeWorktreeOperationId = operation.id;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    selection = null;
+  }
+
+  function dismissActiveWorktreeOperation(): void {
+    if (activeWorktreeOperationId) dismissWorktreeOperation(activeWorktreeOperationId);
+    activeWorktreeOperationId = null;
+  }
+
+  async function retryWorktreeOperation(operation: WorktreeOperation): Promise<void> {
+    const source = operation.source_project_id === null
+      ? projects.find((project) =>
+          project.repository_id === operation.repository_id && project.parent_project_id === null
+        )
+      : projects.find((project) => project.id === operation.source_project_id);
+    dismissWorktreeOperation(operation.id);
+    activeWorktreeOperationId = null;
+    if (!source) {
+      reportError(new Error('The source project is no longer available'));
+      return;
+    }
+    await openWorktreeDialog(operation.mode, source);
+  }
+
   async function refreshWorktreeMetadata(
     projectList: Project[],
     refreshPullRequests = false,
@@ -809,6 +923,7 @@
     quickJumpRecentKeys = readRecentNavigationKeys();
     settingsOpen = false;
     todoBrowserOpen = false;
+    activeWorktreeOperationId = null;
     selection = next;
     todoDetail = null;
     scratchpadRead = null;
@@ -891,14 +1006,73 @@
   }
 
   async function commandAdded(
-    process: Pick<ProcessView, 'id' | 'project_id' | 'name'>
+    process: Pick<ProcessView, 'id' | 'project_id' | 'name'>,
+    optimisticId: number | null = null
   ): Promise<void> {
     const projectId = process.project_id;
     dialog = null;
     await refreshProcesses(projectId);
+    if (optimisticId !== null) {
+      optimisticProcesses = optimisticProcesses.filter(
+        (optimistic) => optimistic.process.id !== optimisticId
+      );
+    }
     if (selectedProject?.id !== projectId) return;
     const added = processes.find((candidate) => candidate.id === process.id) ?? process;
     selection = projectTreeSelection('command', added.id, projectId, added.name);
+  }
+
+  function beginOptimisticCommand(input: {
+    project_id: number;
+    name: string;
+    command: string;
+  }): number | null {
+    const project = selectedProject;
+    if (!project || project.id !== input.project_id) return null;
+    const id = nextOptimisticProcessId--;
+    optimisticProcesses = [
+      ...optimisticProcesses,
+      createOptimisticProcess({
+        id,
+        project,
+        kind: 'command',
+        name: input.name,
+        command: input.command,
+        retry: 'command'
+      })
+    ];
+    dialog = null;
+    activeWorktreeOperationId = null;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    selection = projectTreeSelection('command', id, project.id, input.name);
+    return id;
+  }
+
+  function failPendingProcess(cause: unknown, optimisticId: number): void {
+    optimisticProcesses = optimisticProcesses.map((optimistic) =>
+      optimistic.process.id === optimisticId
+        ? failOptimisticProcess(optimistic, cause)
+        : optimistic
+    );
+  }
+
+  function dismissOptimisticProcess(optimisticId: number): void {
+    optimisticProcesses = optimisticProcesses.filter(
+      (optimistic) => optimistic.process.id !== optimisticId
+    );
+    if (selection?.id === optimisticId && isProcessSelection(selection)) selection = null;
+  }
+
+  function retryOptimisticProcess(optimistic: OptimisticProcess): void {
+    const retry = optimistic.retry;
+    const tool = optimistic.process.agent_tool_id === null
+      ? null
+      : agentTools.find((candidate) => candidate.id === optimistic.process.agent_tool_id) ?? null;
+    dismissOptimisticProcess(optimistic.process.id);
+    if (retry === 'agent' && tool) void spawnAgent(tool);
+    else if (retry === 'command') dialog = 'command';
+    else if (retry === 'agent') void openAgentDialog();
   }
 
   async function openAgentDialog(): Promise<void> {
@@ -914,22 +1088,41 @@
   }
 
   async function spawnAgent(tool: AgentTool): Promise<void> {
-    if (!selectedProject) return;
-    detailBusy = true;
+    const project = selectedProject;
+    if (!project) return;
+    const optimisticId = nextOptimisticProcessId--;
+    const optimistic = createOptimisticProcess({
+      id: optimisticId,
+      project,
+      kind: 'agent',
+      name: tool.name,
+      command: tool.command,
+      agentToolId: tool.id,
+      retry: 'agent'
+    });
+    optimisticProcesses = [...optimisticProcesses, optimistic];
+    dialog = null;
+    activeWorktreeOperationId = null;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    selection = projectTreeSelection('agent', optimisticId, project.id, tool.name);
+    await tick();
     try {
       const result = await client.spawnAgent({
-        project_id: selectedProject.id,
+        project_id: project.id,
         agent_tool_id: tool.id,
         extra_args: []
       });
-      dialog = null;
-      await refreshProcesses(selectedProject.id);
+      await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
-      if (process) await selectTreeItem(projectTreeSelection('agent', process.id, process.project_id, process.name));
+      optimisticProcesses = optimisticProcesses.filter(
+        (candidate) => candidate.process.id !== optimisticId
+      );
+      if (process && selectedProject?.id === project.id) {
+        selection = projectTreeSelection('agent', process.id, process.project_id, process.name);
+      }
     } catch (cause) {
-      reportError(cause);
-    } finally {
-      detailBusy = false;
+      failPendingProcess(cause, optimisticId);
     }
   }
 
@@ -1044,12 +1237,14 @@
     todoDetail = null;
     scratchpadRead = null;
     todoBrowserOpen = false;
+    activeWorktreeOperationId = null;
   }
 
   function openTodosBrowser(): void {
     if (!selectedProject) return;
     settingsOpen = false;
     todoBrowserOpen = true;
+    activeWorktreeOperationId = null;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
@@ -1163,29 +1358,45 @@
     if (!state || worktreeDialogBusy) return;
     worktreeDialogBusy = true;
     worktreeDialogError = null;
+    const operationId = crypto.randomUUID();
+    const operation = beginWorktreeOperation({
+      id: operationId,
+      mode: submission.mode,
+      sourceProjectId: state.sourceProject.id,
+      repositoryId: state.repository.id,
+      branch: submission.mode === 'adopt' ? null : submission.branch,
+      path: submission.mode === 'adopt' ? submission.path : null
+    });
+    collapsedRepositories = { ...collapsedRepositories, [state.repository.id]: false };
+    persistRepositoryCollapse();
+    worktreeDialog = null;
+    branchOptions = [];
+    showWorktreeOperation(operation);
+    await tick();
     try {
-      const mutation = submission.mode === 'create'
-        ? await client.createWorktree({
+      if (submission.mode === 'create') {
+        await client.createWorktreeAsync(operationId, {
             project_id: state.sourceProject.id,
             branch: submission.branch,
             from_ref: submission.fromRef,
             env_policy: submission.envPolicy,
             remember_env_policy: submission.rememberEnvPolicy
-          })
-        : submission.mode === 'fork'
-          ? await client.forkWorktree({
+        });
+      } else if (submission.mode === 'fork') {
+        await client.forkWorktreeAsync(operationId, {
               project_id: state.sourceProject.id,
               branch: submission.branch,
               env_policy: submission.envPolicy,
               remember_env_policy: submission.rememberEnvPolicy
-            })
-          : await client.adoptWorktree(submission.path);
-      worktreeDialog = null;
-      projects = await client.projects();
-      await refreshWorktreeMetadata(projects, true, true, mutation.repository.id);
-      appNavigation.navigate({ type: 'project', projectId: mutation.project.id }, 'api');
+        });
+      } else {
+        await client.adoptWorktreeAsync(operationId, submission.path);
+      }
     } catch (cause) {
-      worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
+      failWorktreeOperation(
+        operationId,
+        cause instanceof Error ? cause.message : String(cause)
+      );
     } finally {
       worktreeDialogBusy = false;
     }
@@ -1232,25 +1443,12 @@
   async function adoptImportPath(path: string, navigate = true): Promise<number | null> {
     if (!importOffer) return null;
     const repositoryId = importOffer.repository.id;
-    importBusyPath = path;
     importError = null;
-    try {
-      const mutation = await client.adoptWorktree(path);
-      projects = await client.projects();
-      await refreshWorktreeMetadata(projects, true, true, repositoryId);
-      const list = worktreeLists[repositoryId];
-      const remaining = list?.worktrees.filter((entry) => entry.can_adopt) ?? [];
-      importOffer = remaining.length > 0 && list
-        ? { repository: list.repository, entries: remaining }
-        : null;
-      if (navigate) appNavigation.navigate({ type: 'project', projectId: mutation.project.id }, 'api');
-      return mutation.project.id;
-    } catch (cause) {
-      importError = cause instanceof Error ? cause.message : String(cause);
-      return null;
-    } finally {
-      importBusyPath = null;
-    }
+    const offer = importOffer;
+    const remaining = offer.entries.filter((entry) => entry.path !== path);
+    importOffer = remaining.length > 0 ? { ...offer, entries: remaining } : null;
+    void startAdoptOperation(path, repositoryId, navigate);
+    return null;
   }
 
   async function adoptAllImports(): Promise<void> {
@@ -1258,25 +1456,54 @@
     if (!offer || importBusyPath) return;
     importBusyPath = '*';
     importError = null;
-    let lastProjectId: number | null = null;
+    importOffer = null;
+    for (const [index, entry] of offer.entries.entries()) {
+      void startAdoptOperation(
+        entry.path,
+        offer.repository.id,
+        index === offer.entries.length - 1
+      );
+    }
+    importBusyPath = null;
+  }
+
+  async function startAdoptOperation(
+    path: string,
+    repositoryId: number,
+    navigate: boolean
+  ): Promise<void> {
+    const source = projects.find((project) =>
+      project.repository_id === repositoryId && project.parent_project_id === null
+    );
+    const operationId = crypto.randomUUID();
+    const operation = beginWorktreeOperation({
+      id: operationId,
+      mode: 'adopt',
+      sourceProjectId: source?.id ?? null,
+      repositoryId,
+      path
+    });
+    collapsedRepositories = { ...collapsedRepositories, [repositoryId]: false };
+    persistRepositoryCollapse();
+    if (navigate) showWorktreeOperation(operation);
+    await tick();
     try {
-      for (const entry of offer.entries) {
-        const mutation = await client.adoptWorktree(entry.path);
-        lastProjectId = mutation.project.id;
-      }
-      projects = await client.projects();
-      await refreshWorktreeMetadata(projects, true, true, offer.repository.id);
-      importOffer = null;
-      if (lastProjectId !== null) appNavigation.navigate({ type: 'project', projectId: lastProjectId }, 'api');
+      await client.adoptWorktreeAsync(operationId, path);
     } catch (cause) {
-      importError = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      importBusyPath = null;
+      failWorktreeOperation(
+        operationId,
+        cause instanceof Error ? cause.message : String(cause)
+      );
     }
   }
 
   function selectProject(project: Project): void {
-    if (project.selected || busy || projectReorderBusy) return;
+    if (project.selected) {
+      activeWorktreeOperationId = null;
+      clearSelection();
+      return;
+    }
+    if (busy || projectReorderBusy) return;
     appNavigation.navigate({ type: 'project', projectId: project.id }, 'project-rail');
   }
 
@@ -1728,6 +1955,10 @@
       ...collapsedRepositories,
       [repositoryId]: !collapsedRepositories[repositoryId]
     };
+    persistRepositoryCollapse();
+  }
+
+  function persistRepositoryCollapse(): void {
     try {
       localStorage.setItem(worktreeCollapseStorageKey, JSON.stringify(collapsedRepositories));
     } catch {
@@ -1824,13 +2055,14 @@
   {@const rowLabel = projectRailLabel(project, nested)}
   {@const fullTitle = projectTitle(project)}
   {@const projectKind = nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+  {@const hasRepositoryChildren = group.grouped || worktreeOperationsFor(group.repositoryId).length > 0}
   <article
     class:active={project.selected}
     class:nested
     class:repository-root={!nested && project.repository_id !== null}
     class="project-row group/project group/repository"
   >
-    {#if !nested && group.grouped && group.repositoryId !== null && !projectRailCollapsed}
+    {#if !nested && hasRepositoryChildren && group.repositoryId !== null && !projectRailCollapsed}
       <IconButton
         class="ml-0.5 size-7 shrink-0 rounded-none border-r border-border"
         label={`${repositoryCollapsed(group.repositoryId) ? 'Expand' : 'Collapse'} worktrees under ${repository?.name ?? rowLabel}`}
@@ -1944,17 +2176,25 @@
       </IconButton>
     </header>
 
-    <div class="rail-label"><span>Projects</span><small>{projects.length.toString().padStart(2, '0')}</small></div>
+    <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
     <div class="project-list" aria-live="polite">
       {#if projects.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button></div>
       {/if}
       {#each projectRailGroups as group (group.key)}
+        {@const pendingWorktrees = worktreeOperationsFor(group.repositoryId)}
         {@render projectRailRow(group.root, false, group)}
-        {#if group.grouped && (projectRailCollapsed || !repositoryCollapsed(group.repositoryId))}
+        {#if (group.grouped || pendingWorktrees.length > 0) && (projectRailCollapsed || !repositoryCollapsed(group.repositoryId))}
           <div class="repository-children" aria-label={`${worktreeRepositoryFor(group.root)?.name ?? projectLabel(group.root)} worktrees`}>
             {#each group.children as child (child.id)}
               {@render projectRailRow(child, true, group)}
+            {/each}
+            {#each pendingWorktrees as operation (operation.id)}
+              <WorktreeOperationRow
+                {operation}
+                collapsed={projectRailCollapsed}
+                onSelect={() => showWorktreeOperation(operation)}
+              />
             {/each}
           </div>
         {/if}
@@ -2035,7 +2275,7 @@
   >
     {#if selectedProject}
       <header class="document-title" data-tauri-drag-region>
-        <div class="title-side"><span>{selection?.kind ?? 'project'}</span></div>
+        <div class="title-side"><span>{activeWorktreeOperation ? 'worktree' : (selection?.kind ?? 'project')}</span></div>
         <h1>{projectTitle(selectedProject)} - {frameItemLabel}</h1>
         <div class="title-side right">
           {#if settingsOpen}<Button variant="outline" size="sm" onclick={() => (settingsOpen = false)}>Done</Button>{/if}
@@ -2052,6 +2292,20 @@
       >
         {#if settingsOpen}
           <SettingsPanel {client} project={selectedProject} {connection} onError={reportError} />
+        {:else if activeWorktreeOperation}
+          <WorktreeProgressPanel
+            operation={activeWorktreeOperation}
+            onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
+            onDismiss={dismissActiveWorktreeOperation}
+          />
+        {:else if selectedOptimisticProcess}
+          <OptimisticProcessPanel
+            kind={selectedOptimisticProcess.process.kind}
+            name={selectedOptimisticProcess.process.name}
+            error={selectedOptimisticProcess.error}
+            onRetry={() => retryOptimisticProcess(selectedOptimisticProcess!)}
+            onDismiss={() => dismissOptimisticProcess(selectedOptimisticProcess!.process.id)}
+          />
         {:else if selectedProcess}
           {#key selectedProcess.id}
             <div class="terminal-view"><TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} /></div>
@@ -2076,7 +2330,7 @@
           <EmptyState eyebrow="Project tree" title="Select an item" body="Choose a todo, agent, terminal, command, or scratchpad from the project tree." actionLabel="New terminal" icon="↖" onAction={() => void spawnTerminal()} />
         {/if}
       </div>
-      {#if selectedProcess}
+      {#if selectedProcess && !selectedOptimisticProcess}
         <ProcessStatusBar
           {client}
           project={selectedProject}
@@ -2202,7 +2456,9 @@
   <AddCommandDialog
     {client}
     project={selectedProject}
-    onAdded={(process) => void commandAdded(process)}
+    onPending={beginOptimisticCommand}
+    onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
+    onFailed={failPendingProcess}
     onClose={() => (dialog = null)}
   />
 {/if}

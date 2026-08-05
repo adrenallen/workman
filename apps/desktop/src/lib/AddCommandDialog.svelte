@@ -14,7 +14,7 @@
     type Project
   } from './daemon';
 
-  interface CommandInput {
+  export interface CommandInput {
     project_id: number;
     name: string;
     command: string;
@@ -34,16 +34,18 @@
     relative: string;
   }
 
-  type CommandProcessReceipt = Pick<ProcessView, 'id' | 'project_id' | 'name'>;
+  export type CommandProcessReceipt = Pick<ProcessView, 'id' | 'project_id' | 'name'>;
 
   interface Props {
     client: DaemonClient;
     project: Project;
-    onAdded: (process: CommandProcessReceipt) => void;
+    onPending?: (input: CommandInput) => number | null;
+    onAdded: (process: CommandProcessReceipt, optimisticId: number | null) => void;
+    onFailed?: (cause: unknown, optimisticId: number) => void;
     onClose: () => void;
   }
 
-  let { client, project, onAdded, onClose }: Props = $props();
+  let { client, project, onPending, onAdded, onFailed, onClose }: Props = $props();
 
   let name = $state('');
   let command = $state('');
@@ -95,6 +97,15 @@
     if (!name.trim() || !command.trim()) return;
 
     busy = true;
+    const pendingInput: CommandInput = {
+      project_id: project.id,
+      name: name.trim(),
+      command: command.trim(),
+      working_dir: workingDir,
+      auto_start: autoStart,
+      auto_restart: autoRestart
+    };
+    const optimisticId = onPending?.(pendingInput) ?? null;
     try {
       const validated = await client.control<ValidatedWorkingDirectory>(
         'config.validate_working_dir',
@@ -111,9 +122,11 @@
       const process = saveMode === 'yml'
         ? await client.control<CommandProcessReceipt>('config.command_save', { ...input })
         : await createLocalCommand(input);
-      onAdded(process);
+      onAdded(process, optimisticId);
     } catch (cause) {
-      if (cause instanceof DaemonRequestError && cause.code === 'invalid_working_directory') {
+      if (optimisticId !== null && onFailed) {
+        onFailed(cause, optimisticId);
+      } else if (cause instanceof DaemonRequestError && cause.code === 'invalid_working_directory') {
         workingDirError = `Choose an existing folder inside ${project.path}.`;
       } else {
         formError = cause instanceof Error ? cause.message : String(cause);
