@@ -33,24 +33,30 @@
 
   let popoverRoot = $state<HTMLElement>();
   let popoverOpen = $state(false);
+  let overflowRoot = $state<HTMLElement>();
+  let overflowOpen = $state(false);
   let freshChildren = $state<DescendantProcessStats[]>([]);
   let loadingChildren = $state(false);
   let confirmingPid = $state<number | null>(null);
   let killingPid = $state<number | null>(null);
   let activeProcessId = $state<number | null>(null);
+  let statusWidth = $state(1_200);
 
   const stats = $derived($liveStats.processes[process.id] ?? null);
   const childCount = $derived(popoverOpen ? freshChildren.length : (stats?.descendant_count ?? 0));
   const siblingIndex = $derived(processes.findIndex((candidate) => candidate.id === process.id));
+  const timerDensity = $derived(statusWidth <= 680 ? 'hidden' : statusWidth <= 1_040 ? 'compact' : 'full');
 
   onMount(() => {
     const handlePointerDown = (event: PointerEvent) => {
       if (popoverOpen && !popoverRoot?.contains(event.target as Node)) closePopover();
+      if (overflowOpen && !overflowRoot?.contains(event.target as Node)) closeOverflow();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && popoverOpen) {
+      if (event.key === 'Escape' && (popoverOpen || overflowOpen)) {
         event.preventDefault();
         closePopover();
+        closeOverflow();
       }
     };
     document.addEventListener('pointerdown', handlePointerDown);
@@ -71,6 +77,7 @@
     if (nextProcessId === activeProcessId) return;
     activeProcessId = nextProcessId;
     popoverOpen = false;
+    overflowOpen = false;
     freshChildren = [];
     confirmingPid = null;
   });
@@ -111,6 +118,19 @@
   function closePopover(): void {
     popoverOpen = false;
     confirmingPid = null;
+  }
+
+  function toggleOverflow(): void {
+    overflowOpen = !overflowOpen;
+  }
+
+  function closeOverflow(): void {
+    overflowOpen = false;
+  }
+
+  function showSubprocessesFromOverflow(): void {
+    closeOverflow();
+    togglePopover();
   }
 
   async function confirmKill(child: DescendantProcessStats): Promise<void> {
@@ -164,7 +184,14 @@
   }
 </script>
 
-<footer class="status-bar" aria-label={`${project.name} selected process status`}>
+<footer
+  class="status-bar"
+  class:stage-medium={statusWidth <= 1_040}
+  class:stage-narrow={statusWidth <= 680}
+  class:stage-tiny={statusWidth <= 480}
+  bind:clientWidth={statusWidth}
+  aria-label={`${project.name} selected process status`}
+>
   <nav class="navigation" aria-label="Process selection">
     <button
       type="button"
@@ -173,7 +200,7 @@
       aria-keyshortcuts="Meta+U"
       onclick={onUnfocus}
     >
-      <span aria-hidden="true">×</span> Unfocus
+      <span aria-hidden="true">×</span><span class="nav-label">Unfocus</span>
     </button>
     <span class="rule" aria-hidden="true"></span>
     <button
@@ -182,7 +209,7 @@
       disabled={processes.length < 2}
       onclick={() => cycle(-1)}
     >
-      <span aria-hidden="true">←</span> Prev
+      <span aria-hidden="true">←</span><span class="nav-label">Prev</span>
     </button>
     <button
       type="button"
@@ -190,16 +217,17 @@
       disabled={processes.length < 2}
       onclick={() => cycle(1)}
     >
-      Next <span aria-hidden="true">→</span>
+      <span class="nav-label">Next</span><span aria-hidden="true">→</span>
     </button>
   </nav>
 
   <div class="telemetry">
     <span class="metric uptime" title={`Process uptime: ${formatDuration(stats?.uptime_seconds)}`}>
       <span class="clock" aria-hidden="true">◷</span>
-      <span>up {formatDuration(stats?.uptime_seconds)}</span>
+      <span class="uptime-prefix">up</span>
+      <span class="uptime-value">{formatDuration(stats?.uptime_seconds)}</span>
     </span>
-    <TimerCountdown processId={process.id} />
+    <TimerCountdown processId={process.id} density={timerDensity} />
     <strong class="process-name" title={process.name}>{process.name}</strong>
 
     <div class="subprocess-control" bind:this={popoverRoot}>
@@ -209,11 +237,13 @@
         class:active={popoverOpen}
         aria-haspopup="dialog"
         aria-expanded={popoverOpen}
+        title={`${childCount} live ${childCount === 1 ? 'subprocess' : 'subprocesses'}`}
         disabled={!connected || process.pid === null}
         onclick={togglePopover}
       >
         <span class="branch" aria-hidden="true">⑂</span>
-        +{childCount} {childCount === 1 ? 'subprocess' : 'subprocesses'}
+        <span>+{childCount}</span>
+        <span class="subprocess-label">{childCount === 1 ? 'subprocess' : 'subprocesses'}</span>
       </button>
 
       {#if popoverOpen}
@@ -283,22 +313,86 @@
       {/if}
     </div>
 
-    <span class="metric" title="CPU usage">CPU {(stats?.cpu_percent ?? 0).toFixed(1)}%</span>
-    <span class="metric" title="Memory usage">MEM {formatMemory(stats?.memory_bytes)}</span>
+    <span class="metric secondary-metric" title={`CPU usage: ${(stats?.cpu_percent ?? 0).toFixed(1)}%`}>
+      <span class="metric-label">CPU</span><span>{(stats?.cpu_percent ?? 0).toFixed(1)}%</span>
+    </span>
+    <span class="metric secondary-metric" title={`Memory usage: ${formatMemory(stats?.memory_bytes)}`}>
+      <span class="metric-label">MEM</span><span>{formatMemory(stats?.memory_bytes)}</span>
+    </span>
     <span
       class="attention"
       class:waiting={process.agent_state.needs_input}
       class:working={process.agent_state.working}
-      >{attentionWord()}</span
+      title={`Agent attention: ${attentionWord()}`}
+      ><i aria-hidden="true"></i><span class="attention-word">{attentionWord()}</span></span
     >
-    <span class:active-run={process.status === 'running'} class:fault={process.status === 'crashed'} class="run-state">
-      <i aria-hidden="true"></i>{process.status}
+    <span
+      class:active-run={process.status === 'running'}
+      class:fault={process.status === 'crashed'}
+      class="run-state"
+      title={`Process status: ${process.status}`}
+    >
+      <i aria-hidden="true"></i><span class="state-word">{process.status}</span>
     </span>
+
+    <div class="status-overflow-control" bind:this={overflowRoot}>
+      <button
+        type="button"
+        class="status-overflow-trigger"
+        class:active={overflowOpen}
+        title="Show full process status"
+        aria-label="Show full process status"
+        aria-haspopup="dialog"
+        aria-expanded={overflowOpen}
+        onclick={toggleOverflow}
+      >•••</button>
+
+      {#if overflowOpen}
+        <dialog open class="status-overflow-popover" aria-label={`${process.name} full status`}>
+          <header>
+            <div><span class="eyebrow">Full status</span><h2>{process.name}</h2></div>
+            <button type="button" title="Close full status" onclick={closeOverflow}>×</button>
+          </header>
+
+          <nav class="overflow-actions" aria-label="Process actions">
+            <button type="button" onclick={() => { closeOverflow(); onUnfocus(); }}>Unfocus</button>
+            <button type="button" disabled={processes.length < 2} onclick={() => cycle(-1)}>← Previous</button>
+            <button type="button" disabled={processes.length < 2} onclick={() => cycle(1)}>Next →</button>
+          </nav>
+
+          <dl>
+            <div><dt>Uptime</dt><dd>{formatDuration(stats?.uptime_seconds)}</dd></div>
+            <div><dt>CPU</dt><dd>{(stats?.cpu_percent ?? 0).toFixed(1)}%</dd></div>
+            <div><dt>Memory</dt><dd>{formatMemory(stats?.memory_bytes)}</dd></div>
+            <div><dt>Attention</dt><dd>{attentionWord()}</dd></div>
+            <div><dt>State</dt><dd>{process.status}</dd></div>
+            <div><dt>PID</dt><dd>{process.pid ?? '—'}</dd></div>
+          </dl>
+
+          <section class="overflow-timers" aria-label="Active timers">
+            <span class="eyebrow">Timers</span>
+            <TimerCountdown processId={process.id} variant="menu" />
+          </section>
+
+          <button
+            type="button"
+            class="overflow-subprocesses"
+            disabled={!connected || process.pid === null}
+            onclick={showSubprocessesFromOverflow}
+          >
+            <span>⑂ +{childCount}</span>
+            <strong>{childCount === 1 ? 'Subprocess' : 'Subprocesses'}</strong>
+          </button>
+        </dialog>
+      {/if}
+    </div>
   </div>
 </footer>
 
 <style>
   .status-bar {
+    container-name: process-status;
+    container-type: inline-size;
     position: relative;
     z-index: 20;
     display: flex;
@@ -312,6 +406,7 @@
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 9px;
     letter-spacing: 0.02em;
+    white-space: nowrap;
   }
 
   button {
@@ -331,6 +426,10 @@
     display: flex;
     min-width: 0;
     align-items: stretch;
+  }
+
+  .navigation {
+    flex: 0 0 auto;
   }
 
   .navigation button {
@@ -359,6 +458,11 @@
     font-size: 12px;
   }
 
+  .navigation .unfocus .nav-label {
+    color: inherit;
+    font-size: inherit;
+  }
+
   .rule {
     width: 1px;
     height: 14px;
@@ -367,6 +471,7 @@
   }
 
   .telemetry {
+    flex: 0 1 auto;
     overflow: visible;
     justify-content: flex-end;
   }
@@ -383,6 +488,7 @@
   }
 
   .metric {
+    gap: 4px;
     color: #858c96;
     font-variant-numeric: tabular-nums;
   }
@@ -433,9 +539,18 @@
   }
 
   .attention {
+    gap: 6px;
     color: #979da6;
     font-weight: 650;
     text-transform: uppercase;
+  }
+
+  .attention i {
+    width: 5px;
+    height: 5px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: currentColor;
   }
 
   .attention.waiting {
@@ -468,11 +583,170 @@
     color: var(--fault);
   }
 
+  .status-overflow-control {
+    position: relative;
+    display: none;
+    min-width: 0;
+  }
+
+  .status-overflow-trigger {
+    display: flex;
+    width: 34px;
+    align-items: center;
+    justify-content: center;
+    border-left: 1px solid #262a2f;
+    color: #aab0b8;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .status-overflow-trigger:hover,
+  .status-overflow-trigger.active,
+  .status-overflow-trigger:focus-visible {
+    background: #20242a;
+    color: var(--fog);
+  }
+
+  .status-overflow-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 7px);
+    width: min(310px, calc(100cqw - 12px), calc(100vw - 28px));
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    background: #191c20;
+    box-shadow: 0 18px 48px rgb(0 0 0 / 48%);
+    color: var(--text-soft);
+    font: inherit;
+  }
+
+  .status-overflow-popover > header {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 8px 7px 12px;
+    border-bottom: 1px solid var(--border);
+    background: #1d2025;
+  }
+
+  .status-overflow-popover > header button {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 1px solid #363c43;
+    border-radius: 2px;
+    color: #9ca3ac;
+    font-size: 15px;
+  }
+
+  .overflow-actions {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .overflow-actions button {
+    min-height: 30px;
+    border-right: 1px solid var(--border);
+    color: #9fa6af;
+    font-size: 7px;
+    font-weight: 650;
+    text-transform: uppercase;
+  }
+
+  .overflow-actions button:last-child {
+    border-right: 0;
+  }
+
+  .overflow-actions button:not(:disabled):hover {
+    background: #22262b;
+    color: var(--fog);
+  }
+
+  .status-overflow-popover dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .status-overflow-popover dl div {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 9px;
+    border-right: 1px solid #282d33;
+    border-bottom: 1px solid #282d33;
+  }
+
+  .status-overflow-popover dl div:nth-child(even) {
+    border-right: 0;
+  }
+
+  .status-overflow-popover dl div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .status-overflow-popover dt {
+    color: #737b85;
+    font-size: 7px;
+    text-transform: uppercase;
+  }
+
+  .status-overflow-popover dd {
+    margin: 0;
+    overflow: hidden;
+    color: #d6dae0;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+  }
+
+  .overflow-timers {
+    display: grid;
+    gap: 3px;
+    padding: 8px 9px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .overflow-subprocesses {
+    display: flex;
+    width: 100%;
+    min-height: 34px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    color: #9ba2ab;
+  }
+
+  .overflow-subprocesses span {
+    color: var(--signal);
+    font-size: 10px;
+  }
+
+  .overflow-subprocesses strong {
+    font-size: 8px;
+    text-transform: uppercase;
+  }
+
+  .overflow-subprocesses:not(:disabled):hover {
+    background: #22262b;
+    color: var(--fog);
+  }
+
   .subprocess-popover {
     position: absolute;
     right: 0;
     bottom: calc(100% + 7px);
-    width: min(620px, calc(100vw - 42px));
+    width: min(620px, calc(100cqw - 12px), calc(100vw - 42px));
     margin: 0;
     padding: 0;
     overflow: hidden;
@@ -683,20 +957,72 @@
     font-size: 7px;
   }
 
-  @media (max-width: 780px) {
-    .metric,
-    .attention,
-    .process-name {
-      display: none;
-    }
+  .stage-medium .nav-label,
+  .stage-medium .uptime-prefix,
+  .stage-medium .metric-label,
+  .stage-medium .attention-word,
+  .stage-medium .subprocess-label,
+  .stage-medium .process-name {
+    display: none;
+  }
 
-    .subprocess-popover {
-      right: -72px;
-    }
+  .stage-medium .navigation button,
+  .stage-medium .telemetry > span,
+  .stage-medium .subprocess-trigger {
+    padding-right: 7px;
+    padding-left: 7px;
+  }
+
+  .stage-medium .navigation button {
+    min-width: 28px;
+    justify-content: center;
+  }
+
+  .stage-narrow .navigation,
+  .stage-narrow .secondary-metric,
+  .stage-narrow .process-name {
+    display: none;
+  }
+
+  .stage-narrow .telemetry {
+    margin-left: auto;
+  }
+
+  .stage-narrow .attention,
+  .stage-narrow .run-state {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .stage-tiny .uptime,
+  .stage-tiny .secondary-metric,
+  .stage-tiny .process-name,
+  .stage-tiny .attention,
+  .stage-tiny .subprocess-trigger {
+    display: none;
+  }
+
+  .stage-tiny .subprocess-control {
+    width: 0;
+  }
+
+  .stage-tiny .state-word {
+    display: none;
+  }
+
+  .stage-tiny .run-state {
+    width: 30px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .stage-tiny .status-overflow-control {
+    display: flex;
   }
 
   @media (prefers-reduced-motion: no-preference) {
-    .subprocess-popover {
+    .subprocess-popover,
+    .status-overflow-popover {
       animation: reveal 120ms ease-out;
       transform-origin: right bottom;
     }
