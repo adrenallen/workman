@@ -1,21 +1,33 @@
 <script lang="ts">
   import type { SettingsPanelProps } from './workspace';
   import { loadDaemonSettings, restartDaemon, type DaemonSettingsInfo } from './settings';
+  import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
+  import HotkeysCard from './settings/HotkeysCard.svelte';
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
   import OpenersCard from './settings/OpenersCard.svelte';
+  import RuntimeDoctor from './settings/RuntimeDoctor.svelte';
+  import SettingsConnectionCard from './settings/SettingsConnectionCard.svelte';
+  import SettingsSectionNav from './settings/SettingsSectionNav.svelte';
+  import SettingsStatusStrip from './settings/SettingsStatusStrip.svelte';
+  import SidebarCard from './settings/SidebarCard.svelte';
   import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
 
-  let { client, connection, onError }: SettingsPanelProps = $props();
+  let { client, project, connection, onError }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
   let restarting = $state(false);
   let sawRestartDisconnect = $state(false);
   let loadedConnection = $state<string | null>(null);
+  let viewport = $state<HTMLDivElement>();
   let request = 0;
+
+  let activeDefinition = $derived(
+    settingsSections.find((section) => section.id === $settingsSection) ?? settingsSections[0]
+  );
 
   $effect(() => {
     const status = connection.status;
@@ -34,6 +46,11 @@
         sawRestartDisconnect = false;
       }
     }
+  });
+
+  $effect(() => {
+    $settingsSection;
+    queueMicrotask(() => viewport?.scrollTo({ top: 0 }));
   });
 
   async function refresh(): Promise<void> {
@@ -74,66 +91,84 @@
 </script>
 
 <section class="settings-panel" aria-label="Settings controls">
-  {#if connection.status !== 'connected' && info === null}
-    <div class="unavailable">
-      <span aria-hidden="true">⌁</span>
-      <div><h2>Daemon connection required</h2><p>Settings load from the authenticated local daemon. Keep this view open while gbuild reconnects.</p></div>
+  <header class="settings-header">
+    <div>
+      <span class="eyebrow">Workspace preferences</span>
+      <h2>Settings</h2>
     </div>
-  {:else if loading && info === null}
-    <div class="loading"><i aria-hidden="true"></i><span>Reading daemon settings…</span></div>
-  {:else if loadError && info === null}
-    <div class="settings-grid degraded">
-      <section class="compatibility" aria-live="polite">
-        <span class="compatibility-mark" aria-hidden="true">!</span>
-        <div class="compatibility-copy">
-          <span class="eyebrow">Daemon compatibility</span>
-          <h2>Settings opened, but the daemon is out of date</h2>
-          <p>The installed app is ready. Restart the local daemon to load connection, runtime, and agent-tool settings.</p>
-          <code>{loadError}</code>
+    <p><strong>{activeDefinition?.label}</strong><span>{activeDefinition?.description}</span></p>
+  </header>
+
+  <SettingsStatusStrip {project} {connection} {info} />
+  <SettingsSectionNav connected={connection.status === 'connected'} />
+
+  <div class="section-viewport" bind:this={viewport}>
+    <div
+      class="section-panel"
+      id={`settings-panel-${$settingsSection}`}
+      role="tabpanel"
+      aria-labelledby={`settings-tab-${$settingsSection}`}
+      tabindex="0"
+    >
+      {#if $settingsSection === 'appearance'}
+        <AppearanceCard />
+      {:else if $settingsSection === 'terminal'}
+        <TerminalAppearanceCard />
+      {:else if $settingsSection === 'sidebar'}
+        <SidebarCard />
+      {:else if $settingsSection === 'hotkeys'}
+        <HotkeysCard />
+      {:else if $settingsSection === 'agents'}
+        <div class="section-stack">
+          <AgentToolsCard {client} connected={connection.status === 'connected'} {onError} />
+          <RuntimeDoctor {client} {project} connected={connection.status === 'connected'} {onError} />
         </div>
-        <button type="button" disabled={connection.status !== 'connected' || loading} onclick={() => void refresh()}>
-          {loading ? 'Checking…' : 'Retry settings'}
-        </button>
-      </section>
-      <div class="appearance"><AppearanceCard /></div>
-      <div class="terminal"><TerminalAppearanceCard /></div>
-      <div class="openers"><OpenersCard /></div>
+      {:else if $settingsSection === 'tools'}
+        <OpenersCard />
+      {:else if $settingsSection === 'mcp'}
+        {#if info}
+          <McpConnectionCard connection={info.mcp} />
+        {:else}
+          <SettingsConnectionCard
+            title="MCP settings"
+            connected={connection.status === 'connected'}
+            {loading}
+            error={loadError}
+            onRetry={() => void refresh()}
+          />
+        {/if}
+      {:else if $settingsSection === 'daemon'}
+        {#if info}
+          <DaemonCard {info} {connection} {restarting} onRestart={() => void restart()} />
+        {:else}
+          <SettingsConnectionCard
+            title="Daemon settings"
+            connected={connection.status === 'connected'}
+            {loading}
+            error={loadError}
+            onRetry={() => void refresh()}
+          />
+        {/if}
+      {/if}
     </div>
-  {:else if info}
-    <div class="settings-grid">
-      <div class="mcp"><McpConnectionCard connection={info.mcp} /></div>
-      <div class="daemon"><DaemonCard {info} {connection} {restarting} onRestart={() => void restart()} /></div>
-      <div class="appearance"><AppearanceCard /></div>
-      <div class="terminal"><TerminalAppearanceCard /></div>
-      <div class="openers"><OpenersCard /></div>
-      <div class="agents"><AgentToolsCard {client} connected={connection.status === 'connected'} {onError} /></div>
-    </div>
-  {/if}
+  </div>
 </section>
 
 <style>
-  .settings-panel { min-width: 0; padding: 12px 16px 24px; }
-  .unavailable, .loading { display: flex; align-items: center; }
-  .loading { font-family: 'JetBrains Mono Variable', monospace; }
+  .settings-panel { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 7px; overflow: hidden; padding: 9px 12px 12px; }
+  .settings-header { display: flex; min-height: 45px; align-items: center; justify-content: space-between; gap: 18px; padding: 0 2px; }
+  .settings-header .eyebrow { color: var(--muted); font: 700 7px/1.2 'JetBrains Mono Variable', monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .settings-header h2 { margin: 2px 0 0; color: var(--text); font-size: 18px; line-height: 1.05; }
+  .settings-header p { display: grid; min-width: 150px; margin: 0; padding-left: 12px; border-left: 1px solid var(--border); text-align: right; }
+  .settings-header p strong { color: var(--text-soft); font-size: 9px; }
+  .settings-header p span { margin-top: 2px; color: var(--muted); font: 7px/1.25 'JetBrains Mono Variable', monospace; }
+  .section-viewport { min-width: 0; min-height: 0; overflow-y: auto; padding: 1px 2px 12px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .section-panel { width: min(1040px, 100%); min-width: 0; margin: 0 auto; outline: 0; }
+  .section-panel:focus-visible { outline: 1px solid var(--signal); outline-offset: 2px; }
+  .section-stack { display: grid; gap: 9px; }
 
-  .settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: 10px; align-items: start; }
-  .mcp, .agents, .openers { grid-column: 1 / -1; }
-  .compatibility { display: grid; min-height: 178px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border)); border-radius: 4px; padding: 14px; background: var(--surface); }
-  .compatibility-mark { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); color: var(--warning); font: 700 14px/1 'JetBrains Mono Variable', monospace; }
-  .compatibility-copy { min-width: 0; }
-  .compatibility .eyebrow { color: var(--warning); font: 650 7px/1.2 'JetBrains Mono Variable', monospace; letter-spacing: 0.08em; text-transform: uppercase; }
-  .compatibility h2 { margin: 4px 0 0; color: var(--text); font-size: 15px; }
-  .compatibility p { max-width: 560px; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
-  .compatibility code { display: block; overflow: hidden; margin-top: 8px; color: #a9afb7; font: 8px/1.4 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
-  .compatibility button { min-height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 9px; background: var(--surface-raised); color: var(--text-soft); font: 650 8px 'JetBrains Mono Variable', monospace; cursor: pointer; }
-  .compatibility button:hover:not(:disabled) { border-color: #707780; color: var(--text); }
-  .compatibility button:disabled { cursor: default; opacity: 0.45; }
-  .unavailable, .loading { min-height: 180px; justify-content: center; gap: 10px; border: 1px dashed var(--border-strong); border-radius: 4px; color: #9299a2; }
-  .unavailable > span { color: #45636e; font-size: 30px; }
-  .unavailable h2 { margin: 0; color: #a5b7bd; font-size: 14px; }
-  .unavailable p { max-width: 430px; margin: 5px 0 0; font-size: 10px; line-height: 1.5; }
-  .loading { font-size: 8px; }
-  .loading i { width: 14px; height: 14px; border: 1px solid #3c5660; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .mcp, .agents, .openers { grid-column: auto; } .compatibility { grid-template-columns: auto minmax(0, 1fr); } .compatibility button { grid-column: 2; justify-self: start; } }
+  @media (max-width: 660px) {
+    .settings-panel { padding-inline: 8px; }
+    .settings-header p { display: none; }
+  }
 </style>
