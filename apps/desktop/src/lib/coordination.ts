@@ -101,4 +101,10 @@ export interface CoordinationClient {
   coordinationTodoComment(projectId: number, todoId: number, body: string): Promise<TodoComment>;
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead>;
   coordinationScratchpadCreate(projectId: number, input: NewScratchpadInput): Promise<Scratchpad>;
+  coordinationScratchpadUpdate(
+    projectId: number,
+    scratchpadId: number,
+    expectedRevision: number,
+    content: string
+  ): Promise<ScratchpadRead>;
 }

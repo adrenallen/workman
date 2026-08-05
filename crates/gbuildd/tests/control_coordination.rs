@@ -152,6 +152,31 @@ async fn rpc(socket: &mut Socket, id: &str, method: &str, params: Value) -> Valu
     }
 }
 
+async fn rpc_error(socket: &mut Socket, id: &str, method: &str, params: Value) -> Value {
+    socket
+        .send(Message::Text(
+            json!({ "id": id, "method": method, "params": params })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(message) = message else {
+            continue;
+        };
+        let response: Value = serde_json::from_str(&message).unwrap();
+        if response["id"] == id {
+            assert_eq!(
+                response["ok"], false,
+                "RPC unexpectedly succeeded: {response}"
+            );
+            return response["error"].clone();
+        }
+    }
+}
+
 #[tokio::test]
 async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     let server = TestServer::start().await;
@@ -195,6 +220,38 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     assert_eq!(created_scratchpad["name"], "Release notes");
     assert_eq!(created_scratchpad["revision"], 1);
     assert_eq!(created_scratchpad["tags"], json!(["desktop"]));
+
+    let updated_scratchpad = rpc(
+        &mut socket,
+        "scratchpad-update",
+        "coordination.scratchpad_update",
+        json!({
+            "project_id": 1,
+            "scratchpad_id": created_scratchpad["id"],
+            "expected_revision": 1,
+            "content": "# Launch notes\n\n### Desktop\n\nSaved as plain Markdown."
+        }),
+    )
+    .await;
+    assert_eq!(updated_scratchpad["scratchpad"]["name"], "Launch notes");
+    assert_eq!(updated_scratchpad["scratchpad"]["revision"], 2);
+    assert_eq!(
+        updated_scratchpad["scratchpad"]["content"],
+        "### Desktop\n\nSaved as plain Markdown."
+    );
+    let stale_update = rpc_error(
+        &mut socket,
+        "scratchpad-stale-update",
+        "coordination.scratchpad_update",
+        json!({
+            "project_id": 1,
+            "scratchpad_id": created_scratchpad["id"],
+            "expected_revision": 1,
+            "content": "# Stale draft\n\nThis must not replace revision 2."
+        }),
+    )
+    .await;
+    assert_eq!(stale_update["code"], "scratchpad_revision_conflict");
 
     let detail = rpc(
         &mut socket,

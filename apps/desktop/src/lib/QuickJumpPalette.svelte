@@ -111,7 +111,7 @@
           key: `action:new-scratchpad:${project.id}`,
           kind: 'action',
           label: `New scratchpad in ${name}`,
-          detail: 'Open the scratchpad creation form',
+          detail: 'Create an Unnamed scratchpad and start writing',
           projectName: name,
           searchText: `new add create scratchpad note ${name} ${project.name} ${project.path}`,
           target: { type: 'new-scratchpad', projectId: project.id },

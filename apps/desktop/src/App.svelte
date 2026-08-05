@@ -123,13 +123,12 @@
   let treeRailWidth = $state(280);
   let treeRailCollapsed = $state(false);
 
-  let dialog = $state<'todo' | 'scratchpad' | 'agent' | 'command' | null>(null);
+  let dialog = $state<'todo' | 'agent' | 'command' | null>(null);
   let todoTitle = $state('');
   let todoBody = $state('');
   let todoPriority = $state<TodoPriority>('medium');
   let todoTags = $state('');
-  let scratchpadName = $state('');
-  let scratchpadContent = $state('');
+  let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
   let versionRestarting = $state(false);
@@ -503,9 +502,7 @@
           return;
         case 'new-scratchpad':
           settingsOpen = false;
-          scratchpadName = '';
-          scratchpadContent = '';
-          dialog = 'scratchpad';
+          await createScratchpad();
           return;
       }
     } catch (cause) {
@@ -592,7 +589,15 @@
     try {
       const next = await client.coordinationSnapshot(projectId);
       cacheProjectCoordination(projectId, next);
-      if (request === coordinationRequest && selectedProject?.id === projectId) coordination = next;
+      if (request === coordinationRequest && selectedProject?.id === projectId) {
+        coordination = next;
+        if (selection?.kind === 'scratchpad') {
+          const summary = next.scratchpads.find((scratchpad) => scratchpad.id === selection?.id);
+          if (summary && summary.revision !== scratchpadRead?.scratchpad.revision) {
+            void loadScratchpad(selection.id, false);
+          }
+        }
+      }
     } catch (cause) {
       if (request === coordinationRequest) reportError(cause);
     } finally {
@@ -602,6 +607,7 @@
 
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
+    scratchpadFocusRequest = 0;
     recordRecentNavigation({ type: 'item', selection: next });
     quickJumpRecentKeys = readRecentNavigationKeys();
     settingsOpen = false;
@@ -634,15 +640,29 @@
     }
   }
 
-  async function loadScratchpad(scratchpadId: number): Promise<void> {
+  async function loadScratchpad(scratchpadId: number, showLoading = true): Promise<void> {
     if (!selectedProject) return;
-    detailLoading = true;
+    const projectId = selectedProject.id;
+    if (showLoading) detailLoading = true;
     try {
-      scratchpadRead = await client.coordinationScratchpad(selectedProject.id, scratchpadId);
+      const next = await client.coordinationScratchpad(projectId, scratchpadId);
+      if (
+        selectedProject?.id === projectId &&
+        selection?.kind === 'scratchpad' &&
+        selection.id === scratchpadId
+      ) {
+        scratchpadRead = next;
+        selection = projectTreeSelection(
+          'scratchpad',
+          scratchpadId,
+          projectId,
+          next.scratchpad.name
+        );
+      }
     } catch (cause) {
       reportError(cause);
     } finally {
-      detailLoading = false;
+      if (showLoading) detailLoading = false;
     }
   }
 
@@ -738,24 +758,54 @@
   }
 
   async function createScratchpad(): Promise<void> {
-    if (!selectedProject || !scratchpadName.trim()) return;
+    if (!selectedProject) return;
     detailBusy = true;
     try {
       const scratchpad = await client.coordinationScratchpadCreate(selectedProject.id, {
-        name: scratchpadName.trim(), content: scratchpadContent.trim(), tags: []
+        name: 'Unnamed scratchpad', content: '', tags: []
       });
-      scratchpadName = '';
-      scratchpadContent = '';
       dialog = null;
       await refreshCoordination(selectedProject.id, false);
       await selectTreeItem(
         projectTreeSelection('scratchpad', scratchpad.id, scratchpad.project_id, scratchpad.name)
       );
+      scratchpadFocusRequest += 1;
     } catch (cause) {
       reportError(cause);
     } finally {
       detailBusy = false;
     }
+  }
+
+  async function saveScratchpad(content: string, expectedRevision: number): Promise<ScratchpadRead> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') {
+      throw new Error('Select a scratchpad before saving');
+    }
+    const projectId = selectedProject.id;
+    const scratchpadId = selection.id;
+    const saved = await client.coordinationScratchpadUpdate(
+      projectId,
+      scratchpadId,
+      expectedRevision,
+      content
+    );
+    setTimeout(() => {
+      if (
+        selectedProject?.id === projectId &&
+        selection?.kind === 'scratchpad' &&
+        selection.id === scratchpadId
+      ) {
+        scratchpadRead = saved;
+        selection = projectTreeSelection(
+          'scratchpad',
+          scratchpadId,
+          projectId,
+          saved.scratchpad.name
+        );
+      }
+      void refreshCoordination(projectId, false);
+    }, 0);
+    return saved;
   }
 
   async function completeTodo(completed: boolean): Promise<void> {
@@ -1418,7 +1468,7 @@
         onAddAgent={() => void openAgentDialog()}
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
-        onAddScratchpad={() => (dialog = 'scratchpad')}
+        onAddScratchpad={() => void createScratchpad()}
         onOpenSettings={() => { settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
@@ -1477,7 +1527,13 @@
         {:else if selection?.kind === 'todo'}
           <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
         {:else if selection?.kind === 'scratchpad'}
-          <ScratchpadDetailView read={scratchpadRead} loading={detailLoading} onRefresh={() => void loadScratchpad(selection?.id ?? 0)} />
+          <ScratchpadDetailView
+            read={scratchpadRead}
+            loading={detailLoading}
+            focusRequest={scratchpadFocusRequest}
+            onRefresh={() => loadScratchpad(selection?.id ?? 0, false)}
+            onSave={saveScratchpad}
+          />
         {:else}
           <EmptyState eyebrow="Project tree" title="Select an item" body="Choose a todo, agent, terminal, command, or scratchpad from the project tree." actionLabel="New terminal" icon="↖" onAction={() => void spawnTerminal()} />
         {/if}
@@ -1541,13 +1597,6 @@
         <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context"></textarea></label>
         <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
         <footer><button type="button" onclick={() => (dialog = null)}>Cancel</button><button class="primary" type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</button></footer>
-      </form>
-    {:else if dialog === 'scratchpad'}
-      <form class="dialog" aria-label="Create scratchpad" onsubmit={(event) => { event.preventDefault(); void createScratchpad(); }}>
-        <header><div><span>New scratchpad</span><h2>Add a shared note</h2></div><button type="button" aria-label="Close" onclick={() => (dialog = null)}>×</button></header>
-        <label><span>Name</span><input bind:value={scratchpadName} placeholder="Release notes" use:focusDialogInput /></label>
-        <label><span>Content <small>optional</small></span><textarea bind:value={scratchpadContent} rows="7" placeholder="Write the first note in Markdown"></textarea></label>
-        <footer><button type="button" onclick={() => (dialog = null)}>Cancel</button><button class="primary" type="submit" disabled={detailBusy || !scratchpadName.trim()}>Create scratchpad</button></footer>
       </form>
     {:else if dialog === 'agent'}
       <section class="dialog" aria-label="Add agent">

@@ -283,6 +283,20 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     });
   }
 
+  coordinationScratchpadUpdate(
+    projectId: number,
+    scratchpadId: number,
+    expectedRevision: number,
+    content: string
+  ): Promise<ScratchpadRead> {
+    return this.request('coordination.scratchpad_update', {
+      project_id: projectId,
+      scratchpad_id: scratchpadId,
+      expected_revision: expectedRevision,
+      content
+    });
+  }
+
   processes(projectId: number): Promise<ProcessView[]> {
     return this.request('process.list', { project_id: projectId });
   }
