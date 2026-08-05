@@ -4,7 +4,7 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -112,6 +112,14 @@ struct DaemonRestartResult {
     restarting: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ShellOpenTarget {
+    Editor,
+    Finder,
+    Reveal,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 enum DaemonFrame {
@@ -165,6 +173,13 @@ fn daemon_status(state: State<'_, BridgeState>) -> ConnectionStatus {
     lock_status(&state.status).clone()
 }
 
+/// Open an existing workspace path without invoking a command shell.
+#[tauri::command]
+fn shell_open_path(path: String, target: ShellOpenTarget) -> Result<(), String> {
+    let path = canonical_shell_path(&path)?;
+    open_shell_target(&path, target)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (sender, receiver) = mpsc::channel(256);
@@ -180,7 +195,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             daemon_send,
             daemon_restart,
-            daemon_status
+            daemon_status,
+            shell_open_path
         ])
         .setup(move |app| {
             tauri::async_runtime::spawn(run_bridge(app.handle().clone(), task_state, receiver));
@@ -416,6 +432,102 @@ fn lock_status(status: &Mutex<ConnectionStatus>) -> std::sync::MutexGuard<'_, Co
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn canonical_shell_path(path: &str) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("path cannot be empty".to_owned());
+    }
+    std::fs::canonicalize(path)
+        .map_err(|error| format!("could not open workspace path {path:?}: {error}"))
+}
+
+fn open_shell_target(path: &Path, target: ShellOpenTarget) -> Result<(), String> {
+    match target {
+        ShellOpenTarget::Editor => open_in_editor(path),
+        ShellOpenTarget::Finder => open_in_file_manager(path, false),
+        ShellOpenTarget::Reveal => open_in_file_manager(path, true),
+    }
+}
+
+fn open_in_editor(path: &Path) -> Result<(), String> {
+    if let Some(editor) = env::var_os("GBUILD_EDITOR")
+        .or_else(|| env::var_os("VISUAL"))
+        .or_else(|| env::var_os("EDITOR"))
+        .filter(|editor| !editor.is_empty())
+    {
+        return spawn_detached(Command::new(editor).arg(path), "editor");
+    }
+
+    for candidate in ["code", "cursor", "zed"] {
+        match spawn_detached(Command::new(candidate).arg(path), candidate) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.contains("No such file") || error.contains("not found") => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    return spawn_detached(
+        Command::new("open")
+            .args(["-a", "Visual Studio Code"])
+            .arg(path),
+        "Visual Studio Code",
+    );
+
+    #[cfg(target_os = "linux")]
+    return spawn_detached(Command::new("xdg-open").arg(path), "default desktop editor");
+
+    #[cfg(target_os = "windows")]
+    return spawn_detached(Command::new("explorer").arg(path), "Explorer");
+
+    #[allow(unreachable_code)]
+    Err("opening an editor is not supported on this platform".to_owned())
+}
+
+fn open_in_file_manager(path: &Path, reveal: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        if reveal || path.is_file() {
+            command.arg("-R");
+        }
+        return spawn_detached(command.arg(path), "Finder");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let target = if reveal && path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        return spawn_detached(Command::new("xdg-open").arg(target), "file manager");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        if reveal || path.is_file() {
+            command.arg(format!("/select,{}", path.display()));
+        } else {
+            command.arg(path);
+        }
+        return spawn_detached(&mut command, "Explorer");
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening a file manager is not supported on this platform".to_owned())
+}
+
+fn spawn_detached(command: &mut Command, label: &str) -> Result<(), String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open {label}: {error}"))
+}
+
 fn daemon_executable() -> io::Result<PathBuf> {
     let current = env::current_exe()?;
     let sibling = current.with_file_name(format!("gbuildd{}", env::consts::EXE_SUFFIX));
@@ -521,5 +633,18 @@ mod tests {
         older.build_id = "older".to_owned();
         assert!(!ConnectionStatus::connected(1, Some(&older)).version_compatible);
         assert!(ConnectionStatus::connected(1, Some(&DaemonVersion::current())).version_compatible);
+    }
+
+    #[test]
+    fn shell_paths_must_exist_and_are_canonicalized() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(
+            canonical_shell_path(nested.to_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&nested).unwrap()
+        );
+        assert!(canonical_shell_path(root.path().join("missing").to_str().unwrap()).is_err());
+        assert!(canonical_shell_path(" ").is_err());
     }
 }

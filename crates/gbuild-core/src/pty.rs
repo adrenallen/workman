@@ -570,6 +570,15 @@ impl PtyProcess {
             return Ok(status);
         }
 
+        self.kill()
+    }
+
+    /// Immediately kill the complete process group and reap the direct child.
+    pub fn kill(&mut self) -> Result<ExitStatus> {
+        if let Some(status) = self.try_wait().context("poll PTY child")? {
+            return Ok(status);
+        }
+
         signal_process_group(self.pid, Signal::SIGKILL).context("send SIGKILL to process group")?;
         // Also target the direct child in case it changed process groups.
         if let Some(child) = self.child.as_mut() {
@@ -884,6 +893,30 @@ mod tests {
         assert!(
             !process_exists(child_pid),
             "descendant {child_pid} survived group kill"
+        );
+    }
+
+    #[test]
+    fn kill_immediately_kills_the_process_group() {
+        let mut process = PtyProcess::spawn(PtySpawnOptions::new(
+            44,
+            "secret-token",
+            "sleep 30 & child=$!; printf 'child:%s\\n' \"$child\"; wait",
+        ))
+        .expect("spawn process tree");
+        let output = wait_for_output(&process, b"child:");
+        let child_pid = parse_child_pid(&output);
+        assert!(process_exists(child_pid));
+
+        process.kill().expect("kill process group");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_exists(child_pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_exists(child_pid),
+            "descendant {child_pid} survived immediate group kill"
         );
     }
 

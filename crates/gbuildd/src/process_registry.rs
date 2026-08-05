@@ -513,6 +513,38 @@ impl ProcessRegistry {
         }
     }
 
+    /// Immediately kill a live process group without a graceful shutdown window.
+    pub fn kill(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        let mut process = self.require(process_id)?;
+        let Some(mut hosted) = self.running.remove(&process_id) else {
+            process.status = ProcessStatus::Stopped;
+            process.pid = None;
+            self.store.put_process(&process)?;
+            return Ok(process);
+        };
+        let _ = self.store.clear_process_mcp_token(process_id);
+
+        match hosted.kill() {
+            Ok(status) => {
+                apply_exit_info(&mut process, &status);
+                process.status = ProcessStatus::Stopped;
+                self.store.put_process(&process)?;
+                Ok(process)
+            }
+            Err(error) => {
+                process.status = ProcessStatus::Crashed;
+                process.pid = None;
+                process.exited_at = Some(now_millis());
+                self.store.put_process(&process)?;
+                Err(RegistryError::Pty {
+                    process_id,
+                    message: error.to_string(),
+                })
+            }
+        }
+    }
+
     pub fn restart(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         self.require(process_id)?;

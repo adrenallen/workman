@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
 
   import CountBadge from './CountBadge.svelte';
+  import InlineTreeRename from './InlineTreeRename.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
   import {
     agentLineageRows,
@@ -9,6 +10,12 @@
   } from './agentLineage';
   import type { ProcessKind, ProcessView, Project } from './daemon';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
+  import {
+    contextMenuRequest,
+    keyboardContextMenuRequest,
+    type ContextMenuRequest,
+    type ContextMenuTarget
+  } from './contextMenu';
   import { liveStats, type ProcessRuntimeStats } from './liveStats';
   import {
     projectTreeSelection,
@@ -44,6 +51,10 @@
     onToggleCollapse: () => void;
     reordering: boolean;
     onReorderProcesses: (kind: ProcessKind, orderedIds: number[]) => void;
+    renameTarget: ContextMenuTarget | null;
+    onContextMenu: (request: ContextMenuRequest) => void;
+    onRenameSubmit: (name: string) => void;
+    onRenameCancel: () => void;
   }
 
   let {
@@ -63,7 +74,11 @@
     onOpenSettings,
     onToggleCollapse,
     reordering,
-    onReorderProcesses
+    onReorderProcesses,
+    renameTarget,
+    onContextMenu,
+    onRenameSubmit,
+    onRenameCancel
   }: Props = $props();
 
   const groupOrder: ProjectTreeGroup[] = [
@@ -147,6 +162,44 @@
     onSelect(
       projectTreeSelection(process.kind, process.id, project.id, processLabel(process))
     );
+  }
+
+  function processTarget(process: ProcessView): ContextMenuTarget {
+    return {
+      kind: 'process',
+      process,
+      selection: projectTreeSelection(
+        process.kind,
+        process.id,
+        project.id,
+        processLabel(process)
+      )
+    };
+  }
+
+  function todoTarget(todo: TodoSummary): ContextMenuTarget {
+    return {
+      kind: 'todo',
+      todo,
+      selection: projectTreeSelection('todo', todo.id, project.id, todo.title)
+    };
+  }
+
+  function scratchpadTarget(scratchpad: ScratchpadSummary): ContextMenuTarget {
+    return {
+      kind: 'scratchpad',
+      scratchpad,
+      selection: projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name)
+    };
+  }
+
+  function openPointerMenu(event: MouseEvent, target: ContextMenuTarget): void {
+    onContextMenu(contextMenuRequest(event, target));
+  }
+
+  function openKeyboardMenu(event: KeyboardEvent, target: ContextMenuTarget): void {
+    const request = keyboardContextMenuRequest(event, target);
+    if (request) onContextMenu(request);
   }
 
   function processLabel(process: ProcessView): string {
@@ -367,7 +420,11 @@
                   class="tree-row"
                   class:selected={selection?.key === `todo:${todo.id}`}
                   data-tree-row
+                  data-context-kind="todo"
+                  data-context-id={todo.id}
                   onclick={() => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title))}
+                  oncontextmenu={(event) => openPointerMenu(event, todoTarget(todo))}
+                  onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
                   <span class:attention={todo.is_blocked} class="attention-dot" aria-hidden="true">{todoGlyph(todo)}</span>
                   <span class="row-copy"><strong>{todo.title}</strong></span>
@@ -386,35 +443,43 @@
               {#each visibleAgentRows as row (row.process.id)}
                 {@const process = row.process}
                 {@const stats = runtimeStats(process)}
-                <button
-                  type="button"
-                  class="tree-row agent-row"
-                  class:agent-child={row.depth > 0}
-                  class:selected={selection?.key === `agent:${process.id}`}
-                  style={`--agent-depth: ${row.depth}`}
-                  data-tree-row
-                  use:reorderItem={reorderOptions(process)}
-                  onclick={() => selectProcess(process)}
-                >
-                  {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
-                  <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
-                  <span class="row-copy"><strong>{process.name}</strong></span>
-                  {#if row.rollup.total > 0 || stats}
-                    <span class="row-badges">
-                      {#if row.rollup.total > 0}
-                        <span
-                          class={`lineage-rollup ${lineageTone(row.rollup)}`}
-                          title={lineageTitle(row.rollup)}
-                          aria-label={lineageTitle(row.rollup)}
-                        >↳{row.rollup.total}</span>
-                      {/if}
-                      {#if stats?.descendant_count}
-                        <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
-                      {/if}
-                      {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
-                    </span>
-                  {/if}
-              </button>
+                {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
+                  <InlineTreeRename value={process.name} label="Agent name" depth={row.depth} onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
+                  <button
+                    type="button"
+                    class="tree-row agent-row"
+                    class:agent-child={row.depth > 0}
+                    class:selected={selection?.key === `agent:${process.id}`}
+                    style={`--agent-depth: ${row.depth}`}
+                    data-tree-row
+                    data-context-kind="agent"
+                    data-context-id={process.id}
+                    use:reorderItem={reorderOptions(process)}
+                    onclick={() => selectProcess(process)}
+                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                  >
+                    {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
+                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <span class="row-copy"><strong>{process.name}</strong></span>
+                    {#if row.rollup.total > 0 || stats}
+                      <span class="row-badges">
+                        {#if row.rollup.total > 0}
+                          <span
+                            class={`lineage-rollup ${lineageTone(row.rollup)}`}
+                            title={lineageTitle(row.rollup)}
+                            aria-label={lineageTitle(row.rollup)}
+                          >↳{row.rollup.total}</span>
+                        {/if}
+                        {#if stats?.descendant_count}
+                          <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
+                        {/if}
+                        {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
+                      </span>
+                    {/if}
+                  </button>
+                {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
               {/each}
@@ -422,18 +487,26 @@
             {:else if group === 'terminals'}
               {#each visibleTerminals as process (process.id)}
                 {@const stats = runtimeStats(process)}
-                <button
-                  type="button"
-                  class="tree-row"
-                  class:selected={selection?.key === `terminal:${process.id}`}
-                  data-tree-row
-                  use:reorderItem={reorderOptions(process)}
-                  onclick={() => selectProcess(process)}
-                >
-                  <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
-                  <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
-                  {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
-                </button>
+                {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
+                  <InlineTreeRename value={process.name} label="Terminal name" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
+                  <button
+                    type="button"
+                    class="tree-row"
+                    class:selected={selection?.key === `terminal:${process.id}`}
+                    data-tree-row
+                    data-context-kind="terminal"
+                    data-context-id={process.id}
+                    use:reorderItem={reorderOptions(process)}
+                    onclick={() => selectProcess(process)}
+                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                  >
+                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
+                    {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
+                  </button>
+                {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching terminals' : 'No terminals'}</p>
               {/each}
@@ -441,35 +514,51 @@
             {:else if group === 'commands'}
               {#each visibleCommands as process (process.id)}
                 {@const stats = runtimeStats(process)}
-                <button
-                  type="button"
-                  class="tree-row command-row"
-                  class:selected={selection?.key === `command:${process.id}`}
-                  data-tree-row
-                  use:reorderItem={reorderOptions(process)}
-                  onclick={() => selectProcess(process)}
-                >
-                  <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
-                  <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
-                  <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}{#if !isRunning(process)}<span class="run-hint">Run</span>{/if}</span>
-                </button>
+                {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
+                  <InlineTreeRename value={process.name} label="Command name" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
+                  <button
+                    type="button"
+                    class="tree-row command-row"
+                    class:selected={selection?.key === `command:${process.id}`}
+                    data-tree-row
+                    data-context-kind="command"
+                    data-context-id={process.id}
+                    use:reorderItem={reorderOptions(process)}
+                    onclick={() => selectProcess(process)}
+                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                  >
+                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
+                    <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}{#if !isRunning(process)}<span class="run-hint">Run</span>{/if}</span>
+                  </button>
+                {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching commands' : 'No commands in gbuild.yml'}</p>
               {/each}
               <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
             {:else}
               {#each visibleScratchpads as scratchpad (scratchpad.id)}
-                <button
-                  type="button"
-                  class="tree-row"
-                  class:selected={selection?.key === `scratchpad:${scratchpad.id}`}
-                  data-tree-row
-                  onclick={() => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name))}
-                >
-                  <span class="attention-dot note" aria-hidden="true">≡</span>
-                  <span class="row-copy"><strong>{scratchpad.name}</strong></span>
-                  <span class="row-meta">r{scratchpad.revision}</span>
-                </button>
+                {#if renameTarget?.kind === 'scratchpad' && renameTarget.scratchpad.id === scratchpad.id}
+                  <InlineTreeRename value={scratchpad.name} label="Scratchpad name" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
+                  <button
+                    type="button"
+                    class="tree-row"
+                    class:selected={selection?.key === `scratchpad:${scratchpad.id}`}
+                    data-tree-row
+                    data-context-kind="scratchpad"
+                    data-context-id={scratchpad.id}
+                    onclick={() => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name))}
+                    oncontextmenu={(event) => openPointerMenu(event, scratchpadTarget(scratchpad))}
+                    onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
+                  >
+                    <span class="attention-dot note" aria-hidden="true">≡</span>
+                    <span class="row-copy"><strong>{scratchpad.name}</strong></span>
+                    <span class="row-meta">r{scratchpad.revision}</span>
+                  </button>
+                {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching scratchpads' : 'No scratchpads'}</p>
               {/each}

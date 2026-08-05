@@ -7,6 +7,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { onMount } from 'svelte';
 
+  import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
 
   let {
@@ -129,6 +130,11 @@
     terminal = instance;
     scheduleFit();
     instance.focus();
+    const focusRequested = (event: Event) => {
+      const detail = (event as CustomEvent<{ processId?: number }>).detail;
+      if (detail?.processId === process.id) instance.focus();
+    };
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
 
     return () => {
       flushInput();
@@ -137,6 +143,7 @@
       removeTerminalListener();
       dataDisposable.dispose();
       binaryDisposable.dispose();
+      window.removeEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
       void client.detachTerminal().catch(() => undefined);
       instance.dispose();
       terminal = null;

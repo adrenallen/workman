@@ -246,6 +246,9 @@ async fn dispatch(
     }
 
     let mut registry = registry.lock().await;
+    if let Some(result) = crate::context_actions::dispatch(method, params.clone(), &mut registry) {
+        return result;
+    }
     if let Some(result) = crate::coordination::dispatch(method, params.clone(), registry.store()) {
         return result;
     }

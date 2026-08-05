@@ -66,6 +66,21 @@ struct CreateScratchpadParams {
     tags: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RenameScratchpadParams {
+    project_id: ProjectId,
+    scratchpad_id: ScratchpadId,
+    name: String,
+    expected_revision: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScratchpadRevisionParams {
+    project_id: ProjectId,
+    scratchpad_id: ScratchpadId,
+    expected_revision: i64,
+}
+
 /// Returns `None` when `method` belongs to another control module.
 pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<ControlResult> {
     match method {
@@ -76,6 +91,9 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.todo_comment" => Some(todo_comment(params, store)),
         "coordination.scratchpad" => Some(scratchpad_read(params, store)),
         "coordination.scratchpad_create" => Some(scratchpad_create(params, store)),
+        "coordination.scratchpad_rename" => Some(scratchpad_rename(params, store)),
+        "coordination.scratchpad_archive" => Some(scratchpad_archive(params, store)),
+        "coordination.scratchpad_delete" => Some(scratchpad_delete(params, store)),
         _ => None,
     }
 }
@@ -213,6 +231,48 @@ fn scratchpad_create(params: Value, store: &Store) -> ControlResult {
             None,
         )
         .map(|(scratchpad, _)| json_value(scratchpad))
+        .map_err(scratchpad_error)
+}
+
+fn scratchpad_rename(params: Value, store: &Store) -> ControlResult {
+    let params: RenameScratchpadParams = params_as(params)?;
+    ScratchpadService::new(store)
+        .rename(
+            params.project_id,
+            params.scratchpad_id,
+            params.name,
+            params.expected_revision,
+        )
+        .map(json_value)
+        .map_err(scratchpad_error)
+}
+
+fn scratchpad_archive(params: Value, store: &Store) -> ControlResult {
+    let params: ScratchpadRevisionParams = params_as(params)?;
+    ScratchpadService::new(store)
+        .archive(
+            params.project_id,
+            params.scratchpad_id,
+            Some(params.expected_revision),
+        )
+        .map(json_value)
+        .map_err(scratchpad_error)
+}
+
+fn scratchpad_delete(params: Value, store: &Store) -> ControlResult {
+    let params: ScratchpadRevisionParams = params_as(params)?;
+    ScratchpadService::new(store)
+        .delete(
+            params.project_id,
+            params.scratchpad_id,
+            params.expected_revision,
+        )
+        .map(|()| {
+            json!({
+                "scratchpad_id": params.scratchpad_id,
+                "deleted": true,
+            })
+        })
         .map_err(scratchpad_error)
 }
 

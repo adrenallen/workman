@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
+  import ContextMenu from './lib/ContextMenu.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
@@ -20,6 +21,16 @@
     TodoDetail,
     TodoPriority
   } from './lib/coordination';
+  import {
+    contextMenuRequest,
+    describeContextMenu,
+    focusTerminalInput,
+    keyboardContextMenuRequest,
+    openWorkspacePath,
+    type ContextActionId,
+    type ContextMenuRequest,
+    type ContextMenuTarget
+  } from './lib/contextMenu';
   import {
     DaemonClient,
     isUnsupportedControlMethod,
@@ -113,6 +124,8 @@
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
   let processReorderBusy = $state(false);
+  let contextRequest = $state<ContextMenuRequest | null>(null);
+  let treeRenameTarget = $state<ContextMenuTarget | null>(null);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
@@ -126,6 +139,9 @@
     ...processes.filter((process) => process.kind === 'command')
   ]);
   let frameItemLabel = $derived(settingsOpen ? 'Settings' : (selection?.label ?? 'Project'));
+  let contextMenuDescriptor = $derived(
+    contextRequest ? describeContextMenu(contextRequest.target) : null
+  );
   let versionSkew = $derived(
     connection.status === 'connected' && !connection.version_compatible
   );
@@ -237,6 +253,10 @@
 
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
+    if (contextRequest) {
+      if (event.key === 'Escape') closeContextMenu();
+      return;
+    }
     if (event.metaKey && !event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       if (quickJumpOpen) closeQuickJump();
@@ -839,6 +859,281 @@
     }
   }
 
+  function showContextMenu(request: ContextMenuRequest): void {
+    treeRenameTarget = null;
+    contextRequest = request;
+  }
+
+  function showProjectPointerMenu(event: MouseEvent, project: Project): void {
+    showContextMenu(contextMenuRequest(event, { kind: 'project', project }));
+  }
+
+  function showProjectKeyboardMenu(event: KeyboardEvent, project: Project): void {
+    const request = keyboardContextMenuRequest(event, { kind: 'project', project });
+    if (request) showContextMenu(request);
+  }
+
+  function closeContextMenu(): void {
+    const restoreFocus = contextRequest?.restoreFocus ?? null;
+    contextRequest = null;
+    if (restoreFocus) {
+      queueMicrotask(() => {
+        if (restoreFocus.isConnected) restoreFocus.focus();
+      });
+    }
+  }
+
+  function selectedContextTarget(): ContextMenuTarget | null {
+    if (!selection) return null;
+    if (selectedProcess) {
+      return { kind: 'process', process: selectedProcess, selection };
+    }
+    if (selection.kind === 'todo') {
+      const todo = coordination?.todos.find((candidate) => candidate.id === selection?.id)
+        ?? todoDetail?.todo;
+      return todo ? { kind: 'todo', todo, selection } : null;
+    }
+    if (selection.kind === 'scratchpad') {
+      const scratchpad = coordination?.scratchpads.find(
+        (candidate) => candidate.id === selection?.id
+      ) ?? scratchpadRead?.scratchpad;
+      return scratchpad ? { kind: 'scratchpad', scratchpad, selection } : null;
+    }
+    return null;
+  }
+
+  function showViewerContextMenu(event: MouseEvent): void {
+    const target = selectedContextTarget();
+    if (target) showContextMenu(contextMenuRequest(event, target));
+  }
+
+  async function runContextAction(action: ContextActionId): Promise<void> {
+    const request = contextRequest;
+    contextRequest = null;
+    if (!request) return;
+    const target = request.target;
+
+    try {
+      if (target.kind === 'project') {
+        await runProjectContextAction(action, target);
+      } else if (target.kind === 'process') {
+        await runProcessContextAction(action, target);
+      } else if (target.kind === 'todo') {
+        await runTodoContextAction(action, target);
+      } else {
+        await runScratchpadContextAction(action, target);
+      }
+    } catch (cause) {
+      reportError(cause);
+    }
+  }
+
+  async function runProjectContextAction(
+    action: ContextActionId,
+    target: Extract<ContextMenuTarget, { kind: 'project' }>
+  ): Promise<void> {
+    const project = target.project;
+    switch (action) {
+      case 'select':
+        appNavigation.navigate({ type: 'project', projectId: project.id }, 'context-menu');
+        return;
+      case 'rename':
+        beginRename(project);
+        return;
+      case 'start-all-commands':
+      case 'stop-all-commands': {
+        const method = action === 'start-all-commands'
+          ? 'process.start_all_commands'
+          : 'process.stop_all_commands';
+        const result = await client.control<{
+          failures: Array<{ process_id: number; message: string }>;
+        }>(method, { project_id: project.id });
+        if (selectedProject?.id === project.id) await refreshProcesses(project.id);
+        if (result.failures.length > 0) {
+          throw new Error(result.failures.map((failure) => failure.message).join('; '));
+        }
+        return;
+      }
+      case 'remove-project':
+        if (!window.confirm(`Remove ${projectLabel(project)} from gbuild? Files stay on disk.`)) return;
+        await client.control('projects.remove', {
+          project_id: project.id,
+          confirm_remove: true
+        });
+        projects = await client.projects();
+        return;
+      case 'open-in-editor':
+        await openWorkspacePath(project.path, 'editor');
+        return;
+      case 'open-in-finder':
+        await openWorkspacePath(project.path, 'finder');
+        return;
+      case 'copy-path':
+        await navigator.clipboard.writeText(project.path);
+        return;
+      default:
+        return;
+    }
+  }
+
+  async function runProcessContextAction(
+    action: ContextActionId,
+    target: Extract<ContextMenuTarget, { kind: 'process' }>
+  ): Promise<void> {
+    const process = target.process;
+    switch (action) {
+      case 'start':
+        if (process.source === 'yml' && process.trust_hash === null) {
+          await openTrustReview(process);
+        } else {
+          await startProcess(process);
+        }
+        return;
+      case 'stop':
+        await client.stopProcess(process.id);
+        await refreshProcesses(process.project_id);
+        return;
+      case 'restart':
+        await client.restartProcess(process.id);
+        await refreshProcesses(process.project_id);
+        return;
+      case 'kill':
+        if (!window.confirm(`Kill ${process.name} immediately? Unsaved terminal state may be lost.`)) return;
+        await client.control('process.kill', { process_id: process.id, confirm_kill: true });
+        await refreshProcesses(process.project_id);
+        return;
+      case 'close':
+        if (!window.confirm(`Close ${process.name}? Its saved terminal entry will be removed.`)) return;
+        await client.closeProcess(process.id);
+        if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
+        await refreshProcesses(process.project_id);
+        return;
+      case 'rename':
+        treeRenameTarget = target;
+        return;
+      case 'copy-name':
+        await navigator.clipboard.writeText(process.name);
+        return;
+      case 'copy-id':
+        await navigator.clipboard.writeText(String(process.id));
+        return;
+      case 'send-prompt':
+        appNavigation.navigate({ type: 'item', selection: target.selection }, 'context-menu');
+        setTimeout(() => focusTerminalInput(process.id), 80);
+        return;
+      case 'view-parent': {
+        const parent = processes.find(
+          (candidate) => candidate.id === process.spawned_by_process_id
+        );
+        if (!parent) throw new Error('The parent agent is no longer open');
+        appNavigation.navigate(
+          {
+            type: 'item',
+            selection: projectTreeSelection(
+              parent.kind,
+              parent.id,
+              parent.project_id,
+              processLabel(parent)
+            )
+          },
+          'context-menu'
+        );
+        return;
+      }
+      case 'reveal-config':
+        await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/gbuild.yml`, 'reveal');
+        return;
+      default:
+        return;
+    }
+  }
+
+  async function runTodoContextAction(
+    action: ContextActionId,
+    target: Extract<ContextMenuTarget, { kind: 'todo' }>
+  ): Promise<void> {
+    if (action === 'copy-title') {
+      await navigator.clipboard.writeText(target.todo.title);
+      return;
+    }
+    if (action !== 'complete-todo' && action !== 'reopen-todo') return;
+    const completed = action === 'complete-todo';
+    await client.coordinationTodoComplete(
+      target.selection.projectId,
+      target.todo.id,
+      completed
+    );
+    await refreshCoordination(target.selection.projectId, false);
+    if (selection?.kind === 'todo' && selection.id === target.todo.id) {
+      await loadTodo(target.todo.id);
+    }
+  }
+
+  async function runScratchpadContextAction(
+    action: ContextActionId,
+    target: Extract<ContextMenuTarget, { kind: 'scratchpad' }>
+  ): Promise<void> {
+    if (action === 'rename') {
+      treeRenameTarget = target;
+      return;
+    }
+    if (action !== 'archive-scratchpad' && action !== 'delete-scratchpad') return;
+    if (action === 'delete-scratchpad'
+      && !window.confirm(`Delete ${target.scratchpad.name}? This cannot be undone.`)) return;
+
+    const method = action === 'archive-scratchpad'
+      ? 'coordination.scratchpad_archive'
+      : 'coordination.scratchpad_delete';
+    await client.control(method, {
+      project_id: target.selection.projectId,
+      scratchpad_id: target.scratchpad.id,
+      expected_revision: target.scratchpad.revision
+    });
+    if (selection?.kind === 'scratchpad' && selection.id === target.scratchpad.id) clearSelection();
+    await refreshCoordination(target.selection.projectId, false);
+  }
+
+  async function commitTreeRename(name: string): Promise<void> {
+    const target = treeRenameTarget;
+    treeRenameTarget = null;
+    if (!target) return;
+    try {
+      if (target.kind === 'process') {
+        const process = await client.control<ProcessView>('process.rename', {
+          process_id: target.process.id,
+          name
+        });
+        await refreshProcesses(process.project_id);
+        if (selection?.id === process.id && isProcessSelection(selection)) {
+          selection = projectTreeSelection(
+            process.kind,
+            process.id,
+            process.project_id,
+            processLabel(process)
+          );
+        }
+      } else if (target.kind === 'scratchpad') {
+        await client.control('coordination.scratchpad_rename', {
+          project_id: target.selection.projectId,
+          scratchpad_id: target.scratchpad.id,
+          name,
+          expected_revision: target.scratchpad.revision
+        });
+        await refreshCoordination(target.selection.projectId, false);
+        if (selection?.kind === 'scratchpad' && selection.id === target.scratchpad.id) {
+          selection = { ...selection, label: name };
+          await loadScratchpad(target.scratchpad.id);
+        }
+      }
+    } catch (cause) {
+      reportError(cause);
+    }
+  }
+
+  function projectForProcess(process: ProcessView): Project | undefined {
+    return projects.find((project) => project.id === process.project_id);
+  }
+
   function focusRename(node: HTMLInputElement): void {
     queueMicrotask(() => { node.focus(); node.select(); });
   }
@@ -966,6 +1261,10 @@
                 onKeyboardMove: moveProjectFromKeyboard
               }}
               onclick={() => selectProject(project)}
+              oncontextmenu={(event) => showProjectPointerMenu(event, project)}
+              onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+              data-context-kind="project"
+              data-context-id={project.id}
             >
               <span class="status-dot" class:error={project.status === 'error'} class:running={project.status === 'running'} aria-hidden="true"></span>
               <span class="project-glyph" aria-hidden="true">{projectLabel(project).slice(0, 1).toUpperCase()}</span>
@@ -1014,6 +1313,10 @@
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
+        renameTarget={treeRenameTarget}
+        onContextMenu={showContextMenu}
+        onRenameSubmit={(name) => void commitTreeRename(name)}
+        onRenameCancel={() => (treeRenameTarget = null)}
       />
       {#if !treeRailCollapsed}
         <button
@@ -1043,7 +1346,12 @@
       {#if error}
         <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
       {/if}
-      <div class="item-viewer">
+      <div
+        class="item-viewer"
+        role="region"
+        aria-label={`${frameItemLabel} detail`}
+        oncontextmenu={showViewerContextMenu}
+      >
         {#if settingsOpen}
           <SettingsPanel {client} project={selectedProject} {connection} onError={reportError} />
         {:else if selectedProcess}
@@ -1078,6 +1386,18 @@
     {/if}
   </section>
 </main>
+
+{#if contextRequest && contextMenuDescriptor}
+  <ContextMenu
+    x={contextRequest.x}
+    y={contextRequest.y}
+    title={contextMenuDescriptor.title}
+    subtitle={contextMenuDescriptor.subtitle}
+    items={contextMenuDescriptor.items}
+    onSelect={(action) => void runContextAction(action)}
+    onClose={closeContextMenu}
+  />
+{/if}
 
 {#if quickJumpOpen}
   <QuickJumpPalette
