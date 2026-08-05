@@ -6,8 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentTool, Process, ProcessId, ProcessKind, Project, ProjectId, ProjectLock, Scratchpad,
-    Timer, Todo, TodoBlocker, TodoComment, TodoId,
+    Actor, AgentTool, Process, ProcessId, ProcessKind, Project, ProjectId, ProjectLock,
+    ProjectWorktree, Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
+    WorktreeRepositoryId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -42,10 +43,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sort_order",
         include_str!("../migrations/0007_sort_order.sql"),
     ),
+    (
+        8,
+        "worktrees",
+        include_str!("../migrations/0008_worktrees.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -296,6 +302,156 @@ impl Store {
             .connection
             .execute("DELETE FROM projects WHERE id = ?1", [id])?
             > 0)
+    }
+
+    pub fn put_worktree_repository(&self, repository: &WorktreeRepository) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO worktree_repositories (id, root_path, name, managed_root)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                root_path = excluded.root_path,
+                name = excluded.name,
+                managed_root = excluded.managed_root",
+            params![
+                repository.id,
+                repository.root_path,
+                repository.name,
+                repository.managed_root,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn next_worktree_repository_id(&self) -> StoreResult<WorktreeRepositoryId> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM worktree_repositories",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn get_worktree_repository(
+        &self,
+        id: WorktreeRepositoryId,
+    ) -> StoreResult<Option<WorktreeRepository>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, root_path, name, managed_root
+                 FROM worktree_repositories WHERE id = ?1",
+                [id],
+                worktree_repository_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn get_worktree_repository_by_root(
+        &self,
+        root_path: &str,
+    ) -> StoreResult<Option<WorktreeRepository>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, root_path, name, managed_root
+                 FROM worktree_repositories WHERE root_path = ?1",
+                [root_path],
+                worktree_repository_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_worktree_repositories(&self) -> StoreResult<Vec<WorktreeRepository>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, root_path, name, managed_root
+             FROM worktree_repositories ORDER BY id",
+        )?;
+        Ok(statement
+            .query_map([], worktree_repository_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn put_project_worktree(&self, link: &ProjectWorktree) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO project_worktrees
+                (project_id, repository_id, parent_project_id, branch, managed)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(project_id) DO UPDATE SET
+                repository_id = excluded.repository_id,
+                parent_project_id = excluded.parent_project_id,
+                branch = excluded.branch,
+                managed = excluded.managed",
+            params![
+                link.project_id,
+                link.repository_id,
+                link.parent_project_id,
+                link.branch,
+                link.managed,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_project_worktree(
+        &self,
+        project_id: ProjectId,
+    ) -> StoreResult<Option<ProjectWorktree>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT project_id, repository_id, parent_project_id, branch, managed
+                 FROM project_worktrees WHERE project_id = ?1",
+                [project_id],
+                project_worktree_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_project_worktrees(
+        &self,
+        repository_id: WorktreeRepositoryId,
+    ) -> StoreResult<Vec<ProjectWorktree>> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, repository_id, parent_project_id, branch, managed
+             FROM project_worktrees WHERE repository_id = ?1 ORDER BY project_id",
+        )?;
+        Ok(statement
+            .query_map([repository_id], project_worktree_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn set_worktree_preference(
+        &self,
+        repository_id: WorktreeRepositoryId,
+        key: &str,
+        value: Option<&str>,
+    ) -> StoreResult<()> {
+        if let Some(value) = value {
+            self.connection.execute(
+                "INSERT INTO worktree_preferences (repository_id, key, value)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(repository_id, key) DO UPDATE SET value = excluded.value",
+                params![repository_id, key, value],
+            )?;
+        } else {
+            self.connection.execute(
+                "DELETE FROM worktree_preferences WHERE repository_id = ?1 AND key = ?2",
+                params![repository_id, key],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn worktree_preferences(
+        &self,
+        repository_id: WorktreeRepositoryId,
+    ) -> StoreResult<std::collections::BTreeMap<String, String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT key, value FROM worktree_preferences
+             WHERE repository_id = ?1 ORDER BY key",
+        )?;
+        Ok(statement
+            .query_map([repository_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?)
     }
 
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
@@ -1035,6 +1191,25 @@ fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {
         agent_tool_id: row.get(17)?,
         spawned_by_process_id: row.get(18)?,
         sort_order: row.get(19)?,
+    })
+}
+
+fn worktree_repository_from_row(row: &Row<'_>) -> rusqlite::Result<WorktreeRepository> {
+    Ok(WorktreeRepository {
+        id: row.get(0)?,
+        root_path: row.get(1)?,
+        name: row.get(2)?,
+        managed_root: row.get(3)?,
+    })
+}
+
+fn project_worktree_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectWorktree> {
+    Ok(ProjectWorktree {
+        project_id: row.get(0)?,
+        repository_id: row.get(1)?,
+        parent_project_id: row.get(2)?,
+        branch: row.get(3)?,
+        managed: row.get(4)?,
     })
 }
 

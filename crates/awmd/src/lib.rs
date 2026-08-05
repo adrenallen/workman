@@ -51,6 +51,7 @@ mod timers;
 mod updates;
 mod user_config;
 mod version;
+pub mod worktrees;
 
 pub use config::{
     AWM_CONFIG_FILE, AwmConfig, ConfigError, LEGACY_GBUILD_CONFIG_FILE, SyncReport,
@@ -176,6 +177,9 @@ impl DaemonServer {
                 format!("{}: {error}", user_config_path.display()),
             )
         })?;
+        if let Err(error) = worktrees::reconcile_existing_projects(&store) {
+            eprintln!("awm daemon: worktree metadata reconciliation skipped: {error}");
+        }
         let registry = Arc::new(Mutex::new(
             ProcessRegistry::with_output_persistence(
                 store,

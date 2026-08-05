@@ -36,9 +36,11 @@ mod tools_readiness;
 mod tools_scratchpad;
 mod tools_timer;
 mod tools_todo;
+mod tools_worktree;
 
 pub const AWM_MCP_TOKEN_HEADER: &str = "x-awm-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in awm scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
+pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and worktree_create when parallel or isolated work should live on its own branch; each managed worktree becomes a separate awm project.";
 
 #[derive(Clone)]
 pub struct AwmMcp {
@@ -62,6 +64,7 @@ impl AwmMcp {
         tool_router.merge(Self::lock_tool_router());
         tool_router.merge(Self::scratchpad_tool_router());
         tool_router.merge(Self::timer_tool_router());
+        tool_router.merge(Self::worktree_tool_router());
         Self {
             registry,
             mcp_url,
@@ -283,6 +286,7 @@ impl AwmMcp {
                 "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Delete always requires confirm_delete and active processes require confirm_stop_running."
             }
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
+            "worktrees" => WORKTREE_AGENT_GUIDANCE,
             "tools" => "Use mcp_tools_summary for the complete core tool list.",
             other => {
                 return failure(
@@ -323,7 +327,10 @@ impl AwmMcp {
     async fn list_projects(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
         match registry.store().list_projects() {
-            Ok(projects) => success(json!({ "projects": projects })),
+            Ok(projects) => match crate::worktrees::project_envelopes(registry.store(), projects) {
+                Ok(projects) => success(json!({ "projects": projects })),
+                Err(error) => failure(error.code(), error.to_string()),
+            },
             Err(error) => failure("store_error", error.to_string()),
         }
     }
@@ -354,7 +361,10 @@ impl AwmMcp {
         if let Err(error) = registry.store().put_actor(&actor) {
             return failure("store_error", error.to_string());
         }
-        success(json!({ "project": project, "actor_id": actor.id }))
+        match crate::worktrees::project_envelope(registry.store(), project) {
+            Ok(project) => success(json!({ "project": project, "actor_id": actor.id })),
+            Err(error) => failure(error.code(), error.to_string()),
+        }
     }
 
     #[tool(description = "Get the effective or explicitly requested project")]
@@ -365,7 +375,11 @@ impl AwmMcp {
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
         match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok((project, _)) => success(project),
+            Ok((project, _)) => match crate::worktrees::project_envelope(registry.store(), project)
+            {
+                Ok(project) => success(project),
+                Err(error) => failure(error.code(), error.to_string()),
+            },
             Err(error) => failure("project_scope_error", error),
         }
     }
@@ -381,7 +395,11 @@ impl AwmMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match registry.list_statuses(Some(project.id)) {
+        let project = match crate::worktrees::project_envelope(registry.store(), project) {
+            Ok(project) => project,
+            Err(error) => return failure(error.code(), error.to_string()),
+        };
+        match registry.list_statuses(Some(project.project.id)) {
             Ok(processes) => success(json!({ "project": project, "processes": processes })),
             Err(error) => failure(error.code(), error.to_string()),
         }
@@ -441,7 +459,10 @@ impl AwmMcp {
                     .into_iter()
                     .find(|project| project.path == canonical)
                 {
-                    return success(project);
+                    return match crate::worktrees::project_envelope(registry.store(), project) {
+                        Ok(project) => success(project),
+                        Err(error) => failure(error.code(), error.to_string()),
+                    };
                 }
             }
             Err(error) => return failure("store_error", error.to_string()),
@@ -462,7 +483,13 @@ impl AwmMcp {
             },
         };
         match registry.store().put_project(&project) {
-            Ok(()) => success(project),
+            Ok(()) => {
+                let _ = crate::worktrees::reconcile_existing_projects(registry.store());
+                match crate::worktrees::project_envelope(registry.store(), project) {
+                    Ok(project) => success(project),
+                    Err(error) => failure(error.code(), error.to_string()),
+                }
+            }
             Err(error) => failure("project_create_failed", error.to_string()),
         }
     }
@@ -483,7 +510,10 @@ impl AwmMcp {
         };
         project.name = args.name;
         match registry.store().put_project(&project) {
-            Ok(()) => success(project),
+            Ok(()) => match crate::worktrees::project_envelope(registry.store(), project) {
+                Ok(project) => success(project),
+                Err(error) => failure(error.code(), error.to_string()),
+            },
             Err(error) => failure("project_rename_failed", error.to_string()),
         }
     }

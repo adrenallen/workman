@@ -1,6 +1,10 @@
 //! JSON request dispatch for the authenticated WebSocket control channel.
 
-use std::{path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use awm_core::{
     AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
@@ -81,6 +85,46 @@ struct ProjectReorderParams {
     ordered_ids: Vec<ProjectId>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct WorktreeScopeParams {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeCreateParams {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    branch: String,
+    #[serde(default)]
+    from_ref: Option<String>,
+    #[serde(default)]
+    managed_root: Option<String>,
+    #[serde(default)]
+    preferences: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorktreeAdoptParams {
+    path: String,
+    #[serde(default)]
+    preferences: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorktreeRemoveParams {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    #[serde(default)]
+    confirm_remove: bool,
+    #[serde(default)]
+    confirm_stop_running: bool,
+    #[serde(default)]
+    force_dirty: bool,
+    #[serde(default)]
+    confirm_branch: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ProcessReorderParams {
     project_id: ProjectId,
@@ -92,6 +136,11 @@ struct ProcessReorderParams {
 struct ProjectSummary {
     #[serde(flatten)]
     project: Project,
+    repository_id: Option<i64>,
+    repository_root: Option<String>,
+    parent_project_id: Option<ProjectId>,
+    branch: Option<String>,
+    worktree_managed: bool,
     status: &'static str,
 }
 
@@ -228,6 +277,61 @@ async fn dispatch(
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
+        "worktree.list" | "worktree_list" => {
+            let params: WorktreeScopeParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::list_for_project(registry, project_id)
+                .await
+                .map(json_value)
+                .map_err(worktree_error);
+        }
+        "worktree.create" | "worktree_create" => {
+            let params: WorktreeCreateParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::create(
+                registry,
+                crate::worktrees::CreateWorktree {
+                    source_project_id: project_id,
+                    branch: params.branch,
+                    from_ref: params.from_ref,
+                    managed_root: params.managed_root.map(PathBuf::from),
+                    preferences: params.preferences,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
+        "worktree.adopt" | "worktree_adopt" => {
+            let params: WorktreeAdoptParams = params_as(params)?;
+            return crate::worktrees::adopt(
+                registry,
+                crate::worktrees::AdoptWorktree {
+                    path: PathBuf::from(params.path),
+                    preferences: params.preferences,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
+        "worktree.remove" | "worktree_remove" => {
+            let params: WorktreeRemoveParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::remove(
+                registry,
+                crate::worktrees::RemoveWorktree {
+                    project_id,
+                    confirm_remove: params.confirm_remove,
+                    confirm_stop_running: params.confirm_stop_running,
+                    force_dirty: params.force_dirty,
+                    confirm_branch: params.confirm_branch,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
         "services.list" => {
             let params: ListParams = params_as(params)?;
             return readiness
@@ -328,6 +432,7 @@ async fn dispatch(
         "projects.register" => {
             let params: RegisterProjectParams = params_as(params)?;
             register_project(registry.store(), &params.path)?;
+            let _ = crate::worktrees::reconcile_existing_projects(registry.store());
             return project_result(list_projects(registry.store()));
         }
         "projects.select" => {
@@ -792,29 +897,7 @@ fn rename_project(
 }
 
 fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, String)> {
-    let mut statement = store
-        .connection()
-        .prepare(
-            "SELECT id, path, name, display_name, icon, selected, sort_order
-             FROM projects
-             ORDER BY sort_order, id",
-        )
-        .map_err(project_store_error)?;
-    let projects = statement
-        .query_map([], |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                name: row.get(2)?,
-                display_name: row.get(3)?,
-                icon: row.get(4)?,
-                selected: row.get(5)?,
-                sort_order: row.get(6)?,
-            })
-        })
-        .map_err(project_store_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(project_store_error)?;
+    let projects = store.list_projects().map_err(project_store_error)?;
 
     projects
         .into_iter()
@@ -837,9 +920,52 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
             } else {
                 "idle"
             };
-            Ok(ProjectSummary { project, status })
+            let envelope =
+                crate::worktrees::project_envelope(store, project).map_err(worktree_error)?;
+            Ok(ProjectSummary {
+                project: envelope.project,
+                repository_id: envelope.repository_id,
+                repository_root: envelope.repository_root,
+                parent_project_id: envelope.parent_project_id,
+                branch: envelope.branch,
+                worktree_managed: envelope.worktree_managed,
+                status,
+            })
         })
         .collect()
+}
+
+async fn control_worktree_project_id(
+    registry: &SharedProcessRegistry,
+    explicit: Option<ProjectId>,
+) -> Result<ProjectId, (&'static str, String)> {
+    let registry = registry.lock().await;
+    if let Some(project_id) = explicit {
+        return registry
+            .store()
+            .get_project(project_id)
+            .map_err(project_store_error)?
+            .map(|project| project.id)
+            .ok_or((
+                "project_not_found",
+                format!("project {project_id} was not found"),
+            ));
+    }
+    registry
+        .store()
+        .list_projects()
+        .map_err(project_store_error)?
+        .into_iter()
+        .find(|project| project.selected)
+        .map(|project| project.id)
+        .ok_or((
+            "project_scope_error",
+            "no project_id was supplied and no project is selected".to_owned(),
+        ))
+}
+
+fn worktree_error(error: crate::worktrees::WorktreeError) -> (&'static str, String) {
+    (error.code(), error.to_string())
 }
 
 fn project_store_error(error: impl std::fmt::Display) -> (&'static str, String) {

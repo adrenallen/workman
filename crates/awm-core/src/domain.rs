@@ -9,6 +9,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 
 pub type ProjectId = i64;
+pub type WorktreeRepositoryId = i64;
 pub type ProcessId = i64;
 pub type AgentToolId = i64;
 pub type TodoId = i64;
@@ -180,6 +181,28 @@ pub struct Project {
     pub selected: bool,
     #[serde(default)]
     pub sort_order: i64,
+}
+
+/// One Git repository shared by a main checkout and its linked worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRepository {
+    pub id: WorktreeRepositoryId,
+    /// Canonical path of Git's first/main worktree.
+    pub root_path: String,
+    pub name: String,
+    /// Canonical parent directory used for awm-managed worktrees.
+    pub managed_root: String,
+}
+
+/// Git relationship metadata for a registered awm project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectWorktree {
+    pub project_id: ProjectId,
+    pub repository_id: WorktreeRepositoryId,
+    pub parent_project_id: Option<ProjectId>,
+    pub branch: String,
+    /// True only when awm (or the faithfully detected SWM predecessor) owns removal.
+    pub managed: bool,
 }
 
 /// Configuration for one supported coding-agent command.

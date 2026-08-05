@@ -7,8 +7,8 @@ use std::{
 
 use awm_core::{
     Actor, AgentTool, AgentToolSource, LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource,
-    ProcessStatus, Project, ProjectLock, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker,
-    TodoComment, TodoPriority, TodoStatus,
+    ProcessStatus, Project, ProjectLock, ProjectWorktree, Scratchpad, Store, Timer, TimerKind,
+    Todo, TodoBlocker, TodoComment, TodoPriority, TodoStatus, WorktreeRepository,
 };
 
 #[test]
@@ -51,6 +51,7 @@ fn fresh_database_migrates_to_current_schema() {
             "locks",
             "process_mcp_tokens",
             "processes",
+            "project_worktrees",
             "projects",
             "schema_migrations",
             "scratchpad_tags",
@@ -61,6 +62,8 @@ fn fresh_database_migrates_to_current_schema() {
             "todo_comments",
             "todo_tags",
             "todos",
+            "worktree_preferences",
+            "worktree_repositories",
         ]
     );
     drop(statement);
@@ -132,6 +135,45 @@ fn file_database_uses_wal() {
 }
 
 #[test]
+fn worktree_preferences_survive_store_reopen() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "awm-core-worktree-preferences-{}-{unique}.sqlite",
+        std::process::id()
+    ));
+    let repository = WorktreeRepository {
+        id: 4,
+        root_path: "/fixture/repository".into(),
+        name: "fixture".into(),
+        managed_root: "/fixture/worktrees".into(),
+    };
+
+    {
+        let store = Store::open(&path).expect("open file store");
+        store
+            .put_worktree_repository(&repository)
+            .expect("put repository");
+        store
+            .set_worktree_preference(repository.id, "env_policy", Some("copy"))
+            .expect("set preference");
+    }
+    {
+        let store = Store::open(&path).expect("reopen file store");
+        assert_eq!(
+            store.worktree_preferences(repository.id).unwrap(),
+            BTreeMap::from([("env_policy".into(), "copy".into())])
+        );
+    }
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(with_suffix(&path, "-wal"));
+    let _ = fs::remove_file(with_suffix(&path, "-shm"));
+}
+
+#[test]
 fn domain_records_round_trip_through_store() {
     let mut store = Store::open_in_memory().expect("open store");
 
@@ -151,6 +193,47 @@ fn domain_records_round_trip_through_store() {
     );
     assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
     assert_eq!(store.next_project_id().unwrap(), 2);
+
+    let repository = WorktreeRepository {
+        id: 1,
+        root_path: project.path.clone(),
+        name: "awm".into(),
+        managed_root: "/workspace/worktrees".into(),
+    };
+    store
+        .put_worktree_repository(&repository)
+        .expect("put worktree repository");
+    assert_eq!(
+        store.get_worktree_repository(repository.id).unwrap(),
+        Some(repository.clone())
+    );
+    assert_eq!(
+        store
+            .get_worktree_repository_by_root(&repository.root_path)
+            .unwrap(),
+        Some(repository.clone())
+    );
+    let worktree = ProjectWorktree {
+        project_id: project.id,
+        repository_id: repository.id,
+        parent_project_id: None,
+        branch: "main".into(),
+        managed: false,
+    };
+    store
+        .put_project_worktree(&worktree)
+        .expect("put project worktree");
+    assert_eq!(
+        store.get_project_worktree(project.id).unwrap(),
+        Some(worktree.clone())
+    );
+    store
+        .set_worktree_preference(repository.id, "copy_env", Some("yes"))
+        .expect("set worktree preference");
+    assert_eq!(
+        store.worktree_preferences(repository.id).unwrap(),
+        BTreeMap::from([("copy_env".into(), "yes".into())])
+    );
 
     let agent_tool = AgentTool {
         id: 2,
