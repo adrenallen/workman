@@ -4,23 +4,36 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
-- Renamed the product from awm to Workman: crates are now `workman-core`, `workmand`,
-  `workman-cli` (`wrk`), and `workman-desktop`; runtime configuration uses `WORKMAN_*` and the
-  MCP server/header identity is `workman` / `x-workman-mcp-token`.
-- Added a non-destructive first-run migration chain that prefers awm state and falls back to
-  gbuild, plus `workman.yml` compatibility reads for `awm.yml` and `gbuild.yml`.
+## 0.1.1 - 2026-08-05
 
-- Unified each platform's Workman app, `wrk` CLI, `workmand` daemon, installer, and human
-  getting-started guide into one download. The next release keeps root-level, awm-named binary
-  and desktop aliases as temporary v0.1.0 updater compatibility assets while new updaters read
-  `bin/` from the unified Workman archives.
-- Moved cross-platform release builds and prerelease publishing to one local command, leaving
-  GitHub Actions as a manual build-only fallback.
-- Added stable and latest update channels, prerelease-first publishing, and an explicit release
-  promotion command.
-- Made routine CI manual-only so builds run only when a maintainer requests them or pushes a
-  release tag.
-- Reduced release compilation work with a shared dist profile and default-branch Rust/npm caches.
+The first Workman release turns the awm preview into a more complete work manager, with a precise
+desktop design system, first-class Git worktrees, durable terminal history, and a migration-safe
+rename. Existing awm v0.1.0 installs can update directly to this release.
+
+### Highlights
+
+- Renamed the product from awm to Workman: the terminal command is now `wrk`, the daemon is
+  `workmand`, and runtime configuration uses `WORKMAN_*` with a `workman` MCP identity.
+- Added a non-destructive first-run migration chain that prefers existing awm state and falls back
+  to gbuild, while `workman.yml` retains warned read compatibility with `awm.yml` and `gbuild.yml`.
+- Added the one-release updater bridge and transitional awm-named assets required for real v0.1.0
+  clients to discover, checksum, and install the renamed Workman binaries.
+- Rebuilt the desktop on shadcn-svelte, bits-ui, Tailwind, semantic tokens, shared primitives, and
+  a legible dense type scale; added native macOS menus and a full Settings About/Updates section.
+- Added complete Git worktree management: repository grouping, create/adopt/remove, exact-HEAD
+  fork-again, Laravel Herd URLs, safe ignored `.env` porting, cached GitHub PR/check/merge status,
+  Runtime Doctor health checks, context actions, and Cmd+K flows.
+- Persisted bounded raw terminal and agent output across daemon restarts, replaying it through the
+  server-side terminal emulator so the UI, `wrk logs`, search, and MCP output retain history.
+- Unified the Workman app, `wrk`, `workmand`, installer, and getting-started guide into one archive
+  per platform, with Linux AppImage and Debian alternatives clearly marked experimental.
+
+### Release operations
+
+- Moved cross-platform release builds and prerelease publication to one local command, retaining
+  GitHub Actions only as a manual build-only fallback.
+- Added stable and latest update channels, prerelease-first publishing, explicit promotion, a
+  shared dist profile, and release-build caches.
 
 ## 0.1.0 - 2026-08-05
 

@@ -391,8 +391,9 @@ write_release_metadata() {
     printf -- '- **Linux x86_64 (portable, experimental):** `workman-linux-x86_64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
     printf -- '- **Linux arm64 (portable, experimental):** `workman-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
     printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
-    printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. The macOS app is unsigned, so its guide includes the Control-click and `xattr` first-run steps.\n\n'
-    printf '> The `awm-*.tar.gz` and `awm-desktop-*` files are one-release compatibility aliases solely so published v0.1.0 clients can make the hop and find the replacement desktop bundle. New installs must use the `workman-*` assets.\n\n'
+    printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. After extracting, install the CLI and daemon with `./install.sh`.\n\n'
+    printf '> **Unsigned macOS app:** if macOS quarantines the download, run `xattr -dr com.apple.quarantine Workman.app`, then Control-click Workman.app and choose Open.\n\n'
+    printf '> **Existing awm v0.1.0 users:** run `awm update` after this release is promoted, or `awm update --channel latest` while it is a prerelease. The `awm-*.tar.gz` and `awm-desktop-*` files are one-release compatibility aliases for that rename hop. New installs must use the `workman-*` assets.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"
   } > "$OUTPUT_DIR/release-notes.md"
