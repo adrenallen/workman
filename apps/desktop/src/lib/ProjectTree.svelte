@@ -37,6 +37,7 @@
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
+  import { todoClaimLabel, todoClaimState, todoClaimTone } from './todoPresentation';
   import {
     moveOrderedId,
     moveTreeOrderBlock,
@@ -57,6 +58,7 @@
     collapsed: boolean;
     onSelect: (selection: ProjectTreeSelection) => void;
     onCreateTodo: () => void;
+    onBrowseTodos: () => void;
     onAddAgent: () => void;
     onAddTerminal: () => void;
     onAddCommand: () => void;
@@ -80,6 +82,7 @@
     collapsed,
     onSelect,
     onCreateTodo,
+    onBrowseTodos,
     onAddAgent,
     onAddTerminal,
     onAddCommand,
@@ -272,12 +275,7 @@
   }
 
   function todoStatusLabel(todo: TodoSummary): string {
-    return `${todo.title} · ${todo.is_blocked ? 'blocked' : todo.status.replace('_', ' ')}`;
-  }
-
-  function todoStatusTone(todo: TodoSummary): 'success' | 'warning' | 'neutral' {
-    if (todo.is_blocked) return 'warning';
-    return todo.status === 'in_progress' ? 'success' : 'neutral';
+    return `${todo.title} · ${todoClaimLabel(todo)}`;
   }
 
   function groupCount(group: ProjectTreeGroup): string {
@@ -441,8 +439,8 @@
           data-tree-row
           data-group={group}
           aria-expanded={openGroups[group]}
-          title={collapsed ? groupLabel[group] : undefined}
-          onclick={() => toggleGroup(group)}
+          title={group === 'todos' ? 'Browse all todos · Left/Right collapses this group' : collapsed ? groupLabel[group] : undefined}
+          onclick={() => (group === 'todos' ? onBrowseTodos() : toggleGroup(group))}
         >
           <span class="caret" aria-hidden="true">
             {#if openGroups[group]}<ChevronDownIcon size={13} />{:else}<ChevronRightIcon size={13} />{/if}
@@ -458,8 +456,9 @@
               {#each visibleTodos as todo (todo.id)}
                 <button
                   type="button"
-                  class="tree-row"
+                  class="tree-row todo-row"
                   class:selected={selection?.key === `todo:${todo.id}`}
+                  data-todo-state={todoClaimState(todo)}
                   data-tree-row
                   data-context-kind="todo"
                   data-context-id={todo.id}
@@ -467,7 +466,8 @@
                   oncontextmenu={(event) => openPointerMenu(event, todoTarget(todo))}
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
-                  <StatusIndicator tone={todoStatusTone(todo)} label={todoStatusLabel(todo)} />
+                  <span class="todo-state-rail" aria-hidden="true"></span>
+                  <StatusIndicator tone={todoClaimTone(todo)} label={todoStatusLabel(todo)} />
                   <span class="row-copy"><strong>{todo.title}</strong></span>
                   {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
                 </button>
@@ -640,6 +640,14 @@
   .group-rows { padding: 0 4px 4px 13px; }
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
+  .todo-row { min-height: 24px; grid-template-columns: 2px 15px minmax(0, 1fr) auto; gap: 3px; padding-block: 1px; }
+  .todo-row .todo-state-rail { align-self: stretch; border-radius: 1px; background: var(--ring); }
+  .todo-row[data-todo-state='claimed'] .todo-state-rail { background: var(--warning); }
+  .todo-row[data-todo-state='blocked'] .todo-state-rail { background: var(--destructive); }
+  .todo-row[data-todo-state='completed'] .todo-state-rail { background: var(--muted-foreground); opacity: 0.6; }
+  .todo-row[data-todo-state='claimed'] { background: color-mix(in srgb, var(--warning) 5%, transparent); }
+  .todo-row[data-todo-state='blocked'] { background: color-mix(in srgb, var(--destructive) 6%, transparent); }
+  .todo-row .row-copy strong { font-size: var(--font-size-xs); font-weight: 570; }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
   .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
   .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }

@@ -25,6 +25,7 @@
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
   import TerminalView from './lib/TerminalView.svelte';
+  import TodoBrowser from './lib/TodoBrowser.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
   import WorktreeDialog from './lib/WorktreeDialog.svelte';
@@ -152,6 +153,7 @@
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
   let settingsOpen = $state(false);
+  let todoBrowserOpen = $state(false);
   let trustReview = $state<TrustReview | null>(null);
   let trustBusy = $state(false);
   let projectRailWidth = $state(238);
@@ -217,7 +219,9 @@
     ...processes.filter((process) => process.kind === 'terminal'),
     ...processes.filter((process) => process.kind === 'command')
   ]);
-  let frameItemLabel = $derived(settingsOpen ? 'Settings' : (selection?.label ?? 'Project'));
+  let frameItemLabel = $derived(
+    settingsOpen ? 'Settings' : todoBrowserOpen ? 'Todos' : (selection?.label ?? 'Project')
+  );
   let contextMenuDescriptor = $derived(
     contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
   );
@@ -237,6 +241,7 @@
       todoDetail = null;
       scratchpadRead = null;
       settingsOpen = false;
+      todoBrowserOpen = false;
       loadedProjectId = null;
       return;
     }
@@ -248,6 +253,7 @@
       todoDetail = null;
       scratchpadRead = null;
       settingsOpen = false;
+      todoBrowserOpen = false;
       void loadProject(projectId);
     }
   });
@@ -589,7 +595,10 @@
           await selectTreeItem(target.selection);
           return;
         case 'settings':
-          if (selectedProject) settingsOpen = true;
+          if (selectedProject) {
+            todoBrowserOpen = false;
+            settingsOpen = true;
+          }
           return;
         case 'new-worktree':
           if (selectedProject) await openWorktreeDialog('create', selectedProject);
@@ -647,6 +656,7 @@
       todoDetail = null;
       scratchpadRead = null;
       settingsOpen = false;
+      todoBrowserOpen = false;
       await tick();
       await loadProject(projectId);
       await refreshWorktreeMetadata(projects);
@@ -796,6 +806,7 @@
     recordRecentNavigation({ type: 'item', selection: next });
     quickJumpRecentKeys = readRecentNavigationKeys();
     settingsOpen = false;
+    todoBrowserOpen = false;
     selection = next;
     todoDetail = null;
     scratchpadRead = null;
@@ -1027,6 +1038,16 @@
   }
 
   function clearSelection(): void {
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+    todoBrowserOpen = false;
+  }
+
+  function openTodosBrowser(): void {
+    if (!selectedProject) return;
+    settingsOpen = false;
+    todoBrowserOpen = true;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
@@ -1974,11 +1995,12 @@
         collapsed={treeRailCollapsed}
         onSelect={(next) => void selectTreeItem(next)}
         onCreateTodo={() => (dialog = 'todo')}
+        onBrowseTodos={openTodosBrowser}
         onAddAgent={() => void openAgentDialog()}
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
         onAddScratchpad={() => void createScratchpad()}
-        onOpenSettings={() => { settingsOpen = true; dialog = null; }}
+        onOpenSettings={() => { todoBrowserOpen = false; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
@@ -2033,6 +2055,12 @@
           {#key selectedProcess.id}
             <div class="terminal-view"><TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} /></div>
           {/key}
+        {:else if todoBrowserOpen}
+          <TodoBrowser
+            todos={coordination?.todos ?? []}
+            onSelect={(todo) => void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title))}
+            onCreate={() => (dialog = 'todo')}
+          />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
         {:else if selection?.kind === 'scratchpad'}
@@ -2162,7 +2190,7 @@
         <div class="agent-choices">
           {#if agentToolsLoading}<p>Loading agent tools…</p>{:else}{#each agentTools as tool (tool.id)}<button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}><strong>{tool.name}</strong><small>{tool.command}</small><span>Spawn</span></button>{:else}<p>No enabled agent tools. Add one in Settings.</p>{/each}{/if}
         </div>
-        <footer><Button variant="outline" onclick={() => { dialog = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
+        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
       </section>
       </Dialog.Content>
     {/if}
