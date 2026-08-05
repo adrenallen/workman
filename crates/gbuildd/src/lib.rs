@@ -1110,8 +1110,13 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
-        assert_eq!(response["result"][0]["id"], second_id);
-        assert_eq!(response["result"][0]["selected"], true);
+        let selected = response["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["selected"] == true)
+            .unwrap();
+        assert_eq!(selected["id"], second_id);
 
         socket
             .send(Message::Text(
@@ -1147,6 +1152,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: true,
+                sort_order: 0,
             })
             .unwrap();
         let (mut socket, _) = connect_async(server.request()).await.unwrap();

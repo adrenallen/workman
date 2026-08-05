@@ -78,6 +78,7 @@ fn process(id: i64, project: &Project, kind: ProcessKind, name: &str, command: &
         exited_at: None,
         agent_tool_id: None,
         spawned_by_process_id: None,
+        sort_order: 0,
     }
 }
 
@@ -123,6 +124,7 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
         display_name: None,
         icon: None,
         selected: false,
+        sort_order: 0,
     };
 
     let server = DaemonServer::bind(DaemonConfig {

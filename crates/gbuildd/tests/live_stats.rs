@@ -44,6 +44,7 @@ impl TestServer {
                 display_name: None,
                 icon: None,
                 selected: true,
+                sort_order: 0,
             })?;
             ScratchpadService::new(registry.store()).write(
                 1,
@@ -73,6 +74,7 @@ impl TestServer {
                 exited_at: None,
                 agent_tool_id: None,
                 spawned_by_process_id: None,
+                sort_order: 0,
             })?;
             registry.start(101)?;
         }

@@ -57,6 +57,7 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
     }
 

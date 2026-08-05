@@ -54,6 +54,7 @@ fn fixture() -> (TempDir, ProcessRegistry) {
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })
         .unwrap();
     (root, ProcessRegistry::new(store).unwrap())
@@ -90,6 +91,7 @@ fn helper_process(root: &TempDir, id: i64, delay: Duration) -> Process {
         exited_at: None,
         agent_tool_id: None,
         spawned_by_process_id: None,
+        sort_order: 0,
     }
 }
 
@@ -283,6 +285,7 @@ async fn websocket_exposes_services_ports_and_wait_contract() {
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })
         .unwrap();
     start_process(

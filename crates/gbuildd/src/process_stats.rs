@@ -451,6 +451,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: true,
+                sort_order: 0,
             })
             .unwrap();
         let todo = TodoService::new(&store)
@@ -523,6 +524,7 @@ mod tests {
             exited_at: None,
             agent_tool_id: None,
             spawned_by_process_id: None,
+            sort_order: 0,
         }
     }
 }

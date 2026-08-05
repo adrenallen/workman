@@ -142,6 +142,7 @@ fn domain_records_round_trip_through_store() {
         display_name: Some("Gbuild".into()),
         icon: Some("terminal".into()),
         selected: true,
+        sort_order: 0,
     };
     store.put_project(&project).expect("put project");
     assert_eq!(
@@ -188,6 +189,7 @@ fn domain_records_round_trip_through_store() {
         exited_at: None,
         agent_tool_id: Some(agent_tool.id),
         spawned_by_process_id: None,
+        sort_order: 0,
     };
     store.put_process(&process).expect("put process");
     assert_eq!(
@@ -365,6 +367,7 @@ fn project_catalog_can_delete_empty_projects() {
         display_name: None,
         icon: None,
         selected: false,
+        sort_order: 0,
     };
     store.put_project(&project).expect("put project");
 

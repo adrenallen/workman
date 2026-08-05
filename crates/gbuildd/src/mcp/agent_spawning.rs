@@ -445,6 +445,7 @@ fn spawn(
             exited_at: None,
             agent_tool_id,
             spawned_by_process_id,
+            sort_order: 0,
         })
         .map_err(|error| error.to_string())?;
     let running = match registry.start(created.id) {
@@ -791,6 +792,7 @@ mod tests {
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         };
         let process = Process {
             id: 41,
@@ -812,6 +814,7 @@ mod tests {
             exited_at: None,
             agent_tool_id: Some(1),
             spawned_by_process_id: None,
+            sort_order: 0,
         };
         let preamble = agent_instructions(
             &process,

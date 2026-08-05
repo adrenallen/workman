@@ -47,6 +47,7 @@ impl TestDaemon {
                 display_name: None,
                 icon: None,
                 selected: true,
+                sort_order: 0,
             })
             .unwrap();
         sync_gbuild_yml_file(&mut registry, 1).unwrap();

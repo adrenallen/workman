@@ -62,6 +62,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
         registry.store().put_project(&Project {
             id: 2,
@@ -70,6 +71,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
     }
 

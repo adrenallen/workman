@@ -70,6 +70,7 @@ impl TestServer {
                 display_name: None,
                 icon: None,
                 selected: true,
+                sort_order: 0,
             })?;
             registry.store().put_agent_tool(&AgentTool {
                 id: 90,
@@ -175,6 +176,7 @@ fn process(id: i64, name: &str, command: &str, agent_tool_id: Option<i64>) -> Pr
         exited_at: None,
         agent_tool_id,
         spawned_by_process_id: None,
+        sort_order: 0,
     }
 }
 

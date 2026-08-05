@@ -84,6 +84,7 @@ async fn agent_spawns_record_lineage_and_parent_close_promotes_children()
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 99,

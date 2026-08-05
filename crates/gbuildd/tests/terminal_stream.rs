@@ -32,6 +32,7 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })?;
         registry.create(test_process(101, "one", &project_dir.to_string_lossy()))?;
         registry.create(test_process(102, "two", &project_dir.to_string_lossy()))?;
@@ -123,6 +124,7 @@ fn test_process(id: i64, label: &str, working_dir: &str) -> Process {
         exited_at: None,
         agent_tool_id: None,
         spawned_by_process_id: None,
+        sort_order: 0,
     }
 }
 

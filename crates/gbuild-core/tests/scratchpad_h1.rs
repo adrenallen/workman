@@ -12,6 +12,7 @@ fn leading_h1_is_name_metadata_across_section_appends() -> Result<(), Box<dyn Er
         display_name: None,
         icon: None,
         selected: true,
+        sort_order: 0,
     })?;
     let service = ScratchpadService::new(&store);
 

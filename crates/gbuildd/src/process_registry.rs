@@ -263,6 +263,9 @@ impl ProcessRegistry {
             return Err(RegistryError::AlreadyExists(process.id));
         }
         validate_name(&process.name)?;
+        process.sort_order = self
+            .store
+            .next_process_sort_order(process.project_id, process.kind)?;
         process.status = ProcessStatus::Stopped;
         process.pid = None;
         process.exit_code = None;
@@ -285,6 +288,7 @@ impl ProcessRegistry {
         process.exit_code = current.exit_code;
         process.exit_signal = current.exit_signal;
         process.exited_at = current.exited_at;
+        process.sort_order = current.sort_order;
         let current_hash = trust_hash_for_process(&current);
         let updated_hash = trust_hash_for_process(&process);
         let trust_still_applies = current.source == ProcessSource::Yml
@@ -1138,6 +1142,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: false,
+                sort_order: 0,
             })
             .unwrap();
         store
@@ -1161,6 +1166,7 @@ mod tests {
                 exited_at: None,
                 agent_tool_id: None,
                 spawned_by_process_id: None,
+                sort_order: 0,
             })
             .unwrap();
 
@@ -1189,6 +1195,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: false,
+                sort_order: 0,
             })
             .unwrap();
         let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
@@ -1214,6 +1221,7 @@ mod tests {
                 exited_at: None,
                 agent_tool_id: None,
                 spawned_by_process_id: None,
+                sort_order: 0,
             })
             .unwrap();
         registry.start(20).unwrap();
@@ -1244,6 +1252,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: false,
+                sort_order: 0,
             })
             .unwrap();
         store
@@ -1282,6 +1291,7 @@ mod tests {
                 exited_at: None,
                 agent_tool_id: Some(9),
                 spawned_by_process_id: None,
+                sort_order: 0,
             })
             .unwrap();
         registry.start(10).unwrap();

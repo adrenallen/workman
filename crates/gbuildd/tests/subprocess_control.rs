@@ -130,6 +130,7 @@ async fn subprocess_rpc_lists_and_only_kills_live_descendants() {
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })
         .unwrap();
 

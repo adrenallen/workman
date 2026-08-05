@@ -551,6 +551,7 @@ fn prepare_processes(
                 exited_at: None,
                 agent_tool_id: None,
                 spawned_by_process_id: None,
+                sort_order: 0,
             })
         })
         .collect()
@@ -646,6 +647,7 @@ mod tests {
                     display_name: None,
                     icon: None,
                     selected: true,
+                    sort_order: 0,
                 })
                 .unwrap();
             Self {
@@ -803,6 +805,7 @@ mod tests {
                 exited_at: None,
                 agent_tool_id: None,
                 spawned_by_process_id: None,
+                sort_order: 0,
             })
             .unwrap();
         let report = sync_gbuild_yml(
@@ -906,6 +909,7 @@ mod tests {
             exited_at: None,
             agent_tool_id: None,
             spawned_by_process_id: None,
+            sort_order: 0,
         };
         let hash = trust_hash_for_process(&base);
         assert!(hash.starts_with("sha256:"));

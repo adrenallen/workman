@@ -115,6 +115,7 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 99,
@@ -280,6 +281,7 @@ async fn installed_codex_in_brand_new_directory_accepts_immediate_mission()
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 100,

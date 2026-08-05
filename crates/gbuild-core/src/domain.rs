@@ -178,6 +178,8 @@ pub struct Project {
     pub display_name: Option<String>,
     pub icon: Option<String>,
     pub selected: bool,
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 /// Configuration for one supported coding-agent command.
@@ -214,6 +216,8 @@ pub struct Process {
     pub agent_tool_id: Option<AgentToolId>,
     #[serde(default)]
     pub spawned_by_process_id: Option<ProcessId>,
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 /// A work item and its lease-based edit-lock metadata.

@@ -66,6 +66,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         display_name: None,
         icon: None,
         selected: true,
+        sort_order: 0,
     })?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

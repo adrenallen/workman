@@ -7,7 +7,7 @@
     agentLineageRows,
     type AgentAttentionRollup
   } from './agentLineage';
-  import type { ProcessView, Project } from './daemon';
+  import type { ProcessKind, ProcessView, Project } from './daemon';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
   import { liveStats, type ProcessRuntimeStats } from './liveStats';
   import {
@@ -15,6 +15,16 @@
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
+  import {
+    moveOrderedId,
+    moveTreeOrderBlock,
+    reorderItem,
+    siblingTarget,
+    type ReorderDirection,
+    type ReorderDrop,
+    type ReorderItemOptions,
+    type TreeOrderItem
+  } from './reorder';
 
   interface Props {
     project: Project;
@@ -32,6 +42,8 @@
     onAddScratchpad: () => void;
     onOpenSettings: () => void;
     onToggleCollapse: () => void;
+    reordering: boolean;
+    onReorderProcesses: (kind: ProcessKind, orderedIds: number[]) => void;
   }
 
   let {
@@ -49,7 +61,9 @@
     onAddCommand,
     onAddScratchpad,
     onOpenSettings,
-    onToggleCollapse
+    onToggleCollapse,
+    reordering,
+    onReorderProcesses
   }: Props = $props();
 
   const groupOrder: ProjectTreeGroup[] = [
@@ -218,6 +232,74 @@
     return $liveStats.processes[process.id];
   }
 
+  function reorderOptions(process: ProcessView): ReorderItemOptions {
+    const group = processesForKind(process.kind);
+    return {
+      id: process.id,
+      group: `process:${project.id}:${process.kind}`,
+      disabled: reordering || Boolean(query.trim()) || group.length < 2,
+      label: processLabel(process),
+      onDrop: (drop) => handleProcessDrop(process.kind, drop),
+      onKeyboardMove: (id, direction) => moveProcessFromKeyboard(process.kind, id, direction)
+    };
+  }
+
+  function processesForKind(kind: ProcessKind): ProcessView[] {
+    if (kind === 'agent') return agents;
+    if (kind === 'terminal') return terminals;
+    return commands;
+  }
+
+  function handleProcessDrop(kind: ProcessKind, drop: ReorderDrop): void {
+    const orderedIds = kind === 'agent'
+      ? moveTreeOrderBlock(agentTreeOrder(), drop.sourceId, drop.targetId, drop.placement)
+      : moveOrderedId(
+          processesForKind(kind).map((process) => process.id),
+          drop.sourceId,
+          drop.targetId,
+          drop.placement
+        );
+    onReorderProcesses(kind, orderedIds);
+  }
+
+  function moveProcessFromKeyboard(
+    kind: ProcessKind,
+    processId: number,
+    direction: ReorderDirection
+  ): void {
+    if (kind === 'agent') {
+      const items = agentTreeOrder();
+      const targetId = siblingTarget(items, processId, direction);
+      if (targetId === null) return;
+      handleProcessDrop(kind, {
+        sourceId: processId,
+        targetId,
+        placement: direction < 0 ? 'before' : 'after'
+      });
+      return;
+    }
+
+    const orderedIds = processesForKind(kind).map((process) => process.id);
+    const index = orderedIds.indexOf(processId);
+    const targetId = orderedIds[index + direction];
+    if (targetId === undefined) return;
+    handleProcessDrop(kind, {
+      sourceId: processId,
+      targetId,
+      placement: direction < 0 ? 'before' : 'after'
+    });
+  }
+
+  function agentTreeOrder(): TreeOrderItem[] {
+    const stack: number[] = [];
+    return agentLineageRows(agents, '').map((row) => {
+      const parentId = row.depth > 0 ? (stack[row.depth - 1] ?? null) : null;
+      stack[row.depth] = row.process.id;
+      stack.length = row.depth + 1;
+      return { id: row.process.id, parentId };
+    });
+  }
+
   function handleTreeKeys(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (!target || target.matches('input')) return;
@@ -311,6 +393,7 @@
                   class:selected={selection?.key === `agent:${process.id}`}
                   style={`--agent-depth: ${row.depth}`}
                   data-tree-row
+                  use:reorderItem={reorderOptions(process)}
                   onclick={() => selectProcess(process)}
                 >
                   {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
@@ -344,6 +427,7 @@
                   class="tree-row"
                   class:selected={selection?.key === `terminal:${process.id}`}
                   data-tree-row
+                  use:reorderItem={reorderOptions(process)}
                   onclick={() => selectProcess(process)}
                 >
                   <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
@@ -362,6 +446,7 @@
                   class="tree-row command-row"
                   class:selected={selection?.key === `command:${process.id}`}
                   data-tree-row
+                  use:reorderItem={reorderOptions(process)}
                   onclick={() => selectProcess(process)}
                 >
                   <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
@@ -425,7 +510,12 @@
   .row-meta, .run-hint { flex: none; border: 1px solid #373c43; border-radius: 3px; padding: 1px 4px; color: #969da6; background: #1d2024; font: 7px 'JetBrains Mono Variable', monospace; }
   .group-rows { padding: 0 4px 4px 13px; }
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: #c8ccd1; text-align: left; cursor: pointer; }
-  .tree-row { grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
+  .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
+  .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
+  .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
+  .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }
+  .project-tree :global(.tree-row[data-reorder-drop='before']::after) { top: -1px; }
+  .project-tree :global(.tree-row[data-reorder-drop='after']::after) { bottom: -1px; }
   .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: #202328; }
   .tree-row.selected { background: #292d32; color: #fff; box-shadow: inset 2px 0 #7a818a; }

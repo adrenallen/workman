@@ -37,6 +37,7 @@ fn fixture() -> (TempDir, ProcessRegistry) {
             display_name: None,
             icon: None,
             selected: true,
+            sort_order: 0,
         })
         .unwrap();
     (root, ProcessRegistry::new(store).unwrap())
@@ -66,6 +67,7 @@ fn process(root: &TempDir, id: i64, command: &str) -> Process {
         exited_at: None,
         agent_tool_id: None,
         spawned_by_process_id: None,
+        sort_order: 0,
     }
 }
 

@@ -97,6 +97,7 @@ async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemo
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
     }
     put_real_agent_tools(&server).await?;

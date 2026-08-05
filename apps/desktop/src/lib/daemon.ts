@@ -45,6 +45,7 @@ export interface Project {
   display_name: string | null;
   icon: string | null;
   selected: boolean;
+  sort_order: number;
   status: ProjectStatus;
 }
 
@@ -96,6 +97,7 @@ export interface ProcessView {
   exited_at: number | null;
   agent_tool_id: number | null;
   spawned_by_process_id: number | null;
+  sort_order: number;
   agent_state: AgentState;
 }
 
@@ -213,6 +215,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('projects.rename', { project_id: projectId, name });
   }
 
+  reorderProjects(orderedIds: number[]): Promise<Project[]> {
+    return this.request('project.reorder', { ordered_ids: orderedIds });
+  }
+
   coordinationSnapshot(projectId: number): Promise<CoordinationSnapshot> {
     return this.requestOptional(
       'coordination.snapshot',
@@ -275,6 +281,18 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   processes(projectId: number): Promise<ProcessView[]> {
     return this.request('process.list', { project_id: projectId });
+  }
+
+  reorderProcesses(
+    projectId: number,
+    kind: ProcessKind,
+    orderedIds: number[]
+  ): Promise<ProcessView[]> {
+    return this.request('process.reorder', {
+      project_id: projectId,
+      kind,
+      ordered_ids: orderedIds
+    });
   }
 
   subscribeProcessStatuses(): Promise<{ subscribed: boolean }> {

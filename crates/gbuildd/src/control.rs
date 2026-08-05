@@ -76,6 +76,18 @@ struct RenameProjectParams {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectReorderParams {
+    ordered_ids: Vec<ProjectId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProcessReorderParams {
+    project_id: ProjectId,
+    kind: ProcessKind,
+    ordered_ids: Vec<ProcessId>,
+}
+
 #[derive(Debug, Serialize)]
 struct ProjectSummary {
     #[serde(flatten)]
@@ -260,6 +272,14 @@ async fn dispatch(
             rename_project(registry.store(), params.project_id, &params.name)?;
             return project_result(list_projects(registry.store()));
         }
+        "project.reorder" => {
+            let params: ProjectReorderParams = params_as(params)?;
+            registry
+                .store_mut()
+                .reorder_projects(&params.ordered_ids)
+                .map_err(reorder_store_error)?;
+            return project_result(list_projects(registry.store()));
+        }
         "config.sync" => {
             let params: ProjectParams = params_as(params)?;
             let project = registry
@@ -438,6 +458,16 @@ async fn dispatch(
             let params: ListParams = params_as(params)?;
             registry.list_statuses(params.project_id).map(json_value)
         }
+        "process.reorder" => {
+            let params: ProcessReorderParams = params_as(params)?;
+            registry
+                .store_mut()
+                .reorder_processes(params.project_id, params.kind, &params.ordered_ids)
+                .map_err(reorder_store_error)?;
+            registry
+                .list_statuses(Some(params.project_id))
+                .map(json_value)
+        }
         "process.start" => {
             let params: ProcessIdParams = params_as(params)?;
             registry.start(params.process_id).map(json_value)
@@ -554,6 +584,7 @@ fn spawn_terminal(
         exited_at: None,
         agent_tool_id: None,
         spawned_by_process_id: None,
+        sort_order: 0,
     })?;
     registry.start(process.id)
 }
@@ -624,7 +655,8 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
     let connection = store.connection();
     connection
         .execute(
-            "INSERT INTO projects (path, name) VALUES (?1, ?2)
+            "INSERT INTO projects (path, name, sort_order)
+             VALUES (?1, ?2, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))
              ON CONFLICT(path) DO NOTHING",
             (&canonical, &name),
         )
@@ -692,9 +724,9 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
     let mut statement = store
         .connection()
         .prepare(
-            "SELECT id, path, name, display_name, icon, selected
+            "SELECT id, path, name, display_name, icon, selected, sort_order
              FROM projects
-             ORDER BY selected DESC, COALESCE(display_name, name) COLLATE NOCASE",
+             ORDER BY sort_order, id",
         )
         .map_err(project_store_error)?;
     let projects = statement
@@ -706,6 +738,7 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
                 display_name: row.get(3)?,
                 icon: row.get(4)?,
                 selected: row.get(5)?,
+                sort_order: row.get(6)?,
             })
         })
         .map_err(project_store_error)?
@@ -740,4 +773,8 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
 
 fn project_store_error(error: impl std::fmt::Display) -> (&'static str, String) {
     ("store_error", error.to_string())
+}
+
+fn reorder_store_error(error: impl std::fmt::Display) -> (&'static str, String) {
+    ("invalid_reorder", error.to_string())
 }

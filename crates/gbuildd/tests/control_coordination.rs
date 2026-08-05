@@ -51,6 +51,7 @@ impl TestServer {
                     display_name: None,
                     icon: None,
                     selected: true,
+                    sort_order: 0,
                 })
                 .unwrap();
             let todos = TodoService::new(store);

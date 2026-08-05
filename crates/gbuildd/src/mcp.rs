@@ -454,6 +454,10 @@ impl GbuildMcp {
             display_name: args.display_name,
             icon: args.icon,
             selected: false,
+            sort_order: match registry.store().next_project_sort_order() {
+                Ok(sort_order) => sort_order,
+                Err(error) => return failure("store_error", error.to_string()),
+            },
         };
         match registry.store().put_project(&project) {
             Ok(()) => success(project),

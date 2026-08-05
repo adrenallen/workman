@@ -1,13 +1,13 @@
 //! SQLite connection setup, schema migration, and domain persistence.
 
-use std::{error::Error, fmt, path::Path, time::Duration};
+use std::{collections::HashSet, error::Error, fmt, path::Path, time::Duration};
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentTool, Process, ProcessId, Project, ProjectId, ProjectLock, Scratchpad, Timer, Todo,
-    TodoBlocker, TodoComment, TodoId,
+    Actor, AgentTool, Process, ProcessId, ProcessKind, Project, ProjectId, ProjectLock, Scratchpad,
+    Timer, Todo, TodoBlocker, TodoComment, TodoId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -37,10 +37,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "process_lineage",
         include_str!("../migrations/0006_process_lineage.sql"),
     ),
+    (
+        7,
+        "sort_order",
+        include_str!("../migrations/0007_sort_order.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 6;
+pub const LATEST_SCHEMA_VERSION: i64 = 7;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -48,6 +53,7 @@ pub enum StoreError {
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     SchemaTooNew { found: i64, supported: i64 },
+    InvalidReorder(String),
 }
 
 impl fmt::Display for StoreError {
@@ -59,6 +65,7 @@ impl fmt::Display for StoreError {
                 formatter,
                 "database schema version {found} is newer than supported version {supported}"
             ),
+            Self::InvalidReorder(message) => formatter.write_str(message),
         }
     }
 }
@@ -68,7 +75,7 @@ impl Error for StoreError {
         match self {
             Self::Sqlite(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::SchemaTooNew { .. } => None,
+            Self::SchemaTooNew { .. } | Self::InvalidReorder(_) => None,
         }
     }
 }
@@ -180,14 +187,15 @@ impl Store {
 
     pub fn put_project(&self, project: &Project) -> StoreResult<()> {
         self.connection.execute(
-            "INSERT INTO projects (id, path, name, display_name, icon, selected)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO projects (id, path, name, display_name, icon, selected, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 path = excluded.path,
                 name = excluded.name,
                 display_name = excluded.display_name,
                 icon = excluded.icon,
-                selected = excluded.selected",
+                selected = excluded.selected,
+                sort_order = excluded.sort_order",
             params![
                 project.id,
                 project.path,
@@ -195,6 +203,7 @@ impl Store {
                 project.display_name,
                 project.icon,
                 project.selected,
+                project.sort_order,
             ],
         )?;
         Ok(())
@@ -204,7 +213,7 @@ impl Store {
         let project = self
             .connection
             .query_row(
-                "SELECT id, path, name, display_name, icon, selected
+                "SELECT id, path, name, display_name, icon, selected, sort_order
                  FROM projects WHERE id = ?1",
                 [id],
                 |row| {
@@ -215,6 +224,7 @@ impl Store {
                         display_name: row.get(3)?,
                         icon: row.get(4)?,
                         selected: row.get(5)?,
+                        sort_order: row.get(6)?,
                     })
                 },
             )
@@ -224,7 +234,8 @@ impl Store {
 
     pub fn list_projects(&self) -> StoreResult<Vec<Project>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, path, name, display_name, icon, selected FROM projects ORDER BY name, id",
+            "SELECT id, path, name, display_name, icon, selected, sort_order
+             FROM projects ORDER BY sort_order, id",
         )?;
         let projects = statement
             .query_map([], |row| {
@@ -235,6 +246,7 @@ impl Store {
                     display_name: row.get(3)?,
                     icon: row.get(4)?,
                     selected: row.get(5)?,
+                    sort_order: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -248,6 +260,35 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    pub fn next_project_sort_order(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Replace the complete project order in one transaction.
+    pub fn reorder_projects(&mut self, ordered_ids: &[ProjectId]) -> StoreResult<Vec<Project>> {
+        let current = self
+            .list_projects()?
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>();
+        validate_reorder_ids("project", &current, ordered_ids)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (sort_order, project_id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order as i64, project_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.list_projects()
     }
 
     pub fn delete_project(&self, id: ProjectId) -> StoreResult<bool> {
@@ -343,10 +384,10 @@ impl Store {
             "INSERT INTO processes (
                 id, project_id, kind, name, command, working_dir, env, auto_start,
                 auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
+                exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id, sort_order
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19
+                ?15, ?16, ?17, ?18, ?19, ?20
              )
              ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
@@ -366,7 +407,8 @@ impl Store {
                 exit_signal = excluded.exit_signal,
                 exited_at = excluded.exited_at,
                 agent_tool_id = excluded.agent_tool_id,
-                spawned_by_process_id = excluded.spawned_by_process_id",
+                spawned_by_process_id = excluded.spawned_by_process_id,
+                sort_order = excluded.sort_order",
             params![
                 process.id,
                 process.project_id,
@@ -387,6 +429,7 @@ impl Store {
                 process.exited_at,
                 process.agent_tool_id,
                 process.spawned_by_process_id,
+                process.sort_order,
             ],
         )?;
         Ok(())
@@ -398,7 +441,8 @@ impl Store {
             .query_row(
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id,
+                        sort_order
                  FROM processes WHERE id = ?1",
                 [id],
                 process_from_row,
@@ -413,15 +457,22 @@ impl Store {
             Some(project_id) => (
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
-                 FROM processes WHERE project_id = ?1 ORDER BY id",
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id,
+                        sort_order
+                 FROM processes WHERE project_id = ?1
+                 ORDER BY CASE kind WHEN 'agent' THEN 0 WHEN 'terminal' THEN 1 ELSE 2 END,
+                          sort_order, id",
                 Some(project_id),
             ),
             None => (
                 "SELECT id, project_id, kind, name, command, working_dir, env, auto_start,
                         auto_restart, restart_when_changed, source, trust_hash, status, pid,
-                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id
-                 FROM processes ORDER BY project_id, id",
+                        exit_code, exit_signal, exited_at, agent_tool_id, spawned_by_process_id,
+                        sort_order
+                 FROM processes
+                 ORDER BY project_id,
+                          CASE kind WHEN 'agent' THEN 0 WHEN 'terminal' THEN 1 ELSE 2 END,
+                          sort_order, id",
                 None,
             ),
         };
@@ -446,6 +497,51 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    pub fn next_process_sort_order(
+        &self,
+        project_id: ProjectId,
+        kind: ProcessKind,
+    ) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1
+             FROM processes WHERE project_id = ?1 AND kind = ?2",
+            params![project_id, kind],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Replace the complete order for one project/kind group in one transaction.
+    pub fn reorder_processes(
+        &mut self,
+        project_id: ProjectId,
+        kind: ProcessKind,
+        ordered_ids: &[ProcessId],
+    ) -> StoreResult<Vec<Process>> {
+        let current = self
+            .list_processes(Some(project_id))?
+            .into_iter()
+            .filter(|process| process.kind == kind)
+            .map(|process| process.id)
+            .collect::<Vec<_>>();
+        validate_reorder_ids("process", &current, ordered_ids)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (sort_order, process_id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE processes SET sort_order = ?1
+                 WHERE id = ?2 AND project_id = ?3 AND kind = ?4",
+                params![sort_order as i64, process_id, project_id, kind],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(self
+            .list_processes(Some(project_id))?
+            .into_iter()
+            .filter(|process| process.kind == kind)
+            .collect())
     }
 
     /// Delete one process record. Related timers and actor links follow schema FK rules.
@@ -487,7 +583,7 @@ impl Store {
                 "SELECT p.id, p.project_id, p.kind, p.name, p.command, p.working_dir, p.env,
                         p.auto_start, p.auto_restart, p.restart_when_changed, p.source,
                         p.trust_hash, p.status, p.pid, p.exit_code, p.exit_signal, p.exited_at,
-                        p.agent_tool_id, p.spawned_by_process_id
+                        p.agent_tool_id, p.spawned_by_process_id, p.sort_order
                  FROM process_mcp_tokens AS token
                  JOIN processes AS p ON p.id = token.process_id
                  WHERE token.token = ?1",
@@ -938,7 +1034,22 @@ fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {
         exited_at: row.get(16)?,
         agent_tool_id: row.get(17)?,
         spawned_by_process_id: row.get(18)?,
+        sort_order: row.get(19)?,
     })
+}
+
+fn validate_reorder_ids(label: &str, current_ids: &[i64], ordered_ids: &[i64]) -> StoreResult<()> {
+    let unique = ordered_ids.iter().copied().collect::<HashSet<_>>();
+    let current = current_ids.iter().copied().collect::<HashSet<_>>();
+    if ordered_ids.len() != current_ids.len()
+        || unique.len() != ordered_ids.len()
+        || unique != current
+    {
+        return Err(StoreError::InvalidReorder(format!(
+            "{label} reorder must contain every scoped ID exactly once"
+        )));
+    }
+    Ok(())
 }
 
 fn to_json(value: &impl Serialize) -> StoreResult<String> {

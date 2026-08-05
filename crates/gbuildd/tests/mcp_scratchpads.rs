@@ -87,6 +87,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
         registry.store().put_project(&Project {
             id: 2,
@@ -95,6 +96,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
     }
 

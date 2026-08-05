@@ -106,6 +106,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 99,

@@ -798,6 +798,7 @@ mod tests {
                 display_name: None,
                 icon: None,
                 selected: false,
+                sort_order: 0,
             })
             .unwrap();
         store
@@ -855,6 +856,7 @@ mod tests {
             exited_at: None,
             agent_tool_id,
             spawned_by_process_id: None,
+            sort_order: 0,
         }
     }
 
@@ -1050,6 +1052,7 @@ mod tests {
                     display_name: None,
                     icon: None,
                     selected: false,
+                    sort_order: 0,
                 })
                 .unwrap();
             let mut registry =

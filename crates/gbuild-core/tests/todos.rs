@@ -13,6 +13,7 @@ fn project(id: i64, name: &str) -> Project {
         display_name: None,
         icon: None,
         selected: false,
+        sort_order: id - 1,
     }
 }
 

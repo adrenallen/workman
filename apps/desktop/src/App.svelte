@@ -47,6 +47,12 @@
     projectTreeSelection,
     type ProjectTreeSelection
   } from './lib/projectTree';
+  import {
+    moveOrderedId,
+    reorderItem,
+    type ReorderDirection,
+    type ReorderDrop
+  } from './lib/reorder';
 
   const client = new DaemonClient();
   const projectRailBounds = { min: 176, max: 340 };
@@ -105,6 +111,8 @@
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
   let navigationIndexRequest = 0;
+  let projectReorderBusy = $state(false);
+  let processReorderBusy = $state(false);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let selectedProcess = $derived(
@@ -732,8 +740,81 @@
   }
 
   function selectProject(project: Project): void {
-    if (project.selected || busy) return;
+    if (project.selected || busy || projectReorderBusy) return;
     appNavigation.navigate({ type: 'project', projectId: project.id }, 'project-rail');
+  }
+
+  function handleProjectDrop(drop: ReorderDrop): void {
+    const orderedIds = moveOrderedId(
+      projects.map((project) => project.id),
+      drop.sourceId,
+      drop.targetId,
+      drop.placement
+    );
+    void persistProjectOrder(orderedIds);
+  }
+
+  function moveProjectFromKeyboard(projectId: number, direction: ReorderDirection): void {
+    const orderedIds = projects.map((project) => project.id);
+    const index = orderedIds.indexOf(projectId);
+    const targetId = orderedIds[index + direction];
+    if (targetId === undefined) return;
+    handleProjectDrop({
+      sourceId: projectId,
+      targetId,
+      placement: direction < 0 ? 'before' : 'after'
+    });
+  }
+
+  async function persistProjectOrder(orderedIds: number[]): Promise<void> {
+    const currentIds = projects.map((project) => project.id);
+    if (projectReorderBusy || orderedIds.join(',') === currentIds.join(',')) return;
+    const previous = projects;
+    const byId = new Map(previous.map((project) => [project.id, project]));
+    projects = orderedIds.map((id, sortOrder) => ({ ...byId.get(id)!, sort_order: sortOrder }));
+    projectReorderBusy = true;
+    try {
+      projects = await client.reorderProjects(orderedIds);
+    } catch (cause) {
+      projects = previous;
+      reportError(cause);
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  async function persistProcessOrder(kind: ProcessView['kind'], orderedIds: number[]): Promise<void> {
+    if (!selectedProject || processReorderBusy) return;
+    const currentIds = processes
+      .filter((process) => process.kind === kind)
+      .map((process) => process.id);
+    if (orderedIds.join(',') === currentIds.join(',')) return;
+
+    const projectId = selectedProject.id;
+    const previous = processes;
+    const byId = new Map(previous.map((process) => [process.id, process]));
+    const reordered = orderedIds.map((id, sortOrder) => ({
+      ...byId.get(id)!,
+      sort_order: sortOrder
+    }));
+    let groupIndex = 0;
+    const optimistic = previous.map((process) =>
+      process.kind === kind ? reordered[groupIndex++] : process
+    );
+    applyProcesses(optimistic);
+    cacheProjectProcesses(projectId, optimistic);
+    processReorderBusy = true;
+    try {
+      const next = await client.reorderProcesses(projectId, kind, orderedIds);
+      if (selectedProject?.id === projectId) applyProcesses(next);
+      cacheProjectProcesses(projectId, next);
+    } catch (cause) {
+      if (selectedProject?.id === projectId) applyProcesses(previous);
+      cacheProjectProcesses(projectId, previous);
+      reportError(cause);
+    } finally {
+      processReorderBusy = false;
+    }
   }
 
   function beginRename(project: Project): void {
@@ -871,7 +952,21 @@
               <button type="submit">Save</button>
             </form>
           {:else}
-            <button class="project-select" type="button" aria-current={project.selected ? 'page' : undefined} aria-label={`${projectLabel(project)}, ${project.status}`} onclick={() => void selectProject(project)}>
+            <button
+              class="project-select"
+              type="button"
+              aria-current={project.selected ? 'page' : undefined}
+              aria-label={`${projectLabel(project)}, ${project.status}`}
+              use:reorderItem={{
+                id: project.id,
+                group: 'projects',
+                disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
+                label: projectLabel(project),
+                onDrop: handleProjectDrop,
+                onKeyboardMove: moveProjectFromKeyboard
+              }}
+              onclick={() => selectProject(project)}
+            >
               <span class="status-dot" class:error={project.status === 'error'} class:running={project.status === 'running'} aria-hidden="true"></span>
               <span class="project-glyph" aria-hidden="true">{projectLabel(project).slice(0, 1).toUpperCase()}</span>
               <span class="project-copy"><strong>{projectLabel(project)}</strong><small>{project.path}</small></span>
@@ -917,6 +1012,8 @@
         onAddScratchpad={() => (dialog = 'scratchpad')}
         onOpenSettings={() => { settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
+        reordering={processReorderBusy}
+        onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
       />
       {#if !treeRailCollapsed}
         <button
@@ -1071,7 +1168,12 @@
   .project-row { position: relative; display: flex; min-height: 40px; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row:hover { background: #202328; }
   .project-row.active { border-color: #41464d; background: #25282d; box-shadow: inset 2px 0 #777f89; }
-  .project-select { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-select { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
+  .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
+  .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }
+  .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
+  .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .status-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #626972; }
   .status-dot.running { background: var(--signal); } .status-dot.error { background: var(--fault); }
   .project-glyph { display: none; }
