@@ -15,7 +15,7 @@ use std::{
 use std::process::Command;
 
 use flate2::read::GzDecoder;
-use reqwest::{Client, Response};
+use reqwest::{Client, Response, StatusCode};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -151,7 +151,20 @@ impl From<semver::Error> for UpdateError {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
+    /// Browser-facing URL shown in update reports and desktop instructions.
     pub url: String,
+    /// Authenticated GitHub API download URL, when supplied by the release response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+}
+
+impl ReleaseAsset {
+    fn download_url(&self, authenticated: bool) -> (&str, bool) {
+        match (authenticated, self.api_url.as_deref()) {
+            (true, Some(api_url)) => (api_url, true),
+            _ => (&self.url, false),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -299,11 +312,13 @@ impl UpdateClient {
     }
 
     pub async fn check(&self, current: &str) -> UpdateResult<UpdateCheck> {
-        let response = self
-            .request(&self.api_url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.request(&self.api_url).send().await?;
+        if self.channel == UpdateChannel::Stable && response.status() == StatusCode::NOT_FOUND {
+            let mut check = UpdateCheck::current_for(current, self.channel);
+            check.checked_at = unix_timestamp();
+            return Ok(check);
+        }
+        let response = response.error_for_status()?;
         let release: GithubRelease = match self.channel {
             UpdateChannel::Stable => response.json().await?,
             UpdateChannel::Latest => response
@@ -328,6 +343,7 @@ impl UpdateClient {
                 .map(|asset| ReleaseAsset {
                     name: asset.name.clone(),
                     url: asset.browser_download_url.clone(),
+                    api_url: asset.api_url.clone(),
                 })
         };
         Ok(UpdateCheck {
@@ -422,7 +438,12 @@ impl UpdateClient {
     }
 
     async fn download(&self, asset: &ReleaseAsset) -> UpdateResult<Vec<u8>> {
-        let response = self.request(&asset.url).send().await?.error_for_status()?;
+        let (url, api_download) = asset.download_url(self.token.is_some());
+        let mut request = self.request(url);
+        if api_download {
+            request = request.header("Accept", "application/octet-stream");
+        }
+        let response = request.send().await?.error_for_status()?;
         limited_body(response).await
     }
 
@@ -649,6 +670,8 @@ struct GithubRelease {
 struct GithubAsset {
     name: String,
     browser_download_url: String,
+    #[serde(default, rename = "url")]
+    api_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -684,6 +707,23 @@ mod tests {
                 .unwrap()
                 .binary_asset_name,
             "awm-linux-arm64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn authenticated_assets_prefer_the_api_download_url() {
+        let asset = ReleaseAsset {
+            name: "awm-macos-arm64.tar.gz".to_owned(),
+            url: "https://github.com/example/download".to_owned(),
+            api_url: Some("https://api.github.com/repos/example/assets/1".to_owned()),
+        };
+        assert_eq!(
+            asset.download_url(true),
+            ("https://api.github.com/repos/example/assets/1", true)
+        );
+        assert_eq!(
+            asset.download_url(false),
+            ("https://github.com/example/download", false)
         );
     }
 }

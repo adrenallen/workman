@@ -238,3 +238,31 @@ async fn stable_ignores_prereleases_while_latest_selects_them() {
     assert_eq!(latest.channel, UpdateChannel::Latest);
     assert!(latest.prerelease);
 }
+
+#[tokio::test]
+async fn stable_without_a_published_release_is_current() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let thread = thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            respond(stream, &HashMap::new());
+        }
+    });
+
+    let check = UpdateClient::with_target_for_channel(
+        format!("{base}/no-stable-release"),
+        fixture_target(),
+        UpdateChannel::Stable,
+    )
+    .unwrap()
+    .check("0.0.9")
+    .await
+    .unwrap();
+    thread.join().unwrap();
+
+    assert_eq!(check.current, "0.0.9");
+    assert_eq!(check.latest, "0.0.9");
+    assert!(!check.available);
+    assert_eq!(check.channel, UpdateChannel::Stable);
+    assert!(check.checked_at > 0);
+}
