@@ -312,7 +312,11 @@ impl UpdateClient {
     }
 
     pub async fn check(&self, current: &str) -> UpdateResult<UpdateCheck> {
-        let response = self.request(&self.api_url).send().await?;
+        let response = self
+            .request(&self.api_url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
         if self.channel == UpdateChannel::Stable && response.status() == StatusCode::NOT_FOUND {
             let mut check = UpdateCheck::current_for(current, self.channel);
             check.checked_at = unix_timestamp();
@@ -451,7 +455,6 @@ impl UpdateClient {
         let request = self
             .http
             .get(url)
-            .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(token) = &self.token {
             request.bearer_auth(token)
