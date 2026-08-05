@@ -290,6 +290,12 @@ jobs:
           cat > release/release-notes.md <<EOF
           # awm $RELEASE_TAG
 
+          ## Install
+
+          ```sh
+          git clone --branch "$RELEASE_TAG" --depth 1 https://github.com/adrenallen/awm.git && cd awm && ./install.sh
+          ```
+
           ## macOS arm64
 
           The desktop app is ad-hoc signed, but it is not Developer ID signed or notarized yet.
