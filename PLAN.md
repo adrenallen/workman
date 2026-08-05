@@ -114,8 +114,10 @@ nothing (their state lives in the daemon).
   watch list (json), interval/loop, max_wait deadline, paused, fired state.
 - `actors` — MCP session identities (see below).
 
-Output buffers are **not** in SQLite — in-memory rings per process (raw bytes, bounded ~2–8 MB)
-plus the emulator's scrollback. Optional disk spill later.
+Output buffers are **not** in SQLite. Each process has a bounded in-memory raw ring and emulator
+scrollback plus a bounded write-behind raw spill under the daemon data directory. On daemon boot,
+the retained tail is reloaded and replayed through the server-side emulator so terminal history
+survives restarts without allowing noisy processes to grow storage without limit.
 
 ## MCP design (the important part)
 
@@ -282,7 +284,6 @@ bulk command controls, `setup_agent_integration` (write MCP docs into CLAUDE.md)
 
 - Real name + icon.
 - Scratchpad storage: plain content-with-revision (v1) vs. revision history table.
-- Output persistence across daemon restarts (v1: buffers are ephemeral, process table isn't).
 - Prompt-template / playbook protocol (Solo exposes MCP prompts) — post-v1.
 - Key-value store tools — Solo has them but ships them disabled; skip unless a need appears.
 - Multi-window / multiple simultaneous terminal views.

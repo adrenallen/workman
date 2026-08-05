@@ -3,6 +3,8 @@
 pub mod attention;
 pub mod domain;
 pub mod locks;
+#[cfg(unix)]
+mod output_spill;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
 pub mod store;

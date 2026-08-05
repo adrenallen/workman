@@ -5,7 +5,11 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -16,6 +20,7 @@ use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
 use crate::attention::{AgentState, AttentionTracker};
+use crate::output_spill::{OutputSpill, OutputSpillSink};
 use crate::terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput};
 
 /// Portable PTY exit status and terminal dimensions used by the host API.
@@ -29,6 +34,9 @@ pub const AWM_MCP_TOKEN_ENV: &str = "AWM_MCP_TOKEN";
 
 /// Default amount of raw PTY output retained for a process.
 pub const DEFAULT_RAW_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
+
+/// Default maximum raw-output bytes retained in a daemon-managed spill file.
+pub const DEFAULT_OUTPUT_SPILL_CAPACITY: usize = 8 * 1024 * 1024;
 
 /// Default PTY dimensions used when the caller has not observed a terminal yet.
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
@@ -181,6 +189,13 @@ impl RawOutput {
         }
     }
 
+    /// Rebuild a bounded raw ring from a retained disk tail.
+    pub fn from_replay(capacity: usize, bytes: &[u8]) -> Self {
+        let output = Self::new(capacity);
+        output.push(bytes);
+        output
+    }
+
     fn lock(&self) -> MutexGuard<'_, RawRingBuffer> {
         self.inner
             .lock()
@@ -245,7 +260,13 @@ pub struct PtySpawnOptions {
     pub scrollback_lines: usize,
     /// Agent tool family used for terminal-attention classification.
     pub tool_type: Option<String>,
+    output_spill: Option<OutputSpillOptions>,
     mcp_token: String,
+}
+
+struct OutputSpillOptions {
+    path: PathBuf,
+    capacity: usize,
 }
 
 impl PtySpawnOptions {
@@ -260,6 +281,7 @@ impl PtySpawnOptions {
             raw_buffer_capacity: DEFAULT_RAW_BUFFER_CAPACITY,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             tool_type: None,
+            output_spill: None,
             mcp_token: mcp_token.into(),
         }
     }
@@ -300,6 +322,15 @@ impl PtySpawnOptions {
         self.tool_type = Some(tool_type.into());
         self
     }
+
+    /// Persist a bounded raw-output tail asynchronously at `path`.
+    pub fn with_output_spill(mut self, path: impl Into<PathBuf>, capacity: usize) -> Self {
+        self.output_spill = Some(OutputSpillOptions {
+            path: path.into(),
+            capacity,
+        });
+        self
+    }
 }
 
 impl fmt::Debug for PtySpawnOptions {
@@ -314,6 +345,13 @@ impl fmt::Debug for PtySpawnOptions {
             .field("raw_buffer_capacity", &self.raw_buffer_capacity)
             .field("scrollback_lines", &self.scrollback_lines)
             .field("tool_type", &self.tool_type)
+            .field(
+                "output_spill",
+                &self
+                    .output_spill
+                    .as_ref()
+                    .map(|spill| (&spill.path, spill.capacity)),
+            )
             .field("mcp_token", &"[redacted]")
             .finish()
     }
@@ -331,6 +369,8 @@ pub struct PtyProcess {
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
     attention: AttentionTracker,
+    output_spill: Option<OutputSpill>,
+    reader_finished: Arc<AtomicBool>,
     reader_thread: Option<JoinHandle<()>>,
     submission_thread: Option<JoinHandle<()>>,
 }
@@ -391,10 +431,34 @@ impl PtyProcess {
         let reader_terminal = terminal_output.clone();
         let attention = AttentionTracker::new(options.tool_type);
         let reader_attention = attention.clone();
+        let output_spill = match options
+            .output_spill
+            .map(|spill| OutputSpill::start(spill.path, spill.capacity))
+            .transpose()
+        {
+            Ok(spill) => spill,
+            Err(error) => {
+                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("initialize raw-output spill");
+            }
+        };
+        let reader_spill = output_spill.as_ref().map(OutputSpill::sink);
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_finished_flag = Arc::clone(&reader_finished);
         let reader_thread = match thread::Builder::new()
             .name(format!("awm-pty-{}-reader", options.process_id))
-            .spawn(move || capture_output(reader, reader_output, reader_terminal, reader_attention))
-        {
+            .spawn(move || {
+                capture_output(
+                    reader,
+                    reader_output,
+                    reader_terminal,
+                    reader_attention,
+                    reader_spill,
+                );
+                reader_finished_flag.store(true, Ordering::Release);
+            }) {
             Ok(thread) => thread,
             Err(error) => {
                 let _ = signal_process_group(pid, Signal::SIGKILL);
@@ -430,6 +494,8 @@ impl PtyProcess {
             raw_output,
             terminal_output,
             attention,
+            output_spill,
+            reader_finished,
             reader_thread: Some(reader_thread),
             submission_thread: Some(submission_thread),
         })
@@ -463,6 +529,22 @@ impl PtyProcess {
     /// Read the current tool-aware attention state.
     pub fn agent_state(&self) -> AgentState {
         self.attention.snapshot()
+    }
+
+    /// Flush the current raw-output batch to disk, when persistence is enabled.
+    pub fn flush_output_spill(&self) -> io::Result<()> {
+        match &self.output_spill {
+            Some(spill) => spill.flush(),
+            None => Ok(()),
+        }
+    }
+
+    /// Clear the persisted tail without detaching the running PTY reader.
+    pub fn clear_output_spill(&self) -> io::Result<()> {
+        match &self.output_spill {
+            Some(spill) => spill.clear(),
+            None => Ok(()),
+        }
     }
 
     /// Write bytes to the terminal and flush them to the child.
@@ -635,7 +717,20 @@ impl Drop for PtyProcess {
         drop(self.submission_tx.take());
         drop(self.writer.take());
         drop(self.master.take());
-        drop(self.reader_thread.take());
+        let reader_deadline = Instant::now() + Duration::from_millis(250);
+        while !self.reader_finished.load(Ordering::Acquire) && Instant::now() < reader_deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if self.reader_finished.load(Ordering::Acquire) {
+            if let Some(reader_thread) = self.reader_thread.take() {
+                let _ = reader_thread.join();
+            }
+        } else {
+            drop(self.reader_thread.take());
+        }
+        if let Some(mut spill) = self.output_spill.take() {
+            let _ = spill.shutdown();
+        }
         drop(self.submission_thread.take());
     }
 }
@@ -667,6 +762,7 @@ fn capture_output(
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
     attention: AttentionTracker,
+    output_spill: Option<OutputSpillSink>,
 ) {
     let mut chunk = [0_u8; 8192];
     loop {
@@ -674,6 +770,9 @@ fn capture_output(
             Ok(0) => break,
             Ok(count) => {
                 raw_output.push(&chunk[..count]);
+                if let Some(spill) = &output_spill {
+                    spill.push(&chunk[..count]);
+                }
                 let rendered = terminal_output.feed_and_read_viewport(&chunk[..count]);
                 attention.observe_output(
                     &chunk[..count],
@@ -941,6 +1040,59 @@ mod tests {
         assert!(output.total_bytes_seen() >= (CAPACITY * 8) as u64);
         assert_eq!(output.len(), CAPACITY);
         assert_eq!(output.snapshot().len(), CAPACITY);
+    }
+
+    #[test]
+    fn write_behind_spill_keeps_up_with_yes_flood() {
+        const TARGET_BYTES: u64 = 8 * 1024 * 1024;
+
+        fn measure(process_id: i64, spill_path: Option<PathBuf>) -> (Duration, u64) {
+            let mut options = PtySpawnOptions::new(process_id, "secret-token", "yes 0123456789")
+                .with_raw_buffer_capacity(DEFAULT_OUTPUT_SPILL_CAPACITY);
+            if let Some(path) = spill_path {
+                options = options.with_output_spill(path, DEFAULT_OUTPUT_SPILL_CAPACITY);
+            }
+            let mut process = PtyProcess::spawn(options).expect("spawn yes flood fixture");
+            let output = process.raw_output();
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(5);
+            while output.total_bytes_seen() < TARGET_BYTES && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let elapsed = started.elapsed();
+            let bytes = output.total_bytes_seen();
+            process
+                .terminate(Duration::from_millis(100))
+                .expect("terminate yes flood fixture");
+            process
+                .flush_output_spill()
+                .expect("flush yes flood fixture");
+            assert!(
+                bytes >= TARGET_BYTES,
+                "yes flood captured only {bytes} bytes in {elapsed:?}"
+            );
+            (elapsed, bytes)
+        }
+
+        let baseline = measure(46, None);
+        let temp = tempfile::tempdir().unwrap();
+        let persisted = measure(47, Some(temp.path().join("47.raw")));
+        let baseline_rate = baseline.1 as f64 / baseline.0.as_secs_f64();
+        let persisted_rate = persisted.1 as f64 / persisted.0.as_secs_f64();
+        eprintln!(
+            "yes flood: memory={:.1} MiB/s, persisted={:.1} MiB/s, ratio={:.2}",
+            baseline_rate / (1024.0 * 1024.0),
+            persisted_rate / (1024.0 * 1024.0),
+            persisted_rate / baseline_rate,
+        );
+        assert!(
+            persisted.0 <= baseline.0.saturating_mul(3).max(Duration::from_secs(2)),
+            "write-behind spill regressed yes throughput: memory={baseline:?}, persisted={persisted:?}"
+        );
+        assert!(
+            std::fs::metadata(temp.path().join("47.raw")).unwrap().len()
+                <= DEFAULT_OUTPUT_SPILL_CAPACITY as u64
+        );
     }
 
     #[test]

@@ -275,6 +275,13 @@ impl TerminalOutput {
         }
     }
 
+    /// Rebuild server-rendered terminal state by replaying retained raw bytes.
+    pub fn from_replay(rows: u16, columns: u16, scrollback_lines: usize, bytes: &[u8]) -> Self {
+        let output = Self::new(rows, columns, scrollback_lines);
+        output.feed_and_read_viewport(bytes);
+        output
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, TerminalEmulator> {
         self.inner
             .lock()

@@ -4,14 +4,20 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt,
+    fs::File,
+    io::{self, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use awm_core::{
     Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store, StoreError,
     attention::{AgentState, AttentionTracker, PendingDialog, pending_dialog},
-    pty::{ExitStatus, PtyProcess, PtySize, PtySpawnOptions, RawOutput},
-    terminal::TerminalOutput,
+    pty::{
+        DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
+        PtySpawnOptions, RawOutput,
+    },
+    terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,6 +32,12 @@ use crate::config::{
 };
 
 const DEFAULT_STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// Directory below the daemon data root containing bounded raw-output tails.
+pub const OUTPUT_DIRECTORY: &str = "output";
+
+/// Optional byte-cap override for per-process raw-output spill files.
+pub const AWM_OUTPUT_CAPACITY_ENV: &str = "AWM_OUTPUT_CAPACITY_BYTES";
 
 /// Errors returned by process registry operations.
 #[derive(Debug)]
@@ -48,6 +60,10 @@ pub enum RegistryError {
         process_id: ProcessId,
         message: String,
     },
+    OutputPersistence {
+        process_id: ProcessId,
+        message: String,
+    },
 }
 
 impl RegistryError {
@@ -65,6 +81,7 @@ impl RegistryError {
             Self::MissingCommand(_) => "process_missing_command",
             Self::InvalidName => "invalid_process_name",
             Self::Pty { .. } => "pty_error",
+            Self::OutputPersistence { .. } => "output_persistence_error",
         }
     }
 }
@@ -103,6 +120,13 @@ impl fmt::Display for RegistryError {
             } => write!(
                 formatter,
                 "PTY operation for process {process_id} failed: {message}"
+            ),
+            Self::OutputPersistence {
+                process_id,
+                message,
+            } => write!(
+                formatter,
+                "output persistence for process {process_id} failed: {message}"
             ),
         }
     }
@@ -220,15 +244,46 @@ pub struct ProcessRegistry {
     selected: HashMap<ProjectId, ProcessId>,
     trust_snapshots: HashMap<ProcessId, TrustFields>,
     stop_grace: Duration,
+    output_persistence: Option<OutputPersistence>,
+}
+
+#[derive(Clone, Debug)]
+struct OutputPersistence {
+    directory: PathBuf,
+    capacity: usize,
 }
 
 impl ProcessRegistry {
     /// Create a registry and mark process rows left running by an earlier daemon as crashed.
     pub fn new(store: Store) -> RegistryResult<Self> {
-        Self::with_stop_grace(store, DEFAULT_STOP_GRACE)
+        Self::with_options(store, DEFAULT_STOP_GRACE, None)
     }
 
     pub fn with_stop_grace(store: Store, stop_grace: Duration) -> RegistryResult<Self> {
+        Self::with_options(store, stop_grace, None)
+    }
+
+    /// Create a registry whose PTY output survives daemon restarts in `output_directory`.
+    pub fn with_output_persistence(
+        store: Store,
+        output_directory: impl Into<PathBuf>,
+        capacity: usize,
+    ) -> RegistryResult<Self> {
+        Self::with_options(
+            store,
+            DEFAULT_STOP_GRACE,
+            Some(OutputPersistence {
+                directory: output_directory.into(),
+                capacity,
+            }),
+        )
+    }
+
+    fn with_options(
+        store: Store,
+        stop_grace: Duration,
+        output_persistence: Option<OutputPersistence>,
+    ) -> RegistryResult<Self> {
         let trust_snapshots = store
             .list_processes(None)?
             .into_iter()
@@ -242,8 +297,10 @@ impl ProcessRegistry {
             selected: HashMap::new(),
             trust_snapshots,
             stop_grace,
+            output_persistence,
         };
         registry.reconcile_stale_processes()?;
+        registry.reload_persisted_outputs()?;
         Ok(registry)
     }
 
@@ -393,6 +450,11 @@ impl ProcessRegistry {
         for (key, value) in &process.env {
             options = options.with_env(key, value);
         }
+        if let Some(persistence) = &self.output_persistence {
+            options = options
+                .with_raw_buffer_capacity(persistence.capacity)
+                .with_output_spill(output_path(persistence, process.id), persistence.capacity);
+        }
 
         let mut hosted = match PtyProcess::spawn(options) {
             Ok(hosted) => hosted,
@@ -403,7 +465,7 @@ impl ProcessRegistry {
                 self.store.put_process(&process)?;
                 return Err(RegistryError::Pty {
                     process_id,
-                    message: error.to_string(),
+                    message: format!("{error:#}"),
                 });
             }
         };
@@ -564,6 +626,7 @@ impl ProcessRegistry {
         };
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
+        self.remove_output_file(process_id)?;
         self.trust_snapshots.remove(&process_id);
         self.selected.retain(|_, selected| *selected != process_id);
         Ok(process)
@@ -820,6 +883,13 @@ impl ProcessRegistry {
             output.raw.clear();
             output.terminal.clear();
         }
+        if let Some(hosted) = self.running.get(&process_id) {
+            hosted
+                .clear_output_spill()
+                .map_err(|error| output_error(process_id, error))?;
+        } else {
+            self.remove_output_file(process_id)?;
+        }
         Ok(process)
     }
 
@@ -998,6 +1068,54 @@ impl ProcessRegistry {
         Ok(())
     }
 
+    fn reload_persisted_outputs(&mut self) -> RegistryResult<()> {
+        let Some(persistence) = self.output_persistence.clone() else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(&persistence.directory).map_err(|error| output_error(0, error))?;
+        for process in self.store.list_processes(None)? {
+            let bytes = match read_output_tail(
+                &output_path(&persistence, process.id),
+                persistence.capacity,
+            ) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(error) => return Err(output_error(process.id, error)),
+            };
+            let raw = RawOutput::from_replay(persistence.capacity, &bytes);
+            let terminal = TerminalOutput::from_replay(
+                DEFAULT_PTY_SIZE.rows,
+                DEFAULT_PTY_SIZE.cols,
+                DEFAULT_SCROLLBACK_LINES,
+                &bytes,
+            );
+            let attention = AttentionTracker::new(self.tool_type_for(&process)?);
+            attention.mark_exited();
+            self.outputs.insert(
+                process.id,
+                ProcessOutput {
+                    raw,
+                    terminal,
+                    attention,
+                    events: Vec::new(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn remove_output_file(&self, process_id: ProcessId) -> RegistryResult<()> {
+        let Some(persistence) = &self.output_persistence else {
+            return Ok(());
+        };
+        let path = output_path(persistence, process_id);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(output_error(process_id, error)),
+        }
+    }
+
     fn require(&self, process_id: ProcessId) -> RegistryResult<Process> {
         self.store
             .get_process(process_id)?
@@ -1025,6 +1143,39 @@ impl ProcessRegistry {
         } else {
             Ok(Some(process.kind.as_str().into()))
         }
+    }
+}
+
+/// Resolve the configured spill cap, falling back to the bounded 8 MiB default.
+pub fn output_spill_capacity_from_env() -> usize {
+    std::env::var(AWM_OUTPUT_CAPACITY_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_OUTPUT_SPILL_CAPACITY)
+}
+
+fn output_path(persistence: &OutputPersistence, process_id: ProcessId) -> PathBuf {
+    persistence.directory.join(format!("{process_id}.raw"))
+}
+
+fn read_output_tail(path: &Path, capacity: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let length = file.metadata()?.len();
+    let retained = length.min(capacity as u64);
+    file.seek(SeekFrom::Start(length.saturating_sub(retained)))?;
+    let mut bytes = Vec::with_capacity(retained as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn output_error(process_id: ProcessId, error: io::Error) -> RegistryError {
+    RegistryError::OutputPersistence {
+        process_id,
+        message: error.to_string(),
     }
 }
 
@@ -1163,6 +1314,48 @@ mod tests {
 
     use super::*;
 
+    fn output_test_process(project_path: &str) -> Process {
+        Process {
+            id: 31,
+            project_id: 1,
+            kind: ProcessKind::Terminal,
+            name: "persistent-terminal".into(),
+            command: Some(
+                "printf '\x1b[32mPERSISTED-OUTPUT-313\x1b[0m\nsecond-line\n'; sleep 30".into(),
+            ),
+            working_dir: project_path.into(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        }
+    }
+
+    fn wait_for_persisted_output(registry: &mut ProcessRegistry) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let output = registry.rendered_output(31).unwrap();
+            if output.text.contains("PERSISTED-OUTPUT-313") {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for PTY output"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn daemon_startup_marks_orphaned_running_rows_as_crashed() {
         let store = Store::open_in_memory().unwrap();
@@ -1207,6 +1400,74 @@ mod tests {
         assert_eq!(process.status, ProcessStatus::Crashed);
         assert_eq!(process.pid, None);
         assert!(process.exited_at.is_some());
+    }
+
+    #[test]
+    fn output_reloads_after_registry_restart_and_is_removed_on_clear_and_close() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let database = temp.path().join("awm.sqlite3");
+        let output_dir = temp.path().join(OUTPUT_DIRECTORY);
+        std::fs::create_dir(&project_dir).unwrap();
+        let project_path = project_dir.to_string_lossy().into_owned();
+
+        {
+            let store = Store::open(&database).unwrap();
+            store
+                .put_project(&Project {
+                    id: 1,
+                    path: project_path.clone(),
+                    name: "persistence".into(),
+                    display_name: None,
+                    icon: None,
+                    selected: true,
+                    sort_order: 0,
+                })
+                .unwrap();
+            let mut registry =
+                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+            registry.create(output_test_process(&project_path)).unwrap();
+            registry.start(31).unwrap();
+            wait_for_persisted_output(&mut registry);
+            // Dropping the registry is the daemon's graceful-shutdown path: it
+            // terminates live PTYs and performs the spill's final flush.
+        }
+
+        let spill_path = output_dir.join("31.raw");
+        let spilled = std::fs::read(&spill_path).unwrap();
+        assert!(
+            String::from_utf8_lossy(&spilled).contains("PERSISTED-OUTPUT-313"),
+            "distinctive output was not flushed: {spilled:?}"
+        );
+        assert!(spilled.len() <= 64 * 1024);
+
+        {
+            let store = Store::open(&database).unwrap();
+            let mut registry =
+                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+            assert_eq!(registry.get(31).unwrap().status, ProcessStatus::Stopped);
+            let raw = registry.raw_output(31, None, usize::MAX).unwrap();
+            assert!(String::from_utf8_lossy(&raw.data).contains("PERSISTED-OUTPUT-313"));
+            let rendered = registry.rendered_output(31).unwrap();
+            assert!(rendered.text.contains("PERSISTED-OUTPUT-313"));
+            assert!(!rendered.text.contains("\u{1b}[32m"));
+
+            registry.clear_output(31).unwrap();
+        }
+        assert!(!spill_path.exists(), "clear_output left the spill behind");
+
+        {
+            let store = Store::open(&database).unwrap();
+            let mut registry =
+                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+            assert!(registry.rendered_output(31).unwrap().text.is_empty());
+            registry.start(31).unwrap();
+            wait_for_persisted_output(&mut registry);
+            registry.stop(31).unwrap();
+            assert!(spill_path.exists());
+            registry.close(31).unwrap();
+            assert!(!spill_path.exists(), "close left the spill behind");
+        }
     }
 
     #[test]

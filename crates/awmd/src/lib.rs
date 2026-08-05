@@ -64,8 +64,8 @@ pub use lifecycle::{
 pub use mcp::AWM_MCP_TOKEN_HEADER;
 pub use migration::migrate_legacy_data_dir;
 pub use process_registry::{
-    BulkFailure, BulkProcessResult, ProcessRegistry, ProcessStatusView, RegistryError,
-    RegistryResult,
+    AWM_OUTPUT_CAPACITY_ENV, BulkFailure, BulkProcessResult, OUTPUT_DIRECTORY, ProcessRegistry,
+    ProcessStatusView, RegistryError, RegistryResult, output_spill_capacity_from_env,
 };
 pub use process_stats::{
     DescendantProcessStats, LiveStatsSnapshot, ProcessRuntimeStats, ProjectCounts,
@@ -177,7 +177,12 @@ impl DaemonServer {
             )
         })?;
         let registry = Arc::new(Mutex::new(
-            ProcessRegistry::new(store).map_err(registry_io_error)?,
+            ProcessRegistry::with_output_persistence(
+                store,
+                config.data_dir.join(OUTPUT_DIRECTORY),
+                output_spill_capacity_from_env(),
+            )
+            .map_err(registry_io_error)?,
         ));
         // Build the HTTP update client before publishing discovery so readiness never advertises
         // a listener that is still loading platform TLS state.
