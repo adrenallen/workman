@@ -9,11 +9,12 @@
     {
       title: 'Move through the workspace',
       shortcuts: [
-        { keys: ['⌘', '⌥', '← / →'], label: 'Move between project rail, tree, and main frame' },
+        { keys: ['⌘', '← / →'], label: 'Move between project rail, tree, and main frame' },
+        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process' },
+        { keys: ['⌘', '⌥', '← / →'], label: 'Panel traversal alias' },
         { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
         { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
-        { keys: ['↵'], label: 'Open or activate the focused row' },
-        { keys: ['Tab'], label: 'Move through controls in the focused panel' }
+        { keys: ['↵'], label: 'Open or activate the focused row' }
       ]
     },
     {
@@ -92,7 +93,7 @@
     </div>
 
     <footer>
-      <span>Terminal input keeps every key except the explicit <strong>⌘U Unfocus</strong> escape.</span>
+      <span>Text fields keep Home/End. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
       <button type="button" onclick={onClose}>Done</button>
     </footer>
   </div>

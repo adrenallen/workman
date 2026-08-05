@@ -6,6 +6,14 @@ export function isTerminalInputTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && Boolean(target.closest('.xterm'));
 }
 
+export function isTextEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target.isContentEditable
+    || Boolean(target.closest('[contenteditable="true"], [contenteditable="plaintext-only"]'));
+}
+
 export function panelForTarget(target: EventTarget | null): AppPanel | null {
   if (!(target instanceof HTMLElement)) return null;
   const panel = target.closest<HTMLElement>('[data-app-panel]')?.dataset.appPanel;

@@ -51,6 +51,7 @@
   import {
     focusAdjacentPanel,
     focusPanel,
+    isTextEditingTarget,
     isTerminalInputTarget,
     moveListFocus,
     panelForTarget
@@ -281,8 +282,9 @@
       return;
     }
     if (quickJumpOpen || shortcutsOpen) return;
+    if (isTextEditingTarget(target)) return;
     if (
-      event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey
+      event.metaKey && !event.ctrlKey && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
       event.preventDefault();
@@ -290,8 +292,13 @@
       return;
     }
     if (
-      target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
-    ) return;
+      event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+      && (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+    ) {
+      event.preventDefault();
+      cycleProcess(event.key === 'ArrowUp' ? -1 : 1, panelForTarget(target));
+      return;
+    }
     if (panelForTarget(target) === 'projects') handleProjectListKeys(event);
     if (event.defaultPrevented) return;
     if (event.metaKey && !event.altKey && event.key.toLowerCase() === 'b') {
@@ -348,6 +355,22 @@
   function unfocusSelectedProcess(): void {
     clearSelection();
     void tick().then(() => focusPanel('tree'));
+  }
+
+  function cycleProcess(direction: -1 | 1, returnPanel: ReturnType<typeof panelForTarget>): void {
+    if (treeProcesses.length === 0) return;
+    const current = selectedProcess
+      ? treeProcesses.findIndex((process) => process.id === selectedProcess?.id)
+      : -1;
+    const next = current < 0
+      ? direction > 0 ? 0 : treeProcesses.length - 1
+      : (current + direction + treeProcesses.length) % treeProcesses.length;
+    const process = treeProcesses[next];
+    if (!process) return;
+    selectProcessById(process.id);
+    if (returnPanel === 'projects' || returnPanel === 'tree') {
+      void tick().then(() => focusPanel(returnPanel));
+    }
   }
 
   function chooseQuickJumpTarget(target: AppNavigationTarget): void {

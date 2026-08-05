@@ -356,6 +356,7 @@
   function handleTreeKeys(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (!target || target.matches('input')) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && target.dataset.group) {
       const group = target.dataset.group as ProjectTreeGroup;
       const shouldOpen = event.key === 'ArrowRight';
