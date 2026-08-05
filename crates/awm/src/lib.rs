@@ -36,7 +36,7 @@ const HELLO_REQUEST_ID: &str = "__awm_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
 const HELP: &str = "\
-Usage: awm [--data-dir PATH] [--daemon PATH] [COMMAND]\n\
+Usage: awm [--data-dir PATH] [--daemon PATH] [--version] [COMMAND]\n\
 \n\
 Commands:\n\
   (none)\n\
@@ -71,6 +71,10 @@ pub async fn run_env() -> Result<()> {
         print!("{HELP}");
         return Ok(());
     }
+    if matches!(cli.command, Command::Version) {
+        println!("awm {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     let data_dir = cli.data_dir.unwrap_or_else(awmd::default_data_dir);
     let daemon = daemon_executable(cli.daemon);
@@ -94,7 +98,9 @@ pub async fn run_env() -> Result<()> {
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
         Command::Stop { process_id } => stop(&mut client, process_id).await,
-        Command::App | Command::McpSetup { .. } | Command::Help => unreachable!(),
+        Command::App | Command::McpSetup { .. } | Command::Help | Command::Version => {
+            unreachable!()
+        }
     }
 }
 
@@ -137,6 +143,7 @@ enum Command {
         process_id: i64,
     },
     Help,
+    Version,
 }
 
 #[derive(Debug)]
@@ -169,6 +176,10 @@ impl Cli {
                 "--data-dir" => data_dir = Some(PathBuf::from(next_value(&mut args, &arg)?)),
                 "--daemon" => daemon = Some(PathBuf::from(next_value(&mut args, &arg)?)),
                 "--help" | "-h" | "help" => break Command::Help,
+                "--version" | "-V" => {
+                    require_no_args(args, "--version")?;
+                    break Command::Version;
+                }
                 "add" => break parse_add(args)?,
                 "up" => break parse_project_action(args, true)?,
                 "down" => break parse_project_action(args, false)?,
@@ -1248,6 +1259,10 @@ mod tests {
     fn parses_all_subcommands() {
         let cli = Cli::parse(["awm"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Status));
+
+        let cli = Cli::parse(["awm", "--version"].map(OsString::from)).unwrap();
+        assert!(matches!(cli.command, Command::Version));
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
 
         let cli = Cli::parse(["awm", "add"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Add { path } if path == Path::new(".")));

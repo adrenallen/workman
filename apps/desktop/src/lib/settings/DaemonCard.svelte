@@ -55,7 +55,8 @@
 
   <div class="runtime-stats">
     <div><span>Port</span><strong>{info.port}</strong></div>
-    <div><span>Version</span><strong>v{info.version}</strong></div>
+    <div><span>App</span><strong>v{connection.app_version}</strong></div>
+    <div><span>Daemon</span><strong>v{info.version}</strong></div>
     <div><span>Uptime</span><strong>{formatUptime(uptime)}</strong></div>
     <div><span>PID</span><strong>{info.pid}</strong></div>
   </div>
@@ -139,7 +140,7 @@
 
   .runtime-stats {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     border-block: 1px solid var(--border);
   }
 
@@ -183,8 +184,8 @@
 
   @media (max-width: 700px) {
     .runtime-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .runtime-stats > div:nth-child(2) { border-right: 0; }
-    .runtime-stats > div:nth-child(-n + 2) { border-bottom: 1px solid #243e49; }
+    .runtime-stats > div:nth-child(even) { border-right: 0; }
+    .runtime-stats > div:not(:last-child) { border-bottom: 1px solid #243e49; }
     footer { align-items: flex-start; flex-direction: column; }
   }
 </style>
