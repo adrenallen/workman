@@ -3,7 +3,6 @@
   import GitPullRequestIcon from '@lucide/svelte/icons/git-pull-request';
   import GitPullRequestClosedIcon from '@lucide/svelte/icons/git-pull-request-closed';
   import GitPullRequestDraftIcon from '@lucide/svelte/icons/git-pull-request-draft';
-  import Globe2Icon from '@lucide/svelte/icons/globe-2';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
@@ -44,15 +43,6 @@
 </script>
 
 <span class="worktree-meta">
-  {#if entry?.site_url}
-    <IconButton
-      class="size-6"
-      label={`Open Herd site · ${entry.site_url}`}
-      onclick={(event) => { event.stopPropagation(); openUrl(entry!.site_url!); }}
-    >
-      {#snippet icon()}<Globe2Icon size={13} strokeWidth={1.8} />{/snippet}
-    </IconButton>
-  {/if}
   {#if pullRequest}
     <IconButton
       class={`size-6 border border-border bg-card ${pullRequestClass}`}

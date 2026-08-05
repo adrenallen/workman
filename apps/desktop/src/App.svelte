@@ -1894,6 +1894,7 @@
         path={project.path}
         projectName={fullTitle}
         collapsed={projectRailCollapsed}
+        siteUrl={worktree?.site_url ?? null}
         onError={reportError}
       />
       <IconButton

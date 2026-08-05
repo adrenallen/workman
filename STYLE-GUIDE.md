@@ -26,6 +26,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Every dot, badge, count, health light, or attention marker must have an exact tooltip and accessible label. Use `StatusIndicator`; never add a bare colored circle.
 - Agent state always uses `AgentStatusIndicator`: gray static circle = idle, spinning green loader = working, amber alert = needs input, blue clock = waiting/timer, and red exit icon = exited. Exit tooltips distinguish clean exits from crashes.
 - Status copy should answer what and why: “Daemon connected · port 62749”, “Agent needs input”, or “3 running of 5 terminals”. Avoid generic labels like “online” without a subject.
+- Row status belongs in a persistent trailing zone. Reveal hover actions in a separate in-flow slot that yields label space; never place an opaque or absolutely positioned action layer over PR, agent, or health indicators.
 
 ## Interaction contract
 
