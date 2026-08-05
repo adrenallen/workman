@@ -68,8 +68,6 @@ body,
 }
 
 #app {
-  width: calc(100% * var(--ui-scale-inverse, 1));
-  height: calc(100% * var(--ui-scale-inverse, 1));
   zoom: var(--ui-scale, 1);
 }
 
