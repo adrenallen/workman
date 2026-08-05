@@ -5,6 +5,7 @@
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
   import ContextMenu from './lib/ContextMenu.svelte';
   import EmptyState from './lib/EmptyState.svelte';
+  import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
@@ -47,6 +48,13 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import {
+    focusAdjacentPanel,
+    focusPanel,
+    isTerminalInputTarget,
+    moveListFocus,
+    panelForTarget
+  } from './lib/keyboardNavigation';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -118,6 +126,7 @@
   let agentToolsLoading = $state(false);
   let versionRestarting = $state(false);
   let quickJumpOpen = $state(false);
+  let shortcutsOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
@@ -257,15 +266,34 @@
       if (event.key === 'Escape') closeContextMenu();
       return;
     }
+    if (isTerminalInputTarget(target)) return;
+    if (event.metaKey && !event.altKey && !event.ctrlKey && event.key === '/') {
+      event.preventDefault();
+      if (shortcutsOpen) closeShortcuts();
+      else openShortcuts();
+      return;
+    }
     if (event.metaKey && !event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'k') {
       event.preventDefault();
+      if (shortcutsOpen) closeShortcuts();
       if (quickJumpOpen) closeQuickJump();
       else openQuickJump();
+      return;
+    }
+    if (quickJumpOpen || shortcutsOpen) return;
+    if (
+      event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey
+      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+    ) {
+      event.preventDefault();
+      focusAdjacentPanel(panelForTarget(target), event.key === 'ArrowLeft' ? -1 : 1);
       return;
     }
     if (
       target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
     ) return;
+    if (panelForTarget(target) === 'projects') handleProjectListKeys(event);
+    if (event.defaultPrevented) return;
     if (event.metaKey && !event.altKey && event.key.toLowerCase() === 'b') {
       event.preventDefault();
       if (event.shiftKey) toggleTreeRail();
@@ -281,6 +309,7 @@
   }
 
   function openQuickJump(): void {
+    shortcutsOpen = false;
     quickJumpRecentKeys = readRecentNavigationKeys();
     quickJumpOpen = true;
     void refreshQuickJumpIndex(true);
@@ -288,6 +317,37 @@
 
   function closeQuickJump(): void {
     quickJumpOpen = false;
+  }
+
+  function openShortcuts(): void {
+    quickJumpOpen = false;
+    shortcutsOpen = true;
+  }
+
+  function closeShortcuts(): void {
+    shortcutsOpen = false;
+  }
+
+  function handleProjectListKeys(event: KeyboardEvent): void {
+    if (
+      event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+      || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')
+    ) return;
+    const container = (event.target as HTMLElement | null)?.closest<HTMLElement>('.project-list');
+    if (!container) return;
+    if (
+      moveListFocus(
+        container,
+        event.target,
+        '.project-select:not(:disabled)',
+        event.key === 'ArrowDown' ? 1 : -1
+      )
+    ) event.preventDefault();
+  }
+
+  function unfocusSelectedProcess(): void {
+    clearSelection();
+    void tick().then(() => focusPanel('tree'));
   }
 
   function chooseQuickJumpTarget(target: AppNavigationTarget): void {
@@ -1221,7 +1281,13 @@
   class:with-version-banner={versionSkew}
   style={`--project-rail-width: ${projectRailCollapsed ? collapsedProjectRailWidth : projectRailWidth}px; --tree-rail-width: ${treeRailCollapsed ? collapsedTreeRailWidth : treeRailWidth}px;`}
 >
-  <aside class="project-rail" class:collapsed={projectRailCollapsed} aria-label="Projects">
+  <aside
+    class="project-rail"
+    class:collapsed={projectRailCollapsed}
+    aria-label="Projects"
+    data-app-panel="projects"
+    tabindex="-1"
+  >
     <header class="brand" data-tauri-drag-region>
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="brand-copy"><strong>gbuild</strong><span>local workspaces</span></div>
@@ -1294,7 +1360,12 @@
   </aside>
 
   {#if selectedProject}
-    <aside class="tree-rail" aria-label={`${projectLabel(selectedProject)} items`}>
+    <aside
+      class="tree-rail"
+      aria-label={`${projectLabel(selectedProject)} items`}
+      data-app-panel="tree"
+      tabindex="-1"
+    >
       <ProjectTree
         project={selectedProject}
         {processes}
@@ -1334,7 +1405,13 @@
     </aside>
   {/if}
 
-  <section class="main-frame" class:empty={selectedProject === null} class:has-error={error !== null}>
+  <section
+    class="main-frame"
+    class:empty={selectedProject === null}
+    class:has-error={error !== null}
+    data-app-panel="main"
+    tabindex="-1"
+  >
     {#if selectedProject}
       <header class="document-title" data-tauri-drag-region>
         <div class="title-side"><span>{selection?.kind ?? 'project'}</span></div>
@@ -1356,7 +1433,7 @@
           <SettingsPanel {client} project={selectedProject} {connection} onError={reportError} />
         {:else if selectedProcess}
           {#key selectedProcess.id}
-            <div class="terminal-view"><TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} /></div>
+            <div class="terminal-view"><TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} /></div>
           {/key}
         {:else if selection?.kind === 'todo'}
           <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
@@ -1373,7 +1450,7 @@
           process={selectedProcess}
           processes={treeProcesses}
           connected={connection.status === 'connected'}
-          onUnfocus={clearSelection}
+          onUnfocus={unfocusSelectedProcess}
           onSelectProcess={selectProcessById}
           onError={reportError}
         />
@@ -1410,6 +1487,10 @@
     onChoose={chooseQuickJumpTarget}
     onClose={closeQuickJump}
   />
+{/if}
+
+{#if shortcutsOpen}
+  <KeyboardShortcuts onClose={closeShortcuts} />
 {/if}
 
 {#if dialog && dialog !== 'command'}
@@ -1468,6 +1549,8 @@
   .version-banner button:hover:not(:disabled) { border-color: #b09259; background: #493b25; }
   .version-banner button:disabled { cursor: default; opacity: 0.6; }
   .project-rail, .tree-rail, .main-frame { min-width: 0; min-height: 0; }
+  [data-app-panel] { isolation: isolate; outline: 0; }
+  [data-app-panel]:focus-within, [data-app-panel]:focus { box-shadow: inset 0 0 0 1px #666d76; }
   .project-rail, .tree-rail { position: relative; border-right: 1px solid var(--border); }
   .project-rail { display: flex; flex-direction: column; background: #17191c; }
 
@@ -1489,6 +1572,7 @@
   .project-row:hover { background: #202328; }
   .project-row.active { border-color: #41464d; background: #25282d; box-shadow: inset 2px 0 #777f89; }
   .project-select { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: #292d32; }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }

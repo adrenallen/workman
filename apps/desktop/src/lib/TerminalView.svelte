@@ -14,12 +14,14 @@
     client,
     process,
     connected,
-    onError
+    onError,
+    onUnfocus
   }: {
     client: DaemonClient;
     process: ProcessView;
     connected: boolean;
     onError: (message: string) => void;
+    onUnfocus?: () => void;
   } = $props();
 
   let host: HTMLDivElement;
@@ -114,6 +116,13 @@
     }
 
     instance.attachCustomKeyEventHandler((event) => {
+      if (
+        event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+        && event.key.toLowerCase() === 'u'
+      ) {
+        if (event.type === 'keydown') onUnfocus?.();
+        return false;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         if (event.type === 'keydown') openSearch();
         return false;

@@ -159,7 +159,13 @@
 
 <footer class="status-bar" aria-label={`${project.name} selected process status`}>
   <nav class="navigation" aria-label="Process selection">
-    <button type="button" class="unfocus" title="Clear selection" onclick={onUnfocus}>
+    <button
+      type="button"
+      class="unfocus"
+      title="Unfocus terminal (⌘U)"
+      aria-keyshortcuts="Meta+U"
+      onclick={onUnfocus}
+    >
       <span aria-hidden="true">×</span> Unfocus
     </button>
     <span class="rule" aria-hidden="true"></span>
