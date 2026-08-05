@@ -255,10 +255,10 @@
           <div><span class="eyebrow">Explicit consent</span><h3 id="config-preview-title">Review the complete config write</h3></div>
           <button type="button" aria-label="Close configuration preview" onclick={() => (preview = null)}>×</button>
         </header>
-        <p>gbuild will write exactly this result to <code>{preview.path}</code>. Existing unrelated values are retained.</p>
+        <p>awm will write exactly this result to <code>{preview.path}</code>. Existing unrelated values are retained.</p>
         <pre>{preview.preview}</pre>
         <footer>
-          <span>{preview.already_configured ? 'The gbuild entry already matches.' : 'No file is changed until you approve.'}</span>
+          <span>{preview.already_configured ? 'The awm entry already matches.' : 'No file is changed until you approve.'}</span>
           <div><button class="cancel" type="button" onclick={() => (preview = null)}>Cancel</button><button class="approve" type="button" disabled={busy !== null} onclick={() => void applyConfiguration()}>{busy?.startsWith('configure-') ? 'Writing…' : 'Approve & write'}</button></div>
         </footer>
       </div>

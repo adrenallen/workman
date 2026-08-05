@@ -43,7 +43,7 @@
   }
 
   function recoveryKey(scratchpadId: number): string {
-    return `gbuild.scratchpad-recovery.${scratchpadId}`;
+    return `awm.scratchpad-recovery.${scratchpadId}`;
   }
 
   function rememberRecovery(copy: RecoveryCopy): void {

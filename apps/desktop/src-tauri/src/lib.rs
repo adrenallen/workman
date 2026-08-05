@@ -9,11 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures_util::{SinkExt, StreamExt};
-use gbuildd::{
+use awmd::{
     BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonConfig, DaemonServer, DaemonVersion,
     Discovery, default_data_dir, discover_or_spawn, probe,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{Emitter, State};
@@ -28,9 +28,9 @@ use tokio_tungstenite::{
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
-const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"GBT1";
+const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"AWM1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
-const HELLO_REQUEST_ID: &str = "__gbuild_desktop_hello__";
+const HELLO_REQUEST_ID: &str = "__awm_desktop_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -270,10 +270,10 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to run gbuild desktop");
+        .expect("failed to run awm desktop");
 }
 
-/// Detect the private daemon-process mode used when no standalone `gbuildd` sits beside the app.
+/// Detect the private daemon-process mode used when no standalone `awmd` sits beside the app.
 pub fn embedded_daemon_data_dir(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
     let mut args = args.into_iter().skip(1);
     while let Some(argument) = args.next() {
@@ -405,11 +405,11 @@ async fn negotiate_daemon_version(
 fn log_daemon_version(daemon: Option<&DaemonVersion>) {
     if let Some(daemon) = daemon {
         eprintln!(
-            "gbuild desktop: connected to daemon v{} (build {}, control protocol {})",
+            "awm desktop: connected to daemon v{} (build {}, control protocol {})",
             daemon.version, daemon.build_id, daemon.control_protocol_version
         );
     } else {
-        eprintln!("gbuild desktop: connected to a legacy daemon without a version handshake");
+        eprintln!("awm desktop: connected to a legacy daemon without a version handshake");
     }
 }
 
@@ -516,7 +516,7 @@ fn open_shell_target(path: &Path, target: ShellOpenTarget) -> Result<(), String>
 }
 
 fn open_in_editor(path: &Path) -> Result<(), String> {
-    if let Some(editor) = env::var_os("GBUILD_EDITOR")
+    if let Some(editor) = env::var_os("AWM_EDITOR")
         .or_else(|| env::var_os("VISUAL"))
         .or_else(|| env::var_os("EDITOR"))
         .filter(|editor| !editor.is_empty())
@@ -729,10 +729,10 @@ fn spawn_detached(command: &mut Command, label: &str) -> Result<(), String> {
 
 fn daemon_executable() -> io::Result<PathBuf> {
     let current = env::current_exe()?;
-    let sibling = current.with_file_name(format!("gbuildd{}", env::consts::EXE_SUFFIX));
+    let sibling = current.with_file_name(format!("awmd{}", env::consts::EXE_SUFFIX));
     Ok(daemon_executable_from(
         &current,
-        env::var_os("GBUILD_DAEMON_BIN").map(PathBuf::from),
+        env::var_os("AWM_DAEMON_BIN").map(PathBuf::from),
         sibling.is_file(),
     ))
 }
@@ -744,7 +744,7 @@ fn daemon_executable_from(
 ) -> PathBuf {
     override_path.unwrap_or_else(|| {
         if sibling_available {
-            current.with_file_name(format!("gbuildd{}", env::consts::EXE_SUFFIX))
+            current.with_file_name(format!("awmd{}", env::consts::EXE_SUFFIX))
         } else {
             current.to_path_buf()
         }
@@ -770,25 +770,25 @@ mod tests {
 
     #[test]
     fn daemon_binary_defaults_to_desktop_binary_sibling() {
-        let desktop = Path::new("/tmp/gbuild-target/debug/gbuild-desktop");
+        let desktop = Path::new("/tmp/awm-target/debug/awm-desktop");
         assert_eq!(
             daemon_executable_from(desktop, None, true),
-            Path::new("/tmp/gbuild-target/debug/gbuildd")
+            Path::new("/tmp/awm-target/debug/awmd")
         );
     }
 
     #[test]
     fn desktop_binary_is_the_headless_fallback() {
-        let desktop = Path::new("/tmp/gbuild-target/debug/gbuild-desktop");
+        let desktop = Path::new("/tmp/awm-target/debug/awm-desktop");
         assert_eq!(daemon_executable_from(desktop, None, false), desktop);
     }
 
     #[test]
     fn daemon_binary_override_wins() {
-        let override_path = PathBuf::from("/opt/gbuild/bin/gbuildd");
+        let override_path = PathBuf::from("/opt/awm/bin/awmd");
         assert_eq!(
             daemon_executable_from(
-                Path::new("/tmp/gbuild-desktop"),
+                Path::new("/tmp/awm-desktop"),
                 Some(override_path.clone()),
                 false
             ),
@@ -799,13 +799,13 @@ mod tests {
     #[test]
     fn embedded_daemon_mode_reads_data_dir_argument() {
         let args = [
-            OsString::from("gbuild-desktop"),
+            OsString::from("awm-desktop"),
             OsString::from("--data-dir"),
-            OsString::from("/tmp/gbuild-data"),
+            OsString::from("/tmp/awm-data"),
         ];
         assert_eq!(
             embedded_daemon_data_dir(args),
-            Some(PathBuf::from("/tmp/gbuild-data"))
+            Some(PathBuf::from("/tmp/awm-data"))
         );
     }
 

@@ -1,6 +1,6 @@
 use std::{path::Path, process::Command, time::Duration};
 
-use gbuildd::{discover_or_spawn, discovery_path, probe};
+use awmd::{discover_or_spawn, discovery_path, probe};
 
 struct TerminateOnDrop(u32);
 
@@ -16,7 +16,7 @@ impl Drop for TerminateOnDrop {
 #[tokio::test]
 async fn desktop_binary_auto_spawns_in_headless_daemon_mode() {
     let temp = tempfile::tempdir().unwrap();
-    let desktop = Path::new(env!("CARGO_BIN_EXE_gbuild-desktop"));
+    let desktop = Path::new(env!("CARGO_BIN_EXE_awm-desktop"));
     let discovery = discover_or_spawn(temp.path(), desktop, Duration::from_secs(5))
         .await
         .unwrap();

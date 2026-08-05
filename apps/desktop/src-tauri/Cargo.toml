@@ -1,11 +1,11 @@
 [package]
-name = "gbuild-desktop"
+name = "awm-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "gbuild_desktop"
+name = "awm_desktop"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
@@ -13,7 +13,7 @@ tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
 futures-util = "0.3.31"
-gbuildd = { path = "../../../crates/gbuildd" }
+awmd = { path = "../../../crates/awmd" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tauri = { version = "2.11.5", features = [] }

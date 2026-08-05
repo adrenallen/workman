@@ -256,7 +256,7 @@
     connection = status;
     if (status.status === 'connected') {
       console.info(
-        `gbuild daemon: ${status.daemon_version ?? 'legacy'} ` +
+        `awm daemon: ${status.daemon_version ?? 'legacy'} ` +
           `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
       );
       if (status.version_compatible) versionRestarting = false;
@@ -1095,7 +1095,7 @@
         return;
       }
       case 'remove-project':
-        if (!window.confirm(`Remove ${projectLabel(project)} from gbuild? Files stay on disk.`)) return;
+        if (!window.confirm(`Remove ${projectLabel(project)} from awm? Files stay on disk.`)) return;
         await client.control('projects.remove', {
           project_id: project.id,
           confirm_remove: true
@@ -1184,7 +1184,7 @@
         return;
       }
       case 'reveal-config':
-        await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/gbuild.yml`, 'reveal');
+        await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/awm.yml`, 'reveal');
         return;
       default:
         return;
@@ -1328,7 +1328,7 @@
 
   async function restartOutdatedDaemon(): Promise<void> {
     if (versionRestarting) return;
-    if (!window.confirm('Restart gbuild daemon? All running project processes will stop.')) return;
+    if (!window.confirm('Restart awm daemon? All running project processes will stop.')) return;
     versionRestarting = true;
     try {
       await client.restartDaemon();
@@ -1342,13 +1342,13 @@
 <svelte:window onkeydown={handleShortcut} />
 
 <svelte:head>
-  <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'gbuild'}</title>
+  <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'awm'}</title>
 </svelte:head>
 
 {#if versionSkew}
   <section class="version-banner" aria-live="assertive">
     <div>
-      <strong>gbuild daemon is running an older version</strong>
+      <strong>awm daemon is running an older version</strong>
       <span>Restarting loads this app’s control protocol and agent config. All running project processes will stop.</span>
     </div>
     <small>app {connection.app_build_id || 'current'} · daemon {connection.daemon_build_id ?? 'legacy'}</small>
@@ -1373,7 +1373,7 @@
   >
     <header class="brand" data-tauri-drag-region>
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="brand-copy"><strong>gbuild</strong><span>local workspaces</span></div>
+      <div class="brand-copy"><strong>awm</strong><span>local workspaces</span></div>
       <button
         class="rail-toggle"
         type="button"

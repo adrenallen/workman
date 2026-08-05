@@ -40,7 +40,7 @@ export interface OpenersState {
   error: string | null;
 }
 
-const storageKey = 'gbuild.openers.v1';
+const storageKey = 'awm.openers.v1';
 
 const defaultConfig: OpenersConfig = {
   editor: {

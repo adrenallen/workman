@@ -31,7 +31,7 @@ export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'daemon', label: 'Daemon', icon: '◉', description: 'Local runtime', local: false }
 ];
 
-const storageKey = 'gbuild.settings.section.v1';
+const storageKey = 'awm.settings.section.v1';
 const fallbackSection: SettingsSectionId = 'appearance';
 
 function isSettingsSection(value: unknown): value is SettingsSectionId {

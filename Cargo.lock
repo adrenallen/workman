@@ -124,6 +124,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "awm"
+version = "0.1.0"
+dependencies = [
+ "awm-core",
+ "awmd",
+ "base64 0.22.1",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "awm-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "nix",
+ "portable-pty",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "awm-desktop"
+version = "0.1.0"
+dependencies = [
+ "awmd",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "awmd"
+version = "0.1.0"
+dependencies = [
+ "awm-core",
+ "axum",
+ "base64 0.22.1",
+ "dirs",
+ "futures-util",
+ "globset",
+ "listeners",
+ "notify",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1127,75 +1196,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "gbuild-cli"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "futures-util",
- "gbuild-core",
- "gbuildd",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "gbuild-core"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "nix",
- "portable-pty",
- "rusqlite",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gbuild-desktop"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gbuildd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "gbuildd"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "dirs",
- "futures-util",
- "gbuild-core",
- "globset",
- "listeners",
- "notify",
- "rmcp",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "sysinfo",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "uuid",
 ]
 
 [[package]]

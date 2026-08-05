@@ -238,8 +238,8 @@
         <legend>Where to save this command</legend>
         <label class:chosen={saveMode === 'yml'} class="save-choice">
           <input type="radio" bind:group={saveMode} value="yml" disabled={busy} />
-          <span><strong>Save to gbuild.yml</strong>
-            {#if configExists === false}<small>No gbuild.yml found — we'll create one for you</small>{:else}<small>Share this command with the project</small>{/if}
+          <span><strong>Save to awm.yml</strong>
+            {#if configExists === false}<small>No awm.yml found — we'll create one for you</small>{:else}<small>Share this command with the project</small>{/if}
           </span>
         </label>
         <label class:chosen={saveMode === 'local'} class="save-choice">

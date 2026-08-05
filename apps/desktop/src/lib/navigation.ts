@@ -38,7 +38,7 @@ export interface NavigationProjectSnapshot {
   coordination: CoordinationSnapshot | null;
 }
 
-const recentStorageKey = 'gbuild.navigation.recents.v1';
+const recentStorageKey = 'awm.navigation.recents.v1';
 const recentLimit = 20;
 
 function createAppNavigation(): Readable<AppNavigationState> & {

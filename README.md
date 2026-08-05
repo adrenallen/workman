@@ -1,6 +1,6 @@
-# gbuild
+# awm
 
-gbuild is a native terminal workspace for running AI coding agents alongside a development
+awm is a native terminal workspace for running AI coding agents alongside a development
 stack. A headless Rust daemon will own terminals, process state, persistence, and the local MCP
 and control APIs; the CLI and desktop app will be thin clients.
 
@@ -14,23 +14,34 @@ The full project specification, architecture, milestones, and design decisions l
 ```
 
 This builds the daemon, CLI, and desktop app in release mode and links them into
-`~/.local/bin` without sudo. Re-run it after pulling updates. Then run `gbuild` in any
-project directory, `gbuild app` for the desktop workspace, or `gbuild mcp-setup` for Claude Code.
+`~/.local/bin` without sudo. Re-run it after pulling updates. Then run `awm` in any
+project directory, `awm app` for the desktop workspace, or `awm mcp-setup` for Claude Code.
+The installer removes obsolete `gbuild`, `gbuildd`, and `gbuild-desktop` symlinks after the
+new binaries have linked successfully; it never stops an already-running legacy daemon.
+
+On its first default-directory boot, awm copies the pre-rename gbuild data directory into the
+new awm directory, preserving SQLite state and `config.yml` while regenerating `daemon.json`.
+The old directory is left untouched. Repository commands belong in `awm.yml`; a legacy
+`gbuild.yml` remains readable for this release and emits a deprecation warning.
 
 ## Workspace
 
-- `crates/gbuild-core` — shared domain and service code
-- `crates/gbuildd` — headless daemon binary
-- `crates/gbuild-cli` — `gbuild` command-line client
+- `crates/awm-core` — shared domain and service code
+- `crates/awmd` — headless daemon binary
+- `crates/awm` — `awm` command-line client
 - `apps/desktop` — Tauri 2 desktop app
 
 Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
+The checkout itself may still be located at `/Users/g/Code/gbuild`. The product and GitHub
+repository are named awm, but that live working-directory path is intentionally not moved by
+the rename.
+
 ## User agent tools
 
-Agent commands can be managed in `gbuild/config.yml` beneath the platform config directory
-(`~/Library/Application Support/gbuild/config.yml` on macOS, or
-`${XDG_CONFIG_HOME:-~/.config}/gbuild/config.yml` on Linux). Set `GBUILD_CONFIG` to use a
+Agent commands can be managed in `awm/config.yml` beneath the platform config directory
+(`~/Library/Application Support/awm/config.yml` on macOS, or
+`${XDG_CONFIG_HOME:-~/.config}/awm/config.yml` on Linux). Set `AWM_CONFIG` to use a
 different file. The daemon reconciles this file on startup; file-backed entries are visible but
 read-only in the desktop settings, while tools created in the UI remain in the database.
 
@@ -52,7 +63,7 @@ generic terminal-prompt attention detector.
 ## Scratchpad Markdown Titles
 
 A scratchpad's `name` is its canonical Markdown H1. When `scratchpad_write` or
-`scratchpad_load_from_file` receives content whose first line is `# Title`, gbuild stores
+`scratchpad_load_from_file` receives content whose first line is `# Title`, awm stores
 `Title` as the scratchpad name and removes that line from the body. Full/content reads return
 the body only; heading outlines, title-section reads, and `scratchpad_save_to_file` reconstruct
 the H1 from the name. This normalization avoids keeping two title values that can drift apart.

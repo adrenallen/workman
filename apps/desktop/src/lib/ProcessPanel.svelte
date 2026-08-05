@@ -72,7 +72,7 @@
       <span aria-hidden="true">⌁</span>
       <div>
         <strong>No processes are registered</strong>
-        <p>Add commands in <code>gbuild.yml</code>, or spawn a terminal to start working now.</p>
+        <p>Add commands in <code>awm.yml</code>, or spawn a terminal to start working now.</p>
       </div>
       <button type="button" disabled={!connected || busyId !== null} onclick={onSpawnTerminal}>
         <span aria-hidden="true">+</span> Spawn terminal

@@ -1,9 +1,9 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
-    "crates/gbuild-core",
-    "crates/gbuildd",
-    "crates/gbuild-cli",
+    "crates/awm-core",
+    "crates/awmd",
+    "crates/awm",
 ]
 resolver = "3"
 
@@ -13,4 +13,4 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
-gbuild-core = { path = "crates/gbuild-core" }
+awm-core = { path = "crates/awm-core" }

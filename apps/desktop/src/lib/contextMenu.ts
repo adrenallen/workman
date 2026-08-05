@@ -72,7 +72,7 @@ export type ContextScratchpad = Pick<
   'id' | 'name' | 'revision' | 'archived'
 >;
 
-export const FOCUS_TERMINAL_EVENT = 'gbuild:focus-terminal';
+export const FOCUS_TERMINAL_EVENT = 'awm:focus-terminal';
 
 export function openWorkspacePath(path: string, target: ShellOpenTarget): Promise<void> {
   return invoke('shell_open_path', { path, target });
@@ -193,7 +193,7 @@ function projectItems(project: Project, openers: OpenersState | null): ContextMe
     { id: 'copy-path', label: 'Copy path', separatorBefore: openerItems.length === 0 },
     {
       id: 'remove-project',
-      label: 'Remove from gbuild…',
+      label: 'Remove from awm…',
       detail: 'Keeps files on disk',
       destructive: true,
       separatorBefore: true
@@ -226,7 +226,7 @@ function processItems(process: ProcessView): ContextMenuItem[] {
   }
 
   if (process.kind === 'command' && process.source === 'yml') {
-    items.push({ id: 'reveal-config', label: 'Reveal in gbuild.yml', separatorBefore: true });
+    items.push({ id: 'reveal-config', label: 'Reveal in awm.yml', separatorBefore: true });
   }
 
   items.push({ id: 'rename', label: 'Rename', separatorBefore: process.kind !== 'command' });
