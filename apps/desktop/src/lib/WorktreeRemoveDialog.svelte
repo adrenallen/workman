@@ -30,7 +30,7 @@
     <AlertDialog.Header class="gap-2 border-b border-border px-4 py-4 text-left">
       <span class="flex items-center gap-2 text-destructive"><Trash2Icon size={16} /><AlertDialog.Title>Remove {entry.branch}?</AlertDialog.Title></span>
       <AlertDialog.Description class="text-sm leading-relaxed">
-        awm will delete the managed worktree folder and unregister its project. The Git branch <strong>{entry.branch}</strong> is kept, so its commits remain available in {repository.name}.
+        Workman will delete the managed worktree folder and unregister its project. The Git branch <strong>{entry.branch}</strong> is kept, so its commits remain available in {repository.name}.
       </AlertDialog.Description>
     </AlertDialog.Header>
 

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: awm-ci-${{ github.ref }}
+  group: workman-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

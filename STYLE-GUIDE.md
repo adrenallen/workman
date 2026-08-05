@@ -1,6 +1,6 @@
-# awm interface style guide
+# Workman interface style guide
 
-awm is a dense, local-first developer instrument panel. It should feel closer to a precise desktop tool than a marketing site: quiet graphite surfaces, clear hierarchy, fast keyboard paths, and color reserved for state.
+Workman is a dense, local-first developer instrument panel. It should feel closer to a precise desktop tool than a marketing site: quiet graphite surfaces, clear hierarchy, fast keyboard paths, and color reserved for state.
 
 ## Compose from the system
 
@@ -8,7 +8,7 @@ awm is a dense, local-first developer instrument panel. It should feel closer to
 - `apps/desktop/src/styles.css` is the only source for color, type, radius, spacing, and focus tokens. Component CSS may own layout, but it must consume tokens instead of introducing hex colors.
 - Use `cn()` from `$lib/utils` to merge classes. Use `tailwind-variants` for a component with multiple visual variants.
 - Prefer an existing primitive before writing interaction code: `Button`, `Input`, `Textarea`, `Checkbox`, `Switch`, `Dialog`, `AlertDialog`, `Popover`, `Tabs`, `Tooltip`, `DropdownMenu`, `ContextMenu`, `ScrollArea`, `Command`, `Select`, and `Collapsible`.
-- Shared awm wrappers live in `components/ds`: `IconButton` for icon-only actions, `StatusIndicator` for semantic status, and `TooltipLabel` for compact metadata.
+- Shared Workman wrappers live in `components/ds`: `IconButton` for icon-only actions, `StatusIndicator` for semantic status, and `TooltipLabel` for compact metadata.
 
 ## Visual contract
 
@@ -55,4 +55,4 @@ awm is a dense, local-first developer instrument panel. It should feel closer to
 - Narrow, normal, collapsed, and resized panel states do not clip or overflow.
 - Dark and light themes use the same semantic tokens.
 - Every indicator and icon-only action exposes its meaning on hover and to assistive technology.
-- Installed-app visual QA uses an isolated `AWM_DATA_DIR`; no test daemon or app remains running.
+- Installed-app visual QA uses an isolated `WORKMAN_DATA_DIR`; no test daemon or app remains running.

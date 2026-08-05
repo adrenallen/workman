@@ -39,7 +39,7 @@ export interface NavigationProjectSnapshot {
   coordination: CoordinationSnapshot | null;
 }
 
-const recentStorageKey = 'awm.navigation.recents.v1';
+const recentStorageKey = 'workman.navigation.recents.v1';
 const recentLimit = 20;
 
 function createAppNavigation(): Readable<AppNavigationState> & {

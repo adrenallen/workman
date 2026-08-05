@@ -67,9 +67,9 @@
 
   <div class="terminal-preview" style={`font-family: ${terminalFontCss($appearance.terminalFont)}; font-size: ${$appearance.terminalFontSize}px`}>
     <div class="terminal-bar"><i></i><span>preview</span><small>80 × 24</small></div>
-    <p><span>awm</span> › cargo test</p>
+    <p><span>wrk</span> › cargo test</p>
     <p class="output">test result: <strong>ok</strong>. 42 passed; 0 failed</p>
-    <p><span>awm</span> › <i class="cursor"></i></p>
+    <p><span>wrk</span> › <i class="cursor"></i></p>
   </div>
 
   <footer>

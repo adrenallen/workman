@@ -1,0 +1,27 @@
+[package]
+name = "workman-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
+anyhow = "1"
+flate2 = "1"
+nix = { version = "0.28", features = ["process", "signal"] }
+portable-pty = "0.9"
+reqwest = { version = "0.13.4", features = ["json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+tar = "0.4"
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tempfile = "3.21.0"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }

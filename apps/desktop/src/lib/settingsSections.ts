@@ -33,7 +33,7 @@ export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'about', label: 'About', icon: 'i', description: 'Version and updates', local: false }
 ];
 
-const storageKey = 'awm.settings.section.v1';
+const storageKey = 'workman.settings.section.v1';
 const fallbackSection: SettingsSectionId = 'appearance';
 
 function isSettingsSection(value: unknown): value is SettingsSectionId {

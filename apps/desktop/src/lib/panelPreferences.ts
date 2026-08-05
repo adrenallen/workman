@@ -12,7 +12,7 @@ interface ResizeOptions {
   onEnd: (width: number) => void;
 }
 
-const storagePrefix = 'awm.panel.v1.';
+const storagePrefix = 'workman.panel.v1.';
 
 export function clampPanelWidth(width: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(width)));

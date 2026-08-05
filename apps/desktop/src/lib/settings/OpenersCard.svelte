@@ -64,7 +64,7 @@
     <div>
       <span class="eyebrow">Project tools</span>
       <h2 id="openers-title">Openers</h2>
-      <p>Choose the apps awm hands projects to. Sidebar actions use the same choices.</p>
+      <p>Choose the apps Workman hands projects to. Sidebar actions use the same choices.</p>
     </div>
     <span
       class="detection"

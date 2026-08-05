@@ -133,83 +133,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "awm"
-version = "0.1.0"
-dependencies = [
- "awm-core",
- "awmd",
- "base64 0.22.1",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "awm-core"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "flate2",
- "nix",
- "portable-pty",
- "reqwest",
- "rusqlite",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "awm-desktop"
-version = "0.1.0"
-dependencies = [
- "awmd",
- "futures-util",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "awmd"
-version = "0.1.0"
-dependencies = [
- "awm-core",
- "axum",
- "base64 0.22.1",
- "dirs",
- "futures-util",
- "globset",
- "listeners",
- "notify",
- "rmcp",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "sysinfo",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
-
-[[package]]
 name = "aws-lc-rs"
 version = "1.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5923,6 +5846,83 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "workman-cli"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "workman-core",
+ "workmand",
+]
+
+[[package]]
+name = "workman-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "flate2",
+ "nix",
+ "portable-pty",
+ "reqwest",
+ "rusqlite",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "zip",
+]
+
+[[package]]
+name = "workman-desktop"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "workmand",
+]
+
+[[package]]
+name = "workmand"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "dirs",
+ "futures-util",
+ "globset",
+ "listeners",
+ "notify",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+ "workman-core",
+]
 
 [[package]]
 name = "writeable"

@@ -121,7 +121,7 @@
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
   const collapsedTreeRailWidth = 54;
-  const worktreeCollapseStorageKey = 'awm.worktree.repository-collapse.v1';
+  const worktreeCollapseStorageKey = 'workman.worktree.repository-collapse.v1';
 
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
@@ -335,7 +335,7 @@
     connection = status;
     if (status.status === 'connected') {
       console.info(
-        `awm daemon: ${status.daemon_version ?? 'legacy'} ` +
+        `workman daemon: ${status.daemon_version ?? 'legacy'} ` +
           `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
       );
       if (status.version_compatible) versionRestarting = false;
@@ -356,7 +356,7 @@
     try {
       startupUpdate = await checkForUpdates(client, false);
     } catch (cause) {
-      console.warn('awm startup update check failed', cause);
+      console.warn('workman startup update check failed', cause);
     }
   }
 
@@ -712,7 +712,7 @@
         worktreeLists = { ...worktreeLists, [repositoryId]: list };
         maybeOfferExistingWorktrees(list, projectList);
       } catch (cause) {
-        console.warn(`awm worktree metadata failed for project ${root.id}`, cause);
+        console.warn(`workman worktree metadata failed for project ${root.id}`, cause);
       } finally {
         if (worktreeRefreshingRepositoryId === repositoryId) worktreeRefreshingRepositoryId = null;
       }
@@ -1171,7 +1171,7 @@
     const repository = worktreeRepositoryFor(project);
     const entry = worktreeEntryFor(project);
     if (!repository || !entry?.can_remove) {
-      reportError(new Error('Only an awm-managed linked worktree can be removed here'));
+      reportError(new Error('Only a Workman-managed linked worktree can be removed here'));
       return;
     }
     removeWorktreeError = null;
@@ -1487,7 +1487,7 @@
         return;
       }
       case 'remove-project':
-        if (!window.confirm(`Remove ${projectLabel(project)} from awm? Files stay on disk.`)) return;
+        if (!window.confirm(`Remove ${projectLabel(project)} from Workman? Files stay on disk.`)) return;
         await client.control('projects.remove', {
           project_id: project.id,
           confirm_remove: true
@@ -1576,7 +1576,7 @@
         return;
       }
       case 'reveal-config':
-        await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/awm.yml`, 'reveal');
+        await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/workman.yml`, 'reveal');
         return;
       default:
         return;
@@ -1750,7 +1750,7 @@
 
   async function restartOutdatedDaemon(): Promise<void> {
     if (versionRestarting) return;
-    if (!window.confirm('Restart awm daemon? All running project processes will stop.')) return;
+    if (!window.confirm('Restart Workman daemon? All running project processes will stop.')) return;
     versionRestarting = true;
     try {
       await client.restartDaemon();
@@ -1762,7 +1762,7 @@
 
   async function applyAvailableUpdate(): Promise<void> {
     if (versionRestarting || !startupUpdate?.check.available) return;
-    if (!window.confirm('Update awm and restart the daemon? All running project processes will stop.')) return;
+    if (!window.confirm('Update Workman and restart the daemon? All running project processes will stop.')) return;
     versionRestarting = true;
     try {
       const report = await applyUpdate(client);
@@ -1778,14 +1778,14 @@
 <svelte:window onkeydown={handleShortcut} />
 
 <svelte:head>
-  <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'awm'}</title>
+  <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'Workman'}</title>
 </svelte:head>
 
 {#if showVersionBanner}
   <section class="version-banner" aria-live="assertive">
     <div>
-      <strong>{versionSkew ? 'awm daemon is running an older version' : `awm ${startupUpdate?.check.latest} is available`}</strong>
-      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : 'The release is downloaded and SHA256 verified before awm and awmd are replaced.'} All running project processes will stop.</span>
+      <strong>{versionSkew ? 'Workman daemon is running an older version' : `Workman ${startupUpdate?.check.latest} is available`}</strong>
+      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : 'The release is downloaded and SHA256 verified before workman and workmand are replaced.'} All running project processes will stop.</span>
     </div>
     <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
     <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
@@ -1909,7 +1909,7 @@
   >
     <header class="brand" data-tauri-drag-region>
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="brand-copy"><strong>awm</strong><span>local workspaces</span></div>
+      <div class="brand-copy"><strong>Workman</strong><span>local workspaces</span></div>
       <IconButton
         class="size-7 shrink-0 rounded border border-border bg-card"
         label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}

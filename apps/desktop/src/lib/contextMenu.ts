@@ -86,7 +86,7 @@ export type ContextScratchpad = Pick<
   'id' | 'name' | 'revision' | 'archived'
 >;
 
-export const FOCUS_TERMINAL_EVENT = 'awm:focus-terminal';
+export const FOCUS_TERMINAL_EVENT = 'workman:focus-terminal';
 
 export function openWorkspacePath(path: string, target: ShellOpenTarget): Promise<void> {
   return invoke('shell_open_path', { path, target });
@@ -244,7 +244,7 @@ function projectItems(
       }
     : {
         id: 'remove-project',
-        label: 'Remove from awm…',
+        label: 'Remove from Workman…',
         detail: 'Keeps files on disk',
         destructive: true,
         separatorBefore: true
@@ -287,7 +287,7 @@ function processItems(process: ProcessView): ContextMenuItem[] {
   }
 
   if (process.kind === 'command' && process.source === 'yml') {
-    items.push({ id: 'reveal-config', label: 'Reveal in awm.yml', separatorBefore: true });
+    items.push({ id: 'reveal-config', label: 'Reveal in workman.yml', separatorBefore: true });
   }
 
   items.push({ id: 'rename', label: 'Rename', separatorBefore: process.kind !== 'command' });

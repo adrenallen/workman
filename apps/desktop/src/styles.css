@@ -4,7 +4,7 @@
 @custom-variant dark (&:is([data-theme='dark'] *));
 
 /*
- * awm UI tokens — the only color, type, radius, and elevation source.
+ * workman UI tokens — the only color, type, radius, and elevation source.
  * Scoped component CSS may describe layout, but must consume these values.
  */
 :root {

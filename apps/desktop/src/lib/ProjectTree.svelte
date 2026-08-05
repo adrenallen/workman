@@ -148,7 +148,7 @@
 
   onMount(() => {
     try {
-      const saved = localStorage.getItem('awm.tree.groups.v1');
+      const saved = localStorage.getItem('workman.tree.groups.v1');
       if (!saved) return;
       const parsed = JSON.parse(saved) as Partial<Record<ProjectTreeGroup, boolean>>;
       openGroups = { ...openGroups, ...parsed };
@@ -165,7 +165,7 @@
   function toggleGroup(group: ProjectTreeGroup): void {
     openGroups = { ...openGroups, [group]: !openGroups[group] };
     try {
-      localStorage.setItem('awm.tree.groups.v1', JSON.stringify(openGroups));
+      localStorage.setItem('workman.tree.groups.v1', JSON.stringify(openGroups));
     } catch {
       // Persistence is a convenience; the tree still works without it.
     }
@@ -577,7 +577,7 @@
                   </button>
                 {/if}
               {:else}
-                <p class="empty-row">{query ? 'No matching commands' : 'No commands in awm.yml'}</p>
+                <p class="empty-row">{query ? 'No matching commands' : 'No commands in workman.yml'}</p>
               {/each}
               <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
             {:else}

@@ -125,8 +125,8 @@
     try {
       info = { ...info, update: await checkForUpdates(client, true) };
       updateMessage = info.update.check.available
-        ? `awm ${info.update.check.latest} is available.`
-        : `awm ${info.update.check.current} is current.`;
+        ? `Workman ${info.update.check.latest} is available.`
+        : `Workman ${info.update.check.current} is current.`;
     } catch (cause) {
       updateMessage = message(cause);
     } finally {
@@ -168,7 +168,7 @@
     updateMessage = 'Downloading and verifying the update…';
     try {
       const report: UpdateInstallReport = await applyUpdate(client);
-      updateMessage = report.desktop_instruction ?? `Updated to awm ${report.latest}. Reconnecting…`;
+      updateMessage = report.desktop_instruction ?? `Updated to Workman ${report.latest}. Reconnecting…`;
       restarting = true;
       sawRestartDisconnect = false;
     } catch (cause) {

@@ -9,10 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use awmd::{
-    BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonConfig, DaemonServer, DaemonVersion,
-    Discovery, default_data_dir, discover_or_spawn, probe,
-};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,18 +24,22 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
+use workmand::{
+    BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonConfig, DaemonServer, DaemonVersion,
+    Discovery, default_data_dir, discover_or_spawn, probe,
+};
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
 const NATIVE_MENU_EVENT: &str = "menu://action";
-const MENU_ABOUT: &str = "awm.about";
-const MENU_SETTINGS: &str = "awm.settings";
-const MENU_CHECK_UPDATES: &str = "awm.check_updates";
+const MENU_ABOUT: &str = "workman.about";
+const MENU_SETTINGS: &str = "workman.settings";
+const MENU_CHECK_UPDATES: &str = "workman.check_updates";
 const MENU_TOGGLE_PROJECT_RAIL: &str = "view.toggle_project_rail";
 const MENU_TOGGLE_SECTION_RAIL: &str = "view.toggle_section_rail";
-const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"AWM1";
+const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"WRK1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
-const HELLO_REQUEST_ID: &str = "__awm_desktop_hello__";
+const HELLO_REQUEST_ID: &str = "__workman_desktop_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -295,11 +295,11 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to run awm desktop");
+        .expect("failed to run workman desktop");
 }
 
 fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let about = MenuItemBuilder::with_id(MENU_ABOUT, "About awm").build(app)?;
+    let about = MenuItemBuilder::with_id(MENU_ABOUT, "About Workman").build(app)?;
     let settings = MenuItemBuilder::with_id(MENU_SETTINGS, "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
@@ -314,7 +314,7 @@ fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> 
             .accelerator("CmdOrCtrl+Shift+B")
             .build(app)?;
 
-    let app_menu = SubmenuBuilder::new(app, "awm")
+    let app_menu = SubmenuBuilder::new(app, "Workman")
         .item(&about)
         .separator()
         .item(&settings)
@@ -322,13 +322,13 @@ fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> 
         .separator()
         .services()
         .separator()
-        .hide_with_text("Hide awm")
+        .hide_with_text("Hide Workman")
         .hide_others()
         .show_all()
         .separator()
         // The daemon is a separate durable process. Tauri's predefined Quit
-        // closes only this desktop application and deliberately leaves awmd running.
-        .quit_with_text("Quit awm")
+        // closes only this desktop application and deliberately leaves workmand running.
+        .quit_with_text("Quit Workman")
         .build()?;
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
@@ -368,7 +368,7 @@ fn native_menu_action(id: &str) -> Option<NativeMenuAction> {
     }
 }
 
-/// Detect the private daemon-process mode used when no standalone `awmd` sits beside the app.
+/// Detect the private daemon-process mode used when no standalone `workmand` sits beside the app.
 pub fn embedded_daemon_data_dir(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
     let mut args = args.into_iter().skip(1);
     while let Some(argument) = args.next() {
@@ -500,11 +500,11 @@ async fn negotiate_daemon_version(
 fn log_daemon_version(daemon: Option<&DaemonVersion>) {
     if let Some(daemon) = daemon {
         eprintln!(
-            "awm desktop: connected to daemon v{} (build {}, control protocol {})",
+            "workman desktop: connected to daemon v{} (build {}, control protocol {})",
             daemon.version, daemon.build_id, daemon.control_protocol_version
         );
     } else {
-        eprintln!("awm desktop: connected to a legacy daemon without a version handshake");
+        eprintln!("workman desktop: connected to a legacy daemon without a version handshake");
     }
 }
 
@@ -611,7 +611,7 @@ fn open_shell_target(path: &Path, target: ShellOpenTarget) -> Result<(), String>
 }
 
 fn open_in_editor(path: &Path) -> Result<(), String> {
-    if let Some(editor) = env::var_os("AWM_EDITOR")
+    if let Some(editor) = env::var_os("WORKMAN_EDITOR")
         .or_else(|| env::var_os("VISUAL"))
         .or_else(|| env::var_os("EDITOR"))
         .filter(|editor| !editor.is_empty())
@@ -827,10 +827,10 @@ fn spawn_detached(command: &mut Command, label: &str) -> Result<(), String> {
 
 fn daemon_executable() -> io::Result<PathBuf> {
     let current = env::current_exe()?;
-    let sibling = current.with_file_name(format!("awmd{}", env::consts::EXE_SUFFIX));
+    let sibling = current.with_file_name(format!("workmand{}", env::consts::EXE_SUFFIX));
     Ok(daemon_executable_from(
         &current,
-        env::var_os("AWM_DAEMON_BIN").map(PathBuf::from),
+        env::var_os("WORKMAN_DAEMON_BIN").map(PathBuf::from),
         sibling.is_file(),
     ))
 }
@@ -842,7 +842,7 @@ fn daemon_executable_from(
 ) -> PathBuf {
     override_path.unwrap_or_else(|| {
         if sibling_available {
-            current.with_file_name(format!("awmd{}", env::consts::EXE_SUFFIX))
+            current.with_file_name(format!("workmand{}", env::consts::EXE_SUFFIX))
         } else {
             current.to_path_buf()
         }
@@ -897,25 +897,25 @@ mod tests {
 
     #[test]
     fn daemon_binary_defaults_to_desktop_binary_sibling() {
-        let desktop = Path::new("/tmp/awm-target/debug/awm-desktop");
+        let desktop = Path::new("/tmp/workman-target/debug/workman-desktop");
         assert_eq!(
             daemon_executable_from(desktop, None, true),
-            Path::new("/tmp/awm-target/debug/awmd")
+            Path::new("/tmp/workman-target/debug/workmand")
         );
     }
 
     #[test]
     fn desktop_binary_is_the_headless_fallback() {
-        let desktop = Path::new("/tmp/awm-target/debug/awm-desktop");
+        let desktop = Path::new("/tmp/workman-target/debug/workman-desktop");
         assert_eq!(daemon_executable_from(desktop, None, false), desktop);
     }
 
     #[test]
     fn daemon_binary_override_wins() {
-        let override_path = PathBuf::from("/opt/awm/bin/awmd");
+        let override_path = PathBuf::from("/opt/workman/bin/workmand");
         assert_eq!(
             daemon_executable_from(
-                Path::new("/tmp/awm-desktop"),
+                Path::new("/tmp/workman-desktop"),
                 Some(override_path.clone()),
                 false
             ),
@@ -926,13 +926,13 @@ mod tests {
     #[test]
     fn embedded_daemon_mode_reads_data_dir_argument() {
         let args = [
-            OsString::from("awm-desktop"),
+            OsString::from("workman-desktop"),
             OsString::from("--data-dir"),
-            OsString::from("/tmp/awm-data"),
+            OsString::from("/tmp/workman-data"),
         ];
         assert_eq!(
             embedded_daemon_data_dir(args),
-            Some(PathBuf::from("/tmp/awm-data"))
+            Some(PathBuf::from("/tmp/workman-data"))
         );
     }
 

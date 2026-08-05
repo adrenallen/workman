@@ -19,7 +19,7 @@
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
 
-  const repositoryUrl = 'https://github.com/adrenallen/awm';
+  const repositoryUrl = 'https://github.com/adrenallen/workman';
   const releasesUrl = `${repositoryUrl}/releases`;
   const changelogUrl = `${repositoryUrl}/blob/main/CHANGELOG.md`;
 
@@ -74,7 +74,7 @@
   <header class="flex flex-wrap items-start justify-between gap-4 px-4 py-3">
     <div class="min-w-0">
       <p class="font-mono text-xs font-semibold tracking-[0.08em] text-muted-foreground uppercase">Release desk</p>
-      <h2 id="about-updates-title" class="mt-1 text-lg font-semibold tracking-tight">About awm</h2>
+      <h2 id="about-updates-title" class="mt-1 text-lg font-semibold tracking-tight">About Workman</h2>
       <p class="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
         Keep the desktop and its local control plane on the release stream you choose.
       </p>
@@ -97,7 +97,7 @@
       </span>
       <div class="min-w-0">
         <span class="block text-xs font-medium text-muted-foreground">Desktop app</span>
-        <strong class="mt-0.5 block truncate font-mono text-sm">awm {connection.app_version}</strong>
+        <strong class="mt-0.5 block truncate font-mono text-sm">Workman {connection.app_version}</strong>
       </div>
     </div>
     <div class="flex items-center gap-3 px-4 py-3">
@@ -106,7 +106,7 @@
       </span>
       <div class="min-w-0">
         <span class="block text-xs font-medium text-muted-foreground">Local daemon</span>
-        <strong class="mt-0.5 block truncate font-mono text-sm">awmd {info.version}</strong>
+        <strong class="mt-0.5 block truncate font-mono text-sm">workmand {info.version}</strong>
       </div>
     </div>
   </div>
@@ -167,21 +167,21 @@
           <div class="min-w-0">
             {#if check.available}
               <div class="flex flex-wrap items-center gap-2">
-                <strong class="text-sm">awm {check.latest} is available</strong>
+                <strong class="text-sm">Workman {check.latest} is available</strong>
                 {#if check.prerelease}<Badge variant="secondary">Prerelease</Badge>{/if}
               </div>
               <p class="mt-1 text-xs leading-5 text-muted-foreground">
                 You are running {check.current} on the {update.channel} channel.
               </p>
             {:else if hasChecked}
-              <strong class="text-sm">awm {check.current} is up to date</strong>
+              <strong class="text-sm">Workman {check.current} is up to date</strong>
               <p class="mt-1 text-xs leading-5 text-muted-foreground">
                 No newer {update.channel} release was found.
               </p>
             {:else}
               <strong class="text-sm">Ready to check</strong>
               <p class="mt-1 text-xs leading-5 text-muted-foreground">
-                awm has not checked the {update.channel} channel yet.
+                Workman has not checked the {update.channel} channel yet.
               </p>
             {/if}
           </div>
@@ -242,8 +242,8 @@
         onCheckedChange={(checked) => onAutomaticChecks(checked === true)}
       />
       <label for="automatic-update-checks" class="min-w-0">
-        <span class="block text-sm font-medium">Check weekly when awm starts</span>
-        <span class="mt-0.5 block text-xs text-muted-foreground">A quiet background check; awm never installs automatically.</span>
+        <span class="block text-sm font-medium">Check weekly when Workman starts</span>
+        <span class="mt-0.5 block text-xs text-muted-foreground">A quiet background check; Workman never installs automatically.</span>
       </label>
     </div>
     <span class="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
@@ -270,9 +270,9 @@
 <AlertDialog.Root bind:open={updateDialogOpen}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title>Update to awm {check.latest}?</AlertDialog.Title>
+      <AlertDialog.Title>Update to Workman {check.latest}?</AlertDialog.Title>
       <AlertDialog.Description>
-        awm will download and verify the release, replace the CLI and daemon in the configured install directory, then restart the daemon. Running project processes will stop.
+        Workman will download and verify the release, replace the CLI and daemon in the configured install directory, then restart the daemon. Running project processes will stop.
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>

@@ -27,7 +27,7 @@ export interface FontChoice<T extends string> {
   localName?: string;
 }
 
-export const APPEARANCE_STORAGE_KEY = 'awm.appearance.v2';
+export const APPEARANCE_STORAGE_KEY = 'workman.appearance.v2';
 
 export const DEFAULT_APPEARANCE: Readonly<AppearanceSettings> = {
   theme: 'system',
@@ -149,7 +149,7 @@ function readAppearance(): AppearanceSettings {
   try {
     const stored = localStorage.getItem(APPEARANCE_STORAGE_KEY);
     if (stored) return sanitizeAppearance(JSON.parse(stored) as Partial<AppearanceSettings>);
-    const legacyTheme = localStorage.getItem('awm.appearance');
+    const legacyTheme = localStorage.getItem('workman.appearance');
     if (legacyTheme === 'light' || legacyTheme === 'dark' || legacyTheme === 'system') {
       return { ...DEFAULT_APPEARANCE, theme: legacyTheme };
     }

@@ -1,9 +1,9 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
-    "crates/awm-core",
-    "crates/awmd",
-    "crates/awm",
+    "crates/workman-core",
+    "crates/workmand",
+    "crates/workman-cli",
 ]
 resolver = "3"
 
@@ -13,7 +13,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
-awm-core = { path = "crates/awm-core" }
+workman-core = { path = "crates/workman-core" }
 
 # Shipping builds use a separate, cache-friendly profile without changing local --release builds.
 [profile.dist]

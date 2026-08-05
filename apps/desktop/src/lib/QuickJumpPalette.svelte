@@ -120,9 +120,9 @@
           key: `action:add-command:${project.id}`,
           kind: 'action',
           label: `Add command in ${name}`,
-          detail: 'Add a command to awm.yml',
+          detail: 'Add a command to workman.yml',
           projectName: name,
-          searchText: `add new command awm yml ${name} ${project.name} ${project.path}`,
+          searchText: `add new command workman yml ${name} ${project.name} ${project.path}`,
           target: { type: 'add-command', projectId: project.id },
           creation: true
         },

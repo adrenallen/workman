@@ -43,7 +43,7 @@
   }
 
   function recoveryKey(scratchpadId: number): string {
-    return `awm.scratchpad-recovery.${scratchpadId}`;
+    return `workman.scratchpad-recovery.${scratchpadId}`;
   }
 
   function rememberRecovery(copy: RecoveryCopy): void {

@@ -32,7 +32,7 @@
 
   {#if activeSetup}
     <div class="handshake" aria-label="Connection path">
-      <strong>{activeSetup.label}</strong><i aria-hidden="true"></i><span>127.0.0.1</span><i aria-hidden="true"></i><span>awm MCP</span>
+      <strong>{activeSetup.label}</strong><i aria-hidden="true"></i><span>127.0.0.1</span><i aria-hidden="true"></i><span>workman MCP</span>
     </div>
 
     <div class="client-switch" aria-label="MCP client">

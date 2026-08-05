@@ -1,8 +1,14 @@
 # Changelog
 
-All notable changes to awm are recorded here.
+All notable changes to Workman are recorded here.
 
 ## Unreleased
+
+- Renamed the product from awm to Workman: crates are now `workman-core`, `workmand`,
+  `workman-cli` (`wrk`), and `workman-desktop`; runtime configuration uses `WORKMAN_*` and the
+  MCP server/header identity is `workman` / `x-workman-mcp-token`.
+- Added a non-destructive first-run migration chain that prefers awm state and falls back to
+  gbuild, plus `workman.yml` compatibility reads for `awm.yml` and `gbuild.yml`.
 
 - Unified each platform's app, CLI, daemon, installer, and human getting-started guide into one
   download. The next release keeps the old macOS binary tarball as a temporary v0.1.0 updater

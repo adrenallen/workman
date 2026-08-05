@@ -50,7 +50,7 @@
     </header>
 
     <p id="trust-description" class="description">
-      This repository is asking awm to execute a command on your machine. Approval applies only
+      This repository is asking Workman to execute a command on your machine. Approval applies only
       to the exact fields below; another change locks it again.
     </p>
 

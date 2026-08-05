@@ -143,7 +143,7 @@
               <Input bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" />
               <Button type="button" variant="outline" onclick={() => void chooseDirectory()}><FolderOpenIcon size={14} />Choose…</Button>
             </span>
-            <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not awm-managed.</small>
+            <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not Workman-managed.</small>
           </label>
         {:else}
           {#if mode === 'create'}

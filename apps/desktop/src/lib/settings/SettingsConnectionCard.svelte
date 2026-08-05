@@ -21,7 +21,7 @@
       {:else if error}
         The installed app is ready, but the daemon could not provide this section. Restart or retry after updating.
       {:else}
-        Keep Settings open while awm reconnects. Local appearance, terminal, sidebar, hotkey, and opener settings remain available.
+        Keep Settings open while Workman reconnects. Local appearance, terminal, sidebar, hotkey, and opener settings remain available.
       {/if}
     </p>
     {#if error}<code>{error}</code>{/if}

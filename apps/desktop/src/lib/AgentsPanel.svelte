@@ -408,7 +408,7 @@
       <label>
         <span>Extra arguments <i>optional</i></span>
         <input bind:value={launchArgs} autocapitalize="none" spellcheck="false" placeholder='--model "gpt-5"' />
-        <small>Quotes group one argument. awm passes each value without shell reinterpretation.</small>
+        <small>Quotes group one argument. Workman passes each value without shell reinterpretation.</small>
       </label>
       <footer>
         <span></span><span></span>

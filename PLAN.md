@@ -1,12 +1,13 @@
-# awm — Plan
+# Workman — Plan
 
 A high-performance reproduction of Solo (soloterm.com): a native terminal workspace for running
 AI coding agents alongside a dev stack, with an MCP server that lets the agents see and control
 the workspace itself — processes, todos, scratchpads, timers, locks, and each other.
 
-Product name: **awm** (daemon `awmd`, CLI `awm`). It was renamed from gbuild in August 2026.
-The compatibility release migrates the legacy data directory and reads `gbuild.yml` as a
-deprecated fallback. The live checkout path `/Users/g/Code/gbuild` is intentionally unchanged
+Product name: **Workman** (daemon `workmand`, CLI `wrk`). It was previously named awm, and gbuild
+before that. The compatibility chain migrates `awm` data first and `gbuild` data only when no awm
+directory exists; repository config resolves `workman.yml`, then deprecated `awm.yml`, then
+deprecated `gbuild.yml`. The live checkout path `/Users/g/Code/gbuild` is intentionally unchanged
 because active terminal and agent sessions depend on it.
 
 ## Why
@@ -24,7 +25,7 @@ ideas are excellent. We're rebuilding the parts that matter, for personal daily 
 - **Work graphs**: todos with blockers, tags, comments, and edit locks so parallel agents
   claim work without colliding, and unblocking can trigger the next agent.
 - **Scratchpads**: revision-guarded markdown buffers agents build plans in, visible in the UI.
-- **Repo-committed config** (`awm.yml`): command processes with auto_start / auto_restart /
+- **Repo-committed config** (`workman.yml`): command processes with auto_start / auto_restart /
   restart-on-file-change, gated behind an explicit trust review.
 
 ## Decisions made
@@ -33,7 +34,7 @@ ideas are excellent. We're rebuilding the parts that matter, for personal daily 
 |---|---|
 | App shell | Tauri 2 (system webview — not Electron), Rust everywhere that matters |
 | Architecture | Headless daemon owns everything; UI and CLI are thin clients |
-| v1 scope | MCP + process tools, todos/scratchpads/locks, agent spawning + timers, `awm.yml` |
+| v1 scope | MCP + process tools, todos/scratchpads/locks, agent spawning + timers, `workman.yml` |
 | Intent | Personal tool first; open-source/product decisions deferred |
 | Platform | macOS + Linux supported; Windows via WSL2 (= the Linux build); native Windows deferred |
 
@@ -41,7 +42,7 @@ ideas are excellent. We're rebuilding the parts that matter, for personal daily 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ awmd (daemon, Rust)                                      │
+│ workmand (daemon, Rust)                                      │
 │                                                             │
 │  PTY host ──► raw byte ring ──► vt emulation ──► grid state │
 │  (portable-pty)                 (alacritty_terminal)        │
@@ -53,7 +54,7 @@ ideas are excellent. We're rebuilding the parts that matter, for personal daily 
 │  Local HTTP server (loopback-only, bearer-token auth):      │
 │    /mcp — streamable HTTP MCP endpoint for agents (rmcp)    │
 │    /ws — control channel for UI + CLI (JSON/binary)         │
-│  Watchers: awm.yml sync, restart_when_changed (notify),  │
+│  Watchers: workman.yml sync, restart_when_changed (notify),  │
 │    port detection, idle detection, timer scheduler          │
 └────────────┬───────────────────────────┬────────────────────┘
              │ /ws (localhost)           │ /mcp (localhost)
@@ -62,7 +63,7 @@ ideas are excellent. We're rebuilding the parts that matter, for personal daily 
       │ (webview UI) │            │ codex, gemini, ...) │
       └──────────────┘            └─────────────────────┘
       ┌──────────────┐
-      │ awm CLI   │
+      │ wrk CLI       │
       └──────────────┘
 ```
 
@@ -91,7 +92,7 @@ nothing (their state lives in the daemon).
   Register with `claude mcp add --transport http`; no stdio shim needed for Claude Code,
   add one later if some agent requires stdio.
 - `rusqlite` (bundled SQLite, WAL mode) — no ORM, plain SQL + migrations.
-- `notify` — file watching for `awm.yml` sync and `restart_when_changed` globs.
+- `notify` — file watching for `workman.yml` sync and `restart_when_changed` globs.
 - `sysinfo` + `listeners`/libproc — CPU/mem stats and listening-port detection per pid tree.
 - Frontend: **Svelte 5** + xterm.js (WebGL). Small, fast, close to Vue if that's more familiar.
 
@@ -123,8 +124,8 @@ survives restarts without allowing noisy processes to grow storage without limit
 
 Mirror Solo's tool surface and semantics — they're well designed and already validated:
 
-- **Identity**: every process the daemon spawns gets `AWM_PROCESS_ID` plus a unique
-  `AWM_MCP_TOKEN` in its env. The agent's MCP config sends the token as a header (client
+- **Identity**: every process the daemon spawns gets `WORKMAN_PROCESS_ID` plus a unique
+  `WORKMAN_MCP_TOKEN` in its env. The agent's MCP config sends the token as a header (client
   configs support `${VAR}` expansion), so the daemon maps each HTTP session to the process
   that owns it automatically; `whoami` reports process_id, actor_id, and effective project;
   `identify_session` stays as the manual fallback for externally launched sessions.
@@ -165,11 +166,11 @@ Mirror Solo's tool surface and semantics — they're well designed and already v
   UI status badges, and the agent-state field in get_process_status. That field exposes both
   the derived state and the raw signals (idle_seconds, last_output_at, tool_type, adapter
   flags like thinking/planning) — matching Solo's agent_state shape closely enough that
-  orchestration prompts written for Solo translate to awm with minimal edits.
+  orchestration prompts written for Solo translate to workman with minimal edits.
 
 ## Trust model
 
-`awm.yml` commands are code execution from a repo file, so: YAML-backed commands sync into
+`workman.yml` commands are code execution from a repo file, so: YAML-backed commands sync into
 the DB but cannot run (manually, via MCP, or auto_start) until trusted in the UI. Trust is a
 hash over trust-relevant fields (command, working_dir, env, auto_start, auto_restart,
 restart_when_changed); any change re-requires review. `working_dir` must stay inside the
@@ -177,7 +178,7 @@ project root (reject `..`, absolute-outside, symlink escapes). The daemon binds 
 only; every request — MCP or UI/CLI — carries a local bearer token, and Origin/Host headers
 are validated to block DNS-rebinding from a browser tab.
 
-## `awm.yml`
+## `workman.yml`
 
 Same shape as solo.yml (keeps mental compatibility):
 
@@ -222,9 +223,9 @@ checked from M1 on (the terminal-rendering torture test runs on both).
 **M0 — Daemon skeleton + CLI (the spine).**
 Cargo workspace (`crates/core`, `crates/daemon`, `crates/cli`, `apps/desktop` later).
 Daemon boots, opens control socket, SQLite migrations run. Spawn a command process in a PTY,
-raw ring buffer, `awm run / ps / logs / attach / stop`. Server-side emulation wired in
+raw ring buffer, `wrk run / ps / logs / attach / stop`. Server-side emulation wired in
 (rendered output readable via CLI). *Done when: a dev server runs under the daemon, survives
-CLI disconnect, and `awm attach` gives a live interactive view.*
+CLI disconnect, and `wrk attach` gives a live interactive view.*
 
 **M1 — Tauri app: projects, processes, terminal.**
 Project sidebar (register existing dirs), process list with status colors (green running /
@@ -232,10 +233,10 @@ red crashed), xterm.js WebGL terminal for the selected process, spawn terminals,
 restart, resize handling, scrollback + search + clickable links. *Done when: I stop using
 Terminal.app for dev-stack work in one project.*
 
-**M2 — `awm.yml` + trust + lifecycle automation.**
+**M2 — `workman.yml` + trust + lifecycle automation.**
 YAML parse/sync/watch, trust review UI, auto_start on project open, auto_restart on crash,
 restart_when_changed via glob watching, env injection, saved-command click-to-run panel.
-*Done when: cloning a repo with awm.yml and trusting it brings up the whole stack.*
+*Done when: cloning a repo with workman.yml and trusting it brings up the whole stack.*
 
 **M3 — MCP server: identity + process/output/readiness tools.**
 rmcp streamable HTTP on localhost; whoami/identify/help; project scoping rules; the full

@@ -28,7 +28,7 @@
     <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
       <span class="flex items-start gap-3">
         <span class="grid size-8 place-items-center rounded border border-border bg-card text-muted-foreground"><FolderGit2Icon size={16} /></span>
-        <span><Dialog.Title>Import existing worktrees</Dialog.Title><Dialog.Description class="mt-1">{repository.name} has linked worktrees that awm does not know yet. Importing registers them in place.</Dialog.Description></span>
+        <span><Dialog.Title>Import existing worktrees</Dialog.Title><Dialog.Description class="mt-1">{repository.name} has linked worktrees that Workman does not know yet. Importing registers them in place.</Dialog.Description></span>
       </span>
       <IconButton label="Close import worktrees" disabled={busyPath !== null} onclick={onClose}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
     </Dialog.Header>
