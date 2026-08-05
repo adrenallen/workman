@@ -11,6 +11,10 @@
     type UpdateInstallReport,
     type UpdateChannel
   } from './settings';
+  import {
+    consumeNativeUpdateCheckRequest,
+    nativeUpdateCheckRequest
+  } from './nativeMenu';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
@@ -63,6 +67,19 @@
   $effect(() => {
     $settingsSection;
     queueMicrotask(() => viewport?.scrollTo({ top: 0 }));
+  });
+
+  $effect(() => {
+    const nativeRequest = $nativeUpdateCheckRequest;
+    if (
+      nativeRequest > 0 &&
+      info &&
+      updateBusy === null &&
+      connection.status === 'connected'
+    ) {
+      consumeNativeUpdateCheckRequest();
+      void checkUpdate();
+    }
   });
 
   async function refresh(): Promise<void> {
@@ -210,7 +227,7 @@
             onRetry={() => void refresh()}
           />
         {/if}
-      {:else if $settingsSection === 'daemon'}
+      {:else if $settingsSection === 'daemon' || $settingsSection === 'about'}
         {#if info}
           <DaemonCard
             {info}
@@ -226,7 +243,7 @@
           />
         {:else}
           <SettingsConnectionCard
-            title="Daemon settings"
+            title={$settingsSection === 'about' ? 'About & update settings' : 'Daemon settings'}
             connected={connection.status === 'connected'}
             {loading}
             error={loadError}

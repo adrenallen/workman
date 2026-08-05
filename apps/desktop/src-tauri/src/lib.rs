@@ -16,7 +16,10 @@ use awmd::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::{Emitter, State};
+use tauri::{
+    Emitter, State,
+    menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID},
+};
 use tokio::{
     sync::{mpsc, oneshot},
     time::{sleep, timeout},
@@ -28,6 +31,12 @@ use tokio_tungstenite::{
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
+const NATIVE_MENU_EVENT: &str = "menu://action";
+const MENU_ABOUT: &str = "awm.about";
+const MENU_SETTINGS: &str = "awm.settings";
+const MENU_CHECK_UPDATES: &str = "awm.check_updates";
+const MENU_TOGGLE_PROJECT_RAIL: &str = "view.toggle_project_rail";
+const MENU_TOGGLE_SECTION_RAIL: &str = "view.toggle_section_rail";
 const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"AWM1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
 const HELLO_REQUEST_ID: &str = "__awm_desktop_hello__";
@@ -177,6 +186,16 @@ enum DaemonFrame {
     Terminal(TerminalFrame),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeMenuAction {
+    About,
+    Settings,
+    CheckUpdates,
+    ToggleProjectRail,
+    ToggleSectionRail,
+}
+
 #[derive(Clone, Serialize)]
 struct TerminalFrame {
     process_id: i64,
@@ -257,6 +276,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .menu(build_native_menu)
+        .on_menu_event(|app, event| {
+            if let Some(action) = native_menu_action(event.id().as_ref()) {
+                let _ = app.emit(NATIVE_MENU_EVENT, action);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             daemon_send,
             daemon_restart,
@@ -271,6 +296,76 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run awm desktop");
+}
+
+fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let about = MenuItemBuilder::with_id(MENU_ABOUT, "About awm").build(app)?;
+    let settings = MenuItemBuilder::with_id(MENU_SETTINGS, "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id(MENU_CHECK_UPDATES, "Check for Updates…").build(app)?;
+    let toggle_project_rail =
+        MenuItemBuilder::with_id(MENU_TOGGLE_PROJECT_RAIL, "Toggle Project Rail")
+            .accelerator("CmdOrCtrl+B")
+            .build(app)?;
+    let toggle_section_rail =
+        MenuItemBuilder::with_id(MENU_TOGGLE_SECTION_RAIL, "Toggle Section Rail")
+            .accelerator("CmdOrCtrl+Shift+B")
+            .build(app)?;
+
+    let app_menu = SubmenuBuilder::new(app, "awm")
+        .item(&about)
+        .separator()
+        .item(&settings)
+        .item(&check_updates)
+        .separator()
+        .services()
+        .separator()
+        .hide_with_text("Hide awm")
+        .hide_others()
+        .show_all()
+        .separator()
+        // The daemon is a separate durable process. Tauri's predefined Quit
+        // closes only this desktop application and deliberately leaves awmd running.
+        .quit_with_text("Quit awm")
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&toggle_project_rail)
+        .item(&toggle_section_rail)
+        .separator()
+        .fullscreen()
+        .build()?;
+    let window_menu = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "Window")
+        .minimize()
+        .maximize_with_text("Zoom")
+        .separator()
+        .bring_all_to_front()
+        .build()?;
+
+    MenuBuilder::new(app)
+        .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+        .build()
+}
+
+fn native_menu_action(id: &str) -> Option<NativeMenuAction> {
+    match id {
+        MENU_ABOUT => Some(NativeMenuAction::About),
+        MENU_SETTINGS => Some(NativeMenuAction::Settings),
+        MENU_CHECK_UPDATES => Some(NativeMenuAction::CheckUpdates),
+        MENU_TOGGLE_PROJECT_RAIL => Some(NativeMenuAction::ToggleProjectRail),
+        MENU_TOGGLE_SECTION_RAIL => Some(NativeMenuAction::ToggleSectionRail),
+        _ => None,
+    }
 }
 
 /// Detect the private daemon-process mode used when no standalone `awmd` sits beside the app.
@@ -770,6 +865,35 @@ async fn embedded_shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_menu_ids_emit_only_frontend_actions() {
+        assert_eq!(
+            native_menu_action(MENU_ABOUT),
+            Some(NativeMenuAction::About)
+        );
+        assert_eq!(
+            native_menu_action(MENU_SETTINGS),
+            Some(NativeMenuAction::Settings)
+        );
+        assert_eq!(
+            native_menu_action(MENU_CHECK_UPDATES),
+            Some(NativeMenuAction::CheckUpdates)
+        );
+        assert_eq!(
+            native_menu_action(MENU_TOGGLE_PROJECT_RAIL),
+            Some(NativeMenuAction::ToggleProjectRail)
+        );
+        assert_eq!(
+            native_menu_action(MENU_TOGGLE_SECTION_RAIL),
+            Some(NativeMenuAction::ToggleSectionRail)
+        );
+        assert_eq!(native_menu_action("predefined-quit"), None);
+        assert_eq!(
+            serde_json::to_string(&NativeMenuAction::CheckUpdates).unwrap(),
+            "\"check_updates\""
+        );
+    }
 
     #[test]
     fn daemon_binary_defaults_to_desktop_binary_sibling() {

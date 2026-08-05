@@ -10,7 +10,8 @@ export type SettingsSectionId =
   | 'agents'
   | 'tools'
   | 'mcp'
-  | 'daemon';
+  | 'daemon'
+  | 'about';
 
 export interface SettingsSectionDefinition {
   id: SettingsSectionId;
@@ -28,7 +29,8 @@ export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'agents', label: 'Agents', icon: '◎', description: 'Runtimes and tools', local: false },
   { id: 'tools', label: 'Tools', icon: '⌁', description: 'External openers', local: true },
   { id: 'mcp', label: 'MCP', icon: '◇', description: 'Agent connection', local: false },
-  { id: 'daemon', label: 'Daemon', icon: '◉', description: 'Local runtime', local: false }
+  { id: 'daemon', label: 'Daemon', icon: '◉', description: 'Local runtime', local: false },
+  { id: 'about', label: 'About', icon: 'i', description: 'Version and updates', local: false }
 ];
 
 const storageKey = 'awm.settings.section.v1';

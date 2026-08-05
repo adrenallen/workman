@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
@@ -51,6 +52,11 @@
     type NavigationProjectSnapshot
   } from './lib/navigation';
   import {
+    NATIVE_MENU_EVENT,
+    requestNativeUpdateCheck,
+    type NativeMenuAction
+  } from './lib/nativeMenu';
+  import {
     openerSettings,
     openProjectCustom,
     openProjectEditor,
@@ -81,6 +87,7 @@
     type ReorderDirection,
     type ReorderDrop
   } from './lib/reorder';
+  import { openSettingsSection } from './lib/settingsSections';
 
   const client = new DaemonClient();
   const projectRailBounds = { min: 176, max: 340 };
@@ -224,6 +231,13 @@
       lastNavigationRequest = request.id;
       void resolveNavigationRequest(request).finally(() => appNavigation.acknowledge(request.id));
     });
+    let stopNativeMenu = (): void => {};
+    void listen<NativeMenuAction>(NATIVE_MENU_EVENT, ({ payload }) => {
+      if (active) handleNativeMenuAction(payload);
+    }).then((stop) => {
+      if (active) stopNativeMenu = stop;
+      else stop();
+    }).catch(reportError);
     const projectTimer = setInterval(() => {
       if (active && connection.status === 'connected' && !busy) void refreshProjects();
     }, 5000);
@@ -252,6 +266,7 @@
       clearInterval(coordinationTimer);
       stopStatuses();
       stopNavigation();
+      stopNativeMenu();
       client.close();
     };
   });
@@ -283,6 +298,27 @@
       startupUpdate = await checkForUpdates(client, false);
     } catch (cause) {
       console.warn('awm startup update check failed', cause);
+    }
+  }
+
+  function handleNativeMenuAction(action: NativeMenuAction): void {
+    switch (action) {
+      case 'settings':
+        appNavigation.navigate({ type: 'settings' }, 'api');
+        return;
+      case 'about':
+        openSettingsSection('about', selectedProject?.id);
+        return;
+      case 'check_updates':
+        requestNativeUpdateCheck();
+        openSettingsSection('about', selectedProject?.id);
+        return;
+      case 'toggle_project_rail':
+        toggleProjectRail();
+        return;
+      case 'toggle_section_rail':
+        toggleTreeRail();
+        return;
     }
   }
 
