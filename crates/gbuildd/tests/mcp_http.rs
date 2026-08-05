@@ -202,6 +202,19 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         call(&process_client, "help", json!({ "topic": "scoping" })).await["topic"],
         "scoping"
     );
+    let scratchpad_help = call(&process_client, "help", json!({ "topic": "scratchpads" })).await;
+    assert!(
+        scratchpad_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("shared notes, plans, briefs, and hand-offs")
+    );
+    assert!(
+        scratchpad_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("read it back with scratchpad_read or todo_get and reference its ID")
+    );
     assert!(
         call(&process_client, "mcp_tools_summary", json!({})).await["count"]
             .as_u64()

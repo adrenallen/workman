@@ -151,6 +151,9 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
     )
     .await;
     let process_id = spawned["process_id"].as_i64().unwrap();
+    let preamble = spawned["agent_instructions"].as_str().unwrap();
+    assert!(preamble.contains("shared notes, plans, briefs, and hand-offs"));
+    assert!(preamble.contains("read it back with scratchpad_read or todo_get"));
     let status = call(
         &client,
         "get_process_status",
@@ -312,6 +315,9 @@ async fn installed_codex_in_brand_new_directory_accepts_immediate_mission()
     )
     .await;
     let process_id = spawned["process_id"].as_i64().unwrap();
+    let preamble = spawned["agent_instructions"].as_str().unwrap();
+    assert!(preamble.contains("shared notes, plans, briefs, and hand-offs"));
+    assert!(preamble.contains("read it back with scratchpad_read or todo_get"));
     let status = call(
         &client,
         "get_process_status",

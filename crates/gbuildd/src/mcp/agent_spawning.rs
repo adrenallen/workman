@@ -19,7 +19,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{GbuildMcp, failure, scoped_project, success};
+use super::{GbuildMcp, SCRATCHPAD_HANDOFF_GUIDANCE, failure, scoped_project, success};
 use crate::ProcessRegistry;
 
 const GBUILD_MCP_URL_ENV: &str = "GBUILD_MCP_URL";
@@ -632,6 +632,7 @@ fn agent_instructions(
          or unrelated gbuild server. Call whoami() through gbuild first to confirm that you \
          auto-identify as process {process_id}. Use \
          identify_session(process_id={process_id}) only if whoami cannot identify you. \
+         {scratchpad_handoff_guidance} \
          [END GBUILD CONTEXT]",
         process_id = process.id,
         process_name = process.name,
@@ -640,6 +641,7 @@ fn agent_instructions(
         project_path = project.path,
         client_wiring = client_wiring,
         mcp_url = mcp_url,
+        scratchpad_handoff_guidance = SCRATCHPAD_HANDOFF_GUIDANCE,
     )
 }
 
@@ -830,6 +832,15 @@ mod tests {
         assert!(preamble.contains("server named gbuild"));
         assert!(preamble.contains("never a globally configured Solo"));
         assert!(preamble.contains("Call whoami() through gbuild first"));
+        assert!(preamble.contains(
+            "Put shared notes, plans, briefs, and hand-offs in gbuild scratchpads with \
+             scratchpad_write so they are visible in the app and verifiable; do not create \
+             ad-hoc repo files for them."
+        ));
+        assert!(preamble.contains(
+            "After creating a scratchpad or todo, read it back with scratchpad_read or todo_get \
+             and reference its ID in every hand-off message."
+        ));
         assert!(!preamble.contains("secret-token"));
     }
 }

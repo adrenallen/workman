@@ -38,6 +38,7 @@ mod tools_timer;
 mod tools_todo;
 
 pub const GBUILD_MCP_TOKEN_HEADER: &str = "x-gbuild-mcp-token";
+pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in gbuild scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 
 #[derive(Clone)]
 pub struct GbuildMcp {
@@ -135,7 +136,7 @@ struct IdentifySessionArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct HelpArgs {
-    /// Optional topic: setup, identity, scoping, projects, or tools.
+    /// Optional topic: setup, identity, scoping, projects, scratchpads, or tools.
     #[serde(default)]
     topic: Option<String>,
 }
@@ -281,6 +282,7 @@ impl GbuildMcp {
             "projects" => {
                 "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Delete always requires confirm_delete and active processes require confirm_stop_running."
             }
+            "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
             "tools" => "Use mcp_tools_summary for the complete core tool list.",
             other => {
                 return failure(
