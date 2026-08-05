@@ -867,7 +867,8 @@ mod tests {
             !output.contains("MSG:firstsecond"),
             "submissions interleaved"
         );
-        process.terminate(Duration::from_millis(50)).unwrap();
+        let status = process.wait().expect("reap completed submission fixture");
+        assert!(status.success(), "submission fixture exited with {status:?}");
     }
 
     #[test]
