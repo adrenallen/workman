@@ -7,6 +7,11 @@
   import '@xterm/xterm/css/xterm.css';
   import { onMount } from 'svelte';
 
+  import {
+    appearance,
+    currentAppearance,
+    terminalFontCss
+  } from './appearance';
   import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
 
@@ -45,6 +50,7 @@
   let fallbackSearchIndex = -1;
   let fallbackSearchMatches: Array<{ row: number; col: number; size: number }> = [];
   const encoder = new TextEncoder();
+  const initialAppearance = currentAppearance();
 
   const searchOptions = {
     incremental: true,
@@ -62,8 +68,8 @@
       convertEol: false,
       cursorBlink: true,
       cursorStyle: 'bar',
-      fontFamily: '"JetBrains Mono Variable", "SFMono-Regular", Consolas, monospace',
-      fontSize: 13,
+      fontFamily: terminalFontCss(initialAppearance.terminalFont),
+      fontSize: initialAppearance.terminalFontSize,
       fontWeight: 430,
       lineHeight: 1.18,
       scrollback: 10_000,
@@ -157,6 +163,25 @@
       instance.dispose();
       terminal = null;
     };
+  });
+
+  $effect(() => {
+    const settings = $appearance;
+    const instance = terminal;
+    if (!instance) return;
+
+    const family = terminalFontCss(settings.terminalFont);
+    const typographyChanged = instance.options.fontFamily !== family
+      || instance.options.fontSize !== settings.terminalFontSize;
+    if (typographyChanged) {
+      instance.options.fontFamily = family;
+      instance.options.fontSize = settings.terminalFontSize;
+      instance.refresh(0, Math.max(0, instance.rows - 1));
+    }
+    // UI zoom changes layout dimensions; terminal changes alter cell geometry.
+    // In both cases FitAddon must resize xterm before the PTY receives rows/cols.
+    scheduleFit();
+    void document.fonts.ready.then(() => scheduleFit());
   });
 
   $effect(() => {
@@ -425,7 +450,7 @@
   .terminal-identity strong {
     overflow: hidden;
     color: #f0f1f3;
-    font: 620 12px/1.2 'Archivo Variable', sans-serif;
+    font: 620 12px/1.2 var(--ui-font-family);
     text-overflow: ellipsis;
     white-space: nowrap;
   }

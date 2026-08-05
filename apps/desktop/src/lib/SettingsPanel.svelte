@@ -5,6 +5,7 @@
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
+  import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
 
   let { client, connection, onError }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
@@ -94,12 +95,14 @@
         </button>
       </section>
       <div class="appearance"><AppearanceCard /></div>
+      <div class="terminal"><TerminalAppearanceCard /></div>
     </div>
   {:else if info}
     <div class="settings-grid">
       <div class="mcp"><McpConnectionCard connection={info.mcp} /></div>
       <div class="daemon"><DaemonCard {info} {connection} {restarting} onRestart={() => void restart()} /></div>
       <div class="appearance"><AppearanceCard /></div>
+      <div class="terminal"><TerminalAppearanceCard /></div>
       <div class="agents"><AgentToolsCard {client} connected={connection.status === 'connected'} {onError} /></div>
     </div>
   {/if}
