@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     net::{TcpListener, TcpStream},
     sync::Arc,
     thread,
@@ -29,6 +29,21 @@ fn archive() -> Vec<u8> {
     archive.into_inner().unwrap().finish().unwrap()
 }
 
+fn unified_zip_archive() -> Vec<u8> {
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    for (name, body) in [
+        ("bin/awm", b"new awm".as_slice()),
+        ("bin/awmd", b"new awmd".as_slice()),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(body).unwrap();
+    }
+    archive.finish().unwrap().into_inner()
+}
+
 struct Fixture {
     base: String,
     _thread: thread::JoinHandle<()>,
@@ -36,17 +51,43 @@ struct Fixture {
 
 impl Fixture {
     fn start(archive: Vec<u8>, checksum: String) -> Self {
+        Self::start_named(
+            archive,
+            checksum,
+            "awm-fixture.tar.gz",
+            "awm-desktop-fixture.zip",
+            3,
+        )
+    }
+
+    fn start_named(
+        archive: Vec<u8>,
+        checksum: String,
+        binary_asset: &str,
+        desktop_asset: &str,
+        request_count: usize,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut assets = vec![serde_json::json!({
+            "name": binary_asset,
+            "browser_download_url": format!("{base}/archive")
+        })];
+        if desktop_asset != binary_asset {
+            assets.push(serde_json::json!({
+                "name": desktop_asset,
+                "browser_download_url": format!("{base}/desktop")
+            }));
+        }
+        assets.push(serde_json::json!({
+            "name": "SHA256SUMS",
+            "browser_download_url": format!("{base}/sums")
+        }));
         let release = serde_json::json!({
             "tag_name": "v9.0.0",
             "html_url": format!("{base}/release"),
             "body": "Fixture release notes",
-            "assets": [
-                {"name": "awm-fixture.tar.gz", "browser_download_url": format!("{base}/archive")},
-                {"name": "awm-desktop-fixture.zip", "browser_download_url": format!("{base}/desktop")},
-                {"name": "SHA256SUMS", "browser_download_url": format!("{base}/sums")}
-            ]
+            "assets": assets
         })
         .to_string()
         .into_bytes();
@@ -55,11 +96,11 @@ impl Fixture {
             ("/archive".to_owned(), archive),
             (
                 "/sums".to_owned(),
-                format!("{checksum}  awm-fixture.tar.gz\n").into_bytes(),
+                format!("{checksum}  {binary_asset}\n").into_bytes(),
             ),
         ]));
         let thread = thread::spawn(move || {
-            for stream in listener.incoming().flatten().take(3) {
+            for stream in listener.incoming().flatten().take(request_count) {
                 respond(stream, &responses);
             }
         });
@@ -147,6 +188,62 @@ async fn local_release_is_checked_verified_and_swapped_in_temp_install_dir() {
             .unwrap()
             .contains("awm-desktop-fixture.zip")
     );
+}
+
+#[tokio::test]
+async fn unified_macos_zip_updates_binaries_from_bin_directory() {
+    let archive = unified_zip_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let target = ReleaseTarget::for_platform("macos", "aarch64").unwrap();
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        &target.binary_asset_name,
+        &target.desktop_asset_name,
+        3,
+    );
+    let install = seed_install();
+    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target).unwrap();
+
+    let check = client.check("0.1.0").await.unwrap();
+    let report = client.install(&check, install.path()).await.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(install.path().join("awm")).unwrap(),
+        "new awm"
+    );
+    assert_eq!(
+        fs::read_to_string(install.path().join("awmd")).unwrap(),
+        "new awmd"
+    );
+    assert!(
+        report
+            .desktop_instruction
+            .unwrap()
+            .contains("platform bundle awm-macos-arm64.zip")
+    );
+}
+
+#[tokio::test]
+async fn legacy_target_still_finds_transitional_macos_tarball() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let target = ReleaseTarget {
+        binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
+        desktop_asset_name: "awm-macos-arm64.zip".to_owned(),
+        platform_label: "legacy macOS updater".to_owned(),
+    };
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        &target.binary_asset_name,
+        &target.desktop_asset_name,
+        1,
+    );
+    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target).unwrap();
+
+    let check = client.check("0.1.0").await.unwrap();
+    assert_eq!(check.binary_asset.unwrap().name, "awm-macos-arm64.tar.gz");
 }
 
 #[tokio::test]

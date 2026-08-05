@@ -60,12 +60,17 @@ scripts/release.sh --dry-run 0.1.0
 scripts/release.sh 0.1.0
 ```
 
-The command builds the native macOS binaries and unsigned app, static musl Linux binaries for
-x86_64 and arm64, and—when Docker or OrbStack is available—experimental Linux AppImage and
-Debian bundles. It writes checksummed artifacts under `release/vX.Y.Z`, creates and pushes the
-tag only after every required artifact verifies, and creates a GitHub prerelease. Re-running is
-safe and resumes from Cargo, npm, and container caches. After installing and accepting the
-prerelease, promote it to stable with `scripts/promote.sh vX.Y.Z`.
+The command builds one portable archive per platform. `awm-macos-arm64.zip` contains the app,
+CLI, daemon, installer, and a human getting-started guide. Each `awm-linux-<arch>.tar.gz`
+contains the same pieces with an experimental AppImage when the Docker/OrbStack desktop build
+is available; the `.deb` remains a separate package alternative. The macOS binary-only
+`.tar.gz` is a temporary compatibility asset for the updater shipped in v0.1.0, not a second
+download for new users.
+
+Artifacts and release notes are written under `release/vX.Y.Z` and checksummed before the tag
+or GitHub prerelease is created. Re-running is safe and resumes from Cargo, npm, and container
+caches. After installing and accepting the prerelease, promote it to stable with
+`scripts/promote.sh vX.Y.Z`.
 
 The manually dispatched Release workflow remains only as an emergency build-only fallback; it
 cannot publish a release.

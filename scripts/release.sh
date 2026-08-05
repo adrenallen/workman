@@ -41,6 +41,7 @@ OUTPUT_DIR="${AWM_RELEASE_OUTPUT_DIR:-$REPO_ROOT/release/$TAG}"
 WORK_DIR="$OUTPUT_DIR/.work"
 LOG_DIR="$OUTPUT_DIR/logs"
 TIMINGS_FILE="$OUTPUT_DIR/build-timings.tsv"
+RELEASE_ASSETS_DIR="$REPO_ROOT/scripts/release-assets"
 MACOS_TARGET=aarch64-apple-darwin
 ZIGBUILD_VERSION=0.23.0
 
@@ -65,7 +66,7 @@ version_stamp() {
 
 preflight() {
   log "Preflight"
-  for tool in cargo rustup npm git gh jq tar ditto file shasum awk; do require "$tool"; done
+  for tool in cargo rustup npm git gh jq tar ditto zip unzip file shasum awk; do require "$tool"; done
   [[ "$(uname -s)" == Darwin ]] || { echo "local releases must run on macOS" >&2; exit 1; }
   [[ "$(uname -m)" == arm64 ]] || { echo "local releases require Apple silicon" >&2; exit 1; }
   [[ "$(git branch --show-current)" == main ]] || { echo "release must run from main" >&2; exit 1; }
@@ -104,6 +105,27 @@ preflight() {
   fi
 }
 
+clear_obsolete_artifacts() {
+  # These split desktop assets were used before platform bundles became unified. Removing them
+  # from a reused output directory prevents an old artifact from being uploaded accidentally.
+  rm -f \
+    "$OUTPUT_DIR/awm-desktop-macos-arm64.zip" \
+    "$OUTPUT_DIR/awm-desktop-linux-x86_64.AppImage" \
+    "$OUTPUT_DIR/awm-desktop-linux-x86_64.deb" \
+    "$OUTPUT_DIR/awm-desktop-linux-arm64.AppImage" \
+    "$OUTPUT_DIR/awm-desktop-linux-arm64.deb" \
+    "$OUTPUT_DIR/awm-linux-x86_64.deb" \
+    "$OUTPUT_DIR/awm-linux-arm64.deb"
+}
+
+add_bundle_guides() {
+  local package_dir="$1" platform="$2"
+  install -m 755 "$RELEASE_ASSETS_DIR/install.sh" "$package_dir/install.sh"
+  install -m 644 \
+    "$RELEASE_ASSETS_DIR/GETTING-STARTED-${platform}.md" \
+    "$package_dir/GETTING-STARTED.md"
+}
+
 ensure_linux_tools() {
   log "Linux cross-build tools"
   if ! command -v zig >/dev/null; then
@@ -140,14 +162,23 @@ build_macos() {
   "$target_dir/awmd" --help >/dev/null
   test -d "$app"
 
-  local package_dir="$WORK_DIR/macos-bin"
+  local package_dir="$WORK_DIR/macos-bundle"
   rm -rf "$package_dir"
-  mkdir -p "$package_dir"
-  install -m 755 "$target_dir/awm" "$package_dir/awm"
-  install -m 755 "$target_dir/awmd" "$package_dir/awmd"
-  tar -C "$package_dir" -czf "$OUTPUT_DIR/awm-macos-arm64.tar.gz" awm awmd
-  rm -f "$OUTPUT_DIR/awm-desktop-macos-arm64.zip"
-  ditto -c -k --sequesterRsrc --keepParent "$app" "$OUTPUT_DIR/awm-desktop-macos-arm64.zip"
+  mkdir -p "$package_dir/bin"
+  install -m 755 "$target_dir/awm" "$package_dir/bin/awm"
+  install -m 755 "$target_dir/awmd" "$package_dir/bin/awmd"
+  ditto "$app" "$package_dir/awm.app"
+  add_bundle_guides "$package_dir" macos
+
+  rm -f "$OUTPUT_DIR/awm-macos-arm64.zip"
+  (
+    cd "$package_dir"
+    COPYFILE_DISABLE=1 zip -qry --symlinks "$OUTPUT_DIR/awm-macos-arm64.zip" .
+  )
+
+  # One-release bridge: the updater shipped in v0.1.0 requests this old asset name and root
+  # layout. New updater builds consume bin/ from the unified ZIP above.
+  tar -C "$package_dir/bin" -czf "$OUTPUT_DIR/awm-macos-arm64.tar.gz" awm awmd
   record_stage macos "$started"
 }
 
@@ -166,7 +197,7 @@ verify_static_linux_binary() {
 build_linux_binaries() {
   local started=$SECONDS
   log "Static Linux CLI and daemon"
-  local target label package_dir target_dir
+  local target label target_dir
   for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
     case "$target" in
       x86_64-*) label=x86_64 ;;
@@ -176,12 +207,6 @@ build_linux_binaries() {
     target_dir="$REPO_ROOT/target/$target/dist"
     verify_static_linux_binary "$target_dir/awm" "$label"
     verify_static_linux_binary "$target_dir/awmd" "$label"
-    package_dir="$WORK_DIR/linux-$label-bin"
-    rm -rf "$package_dir"
-    mkdir -p "$package_dir"
-    install -m 755 "$target_dir/awm" "$package_dir/awm"
-    install -m 755 "$target_dir/awmd" "$package_dir/awmd"
-    tar -C "$package_dir" -czf "$OUTPUT_DIR/awm-linux-${label}.tar.gz" awm awmd
   done
   record_stage linux-static "$started"
 }
@@ -189,14 +214,7 @@ build_linux_binaries() {
 build_linux_desktop() {
   local started=$SECONDS
   log "Experimental Linux desktop bundles (best effort)"
-  # Optional desktop bundles must never survive from an older source revision
-  # when Docker is unavailable (or a current build fails partway through).
-  rm -f \
-    "$OUTPUT_DIR/awm-desktop-linux-x86_64.AppImage" \
-    "$OUTPUT_DIR/awm-desktop-linux-x86_64.deb" \
-    "$OUTPUT_DIR/awm-desktop-linux-arm64.AppImage" \
-    "$OUTPUT_DIR/awm-desktop-linux-arm64.deb"
-
+  rm -rf "$WORK_DIR/linux-x86_64-desktop" "$WORK_DIR/linux-arm64-desktop"
   if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
     warn "Docker/OrbStack is unavailable; skipping experimental Linux desktop bundles"
     printf 'linux-desktop\tskipped\n' >> "$TIMINGS_FILE"
@@ -209,7 +227,7 @@ build_linux_desktop() {
       linux/arm64) label=arm64 ;;
       linux/amd64) label=x86_64 ;;
     esac
-    destination="$WORK_DIR/docker-$label"
+    destination="$WORK_DIR/linux-$label-desktop"
     log_file="$LOG_DIR/linux-desktop-$label.log"
     rm -rf "$destination"
     mkdir -p "$destination"
@@ -220,8 +238,12 @@ build_linux_desktop() {
       --output "type=local,dest=$destination" \
       --progress plain \
       . >"$log_file" 2>&1; then
-      install -m 755 "$destination/awm-desktop-linux-${label}.AppImage" "$OUTPUT_DIR/"
-      install -m 644 "$destination/awm-desktop-linux-${label}.deb" "$OUTPUT_DIR/"
+      install -m 755 \
+        "$destination/awm-desktop-linux-${label}.AppImage" \
+        "$destination/awm.AppImage"
+      install -m 644 \
+        "$destination/awm-desktop-linux-${label}.deb" \
+        "$OUTPUT_DIR/awm-linux-${label}.deb"
       printf '    built Linux desktop %s\n' "$label"
     else
       warn "Linux desktop $label build failed; see $log_file (continuing without it)"
@@ -230,21 +252,85 @@ build_linux_desktop() {
   record_stage linux-desktop "$started"
 }
 
+package_linux_bundles() {
+  local started=$SECONDS
+  log "Unified Linux platform bundles"
+  local label target package_dir desktop_dir
+  local entries=()
+  for label in x86_64 arm64; do
+    case "$label" in
+      x86_64) target=x86_64-unknown-linux-musl ;;
+      arm64) target=aarch64-unknown-linux-musl ;;
+    esac
+    package_dir="$WORK_DIR/linux-$label-bundle"
+    desktop_dir="$WORK_DIR/linux-$label-desktop"
+    rm -rf "$package_dir"
+    mkdir -p "$package_dir/bin"
+    install -m 755 "$REPO_ROOT/target/$target/dist/awm" "$package_dir/bin/awm"
+    install -m 755 "$REPO_ROOT/target/$target/dist/awmd" "$package_dir/bin/awmd"
+    add_bundle_guides "$package_dir" linux
+    if [[ -f "$desktop_dir/awm.AppImage" ]]; then
+      install -m 755 "$desktop_dir/awm.AppImage" "$package_dir/awm.AppImage"
+    else
+      warn "Linux desktop $label was unavailable; portable bundle contains CLI/daemon only"
+    fi
+    entries=(GETTING-STARTED.md install.sh bin)
+    [[ -f "$package_dir/awm.AppImage" ]] && entries+=(awm.AppImage)
+    tar -C "$package_dir" -czf "$OUTPUT_DIR/awm-linux-${label}.tar.gz" "${entries[@]}"
+  done
+  record_stage packaging "$started"
+}
+
+verify_bundle_layouts() {
+  local started=$SECONDS
+  log "Platform bundle layouts"
+  local roots expected label entries mac_entries
+
+  mac_entries="$(unzip -Z1 "$OUTPUT_DIR/awm-macos-arm64.zip")"
+  roots="$(printf '%s\n' "$mac_entries" | awk -F/ 'NF { print $1 }' | sort -u)"
+  expected="$(printf '%s\n' GETTING-STARTED.md awm.app bin install.sh | sort)"
+  [[ "$roots" == "$expected" ]] || {
+    echo "macOS bundle has unexpected top-level entries:" >&2
+    printf '%s\n' "$roots" >&2
+    exit 1
+  }
+  for entry in GETTING-STARTED.md install.sh bin/awm bin/awmd; do
+    grep -qx "$entry" <<<"$mac_entries"
+  done
+  grep -q '^awm\.app/' <<<"$mac_entries"
+
+  for label in x86_64 arm64; do
+    entries="$(tar -tzf "$OUTPUT_DIR/awm-linux-${label}.tar.gz")"
+    roots="$(printf '%s\n' "$entries" | awk -F/ 'NF { print $1 }' | sort -u)"
+    expected="$(printf '%s\n' GETTING-STARTED.md bin install.sh | sort)"
+    if grep -qx awm.AppImage <<<"$entries"; then
+      expected="$(printf '%s\n' "$expected" awm.AppImage | sort)"
+    fi
+    [[ "$roots" == "$expected" ]] || {
+      echo "Linux $label bundle has unexpected top-level entries:" >&2
+      printf '%s\n' "$roots" >&2
+      exit 1
+    }
+    for entry in GETTING-STARTED.md install.sh bin/awm bin/awmd; do
+      grep -qx "$entry" <<<"$entries"
+    done
+  done
+  record_stage layouts "$started"
+}
+
 write_release_metadata() {
   local started=$SECONDS
   log "Checksums and release notes"
   local artifacts=(
+    awm-macos-arm64.zip
     awm-macos-arm64.tar.gz
-    awm-desktop-macos-arm64.zip
     awm-linux-x86_64.tar.gz
     awm-linux-arm64.tar.gz
   )
   local optional
   for optional in \
-    awm-desktop-linux-x86_64.AppImage \
-    awm-desktop-linux-x86_64.deb \
-    awm-desktop-linux-arm64.AppImage \
-    awm-desktop-linux-arm64.deb; do
+    awm-linux-x86_64.deb \
+    awm-linux-arm64.deb; do
     [[ -f "$OUTPUT_DIR/$optional" ]] && artifacts+=("$optional")
   done
   local artifact
@@ -265,14 +351,13 @@ write_release_metadata() {
 
   {
     printf '# awm %s\n\n' "$TAG"
-    printf '## Install\n\n```sh\n'
-    printf 'git clone --branch "%s" --depth 1 https://github.com/adrenallen/awm.git && cd awm && ./install.sh\n' "$TAG"
-    printf '```\n\n'
-    printf '## macOS arm64\n\n'
-    printf 'The desktop app is unsigned and not notarized. After unzipping, Control-click **awm.app** and choose **Open**. If macOS still quarantines it, run:\n\n'
-    printf '```sh\nxattr -dr com.apple.quarantine /Applications/awm.app\n```\n\n'
-    printf '## Linux — EXPERIMENTAL\n\n'
-    printf 'Static CLI/daemon archives are provided for x86_64 and arm64. AppImage and Debian desktop bundles are best-effort local builds and may be absent when the container build is unavailable.\n\n'
+    printf '## Pick one download\n\n'
+    printf -- '- **macOS Apple silicon:** `awm-macos-arm64.zip` — app, CLI, daemon, installer, and getting-started guide.\n'
+    printf -- '- **Linux x86_64 (portable, experimental):** `awm-linux-x86_64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
+    printf -- '- **Linux arm64 (portable, experimental):** `awm-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
+    printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
+    printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. The macOS app is unsigned, so its guide includes the Control-click and `xattr` first-run steps.\n\n'
+    printf '> `awm-macos-arm64.tar.gz` contains only the CLI and daemon as a temporary compatibility asset for the v0.1.0 updater. New installs should ignore it.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"
   } > "$OUTPUT_DIR/release-notes.md"
@@ -326,10 +411,13 @@ mkdir -p "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
 : > "$TIMINGS_FILE"
 TOTAL_STARTED=$SECONDS
 preflight
+clear_obsolete_artifacts
 ensure_linux_tools
 build_macos
 build_linux_binaries
 build_linux_desktop
+package_linux_bundles
+verify_bundle_layouts
 write_release_metadata
 publish_release
 record_stage total "$TOTAL_STARTED"

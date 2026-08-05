@@ -222,18 +222,18 @@ impl ReleaseTarget {
     pub fn for_platform(os: &str, arch: &str) -> UpdateResult<Self> {
         match (os, arch) {
             ("macos", "aarch64") => Ok(Self {
-                binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
-                desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
+                binary_asset_name: "awm-macos-arm64.zip".to_owned(),
+                desktop_asset_name: "awm-macos-arm64.zip".to_owned(),
                 platform_label: "macOS arm64".to_owned(),
             }),
             ("linux", "x86_64") => Ok(Self {
                 binary_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
-                desktop_asset_name: "awm-desktop-linux-x86_64.AppImage".to_owned(),
+                desktop_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
                 platform_label: "Linux x86_64".to_owned(),
             }),
             ("linux", "aarch64") => Ok(Self {
                 binary_asset_name: "awm-linux-arm64.tar.gz".to_owned(),
-                desktop_asset_name: "awm-desktop-linux-arm64.AppImage".to_owned(),
+                desktop_asset_name: "awm-linux-arm64.tar.gz".to_owned(),
                 platform_label: "Linux arm64".to_owned(),
             }),
             (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
@@ -411,9 +411,9 @@ impl UpdateClient {
 
         let staging = unique_staging_dir(&install_dir)?;
         let result = (|| -> UpdateResult<UpdateInstallReport> {
-            extract_tar_gz(&archive, &staging)?;
-            let awm_source = staging.join(executable_name("awm"));
-            let awmd_source = staging.join(executable_name("awmd"));
+            extract_release_archive(&archive, &binary_asset.name, &staging)?;
+            let awm_source = staged_binary(&staging, "awm")?;
+            let awmd_source = staged_binary(&staging, "awmd")?;
             ensure_staged_binary(&awm_source, &staging)?;
             ensure_staged_binary(&awmd_source, &staging)?;
             let quarantine_cleared = clear_macos_quarantine(&staging);
@@ -429,10 +429,17 @@ impl UpdateClient {
                     awmd_target.to_string_lossy().into_owned(),
                 ],
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
-                    format!(
-                        "Desktop app: close awm, download {} from {}, and replace the installed app. The running app is not replaced in place.",
-                        asset.name, asset.url
-                    )
+                    if asset.name == binary_asset.name {
+                        format!(
+                            "Desktop app: close awm, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            asset.name, asset.url
+                        )
+                    } else {
+                        format!(
+                            "Desktop app: close awm, download {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            asset.name, asset.url
+                        )
+                    }
                 }),
                 quarantine_cleared,
             })
@@ -505,7 +512,7 @@ fn ensure_existing_binary(path: &Path) -> UpdateResult<()> {
 fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
     if !path.is_file() {
         return Err(UpdateError::InvalidRelease(format!(
-            "{} does not contain a root {} binary",
+            "{} does not contain {} in bin/ or at archive root",
             staging.display(),
             path.file_name().unwrap_or_default().to_string_lossy()
         )));
@@ -518,6 +525,22 @@ fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
         )));
     }
     Ok(())
+}
+
+fn staged_binary(staging: &Path, name: &str) -> UpdateResult<PathBuf> {
+    let executable = executable_name(name);
+    let bundled = staging.join("bin").join(&executable);
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    let legacy = staging.join(&executable);
+    if legacy.is_file() {
+        return Ok(legacy);
+    }
+    Err(UpdateError::InvalidRelease(format!(
+        "{} does not contain {executable} in bin/ or at archive root",
+        staging.display()
+    )))
 }
 
 fn unique_staging_dir(install_dir: &Path) -> UpdateResult<PathBuf> {
@@ -548,6 +571,46 @@ fn extract_tar_gz(bytes: &[u8], destination: &Path) -> UpdateResult<()> {
                 "archive contains a path outside its root".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn extract_release_archive(bytes: &[u8], asset_name: &str, destination: &Path) -> UpdateResult<()> {
+    if asset_name.ends_with(".tar.gz") {
+        return extract_tar_gz(bytes, destination);
+    }
+    if asset_name.ends_with(".zip") {
+        return extract_zip(bytes, destination);
+    }
+    Err(UpdateError::InvalidRelease(format!(
+        "unsupported update archive format: {asset_name}"
+    )))
+}
+
+fn extract_zip(bytes: &[u8], destination: &Path) -> UpdateResult<()> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|error| {
+        UpdateError::InvalidRelease(format!("ZIP archive could not be read: {error}"))
+    })?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            UpdateError::InvalidRelease(format!("ZIP entry could not be read: {error}"))
+        })?;
+        let relative = entry.enclosed_name().ok_or_else(|| {
+            UpdateError::InvalidRelease(format!(
+                "ZIP entry escapes the staging directory: {}",
+                entry.name()
+            ))
+        })?;
+        let output = destination.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&output)?;
+            continue;
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = File::create(&output)?;
+        io::copy(&mut entry, &mut file)?;
     }
     Ok(())
 }
@@ -684,11 +747,8 @@ mod tests {
     #[test]
     fn manifest_parser_accepts_common_sha256sum_forms() {
         let hash = "a".repeat(64);
-        let manifest = format!("{hash}  awm-macos-arm64.tar.gz\n{hash} *other.tar.gz\n");
-        assert_eq!(
-            checksum_for(&manifest, "awm-macos-arm64.tar.gz"),
-            Some(hash)
-        );
+        let manifest = format!("{hash}  awm-macos-arm64.zip\n{hash} *other.tar.gz\n");
+        assert_eq!(checksum_for(&manifest, "awm-macos-arm64.zip"), Some(hash));
         assert_eq!(checksum_for(&manifest, "missing"), None);
     }
 
@@ -699,6 +759,9 @@ mod tests {
 
     #[test]
     fn release_targets_cover_both_static_linux_archives() {
+        let macos = ReleaseTarget::for_platform("macos", "aarch64").unwrap();
+        assert_eq!(macos.binary_asset_name, "awm-macos-arm64.zip");
+        assert_eq!(macos.desktop_asset_name, macos.binary_asset_name);
         assert_eq!(
             ReleaseTarget::for_platform("linux", "x86_64")
                 .unwrap()
@@ -716,7 +779,7 @@ mod tests {
     #[test]
     fn authenticated_assets_prefer_the_api_download_url() {
         let asset = ReleaseAsset {
-            name: "awm-macos-arm64.tar.gz".to_owned(),
+            name: "awm-macos-arm64.zip".to_owned(),
             url: "https://github.com/example/download".to_owned(),
             api_url: Some("https://api.github.com/repos/example/assets/1".to_owned()),
         };

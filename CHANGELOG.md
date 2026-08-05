@@ -4,6 +4,9 @@ All notable changes to awm are recorded here.
 
 ## Unreleased
 
+- Unified each platform's app, CLI, daemon, installer, and human getting-started guide into one
+  download. The next release keeps the old macOS binary tarball as a temporary v0.1.0 updater
+  compatibility asset while new updaters read `bin/` from the unified ZIP.
 - Moved cross-platform release builds and prerelease publishing to one local command, leaving
   GitHub Actions as a manual build-only fallback.
 - Added stable and latest update channels, prerelease-first publishing, and an explicit release
