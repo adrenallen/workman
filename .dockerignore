@@ -1,0 +1,7 @@
+.git
+.github
+target
+release
+apps/desktop/node_modules
+apps/desktop/dist
+**/.DS_Store

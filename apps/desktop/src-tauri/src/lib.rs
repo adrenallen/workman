@@ -582,6 +582,9 @@ fn open_in_detected_editor(path: &Path, id: &str) -> Result<(), String> {
         .find(|editor| editor.id == id)
         .ok_or_else(|| format!("configured editor {id:?} is not installed"))?;
 
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+
     #[cfg(target_os = "macos")]
     return spawn_detached(
         Command::new("open")

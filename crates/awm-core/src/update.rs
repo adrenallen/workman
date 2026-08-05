@@ -7,10 +7,12 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Cursor},
     path::{Path, PathBuf},
-    process::Command,
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use flate2::read::GzDecoder;
 use reqwest::{Client, Response};
@@ -201,7 +203,11 @@ pub struct ReleaseTarget {
 
 impl ReleaseTarget {
     pub fn current() -> UpdateResult<Self> {
-        match (env::consts::OS, env::consts::ARCH) {
+        Self::for_platform(env::consts::OS, env::consts::ARCH)
+    }
+
+    pub fn for_platform(os: &str, arch: &str) -> UpdateResult<Self> {
+        match (os, arch) {
             ("macos", "aarch64") => Ok(Self {
                 binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
                 desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
@@ -211,6 +217,11 @@ impl ReleaseTarget {
                 binary_asset_name: "awm-linux-x86_64.tar.gz".to_owned(),
                 desktop_asset_name: "awm-desktop-linux-x86_64.AppImage".to_owned(),
                 platform_label: "Linux x86_64".to_owned(),
+            }),
+            ("linux", "aarch64") => Ok(Self {
+                binary_asset_name: "awm-linux-arm64.tar.gz".to_owned(),
+                desktop_asset_name: "awm-desktop-linux-arm64.AppImage".to_owned(),
+                platform_label: "Linux arm64".to_owned(),
             }),
             (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
         }
@@ -658,5 +669,21 @@ mod tests {
     #[test]
     fn semver_comparison_ignores_tag_prefix() {
         assert!(parse_version("v0.2.0").unwrap() > parse_version("0.1.9").unwrap());
+    }
+
+    #[test]
+    fn release_targets_cover_both_static_linux_archives() {
+        assert_eq!(
+            ReleaseTarget::for_platform("linux", "x86_64")
+                .unwrap()
+                .binary_asset_name,
+            "awm-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            ReleaseTarget::for_platform("linux", "aarch64")
+                .unwrap()
+                .binary_asset_name,
+            "awm-linux-arm64.tar.gz"
+        );
     }
 }

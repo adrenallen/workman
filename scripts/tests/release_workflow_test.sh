@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/release.yml"
+CI_WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
 
 if grep -q 'cargo test' "$WORKFLOW"; then
   echo "release workflow must not run tests" >&2
@@ -16,3 +17,13 @@ fi
 [[ "$(grep -c 'Swatinem/rust-cache@' "$WORKFLOW")" == 2 ]]
 [[ "$(grep -c 'dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b' "$WORKFLOW")" == 2 ]]
 grep -q "save-if:.*workflow_dispatch.*refs/heads/main" "$WORKFLOW"
+grep -q 'workflow_dispatch:' "$WORKFLOW"
+grep -q 'workflow_dispatch:' "$CI_WORKFLOW"
+if grep -Eq '(^|[[:space:]])(push|pull_request|tags):' "$WORKFLOW" "$CI_WORKFLOW"; then
+  echo "repository workflows must be dispatch-only" >&2
+  exit 1
+fi
+if grep -q 'gh release' "$WORKFLOW"; then
+  echo "the emergency workflow must not publish releases" >&2
+  exit 1
+fi

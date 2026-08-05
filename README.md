@@ -35,9 +35,10 @@ Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
 ## Release channels
 
-Tag builds are published as prereleases first. This is the **latest** update channel, intended
-for people who want each newly built version before it is promoted. The default **stable**
-channel uses only promoted GitHub releases and therefore ignores prereleases.
+Releases are built locally on an Apple silicon Mac and published as prereleases first. This is
+the **latest** update channel, intended for people who want each newly built version before it
+is promoted. The default **stable** channel uses only promoted GitHub releases and therefore
+ignores prereleases. Tags do not trigger GitHub Actions; both repository workflows are manual.
 
 Choose a channel in Settings → Daemon, or on the CLI:
 
@@ -47,13 +48,27 @@ awm update --channel latest
 ```
 
 The daemon persists the selected channel with its weekly-update preference in `updates.json`
-inside the awm data directory. Maintainers promote a verified release with
-`scripts/promote.sh vX.Y.Z`; promotion is deliberately separate from the tag build.
+inside the awm data directory.
 
-Release jobs restore dependency and target caches warmed from the default branch. Because
-GitHub scopes cache writes by ref, a maintainer can manually dispatch the Release workflow on
-`main` before the first tag after a large dependency change; tag builds read that cache but do
-not write tag-local Rust caches. This warm path never publishes a release.
+### Cutting a release
+
+Stamp the same version in the workspace, desktop package, and Tauri config; add a dated
+CHANGELOG section; commit and push `main`; then preview the complete local build:
+
+```sh
+scripts/release.sh --dry-run 0.1.0
+scripts/release.sh 0.1.0
+```
+
+The command builds the native macOS binaries and unsigned app, static musl Linux binaries for
+x86_64 and arm64, and—when Docker or OrbStack is available—experimental Linux AppImage and
+Debian bundles. It writes checksummed artifacts under `release/vX.Y.Z`, creates and pushes the
+tag only after every required artifact verifies, and creates a GitHub prerelease. Re-running is
+safe and resumes from Cargo, npm, and container caches. After installing and accepting the
+prerelease, promote it to stable with `scripts/promote.sh vX.Y.Z`.
+
+The manually dispatched Release workflow remains only as an emergency build-only fallback; it
+cannot publish a release.
 
 The checkout itself may still be located at `/Users/g/Code/gbuild`. The product and GitHub
 repository are named awm, but that live working-directory path is intentionally not moved by

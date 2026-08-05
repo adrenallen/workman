@@ -4,6 +4,8 @@ All notable changes to awm are recorded here.
 
 ## Unreleased
 
+- Moved cross-platform release builds and prerelease publishing to one local command, leaving
+  GitHub Actions as a manual build-only fallback.
 - Added stable and latest update channels, prerelease-first publishing, and an explicit release
   promotion command.
 - Made routine CI manual-only so builds run only when a maintainer requests them or pushes a
