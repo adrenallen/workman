@@ -7,6 +7,7 @@
   import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
+  import ProjectOpeners from './lib/ProjectOpeners.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
@@ -48,6 +49,12 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import {
+    openerSettings,
+    openProjectCustom,
+    openProjectEditor,
+    openProjectFinder
+  } from './lib/openers';
   import {
     focusAdjacentPanel,
     focusPanel,
@@ -150,7 +157,7 @@
   ]);
   let frameItemLabel = $derived(settingsOpen ? 'Settings' : (selection?.label ?? 'Project'));
   let contextMenuDescriptor = $derived(
-    contextRequest ? describeContextMenu(contextRequest.target) : null
+    contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
   );
   let versionSkew = $derived(
     connection.status === 'connected' && !connection.version_compatible
@@ -1046,10 +1053,13 @@
         projects = await client.projects();
         return;
       case 'open-in-editor':
-        await openWorkspacePath(project.path, 'editor');
+        await openProjectEditor(project.path, $openerSettings);
         return;
       case 'open-in-finder':
-        await openWorkspacePath(project.path, 'finder');
+        await openProjectFinder(project.path);
+        return;
+      case 'open-custom':
+        await openProjectCustom(project.path, $openerSettings);
         return;
       case 'copy-path':
         await navigator.clipboard.writeText(project.path);
@@ -1359,6 +1369,12 @@
               <span class="project-glyph" aria-hidden="true">{projectLabel(project).slice(0, 1).toUpperCase()}</span>
               <span class="project-copy"><strong>{projectLabel(project)}</strong><small>{project.path}</small></span>
             </button>
+            <ProjectOpeners
+              path={project.path}
+              projectName={projectLabel(project)}
+              collapsed={projectRailCollapsed}
+              onError={reportError}
+            />
             <button class="rename-button" type="button" aria-label={`Rename ${projectLabel(project)}`} title="Rename project" onclick={() => beginRename(project)}>···</button>
           {/if}
         </article>

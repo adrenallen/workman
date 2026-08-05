@@ -5,6 +5,7 @@
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
+  import OpenersCard from './settings/OpenersCard.svelte';
   import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
 
   let { client, connection, onError }: SettingsPanelProps = $props();
@@ -96,6 +97,7 @@
       </section>
       <div class="appearance"><AppearanceCard /></div>
       <div class="terminal"><TerminalAppearanceCard /></div>
+      <div class="openers"><OpenersCard /></div>
     </div>
   {:else if info}
     <div class="settings-grid">
@@ -103,6 +105,7 @@
       <div class="daemon"><DaemonCard {info} {connection} {restarting} onRestart={() => void restart()} /></div>
       <div class="appearance"><AppearanceCard /></div>
       <div class="terminal"><TerminalAppearanceCard /></div>
+      <div class="openers"><OpenersCard /></div>
       <div class="agents"><AgentToolsCard {client} connected={connection.status === 'connected'} {onError} /></div>
     </div>
   {/if}
@@ -114,7 +117,7 @@
   .loading { font-family: 'JetBrains Mono Variable', monospace; }
 
   .settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: 10px; align-items: start; }
-  .mcp, .agents { grid-column: 1 / -1; }
+  .mcp, .agents, .openers { grid-column: 1 / -1; }
   .compatibility { display: grid; min-height: 178px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border)); border-radius: 4px; padding: 14px; background: var(--surface); }
   .compatibility-mark { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); color: var(--warning); font: 700 14px/1 'JetBrains Mono Variable', monospace; }
   .compatibility-copy { min-width: 0; }
@@ -132,5 +135,5 @@
   .loading { font-size: 8px; }
   .loading i { width: 14px; height: 14px; border: 1px solid #3c5660; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .mcp, .agents { grid-column: auto; } .compatibility { grid-template-columns: auto minmax(0, 1fr); } .compatibility button { grid-column: 2; justify-self: start; } }
+  @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr; } .mcp, .agents, .openers { grid-column: auto; } .compatibility { grid-template-columns: auto minmax(0, 1fr); } .compatibility button { grid-column: 2; justify-self: start; } }
 </style>

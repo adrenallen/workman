@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core';
 
 import type { ScratchpadSummary, TodoSummary } from './coordination';
 import type { ProcessView, Project } from './daemon';
+import {
+  customActionLabel,
+  editorActionLabel,
+  type OpenersState
+} from './openers';
 import type { ProjectTreeSelection } from './projectTree';
 
 export type ContextActionId =
@@ -27,6 +32,7 @@ export type ContextActionId =
   | 'remove-project'
   | 'open-in-editor'
   | 'open-in-finder'
+  | 'open-custom'
   | 'copy-path';
 
 export interface ContextMenuItem {
@@ -110,13 +116,16 @@ export function keyboardContextMenuRequest(
   };
 }
 
-export function describeContextMenu(target: ContextMenuTarget): ContextMenuDescriptor {
+export function describeContextMenu(
+  target: ContextMenuTarget,
+  openers: OpenersState | null = null
+): ContextMenuDescriptor {
   switch (target.kind) {
     case 'project':
       return {
         title: target.project.display_name?.trim() || target.project.name,
         subtitle: `PROJECT · ${target.project.id}`,
-        items: projectItems(target.project)
+        items: projectItems(target.project, openers)
       };
     case 'process':
       return {
@@ -158,15 +167,30 @@ export function describeContextMenu(target: ContextMenuTarget): ContextMenuDescr
   }
 }
 
-function projectItems(project: Project): ContextMenuItem[] {
+function projectItems(project: Project, openers: OpenersState | null): ContextMenuItem[] {
+  const openerItems: ContextMenuItem[] = openers ? [
+    ...(openers.config.sidebar.editorEnabled
+      ? [{ id: 'open-in-editor' as const, label: editorActionLabel(openers.config, openers.editors) }]
+      : []),
+    ...(openers.config.sidebar.finderEnabled
+      ? [{ id: 'open-in-finder' as const, label: 'Show in Finder' }]
+      : []),
+    ...(openers.config.sidebar.customEnabled
+      ? [{ id: 'open-custom' as const, label: customActionLabel(openers.config) }]
+      : [])
+  ] : [
+    { id: 'open-in-editor', label: 'Open in editor' },
+    { id: 'open-in-finder', label: 'Show in Finder' }
+  ];
+  if (openerItems[0]) openerItems[0].separatorBefore = true;
+
   return [
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
     { id: 'rename', label: 'Rename' },
     { id: 'start-all-commands', label: 'Start all commands', separatorBefore: true },
     { id: 'stop-all-commands', label: 'Stop all commands' },
-    { id: 'open-in-editor', label: 'Open in editor', separatorBefore: true },
-    { id: 'open-in-finder', label: 'Show in Finder' },
-    { id: 'copy-path', label: 'Copy path' },
+    ...openerItems,
+    { id: 'copy-path', label: 'Copy path', separatorBefore: openerItems.length === 0 },
     {
       id: 'remove-project',
       label: 'Remove from gbuild…',

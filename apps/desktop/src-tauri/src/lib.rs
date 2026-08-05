@@ -120,6 +120,55 @@ enum ShellOpenTarget {
     Reveal,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ShellOpener {
+    Detected { id: String },
+    Custom { template: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct DetectedEditor {
+    id: &'static str,
+    label: &'static str,
+    bundle_path: String,
+}
+
+#[derive(Clone, Copy)]
+struct EditorCandidate {
+    id: &'static str,
+    label: &'static str,
+    bundle_names: &'static [&'static str],
+}
+
+const EDITOR_CANDIDATES: &[EditorCandidate] = &[
+    EditorCandidate {
+        id: "vscode",
+        label: "Visual Studio Code",
+        bundle_names: &["Visual Studio Code.app"],
+    },
+    EditorCandidate {
+        id: "cursor",
+        label: "Cursor",
+        bundle_names: &["Cursor.app"],
+    },
+    EditorCandidate {
+        id: "zed",
+        label: "Zed",
+        bundle_names: &["Zed.app"],
+    },
+    EditorCandidate {
+        id: "sublime",
+        label: "Sublime Text",
+        bundle_names: &["Sublime Text.app"],
+    },
+    EditorCandidate {
+        id: "intellij",
+        label: "IntelliJ IDEA",
+        bundle_names: &["IntelliJ IDEA.app", "IntelliJ IDEA CE.app"],
+    },
+];
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 enum DaemonFrame {
@@ -180,6 +229,22 @@ fn shell_open_path(path: String, target: ShellOpenTarget) -> Result<(), String> 
     open_shell_target(&path, target)
 }
 
+/// List supported editors found in standard application directories.
+#[tauri::command]
+fn shell_detect_editors() -> Vec<DetectedEditor> {
+    detect_editors_in(&standard_application_roots())
+}
+
+/// Open a workspace with a detected editor or an argv-style custom template.
+#[tauri::command]
+fn shell_open_with(path: String, opener: ShellOpener) -> Result<(), String> {
+    let path = canonical_shell_path(&path)?;
+    match opener {
+        ShellOpener::Detected { id } => open_in_detected_editor(&path, &id),
+        ShellOpener::Custom { template } => open_with_template(&path, &template),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (sender, receiver) = mpsc::channel(256);
@@ -196,7 +261,9 @@ pub fn run() {
             daemon_send,
             daemon_restart,
             daemon_status,
-            shell_open_path
+            shell_open_path,
+            shell_detect_editors,
+            shell_open_with
         ])
         .setup(move |app| {
             tauri::async_runtime::spawn(run_bridge(app.handle().clone(), task_state, receiver));
@@ -483,6 +550,138 @@ fn open_in_editor(path: &Path) -> Result<(), String> {
     Err("opening an editor is not supported on this platform".to_owned())
 }
 
+fn standard_application_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    roots
+}
+
+fn detect_editors_in(roots: &[PathBuf]) -> Vec<DetectedEditor> {
+    EDITOR_CANDIDATES
+        .iter()
+        .filter_map(|candidate| {
+            roots.iter().find_map(|root| {
+                candidate.bundle_names.iter().find_map(|bundle_name| {
+                    let bundle_path = root.join(bundle_name);
+                    bundle_path.is_dir().then(|| DetectedEditor {
+                        id: candidate.id,
+                        label: candidate.label,
+                        bundle_path: bundle_path.to_string_lossy().into_owned(),
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+fn open_in_detected_editor(path: &Path, id: &str) -> Result<(), String> {
+    let editor = shell_detect_editors()
+        .into_iter()
+        .find(|editor| editor.id == id)
+        .ok_or_else(|| format!("configured editor {id:?} is not installed"))?;
+
+    #[cfg(target_os = "macos")]
+    return spawn_detached(
+        Command::new("open")
+            .args(["-a", editor.bundle_path.as_str()])
+            .arg(path),
+        editor.label,
+    );
+
+    #[allow(unreachable_code)]
+    Err(format!(
+        "opening {} is not supported on this platform",
+        editor.label
+    ))
+}
+
+fn open_with_template(path: &Path, template: &str) -> Result<(), String> {
+    let mut arguments = parse_command_template(template, path)?;
+    let executable = arguments.remove(0);
+    spawn_detached(Command::new(&executable).args(arguments), &executable)
+}
+
+/// Parse a small argv syntax without ever involving a command shell.
+fn parse_command_template(template: &str, path: &Path) -> Result<Vec<String>, String> {
+    if template.len() > 4096 {
+        return Err("custom command template is too long".to_owned());
+    }
+    if template.contains('\0') {
+        return Err("custom command template may not contain NUL bytes".to_owned());
+    }
+
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaping = false;
+    let mut token_started = false;
+
+    for character in template.chars() {
+        if escaping {
+            current.push(character);
+            token_started = true;
+            escaping = false;
+            continue;
+        }
+        if character == '\\' {
+            escaping = true;
+            token_started = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            token_started = true;
+            continue;
+        }
+        if character == '\'' || character == '"' {
+            quote = Some(character);
+            token_started = true;
+        } else if character.is_whitespace() {
+            if token_started {
+                arguments.push(std::mem::take(&mut current));
+                token_started = false;
+            }
+        } else {
+            current.push(character);
+            token_started = true;
+        }
+    }
+
+    if escaping {
+        return Err("custom command template ends with an incomplete escape".to_owned());
+    }
+    if quote.is_some() {
+        return Err("custom command template has an unterminated quote".to_owned());
+    }
+    if token_started {
+        arguments.push(current);
+    }
+    if arguments.is_empty() || arguments[0].is_empty() {
+        return Err("custom command template needs an executable".to_owned());
+    }
+    if arguments.len() > 64 {
+        return Err("custom command template has too many arguments".to_owned());
+    }
+    if arguments[0].contains("{path}") {
+        return Err("{path} cannot be used as the command executable".to_owned());
+    }
+    if !arguments.iter().any(|argument| argument.contains("{path}")) {
+        return Err("custom command template must include {path}".to_owned());
+    }
+
+    let path = path.to_string_lossy();
+    Ok(arguments
+        .into_iter()
+        .map(|argument| argument.replace("{path}", &path))
+        .collect())
+}
+
 fn open_in_file_manager(path: &Path, reveal: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -646,5 +845,47 @@ mod tests {
         );
         assert!(canonical_shell_path(root.path().join("missing").to_str().unwrap()).is_err());
         assert!(canonical_shell_path(" ").is_err());
+    }
+
+    #[test]
+    fn editor_detection_prefers_vscode_and_accepts_intellij_community() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Cursor.app")).unwrap();
+        std::fs::create_dir(root.path().join("Visual Studio Code.app")).unwrap();
+        std::fs::create_dir(root.path().join("IntelliJ IDEA CE.app")).unwrap();
+
+        let editors = detect_editors_in(&[root.path().to_owned()]);
+        assert_eq!(
+            editors.iter().map(|editor| editor.id).collect::<Vec<_>>(),
+            ["vscode", "cursor", "intellij"]
+        );
+        assert!(editors[2].bundle_path.ends_with("IntelliJ IDEA CE.app"));
+    }
+
+    #[test]
+    fn argv_templates_preserve_path_as_data_without_a_shell() {
+        let workspace = Path::new("/tmp/work tree/$(touch nope); still-data");
+        assert_eq!(
+            parse_command_template(
+                r#"tool --reuse-window "two words" --folder={path}"#,
+                workspace
+            )
+            .unwrap(),
+            [
+                "tool",
+                "--reuse-window",
+                "two words",
+                "--folder=/tmp/work tree/$(touch nope); still-data"
+            ]
+        );
+    }
+
+    #[test]
+    fn argv_templates_reject_ambiguous_or_incomplete_commands() {
+        let workspace = Path::new("/tmp/workspace");
+        assert!(parse_command_template("tool --flag", workspace).is_err());
+        assert!(parse_command_template("\"tool {path}", workspace).is_err());
+        assert!(parse_command_template("{path} --flag", workspace).is_err());
+        assert!(parse_command_template("", workspace).is_err());
     }
 }
