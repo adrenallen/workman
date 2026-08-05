@@ -1,0 +1,361 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Version label for a build-only dry run
+        required: true
+        default: v0.1.0
+
+concurrency:
+  group: awm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Cargo.lock currently includes darling 0.23, whose MSRV is Rust 1.88.
+  RUST_VERSION: "1.88.0"
+  NODE_VERSION: "22"
+  MACOS_TARGET: aarch64-apple-darwin
+  LINUX_TARGET: x86_64-unknown-linux-gnu
+  MACOS_BIN_ARCHIVE: awm-macos-arm64.tar.gz
+  MACOS_APP_ARCHIVE: awm-desktop-macos-arm64.zip
+  LINUX_BIN_ARCHIVE: awm-linux-x86_64.tar.gz
+  LINUX_APPIMAGE: awm-desktop-linux-x86_64.AppImage
+  LINUX_DEB: awm-desktop-linux-x86_64.deb
+
+jobs:
+  metadata:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Validate tag and version files
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            TAG="$GITHUB_REF_NAME"
+            PUBLISH=true
+          else
+            TAG="$DISPATCH_TAG"
+            PUBLISH=false
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a vX.Y.Z release tag; received: $TAG" >&2
+            exit 1
+          fi
+
+          if [[ "$PUBLISH" == "true" ]] && ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "Release tags must point to a commit already merged into main." >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          WORKSPACE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          DESKTOP_VERSION="$(jq -r .version apps/desktop/package.json)"
+          TAURI_VERSION="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+
+          for candidate in "$WORKSPACE_VERSION" "$DESKTOP_VERSION" "$TAURI_VERSION"; do
+            if [[ "$candidate" != "$VERSION" ]]; then
+              echo "Release $TAG does not match a version file ($candidate)." >&2
+              exit 1
+            fi
+          done
+
+          if ! grep -qE "^## ${VERSION} - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md has no dated section for $VERSION." >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Build macOS arm64
+    needs: metadata
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$MACOS_TARGET"
+          rustup override set "$RUST_VERSION"
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build daemon and CLI
+        run: cargo build --locked --release --target "$MACOS_TARGET" -p awmd -p awm
+
+      - name: Build unsigned desktop application
+        working-directory: apps/desktop
+        run: npm run tauri -- build --ci --no-sign --target "$MACOS_TARGET" --bundles app
+
+      - name: Ad-hoc sign and package macOS artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="$GITHUB_WORKSPACE/release"
+          BIN_DIR="$RUNNER_TEMP/awm-macos-bin"
+          TARGET_DIR="target/$MACOS_TARGET/release"
+          APP="$TARGET_DIR/bundle/macos/awm.app"
+
+          test -x "$TARGET_DIR/awm"
+          test -x "$TARGET_DIR/awmd"
+          test -d "$APP"
+
+          mkdir -p "$RELEASE_DIR" "$BIN_DIR"
+          install -m 755 "$TARGET_DIR/awm" "$BIN_DIR/awm"
+          install -m 755 "$TARGET_DIR/awmd" "$BIN_DIR/awmd"
+          tar -C "$BIN_DIR" -czf "$RELEASE_DIR/$MACOS_BIN_ARCHIVE" awm awmd
+
+          codesign --force --deep --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$RELEASE_DIR/$MACOS_APP_ARCHIVE"
+
+          tar -tzf "$RELEASE_DIR/$MACOS_BIN_ARCHIVE"
+          unzip -l "$RELEASE_DIR/$MACOS_APP_ARCHIVE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: awm-release-macos-arm64
+          path: |
+            release/${{ env.MACOS_BIN_ARCHIVE }}
+            release/${{ env.MACOS_APP_ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  linux:
+    name: Build Linux x86_64 (experimental)
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Tauri system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$LINUX_TARGET"
+          rustup override set "$RUST_VERSION"
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build daemon and CLI
+        run: cargo build --locked --release --target "$LINUX_TARGET" -p awmd -p awm
+
+      - name: Build experimental desktop bundles
+        working-directory: apps/desktop
+        run: npm run tauri -- build --ci --target "$LINUX_TARGET" --bundles appimage,deb
+
+      - name: Package Linux artifacts with stable names
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="$GITHUB_WORKSPACE/release"
+          BIN_DIR="$RUNNER_TEMP/awm-linux-bin"
+          TARGET_DIR="target/$LINUX_TARGET/release"
+          BUNDLE_DIR="$TARGET_DIR/bundle"
+          APPIMAGE="$(find "$BUNDLE_DIR/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          DEB="$(find "$BUNDLE_DIR/deb" -type f -name '*.deb' -print -quit)"
+
+          test -x "$TARGET_DIR/awm"
+          test -x "$TARGET_DIR/awmd"
+          test -n "$APPIMAGE"
+          test -n "$DEB"
+
+          mkdir -p "$RELEASE_DIR" "$BIN_DIR"
+          install -m 755 "$TARGET_DIR/awm" "$BIN_DIR/awm"
+          install -m 755 "$TARGET_DIR/awmd" "$BIN_DIR/awmd"
+          tar -C "$BIN_DIR" -czf "$RELEASE_DIR/$LINUX_BIN_ARCHIVE" awm awmd
+          install -m 755 "$APPIMAGE" "$RELEASE_DIR/$LINUX_APPIMAGE"
+          install -m 644 "$DEB" "$RELEASE_DIR/$LINUX_DEB"
+
+          tar -tzf "$RELEASE_DIR/$LINUX_BIN_ARCHIVE"
+          file "$RELEASE_DIR/$LINUX_APPIMAGE"
+          dpkg-deb --info "$RELEASE_DIR/$LINUX_DEB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: awm-release-linux-x86_64
+          path: |
+            release/${{ env.LINUX_BIN_ARCHIVE }}
+            release/${{ env.LINUX_APPIMAGE }}
+            release/${{ env.LINUX_DEB }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    name: Assemble and publish release
+    needs: [metadata, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: awm-release-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums and CHANGELOG-derived notes
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSETS=(
+            "$MACOS_BIN_ARCHIVE"
+            "$MACOS_APP_ARCHIVE"
+            "$LINUX_BIN_ARCHIVE"
+            "$LINUX_APPIMAGE"
+            "$LINUX_DEB"
+          )
+          for asset in "${ASSETS[@]}"; do
+            test -f "release/$asset"
+          done
+
+          pushd release >/dev/null
+          sha256sum "${ASSETS[@]}" > SHA256SUMS
+          popd >/dev/null
+
+          awk -v version="$VERSION" '
+            $0 ~ "^## " version " - " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > "$RUNNER_TEMP/changelog-section.md"
+
+          cat > release/release-notes.md <<EOF
+          # awm $RELEASE_TAG
+
+          ## macOS arm64
+
+          The desktop app is ad-hoc signed, but it is not Developer ID signed or notarized yet.
+          After unzipping, first try Control-clicking **awm.app** and choosing **Open**. If macOS
+          still quarantines the app, run:
+
+          \`\`\`sh
+          xattr -dr com.apple.quarantine /Applications/awm.app
+          \`\`\`
+
+          The CLI/daemon archive contains \`awm\` and \`awmd\` for \`aarch64-apple-darwin\`.
+
+          ## Linux x86_64 — EXPERIMENTAL
+
+          Linux packages are provided as an AppImage, a Debian package, and a CLI/daemon archive.
+          WebKitGTK rendering has not received end-to-end release testing yet.
+
+          ## Changes
+
+          EOF
+          cat "$RUNNER_TEMP/changelog-section.md" >> release/release-notes.md
+
+          cat release/SHA256SUMS
+          cat release/release-notes.md
+
+      - name: Preserve assembled dry-run candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: awm-release-candidate-${{ needs.metadata.outputs.tag }}
+          path: |
+            release/${{ env.MACOS_BIN_ARCHIVE }}
+            release/${{ env.MACOS_APP_ARCHIVE }}
+            release/${{ env.LINUX_BIN_ARCHIVE }}
+            release/${{ env.LINUX_APPIMAGE }}
+            release/${{ env.LINUX_DEB }}
+            release/SHA256SUMS
+            release/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Publish GitHub release
+        if: needs.metadata.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            "release/$MACOS_BIN_ARCHIVE"
+            "release/$MACOS_APP_ARCHIVE"
+            "release/$LINUX_BIN_ARCHIVE"
+            "release/$LINUX_APPIMAGE"
+            "release/$LINUX_DEB"
+            "release/SHA256SUMS"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --title "awm $RELEASE_TAG" \
+              --notes-file release/release-notes.md
+          else
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "awm $RELEASE_TAG" \
+              --notes-file release/release-notes.md
+          fi

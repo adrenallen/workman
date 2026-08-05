@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: awm-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Cargo.lock currently includes darling 0.23, whose MSRV is Rust 1.88.
+  RUST_VERSION: "1.88.0"
+  NODE_VERSION: "22"
+
+jobs:
+  macos:
+    name: Build and test macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup override set "$RUST_VERSION"
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build Rust workspace
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked
+
+      - name: Check desktop application
+        working-directory: apps/desktop
+        run: npm run check
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
