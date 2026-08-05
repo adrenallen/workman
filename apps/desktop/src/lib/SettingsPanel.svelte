@@ -18,6 +18,7 @@
   } from './nativeMenu';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
+  import AboutUpdatesCard from './settings/AboutUpdatesCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
   import HotkeysCard from './settings/HotkeysCard.svelte';
@@ -71,6 +72,7 @@
   });
 
   $effect(() => {
+    // Keep the native menu and the About button on the same update-check implementation.
     const nativeRequest = $nativeUpdateCheckRequest;
     if (
       nativeRequest > 0 &&
@@ -161,7 +163,6 @@
 
   async function updateNow(): Promise<void> {
     if (!info || updateBusy) return;
-    if (!window.confirm('Update awm and restart the daemon? All running project processes will stop.')) return;
     updateBusy = 'apply';
     updateMessage = 'Downloading and verifying the update…';
     try {
@@ -228,23 +229,38 @@
             onRetry={() => void refresh()}
           />
         {/if}
-      {:else if $settingsSection === 'daemon' || $settingsSection === 'about'}
+      {:else if $settingsSection === 'daemon'}
         {#if info}
           <DaemonCard
             {info}
             {connection}
             {restarting}
-            {updateBusy}
-            {updateMessage}
             onRestart={() => void restart()}
-            onCheckUpdate={() => void checkUpdate()}
-            onUpdateNow={() => void updateNow()}
-            onAutomaticChecks={(enabled) => void toggleAutomaticChecks(enabled)}
-            onUpdateChannel={(channel) => void chooseUpdateChannel(channel)}
           />
         {:else}
           <SettingsConnectionCard
-            title={$settingsSection === 'about' ? 'About & update settings' : 'Daemon settings'}
+            title="Daemon settings"
+            connected={connection.status === 'connected'}
+            {loading}
+            error={loadError}
+            onRetry={() => void refresh()}
+          />
+        {/if}
+      {:else if $settingsSection === 'about'}
+        {#if info}
+          <AboutUpdatesCard
+            {info}
+            {connection}
+            {updateBusy}
+            {updateMessage}
+            onCheckUpdate={() => void checkUpdate()}
+            onUpdateNow={() => void updateNow()}
+            onAutomaticChecks={(enabled: boolean) => void toggleAutomaticChecks(enabled)}
+            onUpdateChannel={(channel: UpdateChannel) => void chooseUpdateChannel(channel)}
+          />
+        {:else}
+          <SettingsConnectionCard
+            title="About & update settings"
             connected={connection.status === 'connected'}
             {loading}
             error={loadError}

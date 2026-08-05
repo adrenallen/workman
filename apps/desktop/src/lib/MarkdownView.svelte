@@ -161,8 +161,8 @@
 
 <style>
   .markdown {
-    color: #b8c7ce;
-    font-size: 13px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-sm);
     line-height: 1.65;
   }
 
@@ -170,9 +170,9 @@
   .markdown :global(h2),
   .markdown :global(h3),
   .markdown :global(h4) {
-    margin: 1.4em 0 0.55em;
-    color: #e1eaed;
-    font-family: 'Archivo Variable', sans-serif;
+    margin: var(--space-4) 0 var(--space-2);
+    color: var(--foreground);
+    font-family: var(--ui-font-family);
     line-height: 1.15;
   }
 
@@ -182,41 +182,41 @@
     margin-top: 0;
   }
 
-  .markdown :global(h1) { font-size: 24px; }
-  .markdown :global(h2) { font-size: 18px; }
-  .markdown :global(h3) { font-size: 14px; color: var(--signal); }
-  .markdown :global(h4) { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .markdown :global(h1) { font-size: var(--font-size-xl); }
+  .markdown :global(h2) { font-size: var(--font-size-lg); }
+  .markdown :global(h3) { font-size: var(--font-size-base); }
+  .markdown :global(h4) { font-size: var(--font-size-xs); text-transform: uppercase; letter-spacing: 0.05em; }
 
-  .markdown :global(p) { margin: 0 0 0.9em; }
-  .markdown :global(ul), .markdown :global(ol) { margin: 0 0 1em; padding-left: 22px; }
-  .markdown :global(li) { margin: 0.25em 0; }
+  .markdown :global(p) { margin: 0 0 var(--space-3); }
+  .markdown :global(ul), .markdown :global(ol) { margin: 0 0 var(--space-4); padding-left: var(--space-4); }
+  .markdown :global(li) { margin: var(--space-1) 0; }
 
   .markdown :global(blockquote) {
-    margin: 1em 0;
-    border-left: 2px solid var(--signal);
-    padding: 2px 0 2px 14px;
-    color: #91a6b1;
+    margin: var(--space-3) 0;
+    border-left: 2px solid var(--border-token);
+    padding: var(--space-1) 0 var(--space-1) var(--space-3);
+    color: var(--muted-foreground);
   }
 
   .markdown :global(pre) {
     overflow-x: auto;
-    margin: 1em 0;
-    border: 1px solid #273e49;
-    border-radius: 3px;
-    padding: 13px 15px;
-    background: #07131a;
+    margin: var(--space-3) 0;
+    border: 1px solid var(--border-token);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    background: var(--background);
   }
 
   .markdown :global(code) {
-    border-radius: 2px;
-    padding: 1px 4px;
-    background: #102631;
-    color: #8fe3d6;
-    font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 0.88em;
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-1);
+    background: var(--muted-surface);
+    color: var(--foreground);
+    font-family: var(--terminal-font-family);
+    font-size: var(--font-size-xs);
   }
 
-  .markdown :global(pre code) { padding: 0; background: none; color: #bfd1d7; }
-  .markdown :global(a) { color: var(--signal); text-underline-offset: 3px; }
-  .markdown :global(hr) { margin: 20px 0; border: 0; border-top: 1px solid #29404b; }
+  .markdown :global(pre code) { padding: 0; background: none; color: var(--foreground); }
+  .markdown :global(a) { color: var(--ring); text-underline-offset: 3px; }
+  .markdown :global(hr) { margin: var(--space-4) 0; border: 0; border-top: 1px solid var(--border-token); }
 </style>
