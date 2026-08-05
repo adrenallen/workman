@@ -2,6 +2,9 @@
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+  import FolderGit2Icon from '@lucide/svelte/icons/folder-git-2';
+  import FolderIcon from '@lucide/svelte/icons/folder';
+  import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import XIcon from '@lucide/svelte/icons/x';
@@ -108,9 +111,8 @@
     buildProjectRailGroups,
     projectBranchLabel,
     projectRepositoryTitle,
-    projectStatusRollupLabel,
-    rollupProjectStatus,
     type ProjectRailGroup,
+    type WorktreeBranchOption,
     type WorktreeDialogSubmission,
     type WorktreeEntry,
     type WorktreeList,
@@ -193,7 +195,7 @@
   } | null>(null);
   let worktreeDialogBusy = $state(false);
   let worktreeDialogError = $state<string | null>(null);
-  let originBranches = $state<string[]>([]);
+  let branchOptions = $state<WorktreeBranchOption[]>([]);
   let originBranchesLoading = $state(false);
   let removeWorktreeDialog = $state<{
     project: Project;
@@ -1124,7 +1126,7 @@
       return;
     }
     worktreeDialogError = null;
-    originBranches = [];
+    branchOptions = [];
     worktreeDialog = {
       mode,
       sourceProject: mode === 'create' || mode === 'adopt' ? root : sourceProject,
@@ -1137,7 +1139,7 @@
     if (worktreeDialogBusy) return;
     worktreeDialog = null;
     worktreeDialogError = null;
-    originBranches = [];
+    branchOptions = [];
   }
 
   async function loadOriginBranches(): Promise<void> {
@@ -1147,7 +1149,8 @@
     worktreeDialogError = null;
     try {
       const response = await client.originWorktreeBranches(state.sourceProject.id);
-      originBranches = response.branches;
+      branchOptions = response.options
+        ?? response.branches.map((name) => ({ name, source: 'origin' as const }));
     } catch (cause) {
       worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
     } finally {
@@ -1818,20 +1821,19 @@
 {#snippet projectRailRow(project: Project, nested: boolean, group: ProjectRailGroup)}
   {@const repository = worktreeRepositoryFor(project)}
   {@const worktree = worktreeEntryFor(project)}
-  {@const groupProjects = [group.root, ...group.children]}
-  {@const rowStatus = !nested && group.grouped ? rollupProjectStatus(groupProjects) : project.status}
   {@const rowLabel = projectRailLabel(project, nested)}
   {@const fullTitle = projectTitle(project)}
+  {@const projectKind = nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
   <article
-    class:active={project.selected || (!nested && group.children.some((child) => child.selected))}
+    class:active={project.selected}
     class:nested
     class:repository-root={!nested && project.repository_id !== null}
     class="project-row group/project group/repository"
   >
     {#if !nested && group.grouped && group.repositoryId !== null && !projectRailCollapsed}
       <IconButton
-        class="ml-0.5 size-7 shrink-0"
-        label={`${repositoryCollapsed(group.repositoryId) ? 'Expand' : 'Collapse'} ${repository?.name ?? rowLabel} worktrees`}
+        class="ml-0.5 size-7 shrink-0 rounded-none border-r border-border"
+        label={`${repositoryCollapsed(group.repositoryId) ? 'Expand' : 'Collapse'} worktrees under ${repository?.name ?? rowLabel}`}
         aria-expanded={!repositoryCollapsed(group.repositoryId)}
         onclick={() => toggleRepository(group.repositoryId!)}
       >
@@ -1851,9 +1853,7 @@
         type="button"
         title={fullTitle}
         aria-current={project.selected ? 'page' : undefined}
-        aria-label={!nested && group.grouped
-          ? projectStatusRollupLabel(repository?.name ?? rowLabel, groupProjects)
-          : `${fullTitle} · ${project.status}`}
+        aria-label={`${fullTitle} · ${projectKind} · ${project.status}`}
         use:reorderItem={{
           id: project.id,
           group: projectReorderGroup(project),
@@ -1870,15 +1870,15 @@
       >
         <StatusIndicator
           class={projectRailCollapsed ? 'absolute right-1 bottom-1' : ''}
-          tone={rowStatus === 'error' ? 'danger' : rowStatus === 'running' ? 'success' : 'neutral'}
-          label={!nested && group.grouped
-            ? projectStatusRollupLabel(repository?.name ?? rowLabel, groupProjects)
-            : `${fullTitle} · ${project.status}`}
+          tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
+          label={`${fullTitle} · ${project.status}`}
         />
-        <span class="project-glyph" aria-hidden="true">{rowLabel.slice(0, 1).toUpperCase()}</span>
+        <span class="project-kind-icon" aria-hidden="true">
+          {#if nested}<GitBranchIcon size={15} strokeWidth={1.8} />{:else if project.repository_id !== null}<FolderGit2Icon size={15} strokeWidth={1.8} />{:else}<FolderIcon size={15} strokeWidth={1.8} />{/if}
+        </span>
         <span class="project-copy">
           <strong>{rowLabel}</strong>
-          <small>{nested ? fullTitle : project.path}</small>
+          <small>{project.path}</small>
         </span>
       </button>
       {#if repository && !projectRailCollapsed}
@@ -1950,7 +1950,7 @@
       {/if}
       {#each projectRailGroups as group (group.key)}
         {@render projectRailRow(group.root, false, group)}
-        {#if group.grouped && !projectRailCollapsed && !repositoryCollapsed(group.repositoryId)}
+        {#if group.grouped && (projectRailCollapsed || !repositoryCollapsed(group.repositoryId))}
           <div class="repository-children" aria-label={`${worktreeRepositoryFor(group.root)?.name ?? projectLabel(group.root)} worktrees`}>
             {#each group.children as child (child.id)}
               {@render projectRailRow(child, true, group)}
@@ -2132,7 +2132,7 @@
     sourceProject={worktreeDialog.sourceProject}
     repository={worktreeDialog.repository}
     sourceEntry={worktreeDialog.sourceEntry}
-    {originBranches}
+    {branchOptions}
     branchesLoading={originBranchesLoading}
     busy={worktreeDialogBusy}
     error={worktreeDialogError}
@@ -2252,7 +2252,8 @@
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
-  .project-glyph { display: none; }
+  .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
+  .project-row.active .project-kind-icon { color: var(--foreground); }
   .project-copy { min-width: 0; }
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
@@ -2272,9 +2273,10 @@
   .project-rail.collapsed .brand-mark { width: 23px; height: 23px; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { padding-inline: 4px; }
+  .project-rail.collapsed .repository-children { margin-left: 0; border-left: 0; padding-left: 0; }
   .project-rail.collapsed .project-row { min-height: 38px; }
   .project-rail.collapsed .project-select { position: relative; justify-content: center; padding: 4px; }
-  .project-rail.collapsed .project-glyph { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); font-size: var(--font-size-sm); font-weight: 680; }
+  .project-rail.collapsed .project-kind-icon { width: 25px; height: 25px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
   .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }

@@ -65,6 +65,12 @@ export interface WorktreeList {
 export interface OriginBranchList {
   repository_id: number;
   branches: string[];
+  options?: WorktreeBranchOption[];
+}
+
+export interface WorktreeBranchOption {
+  name: string;
+  source: 'local' | 'origin';
 }
 
 export interface WorktreeMutation {

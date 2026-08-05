@@ -166,6 +166,13 @@ pub struct WorktreeList {
 pub struct OriginBranchList {
     pub repository_id: i64,
     pub branches: Vec<String>,
+    pub options: Vec<WorktreeBranchOption>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeBranchOption {
+    pub name: String,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -460,9 +467,9 @@ pub async fn list_for_project_refresh(
     .await
 }
 
-/// Lists origin branches that are not currently checked out in any linked
-/// worktree. This is intentionally fetched on demand for the desktop branch
-/// picker so normal project/worktree polling never adds remote Git traffic.
+/// Lists local and origin branches that are not currently checked out in any
+/// linked worktree. This is intentionally fetched on demand for the desktop
+/// branch picker so normal project/worktree polling never adds remote traffic.
 pub async fn origin_branches_for_project(
     registry: &SharedProcessRegistry,
     project_id: ProjectId,
@@ -485,32 +492,63 @@ pub async fn origin_branches_for_project(
     };
 
     let snapshot = snapshot_async(Path::new(&project.path)).await?;
-    if !git_success(&snapshot.root_path, ["remote", "get-url", "origin"]).await? {
-        return Ok(OriginBranchList {
-            repository_id,
-            branches: Vec::new(),
-        });
-    }
-    let output = git_required(
-        &snapshot.root_path,
-        ["ls-remote", "--heads", "origin"],
-        "list origin branches",
-    )
-    .await?;
     let checked_out = snapshot
         .worktrees
         .iter()
         .map(display_branch)
         .collect::<HashSet<_>>();
-    let mut branches = parse_origin_branches(&output)
-        .into_iter()
-        .filter(|branch| !checked_out.contains(branch))
+    let local_output = git_required(
+        &snapshot.root_path,
+        ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"],
+        "list local branches",
+    )
+    .await?;
+    let mut local = local_output
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && !checked_out.contains(*branch))
+        .map(str::to_owned)
         .collect::<Vec<_>>();
-    branches.sort();
-    branches.dedup();
+    local.sort();
+    local.dedup();
+
+    let mut origin = if git_success(&snapshot.root_path, ["remote", "get-url", "origin"]).await? {
+        let output = git_required(
+            &snapshot.root_path,
+            ["ls-remote", "--heads", "origin"],
+            "list origin branches",
+        )
+        .await?;
+        parse_origin_branches(&output)
+    } else {
+        Vec::new()
+    };
+    origin.retain(|branch| !checked_out.contains(branch));
+    origin.sort();
+    origin.dedup();
+
+    let local_names = local.iter().cloned().collect::<HashSet<_>>();
+    let mut options = local
+        .into_iter()
+        .map(|name| WorktreeBranchOption {
+            name,
+            source: "local",
+        })
+        .collect::<Vec<_>>();
+    options.extend(
+        origin
+            .into_iter()
+            .filter(|name| !local_names.contains(name))
+            .map(|name| WorktreeBranchOption {
+                name,
+                source: "origin",
+            }),
+    );
+    let branches = options.iter().map(|option| option.name.clone()).collect();
     Ok(OriginBranchList {
         repository_id,
         branches,
+        options,
     })
 }
 

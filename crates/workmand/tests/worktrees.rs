@@ -85,6 +85,29 @@ impl GitFixture {
 }
 
 #[tokio::test]
+async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    git(&fixture.main, &["branch", "feature/local-nested"])?;
+
+    let branches = worktrees::origin_branches_for_project(&fixture.registry, 1).await?;
+    assert_eq!(branches.repository_id, 1);
+    assert!(
+        branches
+            .options
+            .iter()
+            .any(|option| option.name == "feature/local-nested" && option.source == "local")
+    );
+    assert!(
+        branches
+            .options
+            .iter()
+            .any(|option| option.name == "remote-only" && option.source == "origin")
+    );
+    assert!(!branches.branches.iter().any(|branch| branch == "main"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;

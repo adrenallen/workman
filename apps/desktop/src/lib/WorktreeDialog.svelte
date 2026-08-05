@@ -2,21 +2,27 @@
   import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
   import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import GitForkIcon from '@lucide/svelte/icons/git-fork';
+  import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+  import SearchIcon from '@lucide/svelte/icons/search';
+  import CloudIcon from '@lucide/svelte/icons/cloud';
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
-  import * as Select from '$lib/components/ui/select';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
   import * as Tabs from '$lib/components/ui/tabs';
+  import { fuzzySubsequenceScore } from './navigation';
   import type { Project } from './daemon';
   import type {
     EnvironmentPolicy,
     WorktreeDialogSubmission,
+    WorktreeBranchOption,
     WorktreeEntry,
     WorktreeRepository
   } from './worktrees';
@@ -26,6 +32,7 @@
     sourceProject: Project;
     repository: WorktreeRepository;
     sourceEntry?: WorktreeEntry | null;
+    branchOptions?: WorktreeBranchOption[];
     originBranches?: string[];
     branchesLoading?: boolean;
     busy?: boolean;
@@ -40,6 +47,7 @@
     sourceProject,
     repository,
     sourceEntry = null,
+    branchOptions = [],
     originBranches = [],
     branchesLoading = false,
     busy = false,
@@ -51,12 +59,20 @@
 
   let createKind = $state<'new' | 'origin'>('new');
   let branch = $state('');
-  let originBranch = $state('');
+  let existingBranch = $state('');
+  let branchQuery = $state('');
+  let branchOptionIndex = $state(0);
   let baseRef = $state('HEAD');
   let adoptPath = $state('');
   let envPolicy = $state<EnvironmentPolicy>('skip');
   let rememberEnvPolicy = $state(true);
   let branchInput = $state<HTMLInputElement | null>(null);
+  let branchSearchInput = $state<HTMLInputElement | null>(null);
+  let effectiveBranchOptions = $derived(branchOptions.length > 0
+    ? branchOptions
+    : originBranches.map((name) => ({ name, source: 'origin' as const })));
+  let rankedBranches = $derived(rankBranches(effectiveBranchOptions, branchQuery));
+  let activeBranch = $derived(rankedBranches[branchOptionIndex] ?? null);
 
   let title = $derived(mode === 'create'
     ? `New worktree in ${repository.name}`
@@ -70,18 +86,27 @@
     mode === 'adopt'
       ? adoptPath.trim().length > 0
       : mode === 'create' && createKind === 'origin'
-        ? originBranch.length > 0
+        ? existingBranch.length > 0
         : branch.trim().length > 0
   ));
 
   $effect(() => {
-    if (branchInput) queueMicrotask(() => branchInput?.focus());
+    const input = mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
+    if (input) queueMicrotask(() => input?.focus());
   });
+
+  function rankBranches(options: WorktreeBranchOption[], query: string): WorktreeBranchOption[] {
+    return options
+      .map((option) => ({ option, score: fuzzySubsequenceScore(query, option.name) }))
+      .filter((entry): entry is { option: WorktreeBranchOption; score: number } => entry.score !== null)
+      .sort((left, right) => right.score - left.score || left.option.name.localeCompare(right.option.name))
+      .map((entry) => entry.option);
+  }
 
   function changeCreateKind(value: string): void {
     if (value !== 'new' && value !== 'origin') return;
     createKind = value;
-    if (value === 'origin' && originBranches.length === 0) onLoadBranches();
+    if (value === 'origin' && effectiveBranchOptions.length === 0) onLoadBranches();
   }
 
   function submit(): void {
@@ -91,7 +116,7 @@
       return;
     }
     const nextBranch = mode === 'create' && createKind === 'origin'
-      ? originBranch
+      ? existingBranch
       : branch.trim();
     if (!nextBranch) return;
     if (mode === 'fork') {
@@ -110,6 +135,28 @@
   async function chooseDirectory(): Promise<void> {
     const path = await open({ directory: true, multiple: false, title: 'Choose an existing Git worktree' });
     if (typeof path === 'string') adoptPath = path;
+  }
+
+  function chooseBranch(option: WorktreeBranchOption | null): void {
+    if (!option) return;
+    existingBranch = option.name;
+    branchQuery = option.name;
+    branchOptionIndex = 0;
+  }
+
+  function handleBranchKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (rankedBranches.length === 0) return;
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      branchOptionIndex = (branchOptionIndex + delta + rankedBranches.length) % rankedBranches.length;
+      queueMicrotask(() => document.getElementById(`worktree-branch-option-${branchOptionIndex}`)?.scrollIntoView({ block: 'nearest' }));
+      return;
+    }
+    if (event.key === 'Enter' && activeBranch) {
+      event.preventDefault();
+      chooseBranch(activeBranch);
+    }
   }
 </script>
 
@@ -150,29 +197,70 @@
             <Tabs.Root value={createKind} onValueChange={changeCreateKind}>
               <Tabs.List class="grid h-9 w-full grid-cols-2">
                 <Tabs.Trigger value="new">New branch</Tabs.Trigger>
-                <Tabs.Trigger value="origin">Existing on origin</Tabs.Trigger>
+                <Tabs.Trigger value="origin">Existing branch</Tabs.Trigger>
               </Tabs.List>
             </Tabs.Root>
           {/if}
 
           {#if mode === 'create' && createKind === 'origin'}
-            <label class="grid gap-1.5">
-              <span class="text-sm font-medium">Origin branch</span>
+            <section class="grid gap-1.5" aria-labelledby="worktree-branch-label">
+              <span id="worktree-branch-label" class="text-sm font-medium">Local or origin branch</span>
               <span class="flex gap-2">
-                <Select.Root type="single" value={originBranch} onValueChange={(value: string) => { originBranch = value; }}>
-                  <Select.Trigger class="min-w-0 flex-1 font-mono" aria-label="Origin branch">
-                    {originBranch || (branchesLoading ? 'Fetching branches…' : 'Choose a branch')}
-                  </Select.Trigger>
-                  <Select.Content class="max-h-64">
-                    {#each originBranches as option (option)}<Select.Item value={option}>{option}</Select.Item>{/each}
-                  </Select.Content>
-                </Select.Root>
+                <label class="relative min-w-0 flex-1">
+                  <SearchIcon class="pointer-events-none absolute top-1/2 left-2.5 z-10 -translate-y-1/2 text-muted-foreground" size={14} aria-hidden="true" />
+                  <Input
+                    bind:ref={branchSearchInput}
+                    bind:value={branchQuery}
+                    class="pl-8 font-mono"
+                    role="combobox"
+                    aria-label="Filter local and origin branches"
+                    aria-expanded="true"
+                    aria-controls="worktree-branch-options"
+                    aria-activedescendant={activeBranch ? `worktree-branch-option-${branchOptionIndex}` : undefined}
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder={branchesLoading ? 'Fetching branches…' : 'Type to fuzzy-filter branches'}
+                    oninput={() => { existingBranch = ''; branchOptionIndex = 0; }}
+                    onkeydown={handleBranchKeydown}
+                  />
+                </label>
                 <Button type="button" variant="outline" disabled={branchesLoading} onclick={onLoadBranches}>
                   {#if branchesLoading}<LoaderCircleIcon class="spin" size={14} />{/if}Refresh
                 </Button>
               </span>
-              {#if !branchesLoading && originBranches.length === 0}<small class="text-xs text-muted-foreground">No unchecked-out origin branches were found.</small>{/if}
-            </label>
+              <div class="overflow-hidden rounded-lg border border-border bg-card">
+                <div class="flex min-h-7 items-center justify-between border-b border-border px-2 text-xs text-muted-foreground" aria-live="polite">
+                  <span>{branchQuery ? `${rankedBranches.length} matches` : 'Available branches'}</span>
+                  <span>local + origin</span>
+                </div>
+                <ScrollArea id="worktree-branch-options" class="h-40" role="listbox" aria-label="Available branches">
+                  <div class="grid gap-0.5 p-1">
+                    {#each rankedBranches as option, index (option.name)}
+                      <button
+                        id={`worktree-branch-option-${index}`}
+                        class="flex min-h-8 items-center gap-2 rounded px-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring data-[active=true]:bg-accent"
+                        data-active={index === branchOptionIndex}
+                        type="button"
+                        role="option"
+                        aria-selected={existingBranch === option.name}
+                        onmouseenter={() => (branchOptionIndex = index)}
+                        onclick={() => chooseBranch(option)}
+                      >
+                        {#if option.source === 'local'}<HardDriveIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />{:else}<CloudIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />{/if}
+                        <span class="min-w-0 flex-1 truncate font-mono">{option.name}</span>
+                        <Badge variant="outline" class="h-5 px-1.5 text-xs font-normal text-muted-foreground">{option.source}</Badge>
+                      </button>
+                    {:else}
+                      <div class="grid min-h-20 place-content-center gap-1 px-3 text-center">
+                        <strong class="text-sm font-medium">{branchesLoading ? 'Fetching branches…' : 'No matching branch'}</strong>
+                        <span class="text-xs text-muted-foreground">{branchesLoading ? 'Local and origin refs load together.' : 'Try fewer letters; characters match in order.'}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </ScrollArea>
+              </div>
+              <small class="text-xs text-muted-foreground">Unchecked-out branches only. Use ↑ ↓ and Enter to choose.</small>
+            </section>
           {:else}
             <label class="grid gap-1.5">
               <span class="text-sm font-medium">Branch name</span>
