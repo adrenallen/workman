@@ -232,7 +232,11 @@
       <div class="tags">
         {#each read.scratchpad.tags as tag}<span>{tag}</span>{/each}
       </div>
-      <div class:attention={saveState === 'conflict' || saveState === 'error'} class="save-state">
+      <div
+        class:attention={saveState === 'conflict' || saveState === 'error'}
+        class="save-state"
+        title={`Scratchpad save state · ${saveState}`}
+      >
         {#if saveState === 'saving'}<i></i> Saving…
         {:else if saveState === 'unsaved'}Unsaved
         {:else if saveState === 'conflict'}Conflict
@@ -287,29 +291,29 @@
 {/if}
 
 <style>
-  .scratchpad-document { display: grid; width: 100%; height: 100%; min-width: 0; grid-template-rows: auto minmax(0, 1fr); background: #0c1419; }
+  .scratchpad-document { display: grid; width: 100%; height: 100%; min-width: 0; grid-template-rows: auto minmax(0, 1fr); background: var(--background); }
   .scratchpad-document.has-notice { grid-template-rows: auto auto minmax(0, 1fr); }
-  .scratchpad-document:not(.editing) { background: linear-gradient(135deg, #0c1419 0%, #0b1115 68%); }
+  .scratchpad-document:not(.editing) { background: linear-gradient(135deg, var(--background) 0%, #0b1115 68%); }
   header { display: flex; min-height: 38px; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); padding: 4px 9px; background: #10191e; }
   .tags { display: flex; min-width: 0; flex: 1; gap: 4px; overflow-x: auto; }
-  .tags span { flex: none; border: 1px solid #34434a; border-radius: 999px; padding: 2px 6px; color: #9fb0b7; background: #152128; font: 7px 'JetBrains Mono Variable', monospace; }
-  .save-state { display: flex; flex: none; align-items: center; gap: 5px; color: #71858d; font: 8px 'JetBrains Mono Variable', monospace; }
+  .tags span { flex: none; border: 1px solid #34434a; border-radius: 999px; padding: 2px 6px; color: #9fb0b7; background: #152128; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .save-state { display: flex; flex: none; align-items: center; gap: 5px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .save-state.attention { color: #e3a671; }
   .save-state i { width: 5px; height: 5px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 8px color-mix(in srgb, var(--signal) 70%, transparent); animation: pulse 1s ease-in-out infinite; }
-  button { flex: none; border: 1px solid #3a484e; border-radius: 4px; padding: 4px 8px; background: #1b252a; color: #cbd5d9; font-size: 9px; cursor: pointer; }
+  button { flex: none; border: 1px solid #3a484e; border-radius: 4px; padding: 4px 8px; background: #1b252a; color: #cbd5d9; font-size: var(--font-size-sm); cursor: pointer; }
   button:hover { border-color: #537078; background: #243239; }
   button.primary { border-color: #327a72; background: #173c39; color: #8ce2d5; }
   .conflict-banner, .recovery-banner { display: flex; align-items: center; gap: 7px; border-bottom: 1px solid #594332; padding: 7px 10px; background: #2a211a; color: #dbb48e; }
   .conflict-banner div { display: grid; min-width: 0; flex: 1; gap: 2px; }
-  .conflict-banner strong { color: #f2cfaa; font-size: 10px; }
-  .conflict-banner span, .recovery-banner span { font-size: 9px; }
+  .conflict-banner strong { color: #f2cfaa; font-size: var(--font-size-sm); }
+  .conflict-banner span, .recovery-banner span { font-size: var(--font-size-sm); }
   .recovery-banner { border-color: #27444a; background: #11252a; color: #9ebec5; }
   .recovery-banner span { min-width: 0; flex: 1; }
   .content { min-height: 0; overflow: hidden; }
-  .read-document { height: 100%; max-width: 900px; overflow: auto; padding: 25px 30px 70px; scrollbar-color: #41464d transparent; scrollbar-width: thin; }
+  .read-document { height: 100%; max-width: 900px; overflow: auto; padding: 25px 30px 70px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .read-document > h1 { margin: 0 0 20px; color: #edf2f3; font: 680 28px/1.15 'Archivo Variable', sans-serif; letter-spacing: -.02em; }
   .read-document > :global(.markdown) { max-width: 820px; }
-  .empty-note { border: 1px dashed #304149; padding: 16px 18px; background: #101a1f; color: #71858d; }
-  .state { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted); font-size: 10px; }
+  .empty-note { border: 1px dashed #304149; padding: 16px 18px; background: #101a1f; color: var(--muted-foreground); }
+  .state { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted); font-size: var(--font-size-sm); }
   @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 </style>

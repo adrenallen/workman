@@ -49,7 +49,7 @@
     background: transparent;
     color: #647d88;
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 620;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -69,6 +69,6 @@
   button:hover { color: #a3b6bd; }
   button.active { color: #cbdadd; }
   button.active::after { background: var(--signal); box-shadow: 0 0 8px rgb(99 215 197 / 45%); }
-  button span { color: #526e79; font-size: 11px; }
+  button span { color: #526e79; font-size: var(--font-size-sm); }
   button.active span { color: var(--signal); }
 </style>

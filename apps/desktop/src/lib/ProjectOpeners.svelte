@@ -111,7 +111,7 @@
     align-items: center;
     gap: 2px;
     padding: 3px 2px 3px 14px;
-    background: linear-gradient(90deg, transparent, #202328 15px);
+    background: linear-gradient(90deg, transparent, var(--popover) 15px);
     opacity: 0;
     pointer-events: none;
     transform: translate(3px, -50%);
@@ -130,7 +130,7 @@
     width: 23px;
     height: 23px;
     place-items: center;
-    border: 1px solid #454b53;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
     padding: 0;
     background: #272b30;
@@ -154,7 +154,7 @@
     right: 2px;
     gap: 1px;
     padding: 3px 2px;
-    background: #202328;
+    background: var(--popover);
   }
 
   .collapsed button { width: 20px; height: 22px; }

@@ -6,6 +6,8 @@
 </script>
 
 <script lang="ts">
+  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
+
   let { bytes, title }: MemoryBadgeProps = $props();
   let formatted = $derived(formatBytes(bytes));
 
@@ -24,7 +26,9 @@
   }
 </script>
 
-<span class="memory" title={title ?? `${formatted} process memory`}>{formatted}</span>
+<TooltipLabel label={title ?? `Process memory · ${formatted}`}>
+  <span class="memory" aria-label={title ?? `Process memory · ${formatted}`}>{formatted}</span>
+</TooltipLabel>
 
 <style>
   .memory {
@@ -33,12 +37,12 @@
     height: 18px;
     align-items: center;
     overflow: hidden;
-    border: 1px solid var(--border, #30343a);
+    border: 1px solid var(--border, var(--border));
     border-radius: 3px;
     padding: 0 5px;
-    background: var(--surface-raised, #1c1f23);
-    color: var(--muted, #7d848e);
-    font: 620 8px/1 'JetBrains Mono Variable', monospace;
+    background: var(--surface-raised, var(--popover));
+    color: var(--muted, var(--muted-foreground));
+    font: 620 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace;
     font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;

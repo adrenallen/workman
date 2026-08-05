@@ -19,6 +19,7 @@
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/source-sans-3": "^5.3.0",
+    "@lucide/svelte": "^1.28.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@xterm/addon-fit": "^0.11.0",
@@ -26,12 +27,20 @@
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
-    "svelte": "^5.56.8"
+    "bits-ui": "^2.18.1",
+    "clsx": "^2.1.1",
+    "svelte": "^5.56.8",
+    "tailwind-merge": "^3.6.0",
+    "tailwind-variants": "^3.3.1"
   },
   "devDependencies": {
+    "@internationalized/date": "^3.12.0",
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
     "svelte-check": "^4.3.4",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
     "typescript": "^6.0.3",
     "vite": "^8.2.0"
   }

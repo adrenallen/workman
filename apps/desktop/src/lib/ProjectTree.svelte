@@ -1,9 +1,24 @@
 <script lang="ts">
+  import BotIcon from '@lucide/svelte/icons/bot';
+  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+  import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+  import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
+  import PlayIcon from '@lucide/svelte/icons/play';
+  import SearchIcon from '@lucide/svelte/icons/search';
+  import SettingsIcon from '@lucide/svelte/icons/settings';
+  import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+  import XIcon from '@lucide/svelte/icons/x';
   import { onMount } from 'svelte';
+  import type { Component } from 'svelte';
 
   import CountBadge from './CountBadge.svelte';
   import InlineTreeRename from './InlineTreeRename.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
+  import IconButton from './components/ds/IconButton.svelte';
+  import StatusIndicator from './components/ds/StatusIndicator.svelte';
+  import TooltipLabel from './components/ds/TooltipLabel.svelte';
   import {
     agentLineageRows,
     type AgentAttentionRollup
@@ -40,7 +55,6 @@
     scratchpads: ScratchpadSummary[];
     selection: ProjectTreeSelection | null;
     collapsed: boolean;
-    connected: boolean;
     onSelect: (selection: ProjectTreeSelection) => void;
     onCreateTodo: () => void;
     onAddAgent: () => void;
@@ -64,7 +78,6 @@
     scratchpads,
     selection,
     collapsed,
-    connected,
     onSelect,
     onCreateTodo,
     onAddAgent,
@@ -95,12 +108,12 @@
     commands: 'Commands',
     scratchpads: 'Scratchpads'
   };
-  const groupIcon: Record<ProjectTreeGroup, string> = {
-    todos: '◇',
-    agents: '◎',
-    terminals: '>_',
-    commands: '▤',
-    scratchpads: '≡'
+  const groupIcon: Record<ProjectTreeGroup, Component> = {
+    todos: CircleCheckIcon,
+    agents: BotIcon,
+    terminals: SquareTerminalIcon,
+    commands: PlayIcon,
+    scratchpads: NotebookTextIcon
   };
 
   let query = $state('');
@@ -224,13 +237,21 @@
     return isRunning(process) ? 'idle' : 'done';
   }
 
-  function processGlyph(process: ProcessView): string {
+  function processStatusTone(process: ProcessView): 'success' | 'warning' | 'danger' | 'neutral' {
+    const state = processAttention(process);
+    if (state === 'attention') return 'warning';
+    if (state === 'error') return 'danger';
+    if (state === 'working' || state === 'idle') return 'success';
+    return 'neutral';
+  }
+
+  function processStatusLabel(process: ProcessView): string {
     switch (processAttention(process)) {
-      case 'working': return '';
-      case 'attention': return '!';
-      case 'done': return '✓';
-      case 'error': return '×';
-      default: return '';
+      case 'working': return `${process.name} · working`;
+      case 'attention': return `${process.name} · needs input`;
+      case 'error': return `${process.name} · crashed`;
+      case 'idle': return `${process.name} · running and idle`;
+      default: return `${process.name} · ${process.status}`;
     }
   }
 
@@ -250,11 +271,13 @@
     return `${rollup.total} nested agent${rollup.total === 1 ? '' : 's'}${suffix}`;
   }
 
-  function todoGlyph(todo: TodoSummary): string {
-    if (todo.is_blocked) return '!';
-    if (todo.status === 'in_progress') return '◒';
-    if (todo.status === 'backlog') return '◇';
-    return '○';
+  function todoStatusLabel(todo: TodoSummary): string {
+    return `${todo.title} · ${todo.is_blocked ? 'blocked' : todo.status.replace('_', ' ')}`;
+  }
+
+  function todoStatusTone(todo: TodoSummary): 'success' | 'warning' | 'neutral' {
+    if (todo.is_blocked) return 'warning';
+    return todo.status === 'in_progress' ? 'success' : 'neutral';
   }
 
   function groupCount(group: ProjectTreeGroup): string {
@@ -272,6 +295,13 @@
     if (group === 'agents' && agents.some((process) => process.agent_state.needs_input)) return 'attention';
     if (group !== 'todos' && group !== 'scratchpads' && processesForGroup(group).some(isRunning)) return 'running';
     return 'neutral';
+  }
+
+  function groupCountTitle(group: ProjectTreeGroup): string {
+    const value = groupCount(group);
+    if (group === 'todos' || group === 'scratchpads') return `${value} ${group}`;
+    const [running, total] = value.split('/');
+    return `${running} running of ${total} ${group}`;
   }
 
   function processesForGroup(group: ProjectTreeGroup): ProcessView[] {
@@ -380,22 +410,30 @@
   <header class="tree-toolbar" data-tauri-drag-region>
     {#if !collapsed}
       <label class="tree-filter">
-        <span aria-hidden="true">⌕</span>
+        <SearchIcon size={14} strokeWidth={1.8} aria-hidden="true" />
         <input bind:value={query} placeholder="Filter processes..." aria-label="Filter project tree" />
-        {#if query}<button type="button" aria-label="Clear filter" onclick={() => (query = '')}>×</button>{/if}
+        {#if query}
+          <IconButton label="Clear project filter" onclick={() => (query = '')}>
+            {#snippet icon()}<XIcon size={13} />{/snippet}
+          </IconButton>
+        {/if}
       </label>
     {/if}
-    <button
-      class="collapse-button"
-      type="button"
-      aria-label={`${collapsed ? 'Expand' : 'Collapse'} project tree`}
-      title={`${collapsed ? 'Expand' : 'Collapse'} project tree (⌘⇧B)`}
+    <IconButton
+      class="size-7 shrink-0 rounded border border-border bg-card"
+      label={`${collapsed ? 'Expand' : 'Collapse'} project tree`}
+      shortcut="⌘⇧B"
       onclick={onToggleCollapse}
-    >{collapsed ? '›' : '‹'}</button>
+    >
+      {#snippet icon()}
+        {#if collapsed}<ChevronRightIcon size={15} />{:else}<ChevronLeftIcon size={15} />{/if}
+      {/snippet}
+    </IconButton>
   </header>
 
   <div class="tree-groups" aria-label="Project items" role="tree" tabindex="-1" onkeydown={handleTreeKeys}>
     {#each groupOrder as group}
+      {@const GroupIcon = groupIcon[group]}
       <section class="tree-group" class:closed={!openGroups[group]}>
         <button
           class="group-header"
@@ -406,10 +444,12 @@
           title={collapsed ? groupLabel[group] : undefined}
           onclick={() => toggleGroup(group)}
         >
-          <span class="caret" aria-hidden="true">{openGroups[group] ? '⌄' : '›'}</span>
-          <span class="group-icon" aria-hidden="true">{groupIcon[group]}</span>
+          <span class="caret" aria-hidden="true">
+            {#if openGroups[group]}<ChevronDownIcon size={13} />{:else}<ChevronRightIcon size={13} />{/if}
+          </span>
+          <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>
           <strong>{groupLabel[group]}</strong>
-          <CountBadge value={groupCount(group)} tone={groupTone(group)} />
+          <CountBadge value={groupCount(group)} tone={groupTone(group)} title={groupCountTitle(group)} />
         </button>
 
         {#if openGroups[group] && !collapsed}
@@ -427,9 +467,9 @@
                   oncontextmenu={(event) => openPointerMenu(event, todoTarget(todo))}
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
-                  <span class:attention={todo.is_blocked} class="attention-dot" aria-hidden="true">{todoGlyph(todo)}</span>
+                  <StatusIndicator tone={todoStatusTone(todo)} label={todoStatusLabel(todo)} />
                   <span class="row-copy"><strong>{todo.title}</strong></span>
-                  {#if todo.comment_count > 0}<span class="row-meta">{todo.comment_count}</span>{/if}
+                  {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
                 </button>
               {:else}
                 <p class="empty-row">{query ? 'No matching todos' : 'No open todos'}</p>
@@ -462,16 +502,17 @@
                     onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                   >
                     {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
-                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
                     <span class="row-copy"><strong>{process.name}</strong></span>
                     {#if row.rollup.total > 0 || stats}
                       <span class="row-badges">
                         {#if row.rollup.total > 0}
-                          <span
-                            class={`lineage-rollup ${lineageTone(row.rollup)}`}
-                            title={lineageTitle(row.rollup)}
-                            aria-label={lineageTitle(row.rollup)}
-                          >↳{row.rollup.total}</span>
+                          <TooltipLabel label={lineageTitle(row.rollup)}>
+                            <span
+                              class={`lineage-rollup ${lineageTone(row.rollup)}`}
+                              aria-label={lineageTitle(row.rollup)}
+                            >↳{row.rollup.total}</span>
+                          </TooltipLabel>
                         {/if}
                         {#if stats?.descendant_count}
                           <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
@@ -503,7 +544,7 @@
                     oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
                     onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                   >
-                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
                     <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
                     {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
                   </button>
@@ -530,7 +571,7 @@
                     oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
                     onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                   >
-                    <span class={`attention-dot ${processAttention(process)}`} aria-hidden="true">{processGlyph(process)}</span>
+                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
                     <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
                     <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}{#if !isRunning(process)}<span class="run-hint">Run</span>{/if}</span>
                   </button>
@@ -555,9 +596,11 @@
                     oncontextmenu={(event) => openPointerMenu(event, scratchpadTarget(scratchpad))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
                   >
-                    <span class="attention-dot note" aria-hidden="true">≡</span>
+                    <TooltipLabel label={`Scratchpad · revision ${scratchpad.revision}`}>
+                      <NotebookTextIcon class="scratchpad-icon" size={14} strokeWidth={1.8} aria-hidden="true" />
+                    </TooltipLabel>
                     <span class="row-copy"><strong>{scratchpad.name}</strong></span>
-                    <span class="row-meta">r{scratchpad.revision}</span>
+                    <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
                   </button>
                 {/if}
               {:else}
@@ -572,34 +615,30 @@
   </div>
 
   <footer class="tree-footer">
-    <button type="button" data-tree-row title="Settings" onclick={onOpenSettings}>
-      <span aria-hidden="true">⚙</span><strong>Settings</strong>
-    </button>
-    <i class:online={connected} aria-label={connected ? 'Daemon online' : 'Daemon offline'}></i>
+    <IconButton class="size-7" label="Open Settings" shortcut="⌘," data-tree-row onclick={onOpenSettings}>
+      {#snippet icon()}<SettingsIcon size={15} strokeWidth={1.8} />{/snippet}
+    </IconButton>
   </footer>
 </section>
 
 <style>
-  .project-tree { display: grid; width: 100%; height: 100%; min-width: 0; grid-template-rows: auto minmax(0, 1fr) auto; background: #141619; color: var(--text-soft); }
+  .project-tree { display: grid; width: 100%; height: 100%; min-width: 0; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--card); color: var(--text-soft); }
   .tree-toolbar { display: flex; min-height: 38px; align-items: center; gap: 5px; padding: 5px 6px; border-bottom: 1px solid var(--border); }
-  .tree-filter { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; height: 28px; border: 1px solid #3a3f46; border-radius: 3px; padding: 0 7px; background: #111315; color: var(--muted); }
-  .tree-filter input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 0; background: transparent; color: var(--text); font-size: 10px; }
-  .tree-filter input::placeholder { color: #6f7680; }
-  .tree-filter button { border: 0; padding: 2px; background: transparent; color: var(--muted); cursor: pointer; }
-  .collapse-button { display: grid; width: 27px; height: 28px; flex: none; place-items: center; border: 1px solid #3a3f46; border-radius: 3px; background: #202328; color: #a7adb5; font: 600 13px/1 'JetBrains Mono Variable', monospace; cursor: pointer; }
-  .collapse-button:hover { border-color: #656c75; color: #fff; }
+  .tree-filter { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 7px; background: var(--background); color: var(--muted); }
+  .tree-filter input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 0; background: transparent; color: var(--text); font-size: var(--font-size-sm); }
+  .tree-filter input::placeholder { color: var(--muted-foreground); }
 
-  .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: #41464d transparent; scrollbar-width: thin; }
-  .tree-group { border-bottom: 1px solid #25292e; }
-  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 13px 16px minmax(0, 1fr) auto; align-items: center; gap: 4px; border: 0; padding: 3px 7px 3px 6px; background: transparent; color: #9da3ab; text-align: left; cursor: pointer; }
-  .group-header:hover { background: #1d2024; }
+  .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .tree-group { border-bottom: 1px solid var(--border); }
+  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 13px 16px minmax(0, 1fr) auto; align-items: center; gap: 4px; border: 0; padding: 3px 7px 3px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
+  .group-header:hover { background: var(--popover); }
   .group-header:focus-visible { position: relative; z-index: 1; }
-  .group-header strong { overflow: hidden; font-size: 9px; font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
-  .caret { color: #6f7680; font: 10px 'JetBrains Mono Variable', monospace; }
-  .group-icon { color: #8d949d; font: 9px 'JetBrains Mono Variable', monospace; text-align: center; }
-  .row-meta, .run-hint { flex: none; border: 1px solid #373c43; border-radius: 3px; padding: 1px 4px; color: #969da6; background: #1d2024; font: 7px 'JetBrains Mono Variable', monospace; }
+  .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+  .caret { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; }
+  .group-icon { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; text-align: center; }
+  .row-meta, .run-hint { flex: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 1px 4px; color: var(--text-soft); background: var(--popover); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .group-rows { padding: 0 4px 4px 13px; }
-  .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: #c8ccd1; text-align: left; cursor: pointer; }
+  .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
   .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
@@ -607,37 +646,25 @@
   .project-tree :global(.tree-row[data-reorder-drop='before']::after) { top: -1px; }
   .project-tree :global(.tree-row[data-reorder-drop='after']::after) { bottom: -1px; }
   .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
-  .tree-row:hover, .add-row:hover, .show-all:hover { background: #202328; }
-  .tree-row.selected { background: #292d32; color: #fff; box-shadow: inset 2px 0 #7a818a; }
+  .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
+  .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
   .row-copy { min-width: 0; }
   .row-copy strong, .row-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-copy strong { font-size: 10px; font-weight: 590; }
-  .row-copy small { margin-top: 1px; color: #777e87; font: 7px 'JetBrains Mono Variable', monospace; }
+  .row-copy strong { font-size: var(--font-size-sm); font-weight: 590; }
+  .row-copy small { margin-top: 1px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .row-badges { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 3px; }
-  .lineage-glyph { color: #687e74; font: 10px/1 'JetBrains Mono Variable', monospace; transform: translateY(-1px); }
-  .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid #3d4643; border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 8px/1 'JetBrains Mono Variable', monospace; }
-  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--warning) 48%, #30343a); color: var(--warning); }
-  .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, #30343a); color: var(--signal); }
-  .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, #30343a); color: var(--fault); }
-  .attention-dot { display: grid; width: 12px; height: 12px; place-items: center; border: 1px solid #565d66; border-radius: 50%; color: #89909a; font: 700 7px/1 'JetBrains Mono Variable', monospace; }
-  .attention-dot.working { border: 2px solid #3f554c; border-top-color: var(--signal); animation: spin 0.85s linear infinite; }
-  .attention-dot.idle { border-color: var(--signal); }
-  .attention-dot.attention, .attention-dot.attention-dot.attention { border-color: var(--warning); color: var(--warning); }
-  .attention-dot.done { border: 0; color: #858c95; }
-  .attention-dot.error { border-color: var(--fault); color: var(--fault); }
-  .attention-dot.note { border: 0; border-radius: 0; color: #969da6; }
-  .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: #858c95; font-size: 9px; }
-  .add-row { color: #aeb3ba; }
-  .empty-row { margin: 0; padding: 5px 5px 5px 22px; color: #686f78; font-size: 9px; }
+  .lineage-glyph { color: #687e74; font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace; transform: translateY(-1px); }
+  .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--warning) 48%, var(--border)); color: var(--warning); }
+  .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, var(--border)); color: var(--signal); }
+  .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, var(--border)); color: var(--fault); }
+  .scratchpad-icon { color: var(--muted-foreground); }
+  .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .add-row { color: var(--text-soft); }
+  .empty-row { margin: 0; padding: 5px 5px 5px 22px; color: #686f78; font-size: var(--font-size-sm); }
   .run-hint { border-color: #44504a; color: #aab8b0; }
 
-  .tree-footer { display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 5px 6px; border-top: 1px solid var(--border); }
-  .tree-footer button { display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; height: 28px; border: 1px solid #3a3f46; border-radius: 3px; padding: 0 8px; background: #1d2024; color: #aeb3ba; cursor: pointer; }
-  .tree-footer button:hover { border-color: #5e656e; background: #25282d; color: #fff; }
-  .tree-footer button span { font-size: 11px; }
-  .tree-footer button strong { font-size: 9px; font-weight: 620; }
-  .tree-footer i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #626972; }
-  .tree-footer i.online { background: var(--signal); }
+  .tree-footer { display: flex; min-height: 38px; align-items: center; justify-content: flex-end; padding: 5px 6px; border-top: 1px solid var(--border); }
 
   .project-tree.collapsed .tree-toolbar { justify-content: center; padding-inline: 0; }
   .project-tree.collapsed .tree-groups { padding-inline: 4px; }
@@ -646,12 +673,6 @@
   .project-tree.collapsed .caret,
   .project-tree.collapsed .group-header strong,
   .project-tree.collapsed .group-header :global(.badge) { display: none; }
-  .project-tree.collapsed .group-icon { font-size: 11px; }
+  .project-tree.collapsed .group-icon { font-size: var(--font-size-sm); }
   .project-tree.collapsed .tree-footer { justify-content: center; padding-inline: 4px; }
-  .project-tree.collapsed .tree-footer button { flex: none; width: 34px; justify-content: center; padding: 0; }
-  .project-tree.collapsed .tree-footer button strong { display: none; }
-  .project-tree.collapsed .tree-footer i { display: none; }
-
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .attention-dot.working { animation: none; } }
 </style>

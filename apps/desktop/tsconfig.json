@@ -8,6 +8,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"]
+    },
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,

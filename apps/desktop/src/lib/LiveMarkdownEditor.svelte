@@ -200,7 +200,7 @@
       overflow: 'auto',
       fontFamily: "'Inter Variable', sans-serif",
       lineHeight: '1.65',
-      scrollbarColor: '#41464d transparent'
+      scrollbarColor: 'var(--border-strong) transparent'
     },
     '.cm-content': { maxWidth: '920px', padding: '22px 28px 80px', caretColor: '#68d4c5' },
     '.cm-line': { padding: '0 2px' },
@@ -245,7 +245,7 @@
     },
     '.cm-live-fence': {
       borderLeft: '2px solid #274953',
-      backgroundColor: '#09171d',
+      backgroundColor: 'var(--background)',
       color: '#7fa0a9',
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
@@ -323,5 +323,5 @@
 <div class="editor-host" bind:this={host}></div>
 
 <style>
-  .editor-host { min-height: 0; height: 100%; overflow: hidden; background: #0c1419; }
+  .editor-host { min-height: 0; height: 100%; overflow: hidden; background: var(--background); }
 </style>

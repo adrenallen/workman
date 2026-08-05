@@ -1,4 +1,5 @@
 <script lang="ts">
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import { onMount } from 'svelte';
 
   import MarkdownView from './MarkdownView.svelte';
@@ -92,7 +93,7 @@
   <aside class="scratchpad-list" class:collapsed={listCollapsed}>
     <header>
       <div class="list-title">
-        <span class="live-dot" aria-hidden="true"></span>
+        <StatusIndicator tone="success" label="Scratchpads update live" />
         <strong>Live scratchpads</strong>
       </div>
       <div class="list-actions">
@@ -167,7 +168,7 @@
           <h3>{read.scratchpad.name}</h3>
         </div>
         <div class="revision" title="This view refreshes whenever the revision changes">
-          <span class="live-dot" aria-hidden="true"></span>
+          <StatusIndicator tone="success" label={`Scratchpad synced · revision ${read.scratchpad.revision}`} />
           rev {read.scratchpad.revision} · {read.total_lines} lines
         </div>
       </header>
@@ -240,10 +241,10 @@
     width: 23px;
     height: 23px;
     place-items: center;
-    border: 1px solid #3b4047;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
-    background: #1d2024;
-    color: #a3a9b1;
+    background: var(--popover);
+    color: var(--text-soft);
     font: 600 13px/1 'JetBrains Mono Variable', monospace;
     cursor: pointer;
   }
@@ -264,7 +265,7 @@
   }
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after,
-  .resize-handle:focus-visible::after { background: #7a818a; }
+  .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
   .scratchpad-list > header strong,
   .scratchpad-list > header small,
@@ -278,29 +279,22 @@
   }
 
   .scratchpad-list > header strong {
-    color: #c9cdd2;
-    font-size: 10px;
+    color: var(--foreground);
+    font-size: var(--font-size-sm);
     letter-spacing: 0.05em;
     text-transform: uppercase;
   }
 
-  .scratchpad-list > header small { color: #7a818a; font-size: 8px; }
-
-  .live-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--signal);
-  }
+  .scratchpad-list > header small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
 
   .search {
     gap: 7px;
     margin: 6px;
-    border: 1px solid #3a3f46;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
     padding: 0 7px;
-    background: #111315;
-    color: #858c95;
+    background: var(--background);
+    color: var(--muted-foreground);
   }
 
   .search input {
@@ -310,9 +304,9 @@
     outline: 0;
     padding: 6px 0;
     background: transparent;
-    color: #d1d4d8;
+    color: var(--foreground);
     font: inherit;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
   }
 
   .search input::placeholder { color: #506872; }
@@ -332,7 +326,7 @@
     align-items: center;
     gap: 7px;
     border: 0;
-    border-bottom: 1px solid #2d3136;
+    border-bottom: 1px solid var(--border);
     padding: 7px 6px;
     background: transparent;
     color: #aebfc4;
@@ -340,18 +334,18 @@
     cursor: pointer;
   }
 
-  .list button:hover { background: #202328; }
-  .list button.active { background: #25282d; box-shadow: inset 2px 0 #747b84; }
-  .note-mark { color: #777e87; font-size: 13px; }
+  .list button:hover { background: var(--popover); }
+  .list button.active { background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .note-mark { color: var(--muted-foreground); font-size: 13px; }
   .list button.active .note-mark { color: #bdc1c7; }
   .note-copy { min-width: 0; }
-  .note-copy strong { display: block; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .note-copy small { display: block; overflow: hidden; margin-top: 2px; color: #818892; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .empty-list { display: grid; justify-items: center; gap: 7px; padding: 16px 7px; color: #858c95; font-size: 8px; text-align: center; }
+  .note-copy strong { display: block; overflow: hidden; font-size: var(--font-size-sm); text-overflow: ellipsis; white-space: nowrap; }
+  .note-copy small { display: block; overflow: hidden; margin-top: 2px; color: var(--muted-foreground); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .empty-list { display: grid; justify-items: center; gap: 7px; padding: 16px 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); text-align: center; }
   .empty-list button,
-  .viewer-empty button { border: 1px solid #4a4f57; border-radius: 3px; padding: 6px 9px; background: #25282d; color: #e0e2e5; font: 650 9px 'Archivo Variable', sans-serif; cursor: pointer; }
+  .viewer-empty button { border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 9px; background: var(--accent); color: var(--foreground); font: 650 var(--font-size-sm) 'Archivo Variable', sans-serif; cursor: pointer; }
   .empty-list button:hover,
-  .viewer-empty button:hover { border-color: #707780; }
+  .viewer-empty button:hover { border-color: var(--muted-foreground); }
 
   .viewer { display: flex; min-width: 0; flex-direction: column; }
 
@@ -364,15 +358,15 @@
   }
 
   .eyebrow {
-    color: #818892;
-    font-size: 8px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.11em;
     text-transform: uppercase;
   }
 
-  .viewer h3 { margin: 2px 0 0; color: #eceef0; font-size: 15px; }
-  .revision { flex: none; gap: 6px; color: #858c95; font-size: 8px; text-transform: uppercase; }
+  .viewer h3 { margin: 2px 0 0; color: var(--foreground); font-size: 15px; }
+  .revision { flex: none; gap: 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); text-transform: uppercase; }
 
   .tags {
     display: flex;
@@ -386,8 +380,8 @@
     border: 1px solid #31505a;
     border-radius: 999px;
     padding: 2px 6px;
-    color: #a0a6ae;
-    font-size: 8px;
+    color: var(--text-soft);
+    font-size: var(--font-size-xs);
   }
 
   .content {
@@ -409,7 +403,7 @@
   }
 
   .viewer-empty h3 { color: #8ca0a8; }
-  .viewer-empty p, .empty-note { max-width: 380px; margin: 6px 0 13px; color: #5c737d; font-size: 10px; line-height: 1.55; }
+  .viewer-empty p, .empty-note { max-width: 380px; margin: 6px 0 13px; color: #5c737d; font-size: var(--font-size-sm); line-height: 1.55; }
   .note-glyph { color: #46636d; font-size: 28px; }
 
   .loader {
@@ -432,7 +426,7 @@
   .scratchpad-list.collapsed .list-actions { display: flex; }
   .scratchpad-list.collapsed .list { padding: 5px 4px; }
   .scratchpad-list.collapsed .list button { grid-template-columns: 1fr; justify-items: center; padding: 7px 3px; }
-  .scratchpad-list.collapsed .note-mark { color: #a5abb3; }
+  .scratchpad-list.collapsed .note-mark { color: var(--text-soft); }
 
   @media (max-width: 760px) {
     .scratchpads { min-width: 560px; }

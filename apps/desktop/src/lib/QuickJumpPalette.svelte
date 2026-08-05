@@ -1,6 +1,17 @@
 <script lang="ts">
+  import BotIcon from '@lucide/svelte/icons/bot';
+  import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import FolderIcon from '@lucide/svelte/icons/folder';
+  import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
+  import PlayIcon from '@lucide/svelte/icons/play';
+  import SearchIcon from '@lucide/svelte/icons/search';
+  import SettingsIcon from '@lucide/svelte/icons/settings';
+  import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import type { AgentTool } from './agentTools';
   import type { Project } from './daemon';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Input } from '$lib/components/ui/input';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
   import {
     fuzzySubsequenceScore,
     navigationTargetKey,
@@ -51,12 +62,17 @@
 
   let query = $state('');
   let selectedIndex = $state(0);
+  let searchInput = $state<HTMLInputElement | null>(null);
   let entries = $derived(buildEntries());
   let rankedEntries = $derived(rankEntries(entries, query, recentKeys));
   let activeEntry = $derived(rankedEntries[selectedIndex] ?? null);
 
   $effect(() => {
     if (selectedIndex >= rankedEntries.length) selectedIndex = Math.max(0, rankedEntries.length - 1);
+  });
+
+  $effect(() => {
+    if (searchInput) queueMicrotask(() => searchInput?.focus());
   });
 
   function buildEntries(): PaletteEntry[] {
@@ -273,20 +289,23 @@
     }
   }
 
-  function kindGlyph(kind: PaletteKind): string {
-    switch (kind) {
-      case 'action': return '→';
-      case 'project': return '◆';
-      case 'todo': return '○';
-      case 'agent': return '◎';
-      case 'terminal': return '>_';
-      case 'command': return '▶';
-      case 'scratchpad': return '≡';
+  function entryIcon(entry: PaletteEntry) {
+    if (entry.kind === 'action') {
+      if (entry.target.type === 'new-terminal') return SquareTerminalIcon;
+      if (entry.target.type === 'add-command') return PlayIcon;
+      if (entry.target.type === 'new-todo') return CircleCheckIcon;
+      if (entry.target.type === 'new-scratchpad') return NotebookTextIcon;
+      if (entry.target.type === 'spawn-agent') return BotIcon;
+      return SettingsIcon;
     }
-  }
-
-  function focusSearch(node: HTMLInputElement): void {
-    queueMicrotask(() => node.focus());
+    switch (entry.kind) {
+      case 'project': return FolderIcon;
+      case 'todo': return CircleCheckIcon;
+      case 'agent': return BotIcon;
+      case 'terminal': return SquareTerminalIcon;
+      case 'command': return PlayIcon;
+      case 'scratchpad': return NotebookTextIcon;
+    }
   }
 
   function choose(entry: PaletteEntry | null): void {
@@ -315,25 +334,26 @@
   }
 </script>
 
-<div
-  class="palette-backdrop"
-  role="presentation"
-  onpointerdown={(event) => { if (event.target === event.currentTarget) onClose(); }}
->
-  <div class="quick-jump" role="dialog" aria-modal="true" aria-labelledby="quick-jump-title" tabindex="-1">
+<Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+  <Dialog.Content
+    class="quick-jump w-[min(680px,calc(100vw-36px))] max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 shadow-2xl"
+    showCloseButton={false}
+    aria-labelledby="quick-jump-title"
+  >
     <header>
       <div class="palette-title">
-        <span class="jump-mark" aria-hidden="true">⌕</span>
+        <span class="jump-mark" aria-hidden="true"><SearchIcon size={14} strokeWidth={1.8} /></span>
         <div><strong id="quick-jump-title">Quick jump</strong><small>Every project, one search</small></div>
       </div>
       <kbd>⌘ K</kbd>
     </header>
 
     <label class="search-field">
-      <span aria-hidden="true">›</span>
-      <input
+      <SearchIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+      <Input
+        bind:ref={searchInput}
         bind:value={query}
-        use:focusSearch
+        class="h-9 border-0 bg-transparent px-0 text-sm shadow-none focus-visible:ring-0"
         role="combobox"
         aria-label="Search projects and project items"
         aria-expanded="true"
@@ -353,10 +373,12 @@
       <small>{projects.length} project{projects.length === 1 ? '' : 's'}</small>
     </div>
 
-    <div id="quick-jump-results" class="results" role="listbox" aria-label="Quick jump results">
+    <ScrollArea id="quick-jump-results" class="results" role="listbox" aria-label="Quick jump results">
       {#each rankedEntries as entry, index (entry.key)}
+        {@const Icon = entryIcon(entry)}
         <button
           id={`quick-jump-option-${index}`}
+          class="result-row"
           class:active={index === selectedIndex}
           type="button"
           role="option"
@@ -364,7 +386,7 @@
           onmouseenter={() => (selectedIndex = index)}
           onclick={() => choose(entry)}
         >
-          <span class={`kind-glyph ${entry.kind}`} aria-hidden="true">{kindGlyph(entry.kind)}</span>
+          <span class={`kind-glyph ${entry.kind}`} aria-hidden="true"><Icon size={14} strokeWidth={1.8} /></span>
           <span class="result-copy"><strong>{entry.label}</strong><small>{entry.detail}</small></span>
           <span class="result-path">
             {#if entry.recentRank !== null}<i>recent</i>{/if}
@@ -375,7 +397,7 @@
       {:else}
         <div class="no-results"><strong>No jump found</strong><span>Try fewer letters — matching follows characters in order.</span></div>
       {/each}
-    </div>
+    </ScrollArea>
 
     <footer>
       <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
@@ -383,76 +405,62 @@
       <span><kbd>esc</kbd> close</span>
       <small>Fuzzy subsequence search</small>
     </footer>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .palette-backdrop {
-    position: fixed;
-    z-index: 1000;
-    inset: 0;
-    display: grid;
-    place-items: start center;
-    padding: min(13vh, 92px) 18px 18px;
-    background: rgb(5 7 9 / 68%);
-  }
-
   .quick-jump {
     display: grid;
-    width: min(680px, calc(100vw - 36px));
     max-height: min(610px, calc(100vh - 110px));
     grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     overflow: hidden;
-    border: 1px solid #565c65;
-    border-radius: 5px;
-    background: #17191c;
-    box-shadow: 0 18px 48px rgb(0 0 0 / 44%);
+    border: 1px solid var(--border);
+    background: var(--popover);
     color: var(--text);
   }
 
-  header { display: flex; min-height: 45px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 9px; background: #1b1e22; }
+  header { display: flex; min-height: 45px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 6px 9px; background: var(--popover); }
   .palette-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
   .palette-title div, .palette-title strong, .palette-title small { display: block; }
-  .palette-title strong { color: #eef0f2; font-size: 11px; font-weight: 700; }
-  .palette-title small { margin-top: 1px; color: #858c95; font-size: 8px; }
-  .jump-mark { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid #474c54; background: #202328; color: #c6cbd1; font: 13px 'JetBrains Mono Variable', monospace; }
-  kbd { display: inline-grid; min-width: 21px; min-height: 19px; place-items: center; border: 1px solid #42474f; border-bottom-color: #5c626b; border-radius: 3px; padding: 1px 5px; background: #23262b; color: #afb5bd; font: 8px 'JetBrains Mono Variable', monospace; }
+  .palette-title strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 700; }
+  .palette-title small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .jump-mark { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--border-strong); background: var(--popover); color: var(--foreground); font: 13px 'JetBrains Mono Variable', monospace; }
+  kbd { display: inline-grid; min-width: 21px; min-height: 19px; place-items: center; border: 1px solid var(--border-strong); border-bottom-color: #5c626b; border-radius: 3px; padding: 1px 5px; background: var(--accent); color: #afb5bd; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
 
-  .search-field { display: grid; min-height: 47px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: #121416; color: #8f969f; }
-  .search-field > span:first-child { color: #b7bdc5; font: 15px/1 'JetBrains Mono Variable', monospace; }
-  .search-field input { width: 100%; border: 0; outline: 0; padding: 4px 0; background: transparent; color: #f0f1f3; font-size: 12px; }
-  .search-field input::placeholder { color: #69717a; }
-  .indexing { color: #a1a7ae; font: 7px 'JetBrains Mono Variable', monospace; letter-spacing: 0.04em; text-transform: uppercase; }
+  .search-field { display: grid; min-height: 47px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: #121416; color: var(--muted-foreground); }
+  .search-field > :global(svg) { color: var(--muted-foreground); }
+  .search-field :global(input) { width: 100%; border: 0; outline: 0; padding: 4px 0; background: transparent; color: var(--foreground); font-size: 12px; }
+  .search-field :global(input::placeholder) { color: var(--muted-foreground); }
+  .indexing { color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; letter-spacing: 0.04em; text-transform: uppercase; }
 
-  .result-summary { display: flex; min-height: 26px; align-items: center; justify-content: space-between; border-bottom: 1px solid #292d32; padding: 4px 10px; color: #9aa1aa; font-size: 8px; font-weight: 680; text-transform: uppercase; }
-  .result-summary small { color: #707780; font: 7px 'JetBrains Mono Variable', monospace; }
-  .results { min-height: 90px; overflow-y: auto; padding: 4px; scrollbar-color: #474c54 transparent; scrollbar-width: thin; }
-  .results button { display: grid; width: 100%; min-height: 43px; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 3px; padding: 4px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
-  .results button:hover, .results button.active { border-color: #484e56; background: #24272c; }
-  .results button.active { box-shadow: inset 2px 0 #969da6; }
-  .kind-glyph { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid #3c4148; background: #1c1f23; color: #aab0b8; font: 8px 'JetBrains Mono Variable', monospace; }
-  .kind-glyph.project { color: #c1c6cc; }
+  .result-summary { display: flex; min-height: 26px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--accent); padding: 4px 10px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; text-transform: uppercase; }
+  .result-summary small { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .results { min-height: 90px; padding: 4px; }
+  .result-row { display: grid; width: 100%; min-height: 43px; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 3px; padding: 4px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
+  .result-row:hover, .result-row.active { border-color: #484e56; background: #24272c; }
+  .result-row.active { box-shadow: inset 2px 0 var(--text-soft); }
+  .kind-glyph { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--border-strong); background: var(--popover); color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .kind-glyph.project { color: var(--text-soft); }
   .kind-glyph.todo, .kind-glyph.scratchpad { color: #b6aa91; }
   .kind-glyph.agent, .kind-glyph.terminal, .kind-glyph.command { color: #9db5aa; }
   .result-copy { min-width: 0; }
   .result-copy strong, .result-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .result-copy strong { color: #e1e4e7; font-size: 10px; font-weight: 650; }
-  .result-copy small { margin-top: 2px; color: #7f8790; font: 7px 'JetBrains Mono Variable', monospace; }
+  .result-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; }
+  .result-copy small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .result-path { display: flex; max-width: 235px; align-items: center; justify-content: flex-end; gap: 5px; overflow: hidden; }
-  .result-path b { overflow: hidden; color: #aeb4bc; font: 8px 'JetBrains Mono Variable', monospace; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .result-path em, .result-path i { flex: none; border: 1px solid #393e45; border-radius: 3px; padding: 1px 4px; color: #858d96; background: #1c1f23; font: normal 7px 'JetBrains Mono Variable', monospace; }
+  .result-path b { overflow: hidden; color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .result-path em, .result-path i { flex: none; border: 1px solid #393e45; border-radius: 3px; padding: 1px 4px; color: var(--muted-foreground); background: var(--popover); font: normal var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .result-path i { border-color: #55504a; color: #b2a890; }
-  .no-results { display: grid; min-height: 112px; place-content: center; gap: 4px; color: #858c95; text-align: center; }
-  .no-results strong { color: #c6cbd1; font-size: 10px; }
-  .no-results span { font-size: 8px; }
+  .no-results { display: grid; min-height: 112px; place-content: center; gap: 4px; color: var(--muted-foreground); text-align: center; }
+  .no-results strong { color: var(--foreground); font-size: var(--font-size-sm); }
+  .no-results span { font-size: var(--font-size-xs); }
 
-  footer { display: flex; min-height: 34px; align-items: center; gap: 13px; border-top: 1px solid var(--border); padding: 5px 9px; color: #858c95; font-size: 8px; }
+  footer { display: flex; min-height: 34px; align-items: center; gap: 13px; border-top: 1px solid var(--border); padding: 5px 9px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   footer span { display: flex; align-items: center; gap: 3px; }
   footer kbd { min-width: 18px; min-height: 17px; padding: 0 4px; }
-  footer small { margin-left: auto; color: #666e78; font: 7px 'JetBrains Mono Variable', monospace; }
+  footer small { margin-left: auto; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
 
   @media (max-width: 620px) {
-    .palette-backdrop { padding: 48px 8px 8px; }
     .quick-jump { width: calc(100vw - 16px); max-height: calc(100vh - 56px); }
     .result-path { max-width: 115px; }
     .result-path em, footer small { display: none; }

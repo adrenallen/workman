@@ -95,11 +95,11 @@
     outline: 0;
     background: transparent;
     color: #f1f3f5;
-    font: 560 11px/1.2 'Archivo Variable', sans-serif;
+    font: 560 var(--font-size-sm)/1.2 'Archivo Variable', sans-serif;
   }
 
   .hint {
     color: #82909a;
-    font: 9px/1 'JetBrains Mono Variable', monospace;
+    font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
   }
 </style>

@@ -273,7 +273,7 @@
         <strong>{activeAgents} active</strong>
       </div>
       {#if attentionCount > 0}
-        <span class="attention-summary"><i></i>{attentionCount} waiting</span>
+        <span class="attention-summary" title={`${attentionCount} agents need input`}><i aria-hidden="true"></i>{attentionCount} waiting</span>
       {:else}
         <span class="quiet-summary">All clear</span>
       {/if}
@@ -297,7 +297,9 @@
                 class:waiting={agent.agent_state.needs_input}
                 class:idle={agent.agent_state.idle}
                 class:exited={agent.agent_state.exited}
-                aria-hidden="true"
+                title={`${agent.name} · ${stateLabel(agent)}`}
+                role="status"
+                aria-label={`${agent.name} · ${stateLabel(agent)}`}
               ><i></i></span>
               <span class="agent-copy">
                 <strong>{agent.name}</strong>
@@ -467,8 +469,8 @@
 
   .eyebrow {
     display: block;
-    color: #858c95;
-    font-size: 8px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.13em;
     text-transform: uppercase;
@@ -477,7 +479,7 @@
   h2,
   h3 {
     margin: 3px 0 0;
-    color: #eef0f2;
+    color: var(--foreground);
     font-size: 15px;
     font-weight: 620;
     letter-spacing: -0.025em;
@@ -486,8 +488,8 @@
   .section-intro p {
     max-width: 520px;
     margin: 4px 0 0;
-    color: #969da6;
-    font-size: 10px;
+    color: var(--text-soft);
+    font-size: var(--font-size-sm);
     line-height: 1.45;
   }
 
@@ -500,7 +502,7 @@
   button:focus-visible,
   input:focus-visible,
   textarea:focus-visible {
-    outline: 2px solid #858c95;
+    outline: 2px solid var(--muted-foreground);
     outline-offset: 2px;
   }
 
@@ -512,12 +514,12 @@
   .add-tool,
   .roster-empty button {
     flex: 0 0 auto;
-    border: 1px solid #484d54;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
     padding: 6px 8px;
-    color: #d7dadd;
-    background: #25282d;
-    font-size: 8px;
+    color: var(--foreground);
+    background: var(--accent);
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -554,7 +556,7 @@
   }
 
   .tool-card:hover {
-    background: #202328;
+    background: var(--popover);
   }
 
   .tool-card.disabled {
@@ -566,11 +568,11 @@
     width: 29px;
     height: 29px;
     place-items: center;
-    border: 1px solid #484d54;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
     color: #b9bec5;
-    background: #25282d;
-    font: 700 8px/1 'JetBrains Mono Variable', monospace;
+    background: var(--accent);
+    font: 700 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.04em;
   }
 
@@ -590,7 +592,7 @@
 
   .tool-heading strong {
     overflow: hidden;
-    color: #e0e2e5;
+    color: var(--foreground);
     font-size: 12px;
     font-weight: 620;
     text-overflow: ellipsis;
@@ -599,7 +601,7 @@
 
   .tool-heading span {
     color: #7d848d;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -609,7 +611,7 @@
     overflow: hidden;
     margin-top: 2px;
     color: #888f98;
-    font-size: 9px;
+    font-size: var(--font-size-sm);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -624,9 +626,9 @@
     border: 1px solid transparent;
     border-radius: 3px;
     padding: 5px 7px;
-    color: #9da3ab;
+    color: var(--text-soft);
     background: transparent;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -642,7 +644,7 @@
   .tool-actions .spawn {
     border-color: #4b5057 !important;
     color: #d8dbde !important;
-    background: #25282d !important;
+    background: var(--accent) !important;
   }
 
   .toggle {
@@ -696,7 +698,7 @@
     align-items: center;
     gap: 6px;
     color: #83969e;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -719,8 +721,8 @@
   }
 
   .agent-row.selected {
-    background: #25282d;
-    box-shadow: inset 2px 0 #747b84;
+    background: var(--accent);
+    box-shadow: inset 2px 0 var(--muted-foreground);
   }
 
   .agent-primary {
@@ -738,7 +740,7 @@
   }
 
   .agent-primary:hover {
-    background: #202328;
+    background: var(--popover);
   }
 
   .attention-orbit {
@@ -801,7 +803,7 @@
 
   .agent-copy strong {
     overflow: hidden;
-    color: #e0e2e5;
+    color: var(--foreground);
     font-size: 12px;
     font-weight: 610;
     text-overflow: ellipsis;
@@ -811,14 +813,14 @@
   .agent-copy small {
     margin-top: 2px;
     color: #7f868f;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.07em;
     text-transform: uppercase;
   }
 
   .agent-state {
     color: #8c939c;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.07em;
     text-transform: uppercase;
   }
@@ -863,7 +865,7 @@
     border-radius: 4px;
     margin-top: 6px;
     padding: 7px 8px;
-    background: #1c1f23;
+    background: var(--popover);
   }
 
   .prompt-composer label span,
@@ -872,8 +874,8 @@
   }
 
   .prompt-composer label span {
-    color: #b9cbd0;
-    font-size: 8px;
+    color: var(--text-soft);
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.07em;
     text-transform: uppercase;
@@ -882,7 +884,7 @@
   .prompt-composer label small {
     margin-top: 4px;
     color: #58727c;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
   }
 
   .prompt-composer textarea {
@@ -894,7 +896,7 @@
     padding: 8px 9px;
     color: #dce7e9;
     background: #0b181d;
-    font: 500 10px/1.4 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1.4 'JetBrains Mono Variable', monospace;
   }
 
   .prompt-composer button {
@@ -904,9 +906,9 @@
     border: 1px solid #4b5057;
     border-radius: 3px;
     padding: 7px 9px;
-    color: #e0e2e5;
+    color: var(--foreground);
     background: #292c31;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -921,7 +923,7 @@
   .empty-card,
   .roster-empty {
     color: #708792;
-    font: 500 9px/1.6 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1.6 'JetBrains Mono Variable', monospace;
   }
 
   .empty-card {
@@ -943,8 +945,8 @@
   }
 
   .empty-card strong {
-    color: #bacbd0;
-    font-size: 11px;
+    color: var(--text-soft);
+    font-size: var(--font-size-sm);
   }
 
   .empty-card span {
@@ -963,7 +965,7 @@
   .roster-empty strong {
     margin-top: 14px;
     color: #c2d0d4;
-    font-size: 11px;
+    font-size: var(--font-size-sm);
   }
 
   .roster-empty p {
@@ -1010,11 +1012,11 @@
 
   .dialog {
     width: min(500px, 100%);
-    border: 1px solid #4a4f57;
+    border: 1px solid var(--border-strong);
     border-radius: 6px;
     padding: 0;
-    color: #e0e2e5;
-    background: #1c1f23;
+    color: var(--foreground);
+    background: var(--popover);
     box-shadow: 0 18px 55px rgb(0 0 0 / 42%);
   }
 
@@ -1055,7 +1057,7 @@
     display: block;
     margin-bottom: 6px;
     color: #8299a2;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -1076,14 +1078,14 @@
     padding: 9px 10px;
     color: #dce6e9;
     background: #0b181e;
-    font: 500 10px/1.2 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1.2 'JetBrains Mono Variable', monospace;
   }
 
   .dialog label small {
     display: block;
     margin-top: 5px;
     color: #58717b;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     line-height: 1.5;
   }
 
@@ -1113,7 +1115,7 @@
     padding: 8px 10px;
     color: #94a8af;
     background: #172830;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -1141,7 +1143,7 @@
     padding: 9px 10px;
     color: #789099;
     background: #0b181d;
-    font-size: 9px;
+    font-size: var(--font-size-sm);
   }
 
   .launch-command span {

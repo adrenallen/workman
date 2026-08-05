@@ -50,7 +50,7 @@
     place-items: center;
     margin-bottom: 13px;
     border: 1px solid #454a51;
-    background: #1b1e22;
+    background: var(--popover);
     color: #a8aeb6;
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 17px;
@@ -59,7 +59,7 @@
   .eyebrow {
     color: #9198a1;
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -67,7 +67,7 @@
 
   h2 {
     margin: 6px 0 0;
-    color: #eef0f2;
+    color: var(--foreground);
     font-size: clamp(20px, 2.8vw, 28px);
     font-weight: 620;
     letter-spacing: -0.035em;
@@ -86,25 +86,25 @@
     align-items: center;
     gap: 7px;
     min-height: 32px;
-    border: 1px solid #4a4f57;
+    border: 1px solid var(--border-strong);
     border-radius: 3px;
     padding: 0 11px;
-    background: #25282d;
-    color: #e6e8ea;
-    font-size: 10px;
+    background: var(--accent);
+    color: var(--foreground);
+    font-size: var(--font-size-sm);
     font-weight: 650;
     cursor: pointer;
   }
 
   button span {
-    color: #a7adb5;
+    color: var(--text-soft);
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 15px;
   }
 
   button:hover:not(:disabled) {
-    border-color: #707780;
-    background: #2d3136;
+    border-color: var(--muted-foreground);
+    background: var(--border);
   }
 
   button:disabled {

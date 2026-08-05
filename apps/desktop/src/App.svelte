@@ -1,9 +1,18 @@
 <script lang="ts">
+  import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+  import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+  import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
+  import PlusIcon from '@lucide/svelte/icons/plus';
+  import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
+  import IconButton from './lib/components/ds/IconButton.svelte';
+  import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
+  import { Button } from './lib/components/ui/button';
+  import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
@@ -1421,9 +1430,9 @@
       <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : 'The release is downloaded and SHA256 verified before awm and awmd are replaced.'} All running project processes will stop.</span>
     </div>
     <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
-    <button type="button" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
+    <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
       {versionRestarting ? 'Restarting daemon…' : versionSkew ? 'Restart daemon' : 'Update now'}
-    </button>
+    </Button>
   </section>
 {/if}
 
@@ -1443,26 +1452,29 @@
     <header class="brand" data-tauri-drag-region>
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="brand-copy"><strong>awm</strong><span>local workspaces</span></div>
-      <button
-        class="rail-toggle"
-        type="button"
-        aria-label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
-        title={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail (⌘B)`}
+      <IconButton
+        class="size-7 shrink-0 rounded border border-border bg-card"
+        label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
+        shortcut="⌘B"
         onclick={toggleProjectRail}
-      >{projectRailCollapsed ? '›' : '‹'}</button>
+      >
+        {#snippet icon()}
+          {#if projectRailCollapsed}<ChevronRightIcon size={15} />{:else}<ChevronLeftIcon size={15} />{/if}
+        {/snippet}
+      </IconButton>
     </header>
 
     <div class="rail-label"><span>Projects</span><small>{projects.length.toString().padStart(2, '0')}</small></div>
     <div class="project-list" aria-live="polite">
       {#if projects.length === 0 && connection.status === 'connected' && !busy}
-        <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><button type="button" onclick={() => void registerProject()}>Register folder</button></div>
+        <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button></div>
       {/if}
       {#each projects as project (project.id)}
-        <article class:active={project.selected} class="project-row">
+        <article class:active={project.selected} class="project-row group/project">
           {#if renameId === project.id}
             <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
               <input aria-label="Project name" bind:value={renameValue} use:focusRename onkeydown={(event) => { if (event.key === 'Escape') cancelRename(); }} />
-              <button type="submit">Save</button>
+              <Button size="sm" type="submit">Save</Button>
             </form>
           {:else}
             <button
@@ -1484,7 +1496,11 @@
               data-context-kind="project"
               data-context-id={project.id}
             >
-              <span class="status-dot" class:error={project.status === 'error'} class:running={project.status === 'running'} aria-hidden="true"></span>
+              <StatusIndicator
+                class={projectRailCollapsed ? 'absolute right-1 bottom-1' : ''}
+                tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
+                label={`${projectLabel(project)} · ${project.status}`}
+              />
               <span class="project-glyph" aria-hidden="true">{projectLabel(project).slice(0, 1).toUpperCase()}</span>
               <span class="project-copy"><strong>{projectLabel(project)}</strong><small>{project.path}</small></span>
             </button>
@@ -1494,13 +1510,21 @@
               collapsed={projectRailCollapsed}
               onError={reportError}
             />
-            <button class="rename-button" type="button" aria-label={`Rename ${projectLabel(project)}`} title="Rename project" onclick={() => beginRename(project)}>···</button>
+            <IconButton
+              class="size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
+              label={`Rename ${projectLabel(project)}`}
+              onclick={() => beginRename(project)}
+            >
+              {#snippet icon()}<MoreHorizontalIcon size={14} />{/snippet}
+            </IconButton>
           {/if}
         </article>
       {/each}
     </div>
     <footer class="project-footer">
-      <button class="register-button" type="button" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}><span aria-hidden="true">+</span><span class="button-copy">Register project</span></button>
+      <Button class="w-full justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>
+        <PlusIcon size={14} aria-hidden="true" /><span class="button-copy">Register project</span>
+      </Button>
     </footer>
     {#if !projectRailCollapsed}
       <button
@@ -1531,7 +1555,6 @@
         scratchpads={coordination?.scratchpads ?? []}
         {selection}
         collapsed={treeRailCollapsed}
-        connected={connection.status === 'connected'}
         onSelect={(next) => void selectTreeItem(next)}
         onCreateTodo={() => (dialog = 'todo')}
         onAddAgent={() => void openAgentDialog()}
@@ -1575,7 +1598,7 @@
         <div class="title-side"><span>{selection?.kind ?? 'project'}</span></div>
         <h1>{projectLabel(selectedProject)} - {frameItemLabel}</h1>
         <div class="title-side right">
-          {#if settingsOpen}<button type="button" onclick={() => (settingsOpen = false)}>Done</button>{/if}
+          {#if settingsOpen}<Button variant="outline" size="sm" onclick={() => (settingsOpen = false)}>Done</Button>{/if}
         </div>
       </header>
       {#if error}
@@ -1614,6 +1637,7 @@
           process={selectedProcess}
           processes={treeProcesses}
           connected={connection.status === 'connected'}
+          daemonPort={connection.port}
           onUnfocus={unfocusSelectedProcess}
           onSelectProcess={selectProcessById}
           onError={reportError}
@@ -1622,7 +1646,7 @@
     {:else}
       <div class="onboarding">
         <span>Local workspaces</span><h1>Register a project</h1><p>Choose a repository to see its work tree.</p>
-        <button type="button" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>+ Register project</button>
+        <Button disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}><PlusIcon size={14} />Register project</Button>
       </div>
     {/if}
   </section>
@@ -1658,25 +1682,35 @@
 {/if}
 
 {#if dialog && dialog !== 'command'}
-  <div class="dialog-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) dialog = null; }}>
+  <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
     {#if dialog === 'todo'}
-      <form class="dialog" aria-label="Create todo" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
-        <header><div><span>New todo</span><h2>Add work to the tree</h2></div><button type="button" aria-label="Close" onclick={() => (dialog = null)}>×</button></header>
+      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
+      <form class="dialog-surface" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
+        <header>
+          <div><span>New todo</span><h2>Add work to the tree</h2></div>
+          <IconButton label="Close new todo" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
+        </header>
         <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
         <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context"></textarea></label>
         <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
-        <footer><button type="button" onclick={() => (dialog = null)}>Cancel</button><button class="primary" type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</button></footer>
+        <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
       </form>
+      </Dialog.Content>
     {:else if dialog === 'agent'}
-      <section class="dialog" aria-label="Add agent">
-        <header><div><span>New agent</span><h2>Choose an agent tool</h2></div><button type="button" aria-label="Close" onclick={() => (dialog = null)}>×</button></header>
+      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Add agent">
+      <section class="dialog-surface">
+        <header>
+          <div><span>New agent</span><h2>Choose an agent tool</h2></div>
+          <IconButton label="Close agent picker" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
+        </header>
         <div class="agent-choices">
           {#if agentToolsLoading}<p>Loading agent tools…</p>{:else}{#each agentTools as tool (tool.id)}<button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}><strong>{tool.name}</strong><small>{tool.command}</small><span>Spawn</span></button>{:else}<p>No enabled agent tools. Add one in Settings.</p>{/each}{/if}
         </div>
-        <footer><button type="button" onclick={() => { dialog = null; settingsOpen = true; }}>Open Settings</button><button type="button" onclick={() => (dialog = null)}>Cancel</button></footer>
+        <footer><Button variant="outline" onclick={() => { dialog = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
       </section>
+      </Dialog.Content>
     {/if}
-  </div>
+  </Dialog.Root>
 {/if}
 
 {#if dialog === 'command' && selectedProject}
@@ -1696,122 +1730,99 @@
   .app-shell { display: grid; width: 100%; height: 100%; min-height: 0; max-height: 100%; grid-template-columns: var(--project-rail-width) var(--tree-rail-width) minmax(0, 1fr); overflow: hidden; background: var(--night); }
   .app-shell.with-version-banner { height: calc(100% - 38px); }
   .app-shell.no-project { grid-template-columns: var(--project-rail-width) minmax(0, 1fr); }
-  .version-banner { display: grid; width: 100%; height: 38px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, #15171a); color: var(--text); }
+  .version-banner { display: grid; width: 100%; height: 38px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, var(--card)); color: var(--text); }
   .version-banner div { min-width: 0; }
   .version-banner strong, .version-banner span { display: block; }
-  .version-banner strong { color: #f2d69a; font-size: 10px; }
-  .version-banner span { overflow: hidden; margin-top: 2px; color: #b3a382; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .version-banner small { color: #91866f; font: 7px 'JetBrains Mono Variable', monospace; white-space: nowrap; }
-  .version-banner button { min-height: 25px; border: 1px solid #8a7449; border-radius: 3px; padding: 0 9px; background: #3a3020; color: #f2d69a; font-size: 8px; font-weight: 680; cursor: pointer; }
-  .version-banner button:hover:not(:disabled) { border-color: #b09259; background: #493b25; }
-  .version-banner button:disabled { cursor: default; opacity: 0.6; }
+  .version-banner strong { color: #f2d69a; font-size: var(--font-size-sm); }
+  .version-banner span { overflow: hidden; margin-top: 2px; color: #b3a382; font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .version-banner small { color: #91866f; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
   .project-rail, .tree-rail, .main-frame { min-width: 0; min-height: 0; }
   [data-app-panel] { isolation: isolate; outline: 0; }
-  [data-app-panel]:focus-within, [data-app-panel]:focus { box-shadow: inset 0 0 0 1px #666d76; }
+  [data-app-panel]:focus-within, [data-app-panel]:focus { box-shadow: inset 0 0 0 1px var(--muted-foreground); }
   .project-rail, .tree-rail { position: relative; border-right: 1px solid var(--border); }
-  .project-rail { display: flex; flex-direction: column; background: #17191c; }
+  .project-rail { display: flex; flex-direction: column; background: var(--card); }
 
   .brand { position: relative; display: flex; min-height: 46px; align-items: center; gap: 8px; padding: 7px 7px 7px 9px; user-select: none; }
-  .brand-mark { display: flex; width: 24px; height: 24px; align-items: flex-end; gap: 3px; padding: 4px; border: 1px solid #454a51; background: #202328; }
+  .brand-mark { display: flex; width: 24px; height: 24px; align-items: flex-end; gap: 3px; padding: 4px; border: 1px solid #454a51; background: var(--popover); }
   .brand-mark span { width: 3px; background: #9ca3ad; }
   .brand-mark span:nth-child(1) { height: 6px; } .brand-mark span:nth-child(2) { height: 14px; } .brand-mark span:nth-child(3) { height: 10px; }
   .brand-copy { min-width: 0; flex: 1; }
   .brand-copy strong, .brand-copy span { display: block; }
   .brand-copy strong { color: #f3f4f6; font-size: 13px; font-weight: 680; }
-  .brand-copy span { margin-top: 1px; color: #777e87; font-size: 8px; }
-  .rail-toggle { display: grid; width: 25px; height: 26px; flex: none; place-items: center; border: 1px solid #3b4047; border-radius: 3px; background: #1d2024; color: #a3a9b1; font: 600 13px/1 'JetBrains Mono Variable', monospace; cursor: pointer; }
-  .rail-toggle:hover { border-color: #656c75; color: #fff; }
+  .brand-copy span { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
 
-  .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: #a2a8b0; font-size: 8px; font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
-  .rail-label small { color: #707780; font-size: 8px; }
-  .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: #42474f transparent; scrollbar-width: thin; }
+  .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
+  .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .project-row { position: relative; display: flex; min-height: 40px; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
-  .project-row:hover { background: #202328; }
-  .project-row.active { border-color: #41464d; background: #25282d; box-shadow: inset 2px 0 #777f89; }
+  .project-row:hover { background: var(--popover); }
+  .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
   .project-select { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
-  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: #292d32; }
+  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
-  .status-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #626972; }
-  .status-dot.running { background: var(--signal); } .status-dot.error { background: var(--fault); }
   .project-glyph { display: none; }
   .project-copy { min-width: 0; }
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .project-copy strong { color: #d4d7dc; font-size: 11px; font-weight: 620; }
-  .project-copy small { margin-top: 1px; color: #777e87; font-size: 8px; }
-  .rename-button { width: 25px; border: 0; background: transparent; color: transparent; cursor: pointer; }
-  .project-row:hover .rename-button, .rename-button:focus-visible { color: #89909a; }
+  .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
+  .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
-  .rename-form input { min-width: 0; flex: 1; border: 1px solid #4a4f57; padding: 5px; background: #111315; color: var(--text); font-size: 10px; }
-  .rename-form button { border: 1px solid #4a4f57; padding: 5px; background: #292d32; color: var(--text); font-size: 8px; }
-  .project-empty { margin: 5px; border: 1px dashed #3b4047; padding: 10px; }
-  .project-empty strong { color: #d4d7dc; font-size: 11px; } .project-empty p { margin: 3px 0 8px; color: var(--muted); font-size: 9px; }
-  .project-empty button { border: 1px solid #4a4f57; border-radius: 3px; padding: 5px 7px; background: #25282d; color: var(--text); font-size: 9px; }
+  .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
+  .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
+  .project-empty strong { color: var(--foreground); font-size: var(--font-size-sm); } .project-empty p { margin: 3px 0 8px; color: var(--muted); font-size: var(--font-size-sm); }
   .project-footer { padding: 6px; border-top: 1px solid var(--border); }
-  .register-button { display: flex; width: 100%; min-height: 29px; align-items: center; justify-content: center; gap: 6px; border: 1px solid #42474f; border-radius: 3px; background: #202328; color: #d1d5db; font-size: 9px; font-weight: 620; cursor: pointer; }
-  .register-button span:first-child { color: #a0a6ae; font-size: 13px; }
-  .register-button:disabled { cursor: not-allowed; opacity: 0.45; }
 
   .resize-handle { position: absolute; z-index: 8; top: 0; right: -3px; bottom: 0; width: 6px; border: 0; padding: 0; background: transparent; cursor: col-resize; touch-action: none; }
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
-  .resize-handle:hover::after, .resize-handle:focus-visible::after { background: #7a818a; }
+  .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
   .project-rail.collapsed .brand { padding-inline: 6px 4px; }
-  .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .rename-button, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
+  .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
   .project-rail.collapsed .brand-mark { width: 23px; height: 23px; }
-  .project-rail.collapsed .rail-toggle { width: 20px; margin-left: 1px; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { padding-inline: 4px; }
   .project-rail.collapsed .project-row { min-height: 38px; }
   .project-rail.collapsed .project-select { position: relative; justify-content: center; padding: 4px; }
-  .project-rail.collapsed .project-glyph { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid #41464d; border-radius: 3px; color: #c5c9ce; background: #202328; font-size: 10px; font-weight: 680; }
-  .project-rail.collapsed .status-dot { position: absolute; z-index: 1; right: 6px; bottom: 6px; border: 1px solid #17191c; }
+  .project-rail.collapsed .project-glyph { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); font-size: var(--font-size-sm); font-weight: 680; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
   .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }
   .main-frame.has-error { grid-template-rows: minmax(0, auto) minmax(0, auto) minmax(0, 1fr) minmax(0, auto); }
   .main-frame.empty { display: flex; }
-  .document-title { display: grid; min-height: 38px; grid-template-columns: minmax(90px, 1fr) auto minmax(90px, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 8px; background: #15171a; }
-  .document-title h1 { overflow: hidden; margin: 0; color: #e4e6e9; font-size: 12px; font-weight: 620; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-  .title-side { min-width: 0; color: #747b84; font: 7px 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
+  .document-title { display: grid; min-height: 38px; grid-template-columns: minmax(90px, 1fr) auto minmax(90px, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 8px; background: var(--card); }
+  .document-title h1 { overflow: hidden; margin: 0; color: var(--foreground); font-size: 12px; font-weight: 620; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+  .title-side { min-width: 0; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
   .title-side.right { display: flex; justify-content: flex-end; }
-  .title-side button { border: 1px solid #444950; border-radius: 3px; padding: 4px 7px; background: #24272b; color: #c8ccd1; font-size: 9px; cursor: pointer; }
-  .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; border-bottom: 1px solid rgb(220 107 107 / 38%); padding: 5px 8px; background: rgb(120 44 44 / 18%); color: #efa5a5; font-size: 9px; text-align: left; cursor: pointer; }
-  .error-banner strong { font-size: 8px; }
+  .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; border-bottom: 1px solid rgb(220 107 107 / 38%); padding: 5px 8px; background: rgb(120 44 44 / 18%); color: #efa5a5; font-size: var(--font-size-sm); text-align: left; cursor: pointer; }
+  .error-banner strong { font-size: var(--font-size-xs); }
   .item-viewer { width: 100%; height: 100%; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden; }
   .terminal-view { width: 100%; height: 100%; min-height: 0; max-height: 100%; overflow: hidden; padding: 5px; }
   .terminal-view > :global(.terminal-frame) { width: 100%; height: 100%; }
   .onboarding { display: grid; width: min(440px, calc(100% - 36px)); place-items: start; align-content: center; margin: auto; }
-  .onboarding > span { color: var(--muted); font-size: 9px; text-transform: uppercase; }
-  .onboarding h1 { margin: 5px 0 0; color: #f0f1f3; font-size: 28px; }
-  .onboarding p { margin: 7px 0 13px; color: #969da6; font-size: 12px; }
-  .onboarding button { border: 1px solid #4a4f57; border-radius: 3px; padding: 7px 9px; background: #25282d; color: var(--text); font-size: 10px; cursor: pointer; }
+  .onboarding > span { color: var(--muted); font-size: var(--font-size-sm); text-transform: uppercase; }
+  .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
+  .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
-  .dialog-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(3 4 5 / 74%); }
-  .dialog { width: min(500px, 100%); border: 1px solid #4a4f57; border-radius: 4px; background: #1c1f23; color: #e2e4e6; box-shadow: 0 18px 55px rgb(0 0 0 / 42%); }
-  .dialog > header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 11px 13px 9px; }
-  .dialog > header span, .dialog label > span { color: #9299a2; font: 700 8px 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
-  .dialog h2 { margin: 3px 0 0; color: #f0f1f3; font-size: 17px; }
-  .dialog > header button { border: 0; background: transparent; color: #a0a6ae; font-size: 18px; cursor: pointer; }
-  .dialog > label, .dialog-row { margin: 10px 13px 0; }
-  .dialog label { display: grid; gap: 4px; }
-  .dialog label small { color: #6f7680; font: inherit; }
-  .dialog input, .dialog textarea, .dialog select { width: 100%; border: 1px solid #41464d; border-radius: 3px; outline: 0; padding: 7px 8px; background: #111315; color: var(--text); font-size: 10px; }
-  .dialog textarea { resize: vertical; line-height: 1.4; }
+  .dialog-surface { width: 100%; color: var(--foreground); }
+  .dialog-surface > header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 11px 13px 9px; }
+  .dialog-surface > header span, .dialog-surface label > span { color: var(--muted-foreground); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
+  .dialog-surface h2 { margin: 3px 0 0; color: var(--foreground); font-size: 17px; }
+  .dialog-surface > label, .dialog-row { margin: 10px 13px 0; }
+  .dialog-surface label { display: grid; gap: 4px; }
+  .dialog-surface label small { color: var(--muted-foreground); font: inherit; }
+  .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
+  .dialog-surface textarea { resize: vertical; line-height: 1.4; }
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
-  .dialog > footer { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  .dialog > footer button { min-height: 28px; border: 1px solid #484d54; border-radius: 3px; padding: 0 9px; background: #25282d; color: #c4c8cd; font-size: 9px; cursor: pointer; }
-  .dialog > footer .primary { border-color: #666d76; background: #30343a; color: #f0f1f3; font-weight: 650; }
-  .dialog button:disabled { cursor: not-allowed; opacity: 0.45; }
+  .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; border-top: 1px solid var(--border); padding: 8px 13px; }
   .agent-choices { display: grid; max-height: 280px; overflow-y: auto; padding: 5px; }
-  .agent-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; border: 0; border-bottom: 1px solid var(--border); padding: 8px; background: transparent; color: #c8ccd1; text-align: left; cursor: pointer; }
-  .agent-choices > button:hover { background: #25282d; }
-  .agent-choices strong { font-size: 10px; } .agent-choices small { overflow: hidden; color: var(--muted); font: 8px 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-choices span { grid-row: 1 / 3; grid-column: 2; align-self: center; color: #aeb3ba; font-size: 9px; }
-  .agent-choices p { margin: 0; padding: 13px; color: #969da6; font-size: 10px; }
+  .agent-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; border: 0; border-bottom: 1px solid var(--border); padding: 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .agent-choices > button:hover { background: var(--accent); }
+  .agent-choices strong { font-size: var(--font-size-sm); } .agent-choices small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-choices span { grid-row: 1 / 3; grid-column: 2; align-self: center; color: var(--text-soft); font-size: var(--font-size-sm); }
+  .agent-choices p { margin: 0; padding: 13px; color: var(--text-soft); font-size: var(--font-size-sm); }
 
   @media (max-width: 760px) {
     .document-title { grid-template-columns: 50px minmax(0, 1fr) 50px; }

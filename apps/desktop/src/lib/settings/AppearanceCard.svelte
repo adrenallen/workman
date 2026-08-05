@@ -117,7 +117,7 @@
   <div class="live-preview" aria-label="Live interface preview">
     <div class="preview-label"><span>Live preview</span><small>{fontChoices.find((font) => font.id === $appearance.uiFont)?.label ?? 'System default'}</small></div>
     <div class="preview-workspace" style={`font-family: ${uiFontCss($appearance.uiFont)}`}>
-      <span class="preview-dot"></span>
+      <span class="preview-dot" aria-hidden="true"></span>
       <div><strong>Workspace ready</strong><small>3 processes · 1 needs input</small></div>
       <button type="button" tabindex="-1">Open terminal</button>
     </div>
@@ -137,27 +137,27 @@
   .appearance-section { overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
   .section-heading { display: flex; min-height: 68px; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 11px 12px 10px; }
   .eyebrow, small, .terminal-note, .preview-label, footer { font-family: 'JetBrains Mono Variable', monospace; }
-  .eyebrow { color: var(--muted); font-size: 7px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .eyebrow { color: var(--muted); font-size: var(--font-size-xs); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   h2 { margin: 2px 0 0; color: var(--text); font-size: 16px; line-height: 1.15; }
-  .section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
-  .terminal-note { display: flex; max-width: 210px; align-items: center; gap: 7px; border-left: 1px solid var(--border); padding: 4px 0 4px 11px; font-size: 8px !important; line-height: 1.45; }
+  .section-heading p { margin: 4px 0 0; color: var(--muted); font-size: var(--font-size-sm); }
+  .terminal-note { display: flex; max-width: 210px; align-items: center; gap: 7px; border-left: 1px solid var(--border); padding: 4px 0 4px 11px; font-size: var(--font-size-xs) !important; line-height: 1.45; }
   .terminal-note span { color: var(--signal); font-weight: 700; }
 
   .setting-row { display: grid; min-height: 52px; grid-template-columns: minmax(190px, 1fr) minmax(220px, .9fr); align-items: center; gap: 16px; border-top: 1px solid var(--border); padding: 7px 12px; }
   .setting-copy strong, .setting-copy small { display: block; }
-  .setting-copy strong { color: var(--text-soft); font-size: 10px; font-weight: 660; }
-  .setting-copy small { margin-top: 3px; color: var(--muted); font-size: 7px; line-height: 1.35; }
+  .setting-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 660; }
+  .setting-copy small { margin-top: 3px; color: var(--muted); font-size: var(--font-size-xs); line-height: 1.35; }
 
   .segmented { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--night); }
   .segmented.compact { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .segmented button { min-height: 28px; border: 0; border-right: 1px solid var(--border-strong); background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+  .segmented button { min-height: 28px; border: 0; border-right: 1px solid var(--border-strong); background: transparent; color: var(--muted); font-size: var(--font-size-sm); cursor: pointer; }
   .segmented button:last-child { border-right: 0; }
   .segmented button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
   .segmented button.active { background: var(--surface-raised); color: var(--text); box-shadow: inset 0 -2px var(--signal); }
 
   .select-wrap { position: relative; display: block; }
-  select { width: 100%; height: 30px; appearance: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 28px 0 9px; background: var(--night); color: var(--text-soft); font-size: 9px; cursor: pointer; }
-  .select-wrap > span { position: absolute; top: 7px; right: 9px; color: var(--muted); font-size: 11px; pointer-events: none; }
+  select { width: 100%; height: 30px; appearance: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 28px 0 9px; background: var(--night); color: var(--text-soft); font-size: var(--font-size-sm); cursor: pointer; }
+  .select-wrap > span { position: absolute; top: 7px; right: 9px; color: var(--muted); font-size: var(--font-size-sm); pointer-events: none; }
 
   .font-scales { display: flex; min-height: 33px; align-items: end; justify-content: space-between; gap: 5px; padding: 0 10px; }
   .font-scales button { position: relative; width: 36px; height: 31px; border: 0; padding: 0 0 7px; background: transparent; color: var(--muted); font-family: var(--ui-font-family); font-size: var(--sample-size); line-height: 1; cursor: pointer; }
@@ -167,17 +167,17 @@
   .font-scales button.active::after { background: var(--signal); }
 
   .live-preview { border-top: 1px solid var(--border); padding: 9px 12px 11px; background: color-mix(in srgb, var(--night) 70%, var(--surface)); }
-  .preview-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 7px; letter-spacing: .06em; text-transform: uppercase; }
+  .preview-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: var(--font-size-xs); letter-spacing: .06em; text-transform: uppercase; }
   .preview-label small { letter-spacing: 0; text-transform: none; }
   .preview-workspace { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 7px; border: 1px solid var(--border); border-radius: 3px; padding: 8px 9px; background: var(--surface-raised); }
   .preview-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
   .preview-workspace strong, .preview-workspace small { display: block; }
-  .preview-workspace strong { color: var(--text); font-size: 11px; }
-  .preview-workspace small { margin-top: 2px; color: var(--muted); font-size: 7px; }
-  .preview-workspace button { min-height: 25px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 8px; background: var(--surface); color: var(--text-soft); font-size: 8px; pointer-events: none; }
+  .preview-workspace strong { color: var(--text); font-size: var(--font-size-sm); }
+  .preview-workspace small { margin-top: 2px; color: var(--muted); font-size: var(--font-size-xs); }
+  .preview-workspace button { min-height: 25px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 8px; background: var(--surface); color: var(--text-soft); font-size: var(--font-size-xs); pointer-events: none; }
 
-  footer { display: flex; min-height: 39px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 10px 6px 12px; color: var(--muted); font-size: 7px; }
-  footer button { min-height: 26px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 9px; background: var(--surface-raised); color: var(--text-soft); font-size: 8px; cursor: pointer; }
+  footer { display: flex; min-height: 39px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 10px 6px 12px; color: var(--muted); font-size: var(--font-size-xs); }
+  footer button { min-height: 26px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 9px; background: var(--surface-raised); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
   footer button:disabled { opacity: .38; cursor: default; }
 
   @media (max-width: 760px) {

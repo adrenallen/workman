@@ -1,4 +1,9 @@
 <script lang="ts">
+  import XIcon from '@lucide/svelte/icons/x';
+  import { Button } from '$lib/components/ui/button';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
+
   interface Props {
     onClose: () => void;
   }
@@ -39,10 +44,6 @@
     }
   ];
 
-  function focusDialog(node: HTMLElement): void {
-    queueMicrotask(() => node.focus());
-  }
-
   function handleKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape' || (event.metaKey && event.key === '/')) {
       event.preventDefault();
@@ -52,18 +53,11 @@
   }
 </script>
 
-<div
-  class="shortcuts-backdrop"
-  role="presentation"
-  onpointerdown={(event) => { if (event.target === event.currentTarget) onClose(); }}
->
-  <div
-    class="shortcuts-dialog"
-    role="dialog"
-    aria-modal="true"
+<Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+  <Dialog.Content
+    class="grid max-h-[min(650px,calc(100vh-36px))] w-[min(760px,calc(100vw-36px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 text-foreground shadow-2xl"
+    showCloseButton={false}
     aria-labelledby="shortcuts-title"
-    tabindex="-1"
-    use:focusDialog
     onkeydown={handleKeydown}
   >
     <header>
@@ -71,10 +65,12 @@
         <span>Keyboard reference</span>
         <h2 id="shortcuts-title">Work without leaving the keys</h2>
       </div>
-      <button type="button" aria-label="Close keyboard shortcuts" onclick={onClose}>×</button>
+      <Button class="text-muted-foreground" variant="ghost" size="icon-sm" aria-label="Close keyboard shortcuts" onclick={onClose}>
+        <XIcon size={15} />
+      </Button>
     </header>
 
-    <div class="shortcut-groups">
+    <ScrollArea class="min-h-0 p-2">
       {#each groups as group}
         <section>
           <h3>{group.title}</h3>
@@ -90,48 +86,37 @@
           </div>
         </section>
       {/each}
-    </div>
+    </ScrollArea>
 
     <footer>
       <span>Text fields keep Home/End. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
-      <button type="button" onclick={onClose}>Done</button>
+      <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .shortcuts-backdrop { position: fixed; z-index: 1100; inset: 0; display: grid; place-items: center; padding: 18px; background: rgb(5 7 9 / 68%); }
-  .shortcuts-dialog { display: grid; width: min(760px, calc(100vw - 36px)); max-height: min(650px, calc(100vh - 36px)); grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #555b63; border-radius: 5px; outline: 0; background: #17191c; box-shadow: 0 18px 48px rgb(0 0 0 / 44%); color: var(--text); }
-  header { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 7px 10px 7px 12px; background: #1b1e22; }
+  header { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 7px 10px 7px 12px; background: var(--popover); }
   header span, header h2 { display: block; margin: 0; }
-  header span { color: #858c95; font: 7px 'JetBrains Mono Variable', monospace; letter-spacing: 0.055em; text-transform: uppercase; }
-  header h2 { margin-top: 3px; color: #edf0f2; font-size: 13px; font-weight: 680; }
-  header button { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid #41464d; border-radius: 3px; background: #202328; color: #aeb4bc; font-size: 16px; cursor: pointer; }
-  header button:hover { border-color: #656c75; color: #fff; }
-  .shortcut-groups { min-height: 0; overflow-y: auto; padding: 7px; scrollbar-color: #454b53 transparent; scrollbar-width: thin; }
-  section { border: 1px solid #2d3137; border-radius: 3px; background: #141619; }
+  header span { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; letter-spacing: 0.055em; text-transform: uppercase; }
+  header h2 { margin-top: 3px; color: var(--foreground); font-size: 13px; font-weight: 680; }
+  section { border: 1px solid var(--border); border-radius: 3px; background: var(--card); }
   section + section { margin-top: 6px; }
-  h3 { min-height: 27px; margin: 0; border-bottom: 1px solid #292d32; padding: 7px 9px 5px; color: #9da4ad; font-size: 8px; font-weight: 700; letter-spacing: 0.055em; text-transform: uppercase; }
+  h3 { min-height: 27px; margin: 0; border-bottom: 1px solid var(--accent); padding: 7px 9px 5px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 700; letter-spacing: 0.055em; text-transform: uppercase; }
   .shortcut-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .shortcut-row { display: grid; min-height: 39px; grid-template-columns: 126px minmax(0, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid #24282d; padding: 5px 8px; color: #b4bac2; font-size: 9px; }
-  .shortcut-row:nth-child(odd) { border-right: 1px solid #24282d; }
+  .shortcut-row { display: grid; min-height: 39px; grid-template-columns: 126px minmax(0, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 5px 8px; color: var(--text-soft); font-size: var(--font-size-sm); }
+  .shortcut-row:nth-child(odd) { border-right: 1px solid var(--border); }
   .shortcut-row:nth-last-child(-n + 2) { border-bottom: 0; }
   .keys { display: flex; align-items: center; gap: 3px; }
-  kbd { display: inline-grid; min-width: 23px; min-height: 21px; place-items: center; border: 1px solid #444a52; border-bottom-color: #616873; border-radius: 3px; padding: 1px 5px; background: #23262b; color: #d0d4d9; font: 8px 'JetBrains Mono Variable', monospace; }
-  footer { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 8px 6px 11px; background: #15171a; color: #818892; font-size: 8px; }
-  footer strong { color: #b9bfc6; font-weight: 650; }
-  footer button { min-height: 27px; border: 1px solid #4b5159; border-radius: 3px; padding: 0 13px; background: #25282d; color: #d9dce0; font-size: 9px; font-weight: 650; cursor: pointer; }
-  footer button:hover { border-color: #686f78; background: #2b2f34; }
+  kbd { display: inline-grid; min-width: 23px; min-height: 21px; place-items: center; border: 1px solid #444a52; border-bottom-color: #616873; border-radius: 3px; padding: 1px 5px; background: var(--accent); color: var(--foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  footer { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 8px 6px 11px; background: var(--card); color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  footer strong { color: var(--text-soft); font-weight: 650; }
 
   @media (max-width: 660px) {
     .shortcut-list { grid-template-columns: 1fr; }
-    .shortcut-row, .shortcut-row:nth-child(odd) { border-right: 0; border-bottom: 1px solid #24282d; }
+    .shortcut-row, .shortcut-row:nth-child(odd) { border-right: 0; border-bottom: 1px solid var(--border); }
     .shortcut-row:last-child { border-bottom: 0; }
     footer span { max-width: 70%; }
   }
 
-  @media (prefers-reduced-motion: no-preference) {
-    .shortcuts-dialog { animation: shortcuts-enter 100ms ease-out; }
-    @keyframes shortcuts-enter { from { opacity: 0; transform: translateY(-3px); } }
-  }
 </style>

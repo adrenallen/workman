@@ -140,7 +140,7 @@
     min-width: 0;
     align-items: center;
     gap: 4px;
-    border-left: 1px solid #262a2f;
+    border-left: 1px solid var(--border);
     padding: 0 9px;
     color: var(--text-soft);
     font-variant-numeric: tabular-nums;
@@ -150,16 +150,16 @@
   .timer-more {
     display: flex;
     align-items: center;
-    border-left: 1px solid #262a2f;
+    border-left: 1px solid var(--border);
     padding: 0 7px;
     color: var(--muted);
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     white-space: nowrap;
   }
 
   .direction {
     color: var(--signal);
-    font-size: 11px;
+    font-size: var(--font-size-sm);
     font-weight: 700;
     line-height: 1;
   }
@@ -167,7 +167,7 @@
   .timer-phrase,
   .timer-value,
   .timer-suffix {
-    color: #d6dae0;
+    color: var(--foreground);
     font-weight: 600;
   }
 
@@ -218,20 +218,20 @@
 
   .timer-menu strong {
     color: #aeb5bd;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     text-transform: uppercase;
   }
 
   .timer-menu article span {
-    color: #e0e3e7;
+    color: var(--foreground);
     font-weight: 650;
     font-variant-numeric: tabular-nums;
   }
 
   .timer-menu small,
   .timer-empty {
-    color: #777f89;
-    font-size: 7px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
   }
 
   .countdown.compact {

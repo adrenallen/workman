@@ -8,6 +8,8 @@
 </script>
 
 <script lang="ts">
+  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
+
   let {
     value,
     prefix = '',
@@ -16,7 +18,9 @@
   }: CountBadgeProps = $props();
 </script>
 
-<span class="badge {tone}" {title}>{prefix}{value}</span>
+<TooltipLabel label={title ?? `Count: ${prefix}${value}`}>
+  <span class="badge {tone}" aria-label={title ?? `Count: ${prefix}${value}`}>{prefix}{value}</span>
+</TooltipLabel>
 
 <style>
   .badge {
@@ -27,17 +31,17 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    border: 1px solid var(--border, #30343a);
+    border: 1px solid var(--border, var(--border));
     border-radius: 3px;
     padding: 0 5px;
-    background: var(--surface-raised, #1c1f23);
-    color: var(--muted, #7d848e);
-    font: 620 8px/1 'JetBrains Mono Variable', monospace;
+    background: var(--surface-raised, var(--popover));
+    color: var(--muted, var(--muted-foreground));
+    font: 620 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.01em;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .running { border-color: color-mix(in srgb, var(--signal, #55b989) 42%, var(--border, #30343a)); color: var(--signal, #55b989); }
-  .attention { border-color: color-mix(in srgb, var(--warning, #d6a24f) 42%, var(--border, #30343a)); color: var(--warning, #d6a24f); }
+  .running { border-color: color-mix(in srgb, var(--signal, #55b989) 42%, var(--border, var(--border))); color: var(--signal, #55b989); }
+  .attention { border-color: color-mix(in srgb, var(--warning, #d6a24f) 42%, var(--border, var(--border))); color: var(--warning, #d6a24f); }
 </style>

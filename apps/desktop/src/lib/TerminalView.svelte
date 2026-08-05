@@ -75,10 +75,10 @@
       scrollback: 10_000,
       smoothScrollDuration: 80,
       theme: {
-        background: '#0e1517',
+        background: 'var(--background)',
         foreground: '#d7e2dc',
         cursor: '#7bd1b5',
-        cursorAccent: '#0e1517',
+        cursorAccent: 'var(--background)',
         selectionBackground: '#355c55aa',
         black: '#11191b',
         red: '#dc7d76',
@@ -449,7 +449,7 @@
 
   .terminal-identity strong {
     overflow: hidden;
-    color: #f0f1f3;
+    color: var(--foreground);
     font: 620 12px/1.2 var(--ui-font-family);
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -459,7 +459,7 @@
   .renderer,
   .stream-gap {
     color: #8e959e;
-    font: 500 9px/1 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -497,8 +497,8 @@
   .terminal-tools button:hover,
   .terminal-search button:hover {
     border-color: #50565e;
-    color: #f0f1f3;
-    background: #292d32;
+    color: var(--foreground);
+    background: var(--accent);
   }
 
   .terminal-search {
@@ -508,7 +508,7 @@
     gap: 4px;
     padding: 5px 8px;
     border-bottom: 1px solid var(--border);
-    background: #17191c;
+    background: var(--card);
   }
 
   .terminal-search input {
@@ -518,19 +518,19 @@
     border-radius: 3px;
     outline: none;
     padding: 0 9px;
-    color: #e2e4e6;
-    background: #111315;
-    font: 500 11px/1 'JetBrains Mono Variable', monospace;
+    color: var(--foreground);
+    background: var(--background);
+    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
   }
 
   .terminal-search input:focus {
-    border-color: #777e87;
+    border-color: var(--muted-foreground);
   }
 
   .terminal-search > span {
     min-width: 48px;
     color: #7f918d;
-    font: 500 9px/1 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
     text-align: center;
   }
 
@@ -562,7 +562,7 @@
     padding: 5px 7px;
     color: #83918f;
     background: rgb(16 24 26 / 86%);
-    font: 500 9px/1 'JetBrains Mono Variable', monospace;
+    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     pointer-events: none;

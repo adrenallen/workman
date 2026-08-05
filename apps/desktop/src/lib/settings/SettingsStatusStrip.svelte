@@ -1,4 +1,5 @@
 <script lang="ts">
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import type { ConnectionStatus, Project } from '../daemon';
   import type { DaemonSettingsInfo } from '../settings';
 
@@ -28,25 +29,27 @@
 
 <div class="status-strip" aria-label="Settings status">
   <span class="context"><strong>Settings</strong><i aria-hidden="true">/</i>{projectName}</span>
-  <span class="saved"><i aria-hidden="true"></i>Preferences saved on this Mac</span>
+  <span class="saved">
+    <StatusIndicator tone="success" label="Preferences saved locally on this Mac" />
+    Preferences saved on this Mac
+  </span>
   <span class="daemon" title={connection.message ?? daemonLabel}>
-    <i class:online={connection.status === 'connected'} class:connecting={connection.status === 'connecting'} aria-hidden="true"></i>
+    <StatusIndicator
+      tone={connection.status === 'connected' ? 'success' : connection.status === 'connecting' ? 'warning' : 'danger'}
+      label={connection.status === 'connected' ? `Daemon connected · port ${info?.port ?? connection.port ?? 'unknown'}` : daemonLabel}
+    />
     {daemonLabel}
     {#if info}<small>· {uptimeLabel(info.uptime_ms)} · :{info.port}</small>{/if}
   </span>
 </div>
 
 <style>
-  .status-strip { display: flex; min-height: 31px; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 4px; padding: 5px 9px; background: color-mix(in srgb, var(--night) 72%, var(--surface)); color: var(--muted); font: 7px/1.2 'JetBrains Mono Variable', monospace; }
+  .status-strip { display: flex; min-height: 31px; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 4px; padding: 5px 9px; background: color-mix(in srgb, var(--night) 72%, var(--surface)); color: var(--muted); font: var(--font-size-xs)/1.2 'JetBrains Mono Variable', monospace; }
   .context, .saved, .daemon { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .context strong { color: var(--text-soft); font-weight: 700; }
   .context > i { color: var(--border-strong); font-style: normal; }
   .saved { margin-left: auto; }
-  .saved > i, .daemon > i { width: 5px; height: 5px; border-radius: 50%; background: var(--signal); }
   .daemon { overflow: hidden; padding-left: 11px; border-left: 1px solid var(--border); text-overflow: ellipsis; white-space: nowrap; }
-  .daemon > i { border: 1px solid var(--border-strong); background: transparent; }
-  .daemon > i.online { border-color: var(--signal); background: var(--signal); }
-  .daemon > i.connecting { border-color: var(--warning); background: var(--warning); }
   .daemon small { color: var(--muted); font: inherit; }
 
   @media (max-width: 760px) { .saved { display: none; } .daemon { margin-left: auto; } }

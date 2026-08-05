@@ -59,9 +59,9 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 6px;
-    color: var(--muted, #7d848e);
+    color: var(--muted, var(--muted-foreground));
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -69,13 +69,13 @@
 
   .field-label small {
     color: #737a83;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     font-weight: 500;
   }
 
   .value-row {
     min-width: 0;
-    border: 1px solid var(--border, #30343a);
+    border: 1px solid var(--border, var(--border));
     border-radius: 3px;
     background: #121416;
   }
@@ -85,9 +85,9 @@
     flex: 1;
     overflow: hidden;
     padding: 10px 11px;
-    color: var(--text-soft, #b3b8c0);
+    color: var(--text-soft, var(--text-soft));
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 9px;
+    font-size: var(--font-size-sm);
     line-height: 1.45;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -96,7 +96,7 @@
   .multiline code {
     overflow-x: auto;
     padding-block: 12px;
-    color: #c8ccd1;
+    color: var(--foreground);
     scrollbar-width: thin;
     text-overflow: clip;
     white-space: pre;
@@ -110,17 +110,17 @@
     align-self: stretch;
     gap: 5px;
     border: 0;
-    border-left: 1px solid var(--border, #30343a);
+    border-left: 1px solid var(--border, var(--border));
     padding: 0 11px;
-    background: #202328;
-    color: var(--text-soft, #b3b8c0);
+    background: var(--popover);
+    color: var(--text-soft, var(--text-soft));
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 650;
     cursor: pointer;
   }
 
-  button:hover { background: #292d32; color: var(--text, #e5e7eb); }
-  button.copied { color: var(--text, #e5e7eb); }
-  button span { color: #a7adb5; font-size: 12px; }
+  button:hover { background: var(--accent); color: var(--text, var(--foreground)); }
+  button.copied { color: var(--text, var(--foreground)); }
+  button span { color: var(--text-soft); font-size: 12px; }
 </style>

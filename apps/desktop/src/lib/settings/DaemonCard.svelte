@@ -1,6 +1,10 @@
 <script lang="ts">
+  import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import { onMount } from 'svelte';
 
+  import { Button } from '$lib/components/ui/button';
+  import { Switch } from '$lib/components/ui/switch';
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
   import CopyField from './CopyField.svelte';
@@ -70,8 +74,12 @@
       <h2 id="daemon-card-title">Daemon</h2>
       <p>Owns process state, terminal sessions, and coordination data on this machine.</p>
     </div>
-    <span class:online={connection.status === 'connected'} class="status">
-      <i aria-hidden="true"></i>{connection.status}
+    <span class="status">
+      <StatusIndicator
+        tone={connection.status === 'connected' ? 'success' : 'danger'}
+        label={connection.status === 'connected' ? `Daemon connected · port ${info.port}` : `Daemon ${connection.status}`}
+      />
+      {connection.status}
     </span>
   </header>
 
@@ -95,18 +103,18 @@
         <span>Current {info.update.check.current} · Latest {info.update.check.latest}</span>
       </div>
       <div class="update-actions">
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           disabled={connection.status !== 'connected' || updateBusy !== null}
           onclick={onCheckUpdate}
-        >{updateBusy === 'check' ? 'Checking…' : 'Check for updates'}</button>
+        >{updateBusy === 'check' ? 'Checking…' : 'Check for updates'}</Button>
         {#if info.update.check.available}
-          <button
-            type="button"
-            class="update-now"
+          <Button
+            size="sm"
             disabled={connection.status !== 'connected' || updateBusy !== null}
             onclick={onUpdateNow}
-          >{updateBusy === 'apply' ? 'Updating…' : `Update to ${info.update.check.latest}`}</button>
+          >{updateBusy === 'apply' ? 'Updating…' : `Update to ${info.update.check.latest}`}</Button>
         {/if}
       </div>
     </div>
@@ -116,11 +124,11 @@
     {#if updateMessage}<p class="update-message" aria-live="polite">{updateMessage}</p>{/if}
     <div class="update-preference">
       <label>
-        <input
-          type="checkbox"
+        <Switch
+          size="sm"
           checked={info.update.automatic_checks}
           disabled={updateBusy !== null}
-          onchange={(event) => onAutomaticChecks(event.currentTarget.checked)}
+          onCheckedChange={(checked) => onAutomaticChecks(checked === true)}
         />
         Check weekly when awm starts
       </label>
@@ -146,15 +154,16 @@
       <strong>Restart the control plane</strong>
       <span>The desktop reconnects automatically after the local service comes back.</span>
     </div>
-    <button
-      type="button"
-      class="restart"
+    <Button
+      variant="outline"
+      size="sm"
+      class="shrink-0"
       disabled={connection.status !== 'connected' || restarting}
       onclick={onRestart}
     >
-      <span aria-hidden="true">↻</span>
+      <RefreshCwIcon size={14} aria-hidden="true" />
       {restarting ? 'Restarting…' : 'Restart daemon'}
-    </button>
+    </Button>
   </footer>
 </section>
 
@@ -167,8 +176,7 @@
 
   header,
   footer,
-  .status,
-  .restart {
+  .status {
     display: flex;
     align-items: center;
   }
@@ -182,21 +190,20 @@
   .eyebrow,
   .status,
   .runtime-stats,
-  footer span,
-  .restart {
+  footer span {
     font-family: 'JetBrains Mono Variable', monospace;
   }
 
   .eyebrow {
-    color: #858c95;
-    font-size: 7px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.1em;
     text-transform: uppercase;
   }
 
-  h2 { margin: 2px 0 0; color: #eceef0; font-size: 16px; }
-  header p { margin: 3px 0 0; color: #969da6; font-size: 10px; line-height: 1.4; }
+  h2 { margin: 2px 0 0; color: var(--foreground); font-size: 16px; }
+  header p { margin: 3px 0 0; color: var(--text-soft); font-size: var(--font-size-sm); line-height: 1.4; }
 
   .status {
     flex: none;
@@ -205,13 +212,11 @@
     border-radius: 999px;
     padding: 6px 8px;
     color: #738b95;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
-  .status i { width: 6px; height: 6px; border-radius: 50%; background: #60737d; }
-  .status.online i { background: var(--signal); }
 
   .runtime-stats {
     display: grid;
@@ -222,36 +227,28 @@
   .runtime-stats > div { padding: 8px 10px; border-right: 1px solid var(--border); }
   .runtime-stats > div:last-child { border-right: 0; }
   .runtime-stats span, .runtime-stats strong { display: block; }
-  .runtime-stats span { color: #59727d; font-size: 7px; text-transform: uppercase; }
-  .runtime-stats strong { margin-top: 4px; overflow: hidden; color: #b9cbd0; font-size: 10px; text-overflow: ellipsis; }
+  .runtime-stats span { color: #59727d; font-size: var(--font-size-xs); text-transform: uppercase; }
+  .runtime-stats strong { margin-top: 4px; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-sm); text-overflow: ellipsis; }
 
   .data-path { padding: 10px 12px; }
-  .data-path p { margin: 6px 0 0; color: #627b85; font-size: 9px; }
+  .data-path p { margin: 6px 0 0; color: #627b85; font-size: var(--font-size-sm); }
 
   .updates { border-top: 1px solid var(--border); padding: 10px 12px; }
   .update-heading, .update-actions, .update-preference, .update-channel { display: flex; align-items: center; }
   .update-heading, .update-preference { justify-content: space-between; gap: 12px; }
   .update-heading strong, .update-heading span { display: block; }
-  .update-heading strong { color: var(--text); font-size: 10px; }
+  .update-heading strong { color: var(--text); font-size: var(--font-size-sm); }
   .update-heading span, .update-preference, .update-message, .release-notes {
     color: var(--muted);
-    font: 8px/1.45 'JetBrains Mono Variable', monospace;
+    font: var(--font-size-xs)/1.45 'JetBrains Mono Variable', monospace;
   }
   .update-heading span { margin-top: 2px; }
   .update-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-  .update-actions button {
-    border: 1px solid var(--border-strong); border-radius: 3px; padding: 5px 7px;
-    background: var(--surface-raised); color: var(--text-soft); font: 8px 'JetBrains Mono Variable', monospace;
-    cursor: pointer;
-  }
-  .update-actions .update-now { border-color: var(--signal); color: var(--text); }
-  .update-actions button:disabled { opacity: .45; cursor: default; }
   .release-notes { max-height: 74px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; }
   .update-message { margin: 7px 0 0; color: var(--text-soft); }
   .update-preference { margin-top: 8px; }
   .update-preference label { display: flex; align-items: center; gap: 6px; color: var(--text-soft); }
-  .update-preference input { margin: 0; accent-color: var(--signal); }
-  .update-channel { gap: 7px; margin-top: 8px; color: var(--text-soft); font: 8px/1.45 'JetBrains Mono Variable', monospace; }
+  .update-channel { gap: 7px; margin-top: 8px; color: var(--text-soft); font: var(--font-size-xs)/1.45 'JetBrains Mono Variable', monospace; }
   .update-channel label { flex: none; }
   .update-channel select {
     height: 26px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 7px;
@@ -265,29 +262,12 @@
     gap: 16px;
     border-top: 1px solid var(--border);
     padding: 9px 12px;
-    background: #15171a;
+    background: var(--card);
   }
 
   footer strong, footer span { display: block; }
-  footer strong { color: #9fb3ba; font-size: 10px; }
-  footer span { margin-top: 3px; color: #536c77; font-size: 7px; line-height: 1.4; }
-
-  .restart {
-    flex: none;
-    gap: 7px;
-    border: 1px solid #484d54;
-    border-radius: 3px;
-    padding: 6px 8px;
-    background: #25282d;
-    color: #d7dadd;
-    font-size: 8px;
-    font-weight: 650;
-    cursor: pointer;
-  }
-
-  .restart:hover:not(:disabled) { border-color: #707780; color: #fff; }
-  .restart:disabled { opacity: 0.45; cursor: default; }
-  .restart span { margin: 0; color: #a7adb5; font-size: 14px; }
+  footer strong { color: #9fb3ba; font-size: var(--font-size-sm); }
+  footer span { margin-top: 3px; color: #536c77; font-size: var(--font-size-xs); line-height: 1.4; }
 
   @media (max-width: 700px) {
     .runtime-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

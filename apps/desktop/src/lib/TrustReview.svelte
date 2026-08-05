@@ -164,7 +164,7 @@
 
   .eyebrow {
     color: #e4ae5b;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
   }
 
   h2 {
@@ -213,7 +213,7 @@
 
   .change-summary span {
     color: #6f858e;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
   }
 
   .changes {
@@ -241,14 +241,14 @@
 
   .field-heading strong {
     color: #b8c7cd;
-    font-size: 10px;
+    font-size: var(--font-size-sm);
     font-weight: 600;
     text-transform: capitalize;
   }
 
   .field-heading span {
     color: #e4ae5b;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
   }
 
   .field-heading span.changed {
@@ -269,7 +269,7 @@
   .value small {
     padding-top: 2px;
     color: #607984;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
   }
 
   .value pre {
@@ -279,7 +279,7 @@
     white-space: pre-wrap;
     color: #b8c7cd;
     font-family: 'JetBrains Mono Variable', monospace;
-    font-size: 10px;
+    font-size: var(--font-size-sm);
     line-height: 1.5;
   }
 
@@ -306,7 +306,7 @@
   footer code {
     overflow: hidden;
     color: #566f79;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -319,7 +319,7 @@
   footer button {
     border-radius: 2px;
     padding: 9px 12px;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 650;
     cursor: pointer;
   }

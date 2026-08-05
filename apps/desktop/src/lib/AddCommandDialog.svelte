@@ -1,7 +1,12 @@
 <script lang="ts">
+  import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
+  import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
 
+  import { Button } from '$lib/components/ui/button';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import IconButton from '$lib/components/ds/IconButton.svelte';
   import {
     DaemonRequestError,
     type DaemonClient,
@@ -144,24 +149,12 @@
     return input.auto_start ? client.startProcess(process.id) : process;
   }
 
-  function closeOnEscape(event: KeyboardEvent): void {
-    if (event.key === 'Escape' && !busy) onClose();
-  }
 </script>
 
-<svelte:window onkeydown={closeOnEscape} />
-
-<div
-  class="backdrop"
-  role="presentation"
-  onclick={(event) => {
-    if (event.target === event.currentTarget && !busy) onClose();
-  }}
->
-  <dialog
-    open
-    class="dialog"
-    aria-modal="true"
+<Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+  <Dialog.Content
+    class="command-dialog max-h-[calc(100vh-44px)] w-[min(560px,calc(100vw-44px))] max-w-none gap-0 overflow-auto rounded-lg border border-border bg-popover p-0 shadow-2xl"
+    showCloseButton={false}
     aria-label="Add command"
     aria-describedby="command-dialog-description"
   >
@@ -176,7 +169,9 @@
         <span>Project command</span>
         <h2>Add command</h2>
       </div>
-      <button class="close" type="button" aria-label="Close add command" disabled={busy} onclick={onClose}>×</button>
+      <IconButton label="Close add command" disabled={busy} onclick={onClose}>
+        {#snippet icon()}<XIcon size={15} />{/snippet}
+      </IconButton>
     </header>
 
     <p id="command-dialog-description" class="description">
@@ -220,7 +215,9 @@
             placeholder={project.path}
             oninput={() => (workingDirError = null)}
           />
-          <button type="button" disabled={busy} onclick={() => void browse()}>Browse</button>
+          <Button variant="outline" size="sm" disabled={busy} onclick={() => void browse()}>
+            <FolderOpenIcon size={14} />Browse
+          </Button>
         </div>
         {#if workingDirError}
           <small id="working-dir-error" class="error">{workingDirError}</small>
@@ -252,38 +249,14 @@
     </div>
 
       <footer>
-        <button type="button" disabled={busy} onclick={onClose}>Cancel</button>
-        <button class="primary" type="submit" disabled={busy}>{busy ? 'Adding…' : 'Add command'}</button>
+        <Button variant="outline" type="button" disabled={busy} onclick={onClose}>Cancel</Button>
+        <Button type="submit" disabled={busy}>{busy ? 'Adding…' : 'Add command'}</Button>
       </footer>
     </form>
-  </dialog>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .backdrop {
-    position: fixed;
-    z-index: 35;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: 22px;
-    background: rgb(2 8 12 / 76%);
-    backdrop-filter: blur(6px);
-  }
-
-  .dialog {
-    position: relative;
-    width: min(560px, 100%);
-    max-height: calc(100vh - 44px);
-    overflow: auto;
-    margin: 0;
-    border: 1px solid #435761;
-    border-radius: 5px;
-    padding: 0;
-    background: #101d25;
-    box-shadow: 0 28px 90px rgb(0 0 0 / 50%);
-  }
-
   form { display: contents; }
 
   header {
@@ -292,13 +265,12 @@
     justify-content: space-between;
     padding: 17px 19px 14px;
     border-bottom: 1px solid #2c4049;
-    background: linear-gradient(105deg, rgb(67 137 153 / 9%), transparent 68%);
+    background: var(--card);
   }
 
   header span,
   label > span,
   legend,
-  button,
   small {
     font-family: 'JetBrains Mono Variable', monospace;
   }
@@ -307,15 +279,14 @@
   label > span,
   legend {
     color: #78909a;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   h2 { margin: 4px 0 0; color: #eef3f4; font-size: 20px; font-weight: 540; }
-  .close { width: 30px; height: 30px; border: 0; background: transparent; color: #78909a; font-size: 21px; }
-  .description { margin: 0; padding: 13px 19px 0; color: #80949d; font-size: 11px; }
+  .description { margin: 0; padding: 13px 19px 0; color: #80949d; font-size: var(--font-size-sm); }
   .description strong { color: #acbbc1; font-weight: 570; }
   .fields { display: grid; gap: 13px; padding: 16px 19px 18px; }
   label { display: grid; gap: 6px; }
@@ -328,21 +299,18 @@
     outline: 0;
     background: #0b171e;
     color: #dce5e8;
-    font: 11px 'JetBrains Mono Variable', monospace;
+    font: var(--font-size-sm) 'JetBrains Mono Variable', monospace;
   }
   input:focus { border-color: #5d8994; box-shadow: 0 0 0 2px rgb(93 137 148 / 13%); }
   input[aria-invalid='true'] { border-color: #b96c62; }
   input::placeholder { color: #526770; }
-  small { color: #687f89; font-size: 8px; line-height: 1.4; }
+  small { color: #687f89; font-size: var(--font-size-xs); line-height: 1.4; }
   small.error { color: #e28e82; }
   .browse-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
-  button { border: 1px solid #3d535d; border-radius: 3px; padding: 0 12px; background: #172832; color: #aebdc3; font-size: 9px; cursor: pointer; }
-  button:hover:not(:disabled) { border-color: #58727d; background: #1d303a; color: #e3eaec; }
-  button:disabled { cursor: default; opacity: 0.55; }
   .switches { display: flex; gap: 20px; padding: 1px 0; }
   .check { display: flex; align-items: center; gap: 7px; }
   .check input, .save-choice input { accent-color: #61a0ae; }
-  .check span { color: #b6c4c9; font-size: 10px; font-weight: 540; letter-spacing: 0; text-transform: none; }
+  .check span { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 540; letter-spacing: 0; text-transform: none; }
   fieldset { display: grid; gap: 7px; margin: 0; border: 0; padding: 0; }
   legend { margin-bottom: 7px; padding: 0; }
   .save-choice {
@@ -359,11 +327,8 @@
   .save-choice.chosen { border-color: #537783; background: #10232b; }
   .save-choice input { margin: 2px 0 0; }
   .save-choice span { display: grid; gap: 4px; }
-  .save-choice strong { color: #c4d0d4; font-size: 10px; font-weight: 610; }
-  .save-choice small { color: #718891; font-size: 8px; }
-  .form-error { margin: 0; border-left: 2px solid #b96c62; padding: 7px 9px; background: rgb(185 108 98 / 9%); color: #e2a097; font-size: 10px; line-height: 1.4; }
+  .save-choice strong { color: #c4d0d4; font-size: var(--font-size-sm); font-weight: 610; }
+  .save-choice small { color: #718891; font-size: var(--font-size-xs); }
+  .form-error { margin: 0; border-left: 2px solid #b96c62; padding: 7px 9px; background: rgb(185 108 98 / 9%); color: #e2a097; font-size: var(--font-size-sm); line-height: 1.4; }
   footer { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #2c4049; padding: 12px 19px; }
-  footer button { min-height: 31px; }
-  footer .primary { border-color: #56818c; background: #31616d; color: #f0f7f8; }
-  footer .primary:hover:not(:disabled) { border-color: #70a1ac; background: #39717e; }
 </style>

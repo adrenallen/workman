@@ -27,7 +27,7 @@
       <h2 id="mcp-card-title">Connect your agent</h2>
       <p>Choose a client and copy the setup it understands. Every recipe targets this local daemon.</p>
     </div>
-    <span class="availability"><i aria-hidden="true"></i>Streamable HTTP</span>
+    <span class="availability" title="MCP transport available · Streamable HTTP"><i aria-hidden="true"></i>Streamable HTTP</span>
   </header>
 
   {#if activeSetup}
@@ -91,9 +91,9 @@
 <style>
   .card {
     overflow: hidden;
-    border: 1px solid var(--border, #30343a);
+    border: 1px solid var(--border, var(--border));
     border-radius: 5px;
-    background: var(--surface, #17191c);
+    background: var(--surface, var(--card));
   }
 
   .card-heading {
@@ -109,9 +109,9 @@
     width: 38px;
     height: 38px;
     place-items: center;
-    border: 1px solid var(--border-strong, #42474f);
-    background: #25282d;
-    color: var(--text-soft, #b3b8c0);
+    border: 1px solid var(--border-strong, var(--border-strong));
+    background: var(--accent);
+    color: var(--text-soft, var(--text-soft));
     font-family: 'JetBrains Mono Variable', monospace;
     font-size: 15px;
     font-weight: 720;
@@ -126,8 +126,8 @@
   }
 
   .eyebrow {
-    color: var(--muted, #7d848e);
-    font-size: 7px;
+    color: var(--muted, var(--muted-foreground));
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -135,15 +135,15 @@
 
   h2 {
     margin: 3px 0 0;
-    color: var(--text, #e5e7eb);
+    color: var(--text, var(--foreground));
     font-size: 18px;
     font-weight: 630;
   }
 
   .card-heading p {
     margin: 4px 0 0;
-    color: var(--muted, #7d848e);
-    font-size: 10px;
+    color: var(--muted, var(--muted-foreground));
+    font-size: var(--font-size-sm);
     line-height: 1.5;
   }
 
@@ -151,8 +151,8 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    color: var(--muted, #7d848e);
-    font-size: 7px;
+    color: var(--muted, var(--muted-foreground));
+    font-size: var(--font-size-xs);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
@@ -169,25 +169,25 @@
     grid-template-columns: auto minmax(24px, 1fr) auto minmax(24px, 1fr) auto;
     align-items: center;
     gap: 9px;
-    border-block: 1px solid var(--border, #30343a);
+    border-block: 1px solid var(--border, var(--border));
     padding: 7px 14px;
-    background: var(--surface, #17191c);
-    color: var(--muted, #7d848e);
-    font-size: 7px;
+    background: var(--surface, var(--card));
+    color: var(--muted, var(--muted-foreground));
+    font-size: var(--font-size-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
-  .handshake strong { color: var(--text-soft, #b3b8c0); font-weight: 650; }
-  .handshake i { height: 1px; background: var(--border-strong, #42474f); }
+  .handshake strong { color: var(--text-soft, var(--text-soft)); font-weight: 650; }
+  .handshake i { height: 1px; background: var(--border-strong, var(--border-strong)); }
 
   .client-switch {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 3px;
-    border-bottom: 1px solid var(--border, #30343a);
+    border-bottom: 1px solid var(--border, var(--border));
     padding: 6px 14px;
-    background: var(--surface, #17191c);
+    background: var(--surface, var(--card));
   }
 
   .client-switch button {
@@ -197,18 +197,18 @@
     border-radius: 2px;
     padding: 7px 8px;
     background: transparent;
-    color: var(--muted, #7d848e);
+    color: var(--muted, var(--muted-foreground));
     font: inherit;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     font-weight: 620;
     text-overflow: ellipsis;
     white-space: nowrap;
     cursor: pointer;
   }
 
-  .client-switch button:hover { background: #22252a; color: var(--text-soft, #b3b8c0); }
+  .client-switch button:hover { background: #22252a; color: var(--text-soft, var(--text-soft)); }
   .client-switch button:focus-visible { outline: 2px solid #8a929d; outline-offset: 1px; }
-  .client-switch button.active { border-color: var(--border-strong, #42474f); background: #292c31; color: var(--text, #e5e7eb); }
+  .client-switch button.active { border-color: var(--border-strong, var(--border-strong)); background: #292c31; color: var(--text, var(--foreground)); }
 
   .connection-overview {
     display: grid;
@@ -217,14 +217,14 @@
     padding: 12px 14px;
   }
 
-  .recipe { border-top: 1px solid var(--border, #30343a); background: var(--surface, #17191c); }
+  .recipe { border-top: 1px solid var(--border, var(--border)); background: var(--surface, var(--card)); }
   .recipe > header { display: flex; align-items: end; justify-content: space-between; gap: 10px; padding: 10px 14px 8px; }
-  .recipe-kicker { color: var(--muted, #7d848e); font-size: 7px; letter-spacing: 0.08em; text-transform: uppercase; }
-  h3 { margin: 2px 0 0; color: var(--text-soft, #b3b8c0); font-size: 13px; }
-  .recipe > header p { max-width: 520px; margin: 0; color: var(--muted, #7d848e); font-size: 9px; line-height: 1.45; text-align: right; }
+  .recipe-kicker { color: var(--muted, var(--muted-foreground)); font-size: var(--font-size-xs); letter-spacing: 0.08em; text-transform: uppercase; }
+  h3 { margin: 2px 0 0; color: var(--text-soft, var(--text-soft)); font-size: 13px; }
+  .recipe > header p { max-width: 520px; margin: 0; color: var(--muted, var(--muted-foreground)); font-size: var(--font-size-sm); line-height: 1.45; text-align: right; }
   .recipe-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 0 14px 14px; }
   .recipe-field.wide { grid-column: 1 / -1; }
-  .missing { margin: 0; padding: 14px; color: var(--muted, #7d848e); font-size: 10px; }
+  .missing { margin: 0; padding: 14px; color: var(--muted, var(--muted-foreground)); font-size: var(--font-size-sm); }
 
   @media (max-width: 760px) {
     .card-heading { grid-template-columns: auto minmax(0, 1fr); }

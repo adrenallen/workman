@@ -1,4 +1,5 @@
 <script lang="ts">
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import type { ProcessView } from './daemon';
 
   interface Props {
@@ -49,6 +50,13 @@
     if (process.agent_state.needs_input) return 'needs input';
     return process.status;
   }
+
+  function stateTone(process: ProcessView): 'success' | 'warning' | 'danger' | 'neutral' {
+    if (process.status === 'crashed') return 'danger';
+    if (process.status === 'starting' || process.agent_state.needs_input || needsTrust(process)) return 'warning';
+    if (process.status === 'running') return 'success';
+    return 'neutral';
+  }
 </script>
 
 <section class="process-panel" aria-label="Project processes">
@@ -92,13 +100,7 @@
             title={process.kind === 'command' && !isActive(process) ? `Run ${process.name}` : `Open ${process.name}`}
             onclick={() => runOrSelect(process)}
           >
-            <span
-              class="status-light"
-              class:green={process.status === 'running' && !process.agent_state.needs_input}
-              class:red={process.status === 'crashed'}
-              class:amber={process.status === 'starting' || process.agent_state.needs_input || needsTrust(process)}
-              aria-hidden="true"
-            ></span>
+            <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
             <span class="process-copy">
               <span class="process-title">
                 <strong>{process.name}</strong>
@@ -184,8 +186,8 @@
   }
 
   header div > span {
-    color: #aeb3ba;
-    font-size: 10px;
+    color: var(--text-soft);
+    font-size: var(--font-size-sm);
     font-weight: 650;
     letter-spacing: 0.09em;
     text-transform: uppercase;
@@ -193,8 +195,8 @@
 
   header strong {
     margin-top: 2px;
-    color: #747b84;
-    font-size: 8px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
     font-weight: 500;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -207,9 +209,9 @@
     border: 1px solid #464b52;
     border-radius: 2px;
     padding: 5px 8px;
-    background: #24272b;
-    color: #d1d4d8;
-    font-size: 8px;
+    background: var(--accent);
+    color: var(--foreground);
+    font-size: var(--font-size-xs);
     font-weight: 650;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -271,25 +273,6 @@
     background: rgb(216 226 233 / 3%);
   }
 
-  .status-light {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #536873;
-  }
-
-  .status-light.green {
-    background: var(--signal);
-  }
-
-  .status-light.red {
-    background: var(--fault);
-  }
-
-  .status-light.amber {
-    background: #e4ae5b;
-  }
-
   .process-copy,
   .process-title,
   .process-title strong,
@@ -313,30 +296,30 @@
   }
 
   .process-title strong {
-    color: #e0e2e5;
+    color: var(--foreground);
     font-size: 12px;
     font-weight: 590;
   }
 
   .process-title small {
     color: #7d848d;
-    font-size: 8px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   .command {
     margin-top: 3px;
-    color: #8a919a;
-    font-size: 9px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-sm);
   }
 
   .state {
     display: flex;
     align-items: center;
     gap: 5px;
-    color: #8a919a;
-    font-size: 8px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
     white-space: nowrap;
@@ -361,12 +344,12 @@
   }
 
   .actions button {
-    border: 1px solid #444950;
+    border: 1px solid var(--border-strong);
     border-radius: 2px;
     padding: 5px 7px;
-    background: #24272b;
+    background: var(--accent);
     color: #b4b9c0;
-    font-size: 7px;
+    font-size: var(--font-size-xs);
     letter-spacing: 0.05em;
     text-transform: uppercase;
     cursor: pointer;
@@ -394,24 +377,24 @@
   }
 
   .empty > span {
-    color: #9da3ab;
+    color: var(--text-soft);
     font-family: 'JetBrains Mono Variable', monospace;
   }
 
-  .empty strong { display: block; color: #e2e4e6; font-size: 12px; }
+  .empty strong { display: block; color: var(--foreground); font-size: 12px; }
 
   .empty p {
     margin: 5px 0 0;
-    font-size: 10px;
+    font-size: var(--font-size-sm);
     line-height: 1.5;
   }
 
-  .empty button { display: flex; align-items: center; gap: 6px; border: 1px solid #4a4f57; border-radius: 3px; padding: 6px 9px; background: #25282d; color: #e2e4e6; font-size: 9px; font-weight: 650; cursor: pointer; }
+  .empty button { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 9px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; cursor: pointer; }
   .empty button span { color: #a6acb4; font: 13px 'JetBrains Mono Variable', monospace; }
 
   code {
     color: #9fb2bb;
-    font-size: 9px;
+    font-size: var(--font-size-sm);
   }
 
   @media (max-width: 820px) {

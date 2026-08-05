@@ -1,29 +1,82 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is([data-theme='dark'] *));
+
+/*
+ * awm UI tokens — the only color, type, radius, and elevation source.
+ * Scoped component CSS may describe layout, but must consume these values.
+ */
 :root {
-  font-family: var(--ui-font-family, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif);
-  font-size: calc(13px * var(--ui-font-scale, 1));
-  -webkit-text-size-adjust: var(--ui-font-scale-percent, 100%);
-  text-size-adjust: var(--ui-font-scale-percent, 100%);
-  color: #e5e7eb;
-  background: #111315;
+  color-scheme: dark;
+  font-family: var(--ui-font-family, 'Inter Variable', -apple-system, BlinkMacSystemFont, sans-serif);
+  font-size: calc(14px * var(--ui-font-scale, 1));
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --night: #111315;
-  --rail: #17191c;
-  --panel: #1b1e22;
-  --slate: #30343a;
-  --steel: #9ca3ad;
-  --fog: #f3f4f6;
-  --signal: #55b989;
-  --fault: #dc6b6b;
-  --warning: #d6a24f;
-  --surface: #17191c;
-  --surface-raised: #1c1f23;
-  --border: #30343a;
-  --border-strong: #42474f;
-  --text: #e5e7eb;
-  --text-soft: #b3b8c0;
-  --muted: #7d848e;
-  --ui-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  -webkit-text-size-adjust: var(--ui-font-scale-percent, 100%);
+  text-size-adjust: var(--ui-font-scale-percent, 100%);
+
+  --background: #101216;
+  --foreground: #e7e9ed;
+  --card: #16191e;
+  --card-foreground: #e7e9ed;
+  --popover: #1a1e24;
+  --popover-foreground: #f0f1f3;
+  --primary: #e2e6ec;
+  --primary-foreground: #171a1f;
+  --secondary: #22262d;
+  --secondary-foreground: #d9dce2;
+  --muted-surface: #1b1f25;
+  --muted-foreground: #9299a4;
+  --accent: #252b34;
+  --accent-foreground: #f2f3f5;
+  --destructive: #df7278;
+  --destructive-foreground: #fff3f3;
+  --border-token: #2b3038;
+  --input: #363c46;
+  --ring: #7aa2f7;
+  --success: #51b986;
+  --success-foreground: #dff8e9;
+  --warning-token: #d5a34f;
+  --warning-foreground: #fff3cf;
+  --sidebar: #14171b;
+  --sidebar-foreground: #d8dbe0;
+  --sidebar-primary: #e2e6ec;
+  --sidebar-primary-foreground: #171a1f;
+  --sidebar-accent: #22272e;
+  --sidebar-accent-foreground: #f2f3f5;
+  --sidebar-border: #292e36;
+  --sidebar-ring: #7aa2f7;
+
+  --radius: 0.25rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  --font-size-lg: 1rem;
+  --font-size-xl: 1.25rem;
+
+  /* Compatibility aliases: all existing surfaces resolve back to this token set. */
+  --night: var(--background);
+  --rail: var(--sidebar);
+  --panel: var(--card);
+  --slate: var(--border-token);
+  --steel: var(--muted-foreground);
+  --fog: var(--foreground);
+  --signal: var(--success);
+  --fault: var(--destructive);
+  --warning: var(--warning-token);
+  --surface: var(--card);
+  --surface-raised: var(--popover);
+  --border: var(--border-token);
+  --border-strong: var(--input);
+  --text: var(--foreground);
+  --text-soft: #bec3cb;
+  --muted: var(--muted-foreground);
+  --ui-font-family: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
   --ui-font-scale: 1;
   --ui-font-scale-percent: 100%;
   --ui-scale: 1;
@@ -33,46 +86,135 @@
 }
 
 :root[data-theme='light'] {
-  color: #24282d;
-  background: #e8eaed;
-  --night: #e8eaed;
-  --rail: #f2f3f5;
-  --panel: #fff;
-  --slate: #cdd1d6;
-  --steel: #606872;
-  --fog: #1e2227;
-  --signal: #267f62;
-  --fault: #b34343;
-  --warning: #94691f;
-  --surface: #f6f7f8;
-  --surface-raised: #fff;
-  --border: #cfd3d8;
-  --border-strong: #b2b8c0;
-  --text: #22262b;
-  --text-soft: #4e555e;
-  --muted: #737b85;
+  color-scheme: light;
+  --background: #f3f4f6;
+  --foreground: #20242a;
+  --card: #ffffff;
+  --card-foreground: #20242a;
+  --popover: #ffffff;
+  --popover-foreground: #171a1f;
+  --primary: #20242a;
+  --primary-foreground: #ffffff;
+  --secondary: #e8eaed;
+  --secondary-foreground: #30353c;
+  --muted-surface: #eceef1;
+  --muted-foreground: #68717d;
+  --accent: #e2e6ec;
+  --accent-foreground: #171a1f;
+  --destructive: #b94d56;
+  --destructive-foreground: #ffffff;
+  --border-token: #d1d5db;
+  --input: #bcc2ca;
+  --ring: #4f72bd;
+  --success: #267f5b;
+  --success-foreground: #0e3e2a;
+  --warning-token: #94691f;
+  --warning-foreground: #3f2a08;
+  --sidebar: #e9ebee;
+  --sidebar-foreground: #2b3037;
+  --sidebar-primary: #20242a;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #dde1e6;
+  --sidebar-accent-foreground: #171a1f;
+  --sidebar-border: #cbd0d7;
+  --sidebar-ring: #4f72bd;
+  --text-soft: #4e5661;
 }
 
-* {
-  box-sizing: border-box;
+@theme inline {
+  --font-sans: var(--ui-font-family);
+  --font-mono: var(--terminal-font-family);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted-surface);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border-token);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning-token);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 1px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 1px);
+  --radius-xl: calc(var(--radius) + 3px);
+  --text-xs: var(--font-size-xs);
+  --text-sm: var(--font-size-sm);
+  --text-base: var(--font-size-base);
+  --text-lg: var(--font-size-lg);
+  --text-xl: var(--font-size-xl);
 }
 
-html,
-body,
-#app {
-  width: 100%;
-  min-width: 320px;
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-}
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--border-token);
+  }
 
-#app {
-  zoom: var(--ui-scale, 1);
-}
+  html,
+  body,
+  #app {
+    width: 100%;
+    min-width: 320px;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
 
-body {
-  background: var(--night);
+  #app {
+    zoom: var(--ui-scale, 1);
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button {
+    color: inherit;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 1px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--ring) 34%, transparent);
+    color: var(--foreground);
+  }
 }
 
 body.resizing-panel {
@@ -80,28 +222,11 @@ body.resizing-panel {
   user-select: none;
 }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
-
-button {
-  color: inherit;
-}
-
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible {
-  outline: 2px solid #8a929d;
-  outline-offset: 2px;
-}
-
-::selection {
-  background: rgb(122 130 140 / 34%);
-  color: #fff;
+[data-slot='button'],
+[data-slot$='-item'],
+[data-slot='input'],
+[data-slot='textarea'] {
+  letter-spacing: -0.005em;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -109,7 +234,6 @@ select:focus-visible {
   input,
   textarea,
   select {
-    transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease,
-      opacity 140ms ease;
+    transition-duration: 120ms;
   }
 }

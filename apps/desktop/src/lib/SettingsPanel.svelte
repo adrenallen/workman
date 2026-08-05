@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { SettingsPanelProps } from './workspace';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
   import {
     applyUpdate,
     checkForUpdates,
@@ -38,7 +39,7 @@
   let updateBusy = $state<'check' | 'apply' | 'preference' | null>(null);
   let updateMessage = $state<string | null>(null);
   let loadedConnection = $state<string | null>(null);
-  let viewport = $state<HTMLDivElement>();
+  let viewport = $state<HTMLElement | null>(null);
   let request = 0;
 
   let activeDefinition = $derived(
@@ -192,7 +193,7 @@
   <SettingsStatusStrip {project} {connection} {info} />
   <SettingsSectionNav connected={connection.status === 'connected'} />
 
-  <div class="section-viewport" bind:this={viewport}>
+  <ScrollArea class="min-h-0 min-w-0 w-full overflow-hidden px-0.5 pb-3" bind:viewportRef={viewport}>
     <div
       class="section-panel"
       id={`settings-panel-${$settingsSection}`}
@@ -252,19 +253,18 @@
         {/if}
       {/if}
     </div>
-  </div>
+  </ScrollArea>
 </section>
 
 <style>
   .settings-panel { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 7px; overflow: hidden; padding: 9px 12px 12px; }
   .settings-header { display: flex; min-height: 45px; align-items: center; justify-content: space-between; gap: 18px; padding: 0 2px; }
-  .settings-header .eyebrow { color: var(--muted); font: 700 7px/1.2 'JetBrains Mono Variable', monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .settings-header .eyebrow { color: var(--muted); font: 700 var(--font-size-xs)/1.2 'JetBrains Mono Variable', monospace; letter-spacing: .08em; text-transform: uppercase; }
   .settings-header h2 { margin: 2px 0 0; color: var(--text); font-size: 18px; line-height: 1.05; }
   .settings-header p { display: grid; min-width: 150px; margin: 0; padding-left: 12px; border-left: 1px solid var(--border); text-align: right; }
-  .settings-header p strong { color: var(--text-soft); font-size: 9px; }
-  .settings-header p span { margin-top: 2px; color: var(--muted); font: 7px/1.25 'JetBrains Mono Variable', monospace; }
-  .section-viewport { min-width: 0; min-height: 0; overflow-y: auto; padding: 1px 2px 12px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .section-panel { width: min(1040px, 100%); min-width: 0; margin: 0 auto; outline: 0; }
+  .settings-header p strong { color: var(--text-soft); font-size: var(--font-size-sm); }
+  .settings-header p span { margin-top: 2px; color: var(--muted); font: var(--font-size-xs)/1.25 'JetBrains Mono Variable', monospace; }
+  .section-panel { width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; outline: 0; }
   .section-panel:focus-visible { outline: 1px solid var(--signal); outline-offset: 2px; }
   .section-stack { display: grid; gap: 9px; }
 

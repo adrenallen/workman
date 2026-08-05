@@ -137,6 +137,7 @@
             type="button"
             role="switch"
             aria-checked={tool.enabled}
+            title={`${tool.name} · ${tool.enabled ? 'enabled' : 'disabled'}`}
             disabled={!connected || busyId !== null || tool.source === 'config'}
             onclick={() => void toggle(tool)}
           ><i aria-hidden="true"></i><span>{tool.enabled ? 'Enabled' : 'Disabled'}</span></button>
@@ -181,60 +182,60 @@
   .card > header, .card > header > div, .add, .tool-copy > div, .toggle, .row-actions, .editor > header, .editor footer, .editor footer > div, .empty { display: flex; align-items: center; }
   .card > header { justify-content: space-between; gap: 12px; padding: 11px 12px 10px; }
   .card > header > div { flex-wrap: wrap; gap: 5px 10px; }
-  .card > header p { width: 100%; margin: 0; color: #969da6; font-size: 10px; }
+  .card > header p { width: 100%; margin: 0; color: var(--text-soft); font-size: var(--font-size-sm); }
   .eyebrow, .add, .tool-copy span, .tool-copy code, .toggle, .row-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
-  .eyebrow { color: #858c95; font-size: 7px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
-  h2 { margin: 0; color: #eceef0; font-size: 16px; }
-  .add { gap: 5px; border: 1px solid #484d54; border-radius: 3px; padding: 6px 8px; background: #25282d; color: #d7dadd; font-size: 8px; font-weight: 650; cursor: pointer; }
-  .add span { color: #a7adb5; font-size: 13px; }
+  .eyebrow { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+  h2 { margin: 0; color: var(--foreground); font-size: 16px; }
+  .add { gap: 5px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 8px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 650; cursor: pointer; }
+  .add span { color: var(--text-soft); font-size: 13px; }
   button:disabled { opacity: 0.42; cursor: default; }
 
   .tool-list { border-top: 1px solid #243e49; }
   article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px; }
   article:last-child { border-bottom: 0; }
   article.disabled { opacity: 0.58; }
-  .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: 11px; font-weight: 700; }
+  .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); font-weight: 700; }
   .tool-copy { min-width: 0; }
   .tool-copy > div { gap: 7px; }
-  .tool-copy strong { color: #bacbd0; font-size: 11px; }
-  .tool-copy span { border: 1px solid #304c57; border-radius: 999px; padding: 2px 5px; color: #708a94; font-size: 6px; text-transform: uppercase; }
-  .tool-copy code { display: block; overflow: hidden; margin-top: 4px; color: #66808a; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .tool-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); }
+  .tool-copy span { border: 1px solid #304c57; border-radius: 999px; padding: 2px 5px; color: #708a94; font-size: var(--font-size-xs); text-transform: uppercase; }
+  .tool-copy code { display: block; overflow: hidden; margin-top: 4px; color: #66808a; font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
 
-  .toggle { gap: 5px; border: 0; background: transparent; color: #718993; font-size: 7px; cursor: pointer; }
+  .toggle { gap: 5px; border: 0; background: transparent; color: #718993; font-size: var(--font-size-xs); cursor: pointer; }
   .toggle i { position: relative; width: 25px; height: 13px; border: 1px solid #405862; border-radius: 999px; background: #152832; }
   .toggle i::after { position: absolute; top: 2px; left: 2px; width: 7px; height: 7px; border-radius: 50%; background: #647983; content: ''; transition: transform 120ms ease; }
   .toggle.enabled i { border-color: #3e756f; background: rgb(99 215 197 / 11%); }
   .toggle.enabled i::after { background: var(--signal); transform: translateX(12px); }
   .row-actions { gap: 4px; }
-  .row-actions button { border: 1px solid #304b56; border-radius: 2px; padding: 5px 7px; background: transparent; color: #8198a1; font-size: 7px; cursor: pointer; }
+  .row-actions button { border: 1px solid #304b56; border-radius: 2px; padding: 5px 7px; background: transparent; color: #8198a1; font-size: var(--font-size-xs); cursor: pointer; }
   .row-actions button:hover:not(:disabled) { border-color: #5a7780; color: #d3e0e3; }
   .row-actions .delete:hover:not(:disabled) { border-color: var(--fault); color: var(--fault); }
 
-  .loading, .empty { min-height: 118px; border-top: 1px solid #243e49; justify-content: center; gap: 10px; padding: 18px; color: #67808a; font-size: 8px; }
+  .loading, .empty { min-height: 118px; border-top: 1px solid #243e49; justify-content: center; gap: 10px; padding: 18px; color: #67808a; font-size: var(--font-size-xs); }
   .loading i { width: 12px; height: 12px; border: 1px solid #3b555f; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
   .empty { justify-content: flex-start; }
   .empty > span { color: #4f6d77; font-size: 23px; }
-  .empty strong { color: #a8bbc1; font-size: 10px; }
-  .empty p { margin: 3px 0 0; color: #607984; font-size: 9px; }
+  .empty strong { color: #a8bbc1; font-size: var(--font-size-sm); }
+  .empty p { margin: 3px 0 0; color: #607984; font-size: var(--font-size-sm); }
   .empty code { color: #8bc9c0; }
-  .empty button { margin-left: auto; border: 1px solid #3c5e67; padding: 7px 9px; background: #112b35; color: #bccdd1; font-size: 8px; }
+  .empty button { margin-left: auto; border: 1px solid #3c5e67; padding: 7px 9px; background: #112b35; color: #bccdd1; font-size: var(--font-size-xs); }
 
   .editor { position: absolute; z-index: 3; inset: 8px; overflow: auto; border: 1px solid #47717a; border-radius: 4px; background: #0c2029; box-shadow: 0 18px 45px rgb(0 0 0 / 35%); }
   .editor > header { justify-content: space-between; border-bottom: 1px solid #29444f; padding: 13px 15px; }
   .editor h3 { margin: 3px 0 0; color: #dce7e9; font-size: 14px; }
   .close { border: 0; background: transparent; color: #78909a; font-size: 20px; cursor: pointer; }
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; padding: 15px; }
-  .editor label > span { display: block; margin-bottom: 5px; color: #708994; font-size: 7px; text-transform: uppercase; }
-  .editor input[type='text'] { width: 100%; border: 1px solid #304c57; border-radius: 2px; outline: 0; padding: 9px; background: #08171e; color: #c3d1d5; font-family: 'JetBrains Mono Variable', monospace; font-size: 9px; }
+  .editor label > span { display: block; margin-bottom: 5px; color: #708994; font-size: var(--font-size-xs); text-transform: uppercase; }
+  .editor input[type='text'] { width: 100%; border: 1px solid #304c57; border-radius: 2px; outline: 0; padding: 9px; background: var(--background); color: var(--text-soft); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); }
   .editor input:focus { border-color: var(--signal); }
   .command { grid-column: 1 / -1; }
   .enabled-check { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; }
   .enabled-check input { accent-color: var(--signal); }
   .enabled-check span { margin: 0 !important; }
   .editor footer { justify-content: space-between; gap: 12px; border-top: 1px solid #29444f; padding: 11px 15px; }
-  .editor footer p { margin: 0; color: #607984; font-size: 7px; }
+  .editor footer p { margin: 0; color: #607984; font-size: var(--font-size-xs); }
   .editor footer > div { gap: 6px; }
-  .editor footer button { border: 1px solid #38545e; border-radius: 2px; padding: 7px 9px; font-size: 8px; cursor: pointer; }
+  .editor footer button { border: 1px solid #38545e; border-radius: 2px; padding: 7px 9px; font-size: var(--font-size-xs); cursor: pointer; }
   .cancel { background: transparent; color: #899da5; }
   .save { background: var(--signal); color: #071a20; font-weight: 680; }
   @keyframes spin { to { transform: rotate(360deg); } }
