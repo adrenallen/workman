@@ -4,6 +4,31 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-06
+
+Workman 0.1.2 makes the desktop easier to read and operate, strengthens isolated agent launches,
+and completes the authenticated self-hosted release path from download through promotion.
+
+### Highlights
+
+- Added a persistent notification center for completed agents, compact project-rail behavior,
+  section overview pages, safer dialogs, clearer todo states, and a searchable scratchpad browser.
+- Added project appearance controls with custom icons and images throughout the rail and overview
+  surfaces, plus the Workman mark in the app chrome, About screen, Dock bundle, README, and lander.
+- Made the agent registry editable, reorderable, restart-persistent, and truthful about runtime and
+  MCP availability; supported agents receive isolated per-launch Workman MCP wiring and deep checks.
+- Made worktree import an explicit user action so linked worktrees never interrupt startup with an
+  automatic prompt, while retaining PR status and repository-aware project navigation.
+
+### Release operations
+
+- Added Cloudflare R2-backed stable/latest release manifests, authenticated artifact downloads,
+  keyed POSIX installer delivery, and updater key support with honest authorization failures.
+- Kept GitHub prereleases as the compatibility bridge for older updaters while local release and
+  promotion scripts publish the complete macOS/Linux artifact set without triggering Actions.
+- Updated `wrk app` to launch the installed macOS bundle through LaunchServices so the branded
+  Workman Dock icon is used instead of a generic executable icon.
+
 ## 0.1.1 - 2026-08-05
 
 The first Workman release turns the awm preview into a more complete work manager, with a precise
