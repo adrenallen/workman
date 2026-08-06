@@ -19,6 +19,7 @@
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import IconButton from './components/ds/IconButton.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
+  import TodoStatusIndicator from './components/ds/TodoStatusIndicator.svelte';
   import TooltipLabel from './components/ds/TooltipLabel.svelte';
   import {
     agentLineageRows,
@@ -38,7 +39,7 @@
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
-  import { todoClaimLabel, todoClaimState, todoClaimTone } from './todoPresentation';
+  import { todoClaimLabel, todoClaimState } from './todoPresentation';
   import {
     moveOrderedId,
     moveTreeOrderBlock,
@@ -484,7 +485,7 @@
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
                   <span class="todo-state-rail" aria-hidden="true"></span>
-                  <StatusIndicator tone={todoClaimTone(todo)} label={todoStatusLabel(todo)} />
+                  <TodoStatusIndicator state={todoClaimState(todo)} label={todoStatusLabel(todo)} />
                   <span class="row-copy"><strong>{todo.title}</strong></span>
                   {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
                 </button>
@@ -671,12 +672,12 @@
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
   .todo-row { min-height: 24px; grid-template-columns: 2px 15px minmax(0, 1fr) auto; gap: 3px; padding-block: 1px; }
-  .todo-row .todo-state-rail { align-self: stretch; border-radius: 1px; background: var(--ring); }
-  .todo-row[data-todo-state='claimed'] .todo-state-rail { background: var(--warning); }
-  .todo-row[data-todo-state='blocked'] .todo-state-rail { background: var(--destructive); }
-  .todo-row[data-todo-state='completed'] .todo-state-rail { background: var(--muted-foreground); opacity: 0.6; }
-  .todo-row[data-todo-state='claimed'] { background: color-mix(in srgb, var(--warning) 5%, transparent); }
-  .todo-row[data-todo-state='blocked'] { background: color-mix(in srgb, var(--destructive) 6%, transparent); }
+  .todo-row .todo-state-rail { align-self: stretch; border-radius: 1px; background: var(--todo-state-open); opacity: 0.55; }
+  .todo-row[data-todo-state='claimed'] .todo-state-rail { background: var(--todo-state-claimed); opacity: 1; }
+  .todo-row[data-todo-state='blocked'] .todo-state-rail { background: var(--todo-state-blocked); opacity: 1; }
+  .todo-row[data-todo-state='completed'] .todo-state-rail { background: var(--todo-state-completed); opacity: 0.45; }
+  .todo-row[data-todo-state='claimed'] { background: color-mix(in srgb, var(--todo-state-claimed) 5%, transparent); }
+  .todo-row[data-todo-state='blocked'] { background: color-mix(in srgb, var(--todo-state-blocked) 6%, transparent); }
   .todo-row .row-copy strong { font-size: var(--font-size-xs); font-weight: 570; }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
   .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }

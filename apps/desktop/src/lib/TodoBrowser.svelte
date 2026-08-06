@@ -3,13 +3,12 @@
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
 
-  import StatusIndicator from './components/ds/StatusIndicator.svelte';
+  import TodoStatusIndicator from './components/ds/TodoStatusIndicator.svelte';
   import type { TodoPriority, TodoStatus, TodoSummary } from './coordination';
   import {
     shortTodoActor,
     todoClaimLabel,
-    todoClaimState,
-    todoClaimTone
+    todoClaimState
   } from './todoPresentation';
 
   interface Props {
@@ -143,7 +142,7 @@
         onclick={() => onSelect(todo)}
       >
         <span class="state-rail" aria-hidden="true"></span>
-        <StatusIndicator tone={todoClaimTone(todo)} label={todoClaimLabel(todo)} />
+        <TodoStatusIndicator state={todoClaimState(todo)} label={todoClaimLabel(todo)} />
         <span class="todo-id">#{todo.id}</span>
         <span class="todo-copy">
           <strong>{todo.title}</strong>
@@ -196,10 +195,10 @@
   .todo-row { position: relative; display: grid; width: 100%; min-height: 38px; grid-template-columns: 3px 15px 45px minmax(180px, 1fr) minmax(94px, 0.28fr) 62px 58px; align-items: center; gap: 7px; border: 0; border-bottom: 1px solid var(--border); padding: 3px 8px 3px 0; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .todo-row:hover { background: var(--popover); }
   .todo-row:focus-visible { z-index: 1; }
-  .state-rail { align-self: stretch; background: var(--ring); }
-  .todo-row[data-state='claimed'] .state-rail { background: var(--warning); }
-  .todo-row[data-state='blocked'] .state-rail { background: var(--destructive); }
-  .todo-row[data-state='completed'] .state-rail { background: var(--muted-foreground); opacity: 0.6; }
+  .state-rail { align-self: stretch; background: var(--todo-state-open); opacity: 0.55; }
+  .todo-row[data-state='claimed'] .state-rail { background: var(--todo-state-claimed); opacity: 1; }
+  .todo-row[data-state='blocked'] .state-rail { background: var(--todo-state-blocked); opacity: 1; }
+  .todo-row[data-state='completed'] .state-rail { background: var(--todo-state-completed); opacity: 0.45; }
   .todo-row[data-state='completed'] .todo-copy strong { color: var(--muted-foreground); text-decoration: line-through; }
   .todo-id { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .todo-copy { min-width: 0; }
@@ -210,8 +209,8 @@
   .claim-copy strong, .claim-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .claim-copy strong { color: var(--text-soft); font-weight: 650; text-transform: uppercase; }
   .claim-copy small { margin-top: 1px; color: var(--muted-foreground); }
-  .todo-row[data-state='claimed'] .claim-copy strong { color: var(--warning); }
-  .todo-row[data-state='blocked'] .claim-copy strong { color: var(--destructive); }
+  .todo-row[data-state='claimed'] .claim-copy strong { color: var(--todo-state-claimed); }
+  .todo-row[data-state='blocked'] .claim-copy strong { color: var(--todo-state-blocked); }
   .priority { justify-self: start; border: 1px solid var(--border-strong); border-radius: 999px; padding: 2px 6px; color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; }
   .priority.high { border-color: color-mix(in srgb, var(--destructive) 42%, var(--border)); color: var(--destructive); }
   .signals { display: flex; justify-content: flex-end; gap: 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); }

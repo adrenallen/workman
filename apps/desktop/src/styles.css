@@ -41,6 +41,10 @@
   --warning-foreground: #fff3cf;
   --information: #6f9fe8;
   --information-foreground: #e4efff;
+  --todo-state-open: var(--muted-foreground);
+  --todo-state-claimed: var(--warning-token);
+  --todo-state-blocked: var(--destructive);
+  --todo-state-completed: var(--muted-foreground);
   --sidebar: #14171b;
   --sidebar-foreground: #d8dbe0;
   --sidebar-primary: #e2e6ec;

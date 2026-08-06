@@ -1,6 +1,5 @@
 <script lang="ts">
-  import ListChecksIcon from '@lucide/svelte/icons/list-checks';
-
+  import TodoStatusIndicator from '$lib/components/ds/TodoStatusIndicator.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as Popover from '$lib/components/ui/popover';
   import * as Tooltip from '$lib/components/ui/tooltip';
@@ -37,7 +36,7 @@
               class="pointer-events-auto min-w-0 max-w-72 rounded-r-none border border-border bg-card pl-2 shadow-sm"
               onclick={() => openClaim(primary)}
             >
-              <ListChecksIcon class="text-muted-foreground" aria-hidden="true" />
+              <TodoStatusIndicator state="claimed" label={`Claimed todo · ${primary.title}`} />
               <span class="truncate">{primary.title}</span>
             </Button>
           {/snippet}
@@ -77,7 +76,7 @@
                 class="h-auto min-w-0 justify-start px-2 py-1.5 text-left"
                 onclick={() => openClaim(claim)}
               >
-                <ListChecksIcon class="text-muted-foreground" aria-hidden="true" />
+                <TodoStatusIndicator state="claimed" label={`Claimed todo · ${claim.title}`} />
                 <span class="min-w-0 flex-1">
                   <strong class="block truncate text-sm font-medium">{claim.title}</strong>
                   <small class="block truncate text-xs font-normal text-muted-foreground">

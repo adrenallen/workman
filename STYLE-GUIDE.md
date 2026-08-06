@@ -25,6 +25,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Icon-only controls must use `IconButton` and provide an action label plus any shortcut. Visible text wins when an action would be ambiguous.
 - Every dot, badge, count, health light, or attention marker must have an exact tooltip and accessible label. Use `StatusIndicator`; never add a bare colored circle.
 - Agent state always uses `AgentStatusIndicator`: gray static circle = idle, spinning green loader = working, amber alert = needs input, blue clock = waiting/timer, and red exit icon = exited. Exit tooltips distinguish clean exits from crashes.
+- Todo state always uses `TodoStatusIndicator` and the shared `--todo-state-*` tokens: a hollow neutral-gray circle means open/unclaimed, an amber circle-dot means claimed or in progress, a red alert means blocked, and a muted gray check means completed. Amber communicates active ownership without borrowing agent-working green or agent-waiting blue; the glyph keeps it distinct from an agent’s amber needs-input alert.
 - Status copy should answer what and why: “Daemon connected · port 62749”, “Agent needs input”, or “3 running of 5 terminals”. Avoid generic labels like “online” without a subject.
 - Row status belongs in a persistent trailing zone. Reveal hover actions in a separate in-flow slot that yields label space; never place an opaque or absolutely positioned action layer over PR, agent, or health indicators.
 
