@@ -1000,6 +1000,8 @@ fn mcp_launch_args(adapter: McpLaunchAdapter, mcp_url: &str) -> Vec<String> {
             })
             .to_string(),
             "--strict-mcp-config".to_owned(),
+            "--allowedTools".to_owned(),
+            "mcp__workman__whoami".to_owned(),
         ],
         McpLaunchAdapter::Codex => vec![
             "-c".to_owned(),
@@ -1010,6 +1012,8 @@ fn mcp_launch_args(adapter: McpLaunchAdapter, mcp_url: &str) -> Vec<String> {
             "-c".to_owned(),
             "mcp_servers.workman.env_http_headers={\"x-workman-mcp-token\"=\"WORKMAN_MCP_TOKEN\"}"
                 .to_owned(),
+            "-c".to_owned(),
+            "mcp_servers.workman.tools.whoami.approval_mode=\"approve\"".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -1234,6 +1238,7 @@ mod tests {
         assert!(command.contains("http://127.0.0.1:43123/mcp"));
         assert!(command.contains("x-workman-mcp-token"));
         assert!(command.contains("${WORKMAN_MCP_TOKEN}"));
+        assert!(command.contains("--allowedTools mcp__workman__whoami"));
         assert!(command.ends_with("--model opus"));
     }
 
@@ -1251,6 +1256,7 @@ mod tests {
         assert!(command.contains("http://127.0.0.1:43124/mcp"));
         assert!(command.contains("mcp_servers.workman.env_http_headers="));
         assert!(command.contains("WORKMAN_MCP_TOKEN"));
+        assert!(command.contains("mcp_servers.workman.tools.whoami.approval_mode=\"approve\""));
         assert!(command.ends_with("--model gpt-test"));
     }
 

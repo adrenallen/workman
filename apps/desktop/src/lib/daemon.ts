@@ -660,10 +660,14 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     const id = `desktop-${Date.now()}-${++this.sequence}`;
     const message = JSON.stringify({ id, method: type, params: fields });
     const response = new Promise<T>((resolve, reject) => {
+      const deepCheckInFlight = type === 'agent_tools.deep_check' || Array.from(this.pending.values())
+        .some((request) => request.method === 'agent_tools.deep_check');
       const requestTimeout = type.startsWith('daemon.update_')
         ? 180_000
         : type.startsWith('worktree.')
           ? 60_000
+          : deepCheckInFlight
+            ? 65_000
           : 5_000;
       const timeout = setTimeout(() => {
         this.pending.delete(id);
