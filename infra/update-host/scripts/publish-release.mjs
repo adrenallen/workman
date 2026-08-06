@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { generateManifest } from "./generate-manifest.mjs";
 
 const BUCKET = "workman-releases";
@@ -60,7 +61,7 @@ function upload(key, file, cacheControl, disposition) {
 async function publishRelease(args) {
   const version = normalizeVersion(args.version);
   const artifactsDir = resolve(args.artifacts_dir ?? "");
-  const installer = resolve(args.installer ?? "");
+  const installer = resolve(args.installer ?? fileURLToPath(new URL("../install.sh", import.meta.url)));
   const manifest = await generateManifest({
     version,
     artifactsDir,

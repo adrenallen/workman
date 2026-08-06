@@ -452,7 +452,7 @@ publish_release() {
     --artifacts-dir "$OUTPUT_DIR" \
     --published-at "$published_at" \
     --notes-url "https://github.com/adrenallen/workman/releases/tag/$TAG" \
-    --installer "$RELEASE_ASSETS_DIR/install.sh"
+    --installer "$UPDATE_HOST_DIR/install.sh"
 }
 
 mkdir -p "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"

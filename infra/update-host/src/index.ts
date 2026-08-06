@@ -2,6 +2,12 @@ const VERSIONED_PATH = /^\/versions\/(\d+\.\d+\.\d+)\/([A-Za-z0-9][A-Za-z0-9._-]
 const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
 const MANIFEST_CACHE = "public, max-age=60, must-revalidate";
 const INSTALLER_CACHE = "public, max-age=300, must-revalidate";
+const LOGO_PATH = "/workman-logo-wide-transparent.png";
+const LOGO_KEY = "branding/workman-logo-wide-transparent.png";
+
+type WorkerEnv = Env & {
+  DOWNLOAD_KEYS: string;
+};
 
 interface ReleaseAsset {
   name: string;
@@ -33,6 +39,86 @@ function errorResponse(status: number, message: string): Response {
   return json({ error: message }, status);
 }
 
+function candidateKeys(request: Request): string[] {
+  const candidates: string[] = [];
+  const authorization = request.headers.get("authorization");
+  if (authorization !== null) {
+    const bearer = /^Bearer\s+(.+)$/i.exec(authorization);
+    if (bearer !== null) candidates.push(bearer[1].trim());
+
+    const basic = /^Basic\s+(.+)$/i.exec(authorization);
+    if (basic !== null) {
+      try {
+        const decoded = atob(basic[1]);
+        const separator = decoded.indexOf(":");
+        if (separator !== -1) candidates.push(decoded.slice(separator + 1));
+      } catch {
+        // A malformed Basic credential is simply not a valid download key.
+      }
+    }
+  }
+
+  const headerKey = request.headers.get("x-workman-key");
+  if (headerKey !== null) candidates.push(headerKey.trim());
+
+  const queryKey = new URL(request.url).searchParams.get("key");
+  if (queryKey !== null) candidates.push(queryKey);
+  return candidates;
+}
+
+function isAuthorized(request: Request, env: WorkerEnv): boolean {
+  const validKeys = new Set(
+    env.DOWNLOAD_KEYS.split(",")
+      .map((key) => key.trim())
+      .filter((key) => key.length > 0),
+  );
+  return validKeys.size > 0 && candidateKeys(request).some((key) => validKeys.has(key));
+}
+
+function unauthorized(request: Request): Response {
+  const browserRequest = request.headers.get("accept")?.toLowerCase().includes("text/html") ?? false;
+  const response = browserRequest
+    ? new Response("A Workman download key is required.\n", {
+        status: 401,
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "www-authenticate": 'Basic realm="workman"',
+        },
+      })
+    : errorResponse(401, "invalid or missing download key");
+  response.headers.set("cache-control", "no-store");
+  return request.method === "HEAD" ? new Response(null, response) : response;
+}
+
+function serveLander(request: Request): Response {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workman</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; background: #000; }
+    body { display: grid; place-items: center; }
+    img { display: block; width: min(90vw, 960px); height: auto; }
+  </style>
+</head>
+<body>
+  <img src="${LOGO_PATH}" alt="Workman">
+</body>
+</html>`;
+  const response = new Response(html, {
+    headers: {
+      "cache-control": "public, max-age=300, must-revalidate",
+      "content-security-policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "content-type": "text/html; charset=utf-8",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+  return request.method === "HEAD" ? new Response(null, response) : response;
+}
+
 function isReleaseManifest(value: unknown): value is ReleaseManifest {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ReleaseManifest>;
@@ -44,7 +130,7 @@ function isReleaseManifest(value: unknown): value is ReleaseManifest {
   );
 }
 
-async function readChannel(env: Env, channel: "stable" | "latest"): Promise<ReleaseManifest> {
+async function readChannel(env: WorkerEnv, channel: "stable" | "latest"): Promise<ReleaseManifest> {
   const object = await env.RELEASES.get(`channels/${channel}.json`);
   if (object === null) throw new Error(`${channel} channel pointer is missing`);
   const manifest: unknown = await object.json();
@@ -52,7 +138,7 @@ async function readChannel(env: Env, channel: "stable" | "latest"): Promise<Rele
   return manifest;
 }
 
-async function serveManifest(request: Request, env: Env): Promise<Response> {
+async function serveManifest(request: Request, env: WorkerEnv): Promise<Response> {
   try {
     const [stable, latest] = await Promise.all([
       readChannel(env, "stable"),
@@ -106,7 +192,7 @@ function rangeHeaders(object: R2ObjectBody, range: R2Range, headers: Headers): v
 
 async function serveObject(
   request: Request,
-  env: Env,
+  env: WorkerEnv,
   key: string,
   cacheControl: string,
 ): Promise<Response> {
@@ -159,6 +245,18 @@ export default {
     }
 
     const pathname = new URL(request.url).pathname;
+    if (pathname === "/") return serveLander(request);
+    if (pathname === LOGO_PATH) {
+      return serveObject(request, env, LOGO_KEY, IMMUTABLE_CACHE);
+    }
+
+    if (
+      (pathname === "/releases.json" || pathname.startsWith("/versions/")) &&
+      !isAuthorized(request, env)
+    ) {
+      return unauthorized(request);
+    }
+
     if (pathname === "/releases.json") return serveManifest(request, env);
     if (pathname === "/install.sh") {
       return serveObject(request, env, "install.sh", INSTALLER_CACHE);
@@ -172,4 +270,4 @@ export default {
 
     return errorResponse(404, "not found");
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<WorkerEnv>;
