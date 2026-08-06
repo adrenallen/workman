@@ -17,21 +17,81 @@
     type DecorationSet,
     type ViewUpdate
   } from '@codemirror/view';
+  import BoldIcon from '@lucide/svelte/icons/bold';
+  import Code2Icon from '@lucide/svelte/icons/code-2';
+  import Heading2Icon from '@lucide/svelte/icons/heading-2';
+  import Heading3Icon from '@lucide/svelte/icons/heading-3';
+  import ItalicIcon from '@lucide/svelte/icons/italic';
+  import LinkIcon from '@lucide/svelte/icons/link';
+  import ListIcon from '@lucide/svelte/icons/list';
+  import ListOrderedIcon from '@lucide/svelte/icons/list-ordered';
+  import MinusIcon from '@lucide/svelte/icons/minus';
+  import StrikethroughIcon from '@lucide/svelte/icons/strikethrough';
+  import TextQuoteIcon from '@lucide/svelte/icons/text-quote';
   import { onMount } from 'svelte';
+
+  import IconButton from '$lib/components/ds/IconButton.svelte';
 
   interface Props {
     value: string;
     focusRequest?: number;
+    toolbar?: boolean;
     onChange: (value: string) => void;
     onSave: () => void;
   }
 
-  let { value, focusRequest = 0, onChange, onSave }: Props = $props();
+  let { value, focusRequest = 0, toolbar = true, onChange, onSave }: Props = $props();
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   let appliedFocusRequest = -1;
 
   const externalChange = Annotation.define<boolean>();
+
+  function replaceSelection(prefix: string, suffix = prefix, fallback = 'text'): void {
+    if (!view) return;
+    const selection = view.state.selection.main;
+    const selected = view.state.sliceDoc(selection.from, selection.to);
+    const content = selected || fallback;
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: `${prefix}${content}${suffix}` },
+      selection: {
+        anchor: selection.from + prefix.length,
+        head: selection.from + prefix.length + content.length
+      },
+      scrollIntoView: true
+    });
+    view.focus();
+  }
+
+  function prefixLines(prefix: string, heading = false): void {
+    if (!view) return;
+    const selection = view.state.selection.main;
+    const firstLine = view.state.doc.lineAt(selection.from);
+    const lastLine = view.state.doc.lineAt(selection.to);
+    const source = view.state.sliceDoc(firstLine.from, lastLine.to);
+    const next = source
+      .split('\n')
+      .map((line) => `${prefix}${heading ? line.replace(/^#{1,6}\s+/, '') : line}`)
+      .join('\n');
+    view.dispatch({
+      changes: { from: firstLine.from, to: lastLine.to, insert: next },
+      selection: { anchor: firstLine.from + next.length },
+      scrollIntoView: true
+    });
+    view.focus();
+  }
+
+  function insertRule(): void {
+    if (!view) return;
+    const position = view.state.selection.main.head;
+    const insert = `${position > 0 ? '\n\n' : ''}---\n\n`;
+    view.dispatch({
+      changes: { from: position, insert },
+      selection: { anchor: position + insert.length },
+      scrollIntoView: true
+    });
+    view.focus();
+  }
 
   class MarkerWidget extends WidgetType {
     readonly label: string;
@@ -191,7 +251,7 @@
   const editorTheme = EditorView.theme({
     '&': {
       height: '100%',
-      color: '#c8d3d8',
+      color: 'var(--foreground)',
       backgroundColor: 'transparent',
       fontSize: '13px'
     },
@@ -202,13 +262,13 @@
       lineHeight: '1.65',
       scrollbarColor: 'var(--border-strong) transparent'
     },
-    '.cm-content': { maxWidth: '920px', padding: '22px 28px 80px', caretColor: '#68d4c5' },
+    '.cm-content': { maxWidth: '920px', padding: '22px 28px 80px', caretColor: 'var(--ring)' },
     '.cm-line': { padding: '0 2px' },
-    '.cm-cursor': { borderLeftColor: '#68d4c5' },
-    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: '#19444b80' },
-    '.cm-activeLine': { backgroundColor: '#13202755' },
+    '.cm-cursor': { borderLeftColor: 'var(--ring)' },
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'color-mix(in srgb, var(--ring) 22%, transparent)' },
+    '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent) 55%, transparent)' },
     '.cm-live-heading': {
-      color: '#e7eef0',
+      color: 'var(--foreground)',
       fontFamily: "'Archivo Variable', sans-serif",
       fontWeight: '680',
       lineHeight: '1.18'
@@ -216,40 +276,40 @@
     '.cm-live-heading .tok-heading': { color: 'inherit', textDecoration: 'none' },
     '.cm-live-h1': { fontSize: '26px', paddingTop: '14px', paddingBottom: '7px' },
     '.cm-live-h2': { fontSize: '20px', paddingTop: '12px', paddingBottom: '5px' },
-    '.cm-live-h3': { fontSize: '16px', color: '#6ed8c9', paddingTop: '9px', paddingBottom: '3px' },
+    '.cm-live-h3': { fontSize: '16px', color: 'var(--text-soft)', paddingTop: '9px', paddingBottom: '3px' },
     '.cm-live-h4': { fontSize: '13px', textTransform: 'uppercase', letterSpacing: '.05em' },
-    '.cm-live-h5, .cm-live-h6': { fontSize: '12px', color: '#a9bdc5' },
-    '.cm-live-strong': { fontWeight: '720', color: '#e2eaed' },
-    '.cm-live-emphasis': { fontStyle: 'italic', color: '#c8d6da' },
+    '.cm-live-h5, .cm-live-h6': { fontSize: '12px', color: 'var(--muted-foreground)' },
+    '.cm-live-strong': { fontWeight: '720', color: 'var(--foreground)' },
+    '.cm-live-emphasis': { fontStyle: 'italic', color: 'var(--text-soft)' },
     '.cm-live-inline-code': {
       borderRadius: '3px',
       padding: '1px 4px',
-      backgroundColor: '#102631',
-      color: '#8fe3d6',
+      backgroundColor: 'var(--card)',
+      color: 'var(--foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace",
       fontSize: '.9em'
     },
-    '.cm-live-link': { color: '#6ed8c9', textDecoration: 'underline', textUnderlineOffset: '3px' },
+    '.cm-live-link': { color: 'var(--ring)', textDecoration: 'underline', textUnderlineOffset: '3px' },
     '.cm-live-quote': {
-      borderLeft: '2px solid #4fc4b6',
+      borderLeft: '2px solid var(--border-strong)',
       paddingLeft: '13px',
-      color: '#95aeb7',
+      color: 'var(--muted-foreground)',
       fontStyle: 'italic'
     },
     '.cm-live-list': { paddingLeft: '14px' },
     '.cm-live-bullet, .cm-live-order': {
       display: 'inline-block',
       minWidth: '18px',
-      color: '#6ed8c9',
+      color: 'var(--muted-foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
     '.cm-live-fence': {
-      borderLeft: '2px solid #274953',
+      borderLeft: '2px solid var(--border-strong)',
       backgroundColor: 'var(--background)',
-      color: '#7fa0a9',
+      color: 'var(--muted-foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
-    '.cm-placeholder': { color: '#586970', fontStyle: 'italic' }
+    '.cm-placeholder': { color: 'var(--muted-foreground)', fontStyle: 'italic' }
   });
 
   onMount(() => {
@@ -271,6 +331,20 @@
           liveMarkdown,
           editorTheme,
           keymap.of([
+            {
+              key: 'Mod-b',
+              run: () => {
+                replaceSelection('**');
+                return true;
+              }
+            },
+            {
+              key: 'Mod-i',
+              run: () => {
+                replaceSelection('*');
+                return true;
+              }
+            },
             {
               key: 'Mod-s',
               run: () => {
@@ -320,8 +394,52 @@
   });
 </script>
 
-<div class="editor-host" bind:this={host}></div>
+<div class="editor-shell" class:with-toolbar={toolbar}>
+  {#if toolbar}
+    <div class="format-toolbar" aria-label="Markdown formatting">
+      <IconButton label="Bold" shortcut="⌘B" onclick={() => replaceSelection('**')}>
+        {#snippet icon()}<BoldIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Italic" shortcut="⌘I" onclick={() => replaceSelection('*')}>
+        {#snippet icon()}<ItalicIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Strikethrough" onclick={() => replaceSelection('~~')}>
+        {#snippet icon()}<StrikethroughIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Inline code" onclick={() => replaceSelection('`')}>
+        {#snippet icon()}<Code2Icon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Link" onclick={() => replaceSelection('[', '](https://)', 'link text')}>
+        {#snippet icon()}<LinkIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <span class="separator" aria-hidden="true"></span>
+      <IconButton label="Heading 2" onclick={() => prefixLines('## ', true)}>
+        {#snippet icon()}<Heading2Icon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Heading 3" onclick={() => prefixLines('### ', true)}>
+        {#snippet icon()}<Heading3Icon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Bulleted list" onclick={() => prefixLines('- ')}>
+        {#snippet icon()}<ListIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Numbered list" onclick={() => prefixLines('1. ')}>
+        {#snippet icon()}<ListOrderedIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Quote" onclick={() => prefixLines('> ')}>
+        {#snippet icon()}<TextQuoteIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Horizontal rule" onclick={insertRule}>
+        {#snippet icon()}<MinusIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+    </div>
+  {/if}
+  <div class="editor-host" bind:this={host}></div>
+</div>
 
 <style>
+  .editor-shell { display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--background); }
+  .editor-shell.with-toolbar { grid-template-rows: auto minmax(0, 1fr); }
+  .format-toolbar { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 1px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 2px 5px; background: var(--card); scrollbar-width: none; }
+  .separator { width: 1px; height: 18px; flex: none; margin: 0 3px; background: var(--border); }
   .editor-host { min-height: 0; height: 100%; overflow: hidden; background: var(--background); }
 </style>

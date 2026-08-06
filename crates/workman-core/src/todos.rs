@@ -90,6 +90,50 @@ pub struct TodoCommentPage {
     pub next_offset: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoActivityKind {
+    Created,
+    Completed,
+    Reopened,
+    Locked,
+    Unlocked,
+}
+
+impl TodoActivityKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Completed => "completed",
+            Self::Reopened => "reopened",
+            Self::Locked => "locked",
+            Self::Unlocked => "unlocked",
+        }
+    }
+
+    fn parse(value: &str) -> TodoServiceResult<Self> {
+        match value {
+            "created" => Ok(Self::Created),
+            "completed" => Ok(Self::Completed),
+            "reopened" => Ok(Self::Reopened),
+            "locked" => Ok(Self::Locked),
+            "unlocked" => Ok(Self::Unlocked),
+            value => Err(TodoServiceError::Store(format!(
+                "unknown todo activity kind {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoActivity {
+    pub id: i64,
+    pub todo_id: TodoId,
+    pub actor: String,
+    pub kind: TodoActivityKind,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TodoSort {
     /// High priority first, then newest IDs first.
@@ -224,6 +268,11 @@ impl<'store> TodoService<'store> {
         )?;
         let todo_id = transaction.last_insert_rowid();
         replace_tags(&transaction, todo_id, &tags)?;
+        transaction.execute(
+            "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+             VALUES (?1, 'workman', 'created', ?2)",
+            params![todo_id, now_ms],
+        )?;
         transaction.commit()?;
         self.require_todo(project_id, todo_id, now_ms)
     }
@@ -250,7 +299,7 @@ impl<'store> TodoService<'store> {
         update: UpdateTodo,
         now_ms: i64,
     ) -> TodoServiceResult<TodoView> {
-        self.require_todo(project_id, todo_id, now_ms)?;
+        let current = self.require_todo(project_id, todo_id, now_ms)?;
         if let Some(title) = &update.title {
             validate_title(title)?;
         }
@@ -280,6 +329,23 @@ impl<'store> TodoService<'store> {
                 "UPDATE todos SET status = ?1, completed = ?2 WHERE id = ?3",
                 params![status, completed, todo_id],
             )?;
+            if status != current.status {
+                let kind = if completed {
+                    Some(TodoActivityKind::Completed)
+                } else if current.status == TodoStatus::Completed {
+                    Some(TodoActivityKind::Reopened)
+                } else {
+                    // Activity intentionally records lifecycle changes, not ordinary workflow-state edits.
+                    None
+                };
+                if let Some(kind) = kind {
+                    transaction.execute(
+                        "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+                         VALUES (?1, 'workman', ?2, ?3)",
+                        params![todo_id, kind.as_str(), now_ms],
+                    )?;
+                }
+            }
         }
         if let Some(tags) = tags {
             replace_tags(&transaction, todo_id, &tags)?;
@@ -583,7 +649,8 @@ impl<'store> TodoService<'store> {
                 "lease duration must be positive".into(),
             ));
         }
-        self.require_todo(project_id, todo_id, now_ms)?;
+        let current = self.require_todo(project_id, todo_id, now_ms)?;
+        let new_claim = current.locked_by.as_deref() != Some(actor);
         let expiry = now_ms
             .checked_add(lease_ttl_ms)
             .ok_or_else(|| TodoServiceError::InvalidInput("lease duration is too large".into()))?;
@@ -607,6 +674,9 @@ impl<'store> TodoService<'store> {
                 owner: todo.locked_by.unwrap_or_else(|| "another actor".into()),
             });
         }
+        if new_claim {
+            self.record_activity(todo_id, actor, TodoActivityKind::Locked, now_ms)?;
+        }
         self.require_todo(project_id, todo_id, now_ms)
     }
 
@@ -626,6 +696,7 @@ impl<'store> TodoService<'store> {
         if changed == 0 {
             return Err(TodoServiceError::LockNotOwned(todo_id));
         }
+        self.record_activity(todo_id, actor, TodoActivityKind::Unlocked, now_ms)?;
         self.require_todo(project_id, todo_id, now_ms)
     }
 
@@ -656,6 +727,18 @@ impl<'store> TodoService<'store> {
              WHERE id = ?5 AND project_id = ?6",
             params![completed, status, release_lock, actor, todo_id, project_id],
         )?;
+        if current.completed != completed {
+            self.record_activity(
+                todo_id,
+                actor,
+                if completed {
+                    TodoActivityKind::Completed
+                } else {
+                    TodoActivityKind::Reopened
+                },
+                now_ms,
+            )?;
+        }
         let affected = dependent_ids(self.store.connection(), todo_id)?;
         Ok((self.require_todo(project_id, todo_id, now_ms)?, affected))
     }
@@ -690,6 +773,55 @@ impl<'store> TodoService<'store> {
             self.require_todo(target_project_id, todo_id, now_ms)?,
             affected,
         ))
+    }
+
+    pub fn activity_list(
+        &self,
+        project_id: ProjectId,
+        todo_id: TodoId,
+        now_ms: i64,
+    ) -> TodoServiceResult<Vec<TodoActivity>> {
+        self.require_todo(project_id, todo_id, now_ms)?;
+        let mut statement = self.store.connection().prepare(
+            "SELECT id, todo_id, actor, kind, created_at
+             FROM todo_activity WHERE todo_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([todo_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, TodoId>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut activity = Vec::new();
+        for row in rows {
+            let (id, todo_id, actor, kind, created_at) = row?;
+            activity.push(TodoActivity {
+                id,
+                todo_id,
+                actor,
+                kind: TodoActivityKind::parse(&kind)?,
+                created_at,
+            });
+        }
+        Ok(activity)
+    }
+
+    fn record_activity(
+        &self,
+        todo_id: TodoId,
+        actor: &str,
+        kind: TodoActivityKind,
+        now_ms: i64,
+    ) -> TodoServiceResult<()> {
+        self.store.connection().execute(
+            "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![todo_id, actor, kind.as_str(), now_ms],
+        )?;
+        Ok(())
     }
 
     fn require_project(&self, project_id: ProjectId) -> TodoServiceResult<()> {

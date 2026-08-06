@@ -308,6 +308,40 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     let created_id = created["id"].as_i64().unwrap();
     assert_eq!(created["status"], "open");
 
+    let updated = rpc(
+        &mut socket,
+        "todo-update",
+        "coordination.todo_update",
+        json!({
+            "project_id": 1,
+            "todo_id": created_id,
+            "title": "Verify the document flow",
+            "priority": "high",
+            "tags": ["desktop", "document"]
+        }),
+    )
+    .await;
+    assert_eq!(updated["title"], "Verify the document flow");
+    assert_eq!(updated["priority"], "high");
+    assert_eq!(updated["tags"], json!(["desktop", "document"]));
+
+    let locked = rpc(
+        &mut socket,
+        "todo-lock",
+        "coordination.todo_lock",
+        json!({ "project_id": 1, "todo_id": created_id }),
+    )
+    .await;
+    assert_eq!(locked["locked_by"], "desktop-ui");
+    let unlocked = rpc(
+        &mut socket,
+        "todo-unlock",
+        "coordination.todo_unlock",
+        json!({ "project_id": 1, "todo_id": created_id }),
+    )
+    .await;
+    assert_eq!(unlocked["locked_by"], Value::Null);
+
     let comment = rpc(
         &mut socket,
         "todo-comment",
@@ -342,6 +376,15 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     assert_eq!(
         created_detail["comments"][0]["body"],
         "The visible comment composer works."
+    );
+    assert_eq!(
+        created_detail["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["created", "locked", "unlocked", "completed"]
     );
 
     let first_read = rpc(

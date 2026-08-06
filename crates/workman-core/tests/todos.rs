@@ -1,6 +1,6 @@
 use workman_core::{
-    NewTodo, Project, Store, TodoListQuery, TodoPriority, TodoService, TodoServiceError, TodoSort,
-    TodoStatus, UpdateTodo,
+    NewTodo, Project, Store, TodoActivityKind, TodoListQuery, TodoPriority, TodoService,
+    TodoServiceError, TodoSort, TodoStatus, UpdateTodo,
 };
 
 const NOW: i64 = 1_800_000_000_000;
@@ -15,6 +15,41 @@ fn project(id: i64, name: &str) -> Project {
         selected: false,
         sort_order: id - 1,
     }
+}
+
+#[test]
+fn todo_activity_records_lifecycle_edges_without_renewal_noise() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_project(&project(1, "one")).unwrap();
+    let service = TodoService::new(&store);
+    let todo_id = create_todo(&service, 1, "Trace lifecycle");
+
+    service
+        .lock(1, todo_id, "desktop-ui", 60_000, NOW + 1)
+        .unwrap();
+    service
+        .lock(1, todo_id, "desktop-ui", 60_000, NOW + 2)
+        .unwrap();
+    service.unlock(1, todo_id, "desktop-ui", NOW + 3).unwrap();
+    service
+        .complete(1, todo_id, "desktop-ui", true, false, NOW + 4)
+        .unwrap();
+    service
+        .complete(1, todo_id, "desktop-ui", false, false, NOW + 5)
+        .unwrap();
+
+    let activity = service.activity_list(1, todo_id, NOW + 5).unwrap();
+    assert_eq!(
+        activity.iter().map(|item| item.kind).collect::<Vec<_>>(),
+        [
+            TodoActivityKind::Created,
+            TodoActivityKind::Locked,
+            TodoActivityKind::Unlocked,
+            TodoActivityKind::Completed,
+            TodoActivityKind::Reopened,
+        ]
+    );
+    assert_eq!(activity[1].actor, "desktop-ui");
 }
 
 fn create_todo(service: &TodoService<'_>, project_id: i64, title: &str) -> i64 {

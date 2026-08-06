@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use workman_core::{
     NewTodo, ProjectId, ScratchpadId, ScratchpadListQuery, ScratchpadReadMode, ScratchpadService,
     ScratchpadServiceError, Store, TodoId, TodoListQuery, TodoPriority, TodoService,
-    TodoServiceError, TodoSort,
+    TodoServiceError, TodoSort, TodoStatus, UpdateTodo,
 };
 
 pub(crate) type ControlResult = Result<Value, (&'static str, String)>;
@@ -41,6 +41,24 @@ struct CompleteTodoParams {
     todo_id: TodoId,
     #[serde(default = "default_true")]
     completed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTodoParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    title: Option<String>,
+    body: Option<String>,
+    priority: Option<TodoPriority>,
+    status: Option<TodoStatus>,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferTodoParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    target_project_id: ProjectId,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,8 +113,13 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.snapshot" => Some(snapshot(params, store)),
         "coordination.todo" => Some(todo_detail(params, store)),
         "coordination.todo_create" => Some(todo_create(params, store)),
+        "coordination.todo_update" => Some(todo_update(params, store)),
         "coordination.todo_complete" => Some(todo_complete(params, store)),
         "coordination.todo_comment" => Some(todo_comment(params, store)),
+        "coordination.todo_lock" => Some(todo_lock(params, store)),
+        "coordination.todo_unlock" => Some(todo_unlock(params, store)),
+        "coordination.todo_delete" => Some(todo_delete(params, store)),
+        "coordination.todo_transfer" => Some(todo_transfer(params, store)),
         "coordination.scratchpad" => Some(scratchpad_read(params, store)),
         "coordination.scratchpad_create" => Some(scratchpad_create(params, store)),
         "coordination.scratchpad_update" => Some(scratchpad_update(params, store)),
@@ -165,11 +188,15 @@ fn todo_detail(params: Value, store: &Store) -> ControlResult {
     let comments = service
         .comment_list(params.project_id, params.todo_id, 0, Some(200), now)
         .map_err(todo_error)?;
+    let activity = service
+        .activity_list(params.project_id, params.todo_id, now)
+        .map_err(todo_error)?;
 
     Ok(json!({
         "todo": todo,
         "comments": comments.comments,
         "comment_total_count": comments.total_count,
+        "activity": activity,
     }))
 }
 
@@ -208,6 +235,25 @@ fn todo_complete(params: Value, store: &Store) -> ControlResult {
     }))
 }
 
+fn todo_update(params: Value, store: &Store) -> ControlResult {
+    let params: UpdateTodoParams = params_as(params)?;
+    TodoService::new(store)
+        .update(
+            params.project_id,
+            params.todo_id,
+            UpdateTodo {
+                title: params.title,
+                body: params.body,
+                priority: params.priority,
+                status: params.status,
+                tags: params.tags,
+            },
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
 fn todo_comment(params: Value, store: &Store) -> ControlResult {
     let params: CommentTodoParams = params_as(params)?;
     TodoService::new(store)
@@ -220,6 +266,60 @@ fn todo_comment(params: Value, store: &Store) -> ControlResult {
         )
         .map(json_value)
         .map_err(todo_error)
+}
+
+fn todo_lock(params: Value, store: &Store) -> ControlResult {
+    let params: TodoParams = params_as(params)?;
+    TodoService::new(store)
+        .lock(
+            params.project_id,
+            params.todo_id,
+            "desktop-ui",
+            20 * 60 * 1_000,
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
+fn todo_unlock(params: Value, store: &Store) -> ControlResult {
+    let params: TodoParams = params_as(params)?;
+    TodoService::new(store)
+        .unlock(
+            params.project_id,
+            params.todo_id,
+            "desktop-ui",
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
+fn todo_delete(params: Value, store: &Store) -> ControlResult {
+    let params: TodoParams = params_as(params)?;
+    let affected_todo_ids = TodoService::new(store)
+        .delete(params.project_id, params.todo_id, now_millis())
+        .map_err(todo_error)?;
+    Ok(json!({
+        "todo_id": params.todo_id,
+        "affected_todo_ids": affected_todo_ids,
+    }))
+}
+
+fn todo_transfer(params: Value, store: &Store) -> ControlResult {
+    let params: TransferTodoParams = params_as(params)?;
+    let (todo, affected_todo_ids) = TodoService::new(store)
+        .transfer(
+            params.project_id,
+            params.todo_id,
+            params.target_project_id,
+            now_millis(),
+        )
+        .map_err(todo_error)?;
+    Ok(json!({
+        "todo": todo,
+        "affected_todo_ids": affected_todo_ids,
+    }))
 }
 
 fn scratchpad_read(params: Value, store: &Store) -> ControlResult {

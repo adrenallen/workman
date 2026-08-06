@@ -31,10 +31,21 @@ export interface TodoComment {
   updated_at: number;
 }
 
+export type TodoActivityKind = 'created' | 'completed' | 'reopened' | 'locked' | 'unlocked';
+
+export interface TodoActivity {
+  id: number;
+  todo_id: number;
+  actor: string;
+  kind: TodoActivityKind;
+  created_at: number;
+}
+
 export interface TodoDetail {
   todo: TodoView;
   comments: TodoComment[];
   comment_total_count: number;
+  activity: TodoActivity[];
 }
 
 export interface ScratchpadSummary {
@@ -78,6 +89,14 @@ export interface NewTodoInput {
   body: string;
   priority: TodoPriority;
   tags: string[];
+}
+
+export interface UpdateTodoInput {
+  title?: string;
+  body?: string;
+  priority?: TodoPriority;
+  status?: TodoStatus;
+  tags?: string[];
 }
 
 export interface NewScratchpadInput {

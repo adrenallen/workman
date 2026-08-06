@@ -16,7 +16,7 @@
 
   interface Props {
     todos: TodoSummary[];
-    onSelect: (todo: TodoSummary) => void;
+    onSelect: (todo: TodoSummary, navigationIds: number[]) => void;
     onCreate: () => void;
     project?: Project | null;
   }
@@ -148,7 +148,7 @@
         class="todo-row"
         data-state={todoClaimState(todo)}
         title={`${todoClaimLabel(todo)} · ${statusCopy(todo)} · ${todo.priority} priority`}
-        onclick={() => onSelect(todo)}
+        onclick={() => onSelect(todo, filteredTodos.map((candidate) => candidate.id))}
       >
         <span class="state-rail" aria-hidden="true"></span>
         <TodoStatusIndicator state={todoClaimState(todo)} label={todoClaimLabel(todo)} />

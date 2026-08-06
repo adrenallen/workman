@@ -1,78 +1,213 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import ArchiveIcon from '@lucide/svelte/icons/archive';
+  import CheckIcon from '@lucide/svelte/icons/check';
+  import CirclePlusIcon from '@lucide/svelte/icons/circle-plus';
+  import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
+  import LockIcon from '@lucide/svelte/icons/lock';
+  import PencilIcon from '@lucide/svelte/icons/pencil';
+  import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+  import TagIcon from '@lucide/svelte/icons/tag';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
+  import UnlockIcon from '@lucide/svelte/icons/unlock';
 
-  import MarkdownView from './MarkdownView.svelte';
-  import type { TodoDetail } from './coordination';
+  import IconButton from '$lib/components/ds/IconButton.svelte';
+  import TodoStatusIndicator from '$lib/components/ds/TodoStatusIndicator.svelte';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import * as Popover from '$lib/components/ui/popover';
+
+  import DocumentScaffold from './DocumentScaffold.svelte';
+  import type {
+    TodoActivity,
+    TodoComment,
+    TodoDetail,
+    TodoPriority,
+    TodoStatus,
+    TodoSummary,
+    UpdateTodoInput
+  } from './coordination';
   import { submitOnEnter } from './formInputConventions';
-  import {
-    clampPanelWidth,
-    loadPanelPreference,
-    savePanelPreference,
-    startPanelResize
-  } from './panelPreferences';
+  import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
+  import MarkdownView from './MarkdownView.svelte';
+  import { todoClaimLabel, todoClaimState } from './todoPresentation';
+
+  interface ProjectOption {
+    id: number;
+    name: string;
+  }
 
   interface Props {
     detail: TodoDetail | null;
     loading: boolean;
     busy: boolean;
+    projectName?: string;
+    todos?: TodoSummary[];
+    navigationIds?: number[];
+    projectOptions?: ProjectOption[];
+    onBack?: () => void;
+    onNavigateTodo?: (todoId: number) => void;
+    onUpdate?: (update: UpdateTodoInput) => Promise<void> | void;
     onComplete: (completed: boolean) => void;
     onComment: (body: string) => void;
+    onLock?: (locked: boolean) => Promise<void> | void;
+    onDelete?: () => Promise<void> | void;
+    onTransfer?: (projectId: number) => Promise<void> | void;
   }
 
-  let { detail, loading, busy, onComplete, onComment }: Props = $props();
-  const inspectorBounds = { min: 220, max: 460 };
-  const collapsedInspectorWidth = 42;
-  let inspectorWidth = $state(280);
-  let inspectorCollapsed = $state(false);
+  let {
+    detail,
+    loading,
+    busy,
+    projectName = 'Project',
+    todos = [],
+    navigationIds = [],
+    projectOptions = [],
+    onBack,
+    onNavigateTodo,
+    onUpdate = () => {},
+    onComplete,
+    onComment,
+    onLock,
+    onDelete,
+    onTransfer
+  }: Props = $props();
+
+  let activeId = $state<number | null>(null);
+  let titleDraft = $state('');
+  let bodyDraft = $state('');
+  let tagsDraft = $state('');
+  let tagsOpen = $state(false);
   let commentBody = $state('');
+  let titleInput = $state<HTMLInputElement | null>(null);
+  let bodyFocusRequest = $state(0);
+  let bodySaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let currentIndex = $derived(detail ? navigationIds.indexOf(detail.todo.id) : -1);
+  let previousId = $derived(currentIndex > 0 ? navigationIds[currentIndex - 1] : null);
+  let nextId = $derived(
+    currentIndex >= 0 && currentIndex < navigationIds.length - 1
+      ? navigationIds[currentIndex + 1]
+      : null
+  );
+  let blockerTodos = $derived(
+    detail ? detail.todo.blocker_ids.map((id) => todos.find((todo) => todo.id === id)).filter(Boolean) as TodoSummary[] : []
+  );
+  let blockingTodos = $derived(
+    detail ? todos.filter((todo) => todo.blocker_ids.includes(detail!.todo.id)) : []
+  );
+  let activityItems = $derived.by(() => {
+    if (!detail) return [] as Array<
+      | { type: 'event'; timestamp: number; event: TodoActivity }
+      | { type: 'comment'; timestamp: number; comment: TodoComment }
+    >;
+    return [
+      ...detail.activity.map((event) => ({ type: 'event' as const, timestamp: event.created_at, event })),
+      ...detail.comments.map((comment) => ({ type: 'comment' as const, timestamp: comment.created_at, comment }))
+    ].sort((left, right) => left.timestamp - right.timestamp);
+  });
 
   $effect(() => {
-    detail?.todo.id;
+    const todo = detail?.todo;
+    if (!todo || activeId === todo.id) return;
+    activeId = todo.id;
+    titleDraft = todo.title;
+    bodyDraft = todo.body;
+    tagsDraft = todo.tags.join(', ');
+    tagsOpen = false;
     commentBody = '';
   });
 
-  onMount(() => {
-    const preference = loadPanelPreference(
-      'todo-comments-inspector',
-      { collapsed: false, width: inspectorWidth },
-      inspectorBounds.min,
-      inspectorBounds.max
-    );
-    inspectorWidth = preference.width;
-    inspectorCollapsed = preference.collapsed;
+  $effect(() => () => {
+    if (bodySaveTimer !== null) clearTimeout(bodySaveTimer);
   });
 
-  function persistInspector(): void {
-    savePanelPreference('todo-comments-inspector', {
-      collapsed: inspectorCollapsed,
-      width: inspectorWidth
-    });
+  function statusLabel(status: TodoStatus): string {
+    if (status === 'in_progress') return 'In progress';
+    return status.charAt(0).toUpperCase() + status.slice(1);
   }
 
-  function toggleInspector(): void {
-    inspectorCollapsed = !inspectorCollapsed;
-    persistInspector();
+  function relativeTime(epochMillis: number): string {
+    const seconds = Math.round((epochMillis - Date.now()) / 1_000);
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    if (Math.abs(seconds) < 60) return formatter.format(seconds, 'second');
+    const minutes = Math.round(seconds / 60);
+    if (Math.abs(minutes) < 60) return formatter.format(minutes, 'minute');
+    const hours = Math.round(minutes / 60);
+    if (Math.abs(hours) < 24) return formatter.format(hours, 'hour');
+    return formatter.format(Math.round(hours / 24), 'day');
   }
 
-  function handleShortcut(event: KeyboardEvent): void {
-    const target = event.target as HTMLElement | null;
-    if (
-      !event.metaKey || !event.shiftKey || event.altKey || event.key.toLowerCase() !== 'i' ||
-      target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
-    ) return;
-    event.preventDefault();
-    toggleInspector();
+  function exactTime(epochMillis: number): string {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    }).format(new Date(epochMillis));
   }
 
-  function resizeFromKeyboard(event: KeyboardEvent): void {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
-    inspectorWidth = clampPanelWidth(
-      inspectorWidth + (event.key === 'ArrowLeft' ? 12 : -12),
-      inspectorBounds.min,
-      inspectorBounds.max
-    );
-    persistInspector();
+  function eventCopy(event: TodoActivity): string {
+    if (event.kind === 'created') return 'created this todo';
+    if (event.kind === 'completed') return 'completed this todo';
+    if (event.kind === 'reopened') return 'reopened this todo';
+    if (event.kind === 'locked') return 'claimed this todo';
+    return 'released the claim';
+  }
+
+  function eventIcon(kind: TodoActivity['kind']) {
+    if (kind === 'created') return CirclePlusIcon;
+    if (kind === 'completed') return CheckIcon;
+    if (kind === 'reopened') return RotateCcwIcon;
+    if (kind === 'locked') return LockIcon;
+    return UnlockIcon;
+  }
+
+  function focusEditor(): void {
+    bodyFocusRequest += 1;
+  }
+
+  function saveTitle(): void {
+    if (!detail) return;
+    const title = titleDraft.trim();
+    if (!title) {
+      titleDraft = detail.todo.title;
+      return;
+    }
+    if (title !== detail.todo.title) void onUpdate({ title });
+  }
+
+  function handleTitleKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      titleInput?.blur();
+    } else if (event.key === 'Escape' && detail) {
+      event.preventDefault();
+      titleDraft = detail.todo.title;
+      titleInput?.blur();
+    }
+  }
+
+  function scheduleBodySave(): void {
+    if (bodySaveTimer !== null) clearTimeout(bodySaveTimer);
+    bodySaveTimer = setTimeout(() => {
+      bodySaveTimer = null;
+      saveBody();
+    }, 700);
+  }
+
+  function changeBody(next: string): void {
+    bodyDraft = next;
+    scheduleBodySave();
+  }
+
+  function saveBody(): void {
+    if (!detail || bodyDraft === detail.todo.body) return;
+    void onUpdate({ body: bodyDraft });
+  }
+
+  function saveTags(): void {
+    if (!detail) return;
+    const tags = [...new Set(tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean))];
+    tagsDraft = tags.join(', ');
+    tagsOpen = false;
+    if (tags.join('\u0000') !== detail.todo.tags.join('\u0000')) void onUpdate({ tags });
   }
 
   function submitComment(): void {
@@ -82,145 +217,268 @@
     onComment(body);
   }
 
-  function formatTime(epochMillis: number): string {
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
-    }).format(new Date(epochMillis));
+  function navigate(todoId: number | null): void {
+    if (todoId !== null) onNavigateTodo?.(todoId);
   }
 </script>
 
-<svelte:window onkeydown={handleShortcut} />
-
 {#if loading && !detail}
-  <div class="loading">Loading todo…</div>
+  <div class="state">Loading todo…</div>
 {:else if detail}
-  <section
-    class="todo-detail"
-    style={`--todo-inspector-width: ${inspectorCollapsed ? collapsedInspectorWidth : inspectorWidth}px;`}
+  <DocumentScaffold
+    ariaLabel={`Todo #${detail.todo.id}`}
+    breadcrumbRoot={projectName}
+    breadcrumbCurrent={detail.todo.title}
+    reference={`#${detail.todo.id}`}
+    previousDisabled={previousId === null || busy}
+    nextDisabled={nextId === null || busy}
+    onBack={onBack}
+    onPrevious={() => navigate(previousId)}
+    onNext={() => navigate(nextId)}
+    onCopyReference={() => void navigator.clipboard.writeText(`#${detail.todo.id}`)}
   >
+    {#snippet actions()}
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger>
+          {#snippet child({ props })}
+            <IconButton {...props} label="Todo actions">
+              {#snippet icon()}<EllipsisIcon size={16} strokeWidth={1.8} />{/snippet}
+            </IconButton>
+          {/snippet}
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" class="w-56">
+          <DropdownMenu.Label>Todo #{detail.todo.id}</DropdownMenu.Label>
+          <DropdownMenu.Separator />
+          <DropdownMenu.Item onclick={() => { titleInput?.focus(); titleInput?.select(); }}>
+            <PencilIcon class="size-4" aria-hidden="true" /> Edit title
+          </DropdownMenu.Item>
+          <DropdownMenu.Item onclick={focusEditor}>
+            <PencilIcon class="size-4" aria-hidden="true" /> Edit body
+          </DropdownMenu.Item>
+          <DropdownMenu.Item disabled={busy} onclick={() => onComplete(!detail!.todo.completed)}>
+            {#if detail.todo.completed}<RotateCcwIcon class="size-4" aria-hidden="true" /> Reopen{:else}<CheckIcon class="size-4" aria-hidden="true" /> Complete{/if}
+          </DropdownMenu.Item>
+          {#if onLock}
+            <DropdownMenu.Item disabled={busy || Boolean(detail.todo.locked_by && detail.todo.locked_by !== 'desktop-ui')} onclick={() => void onLock(!detail!.todo.locked_by)}>
+              {#if detail.todo.locked_by}<UnlockIcon class="size-4" aria-hidden="true" /> Release claim{:else}<LockIcon class="size-4" aria-hidden="true" /> Claim for desktop{/if}
+            </DropdownMenu.Item>
+          {/if}
+          {#if onTransfer && projectOptions.length > 0}
+            <DropdownMenu.Sub>
+              <DropdownMenu.SubTrigger><ArchiveIcon class="size-4" aria-hidden="true" /> Transfer to</DropdownMenu.SubTrigger>
+              <DropdownMenu.SubContent>
+                {#each projectOptions as project (project.id)}
+                  <DropdownMenu.Item onclick={() => void onTransfer?.(project.id)}>{project.name}</DropdownMenu.Item>
+                {/each}
+              </DropdownMenu.SubContent>
+            </DropdownMenu.Sub>
+          {/if}
+          {#if onDelete}
+            <DropdownMenu.Separator />
+            <DropdownMenu.Item variant="destructive" disabled={busy} onclick={() => void onDelete()}>
+              <Trash2Icon class="size-4" aria-hidden="true" /> Delete todo
+            </DropdownMenu.Item>
+          {/if}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/snippet}
+
     <article class="todo-document">
-      <header class="todo-actions">
-        <div class="badges">
-          <span class:high={detail.todo.priority === 'high'}>{detail.todo.priority}</span>
-          <span>{detail.todo.status.replace('_', ' ')}</span>
-          {#if detail.todo.locked_by}<span>locked · {detail.todo.locked_by}</span>{/if}
-        </div>
-        <button
-          type="button"
-          disabled={busy}
-          onclick={() => onComplete(!detail.todo.completed)}
-        >{detail.todo.completed ? 'Reopen' : 'Complete'}</button>
-      </header>
+      <input
+        class="title"
+        bind:this={titleInput}
+        bind:value={titleDraft}
+        aria-label="Todo title"
+        disabled={busy}
+        onblur={saveTitle}
+        onkeydown={handleTitleKeydown}
+      />
 
-      {#if detail.todo.blocker_ids.length > 0}
-        <div class:blocked={detail.todo.is_blocked} class="blockers">
-          <strong>{detail.todo.is_blocked ? 'Blocked by' : 'Dependencies'}</strong>
-          {detail.todo.blocker_ids.map((id) => `#${id}`).join(', ')}
-          {#if detail.todo.is_blocked} · {detail.todo.unresolved_blocker_count} open{/if}
-        </div>
+      <div class="metadata" aria-label="Todo metadata">
+        <label class="metadata-chip status-chip" title={todoClaimLabel(detail.todo)}>
+          <TodoStatusIndicator state={todoClaimState(detail.todo)} label={todoClaimLabel(detail.todo)} />
+          <select
+            aria-label="Todo status"
+            value={detail.todo.status}
+            disabled={busy}
+            onchange={(event) => void onUpdate({ status: event.currentTarget.value as TodoStatus })}
+          >
+            <option value="backlog">Backlog</option>
+            <option value="open">Open</option>
+            <option value="in_progress">In progress</option>
+            <option value="completed">Completed</option>
+          </select>
+        </label>
+
+        <label class={`metadata-chip priority-chip ${detail.todo.priority}`}>
+          <span aria-hidden="true"></span>
+          <select
+            aria-label="Todo priority"
+            value={detail.todo.priority}
+            disabled={busy}
+            onchange={(event) => void onUpdate({ priority: event.currentTarget.value as TodoPriority })}
+          >
+            <option value="high">High priority</option>
+            <option value="medium">Medium priority</option>
+            <option value="low">Low priority</option>
+          </select>
+        </label>
+
+        <button class="metadata-chip" type="button" aria-expanded={tagsOpen} onclick={() => (tagsOpen = !tagsOpen)}>
+          <TagIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+          {detail.todo.tags.length} tag{detail.todo.tags.length === 1 ? '' : 's'}
+        </button>
+
+        <Popover.Root>
+          <Popover.Trigger>
+            {#snippet child({ props })}
+              <button {...props} class:blocked={detail.todo.is_blocked} class="metadata-chip" type="button" disabled={blockerTodos.length === 0}>
+                Blocked by {blockerTodos.length}
+              </button>
+            {/snippet}
+          </Popover.Trigger>
+          <Popover.Content align="start" class="w-80 gap-1 p-1.5">
+            <Popover.Header class="px-2 py-1"><Popover.Title>Blocked by</Popover.Title><Popover.Description>Todos that must finish first.</Popover.Description></Popover.Header>
+            {#each blockerTodos as todo (todo.id)}
+              <button class="relation-row" type="button" onclick={() => navigate(todo.id)}><span>#{todo.id}</span><strong>{todo.title}</strong></button>
+            {/each}
+          </Popover.Content>
+        </Popover.Root>
+
+        <Popover.Root>
+          <Popover.Trigger>
+            {#snippet child({ props })}
+              <button {...props} class="metadata-chip" type="button" disabled={blockingTodos.length === 0}>Blocking {blockingTodos.length}</button>
+            {/snippet}
+          </Popover.Trigger>
+          <Popover.Content align="start" class="w-80 gap-1 p-1.5">
+            <Popover.Header class="px-2 py-1"><Popover.Title>Blocking</Popover.Title><Popover.Description>Todos waiting on this one.</Popover.Description></Popover.Header>
+            {#each blockingTodos as todo (todo.id)}
+              <button class="relation-row" type="button" onclick={() => navigate(todo.id)}><span>#{todo.id}</span><strong>{todo.title}</strong></button>
+            {/each}
+          </Popover.Content>
+        </Popover.Root>
+      </div>
+
+      {#if tagsOpen}
+        <form class="tags-editor" onsubmit={(event) => { event.preventDefault(); saveTags(); }}>
+          <label for="todo-tags">Tags</label>
+          <input id="todo-tags" bind:value={tagsDraft} placeholder="feedback, ui, follow-up" />
+          <button type="button" onclick={() => { tagsDraft = detail!.todo.tags.join(', '); tagsOpen = false; }}>Cancel</button>
+          <button class="primary" type="submit" disabled={busy}>Save tags</button>
+        </form>
       {/if}
 
-      <div class="todo-body">
-        {#if detail.todo.body.trim()}
-          <MarkdownView source={detail.todo.body} />
-        {:else}
-          <p>No notes for this todo.</p>
-        {/if}
+      <section class="body-section" aria-label="Todo body">
+        <LiveMarkdownEditor
+          value={bodyDraft}
+          focusRequest={bodyFocusRequest}
+          onChange={changeBody}
+          onSave={saveBody}
+        />
+      </section>
+
+      <div class="tag-list" aria-label="Todo tags">
+        {#each detail.todo.tags as tag (tag)}<button type="button" onclick={() => (tagsOpen = true)}>{tag}</button>{/each}
+        {#if detail.todo.tags.length === 0}<button class="add-tag" type="button" onclick={() => (tagsOpen = true)}>+ Add tags</button>{/if}
       </div>
+
+      <section class="activity" aria-labelledby="activity-title">
+        <header>
+          <div><span>History and discussion</span><h2 id="activity-title">Activity</h2></div>
+          <small>{activityItems.length} item{activityItems.length === 1 ? '' : 's'}</small>
+        </header>
+
+        <div class="activity-feed">
+          {#each activityItems as item (`${item.type}-${item.type === 'event' ? item.event.id : item.comment.id}`)}
+            {#if item.type === 'event'}
+              {@const EventIcon = eventIcon(item.event.kind)}
+              <article class="event-row">
+                <span class="event-icon"><EventIcon size={14} strokeWidth={1.8} aria-hidden="true" /></span>
+                <p><strong>{item.event.actor}</strong> {eventCopy(item.event)}</p>
+                <time title={exactTime(item.timestamp)}>{relativeTime(item.timestamp)}</time>
+              </article>
+            {:else}
+              <article class="comment-row">
+                <header><strong>{item.comment.actor}</strong><time title={exactTime(item.timestamp)}>{relativeTime(item.timestamp)}</time></header>
+                <MarkdownView source={item.comment.body} />
+              </article>
+            {/if}
+          {:else}
+            <p class="empty-activity">No activity yet. Add context for the next person below.</p>
+          {/each}
+        </div>
+
+        <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); submitComment(); }}>
+          <label for="todo-comment">Add to the activity</label>
+          <textarea id="todo-comment" bind:value={commentBody} rows="3" placeholder="Write a comment in Markdown…" use:submitOnEnter></textarea>
+          <div><small>Enter posts · Shift+Enter adds a line</small><button class="primary" type="submit" disabled={busy || !commentBody.trim()}>Comment</button></div>
+        </form>
+      </section>
     </article>
-
-    <aside class="comments" class:collapsed={inspectorCollapsed} aria-label="Todo comments">
-      <header>
-        <span>Comments</span>
-        <div>
-          <small>{detail.comment_total_count}</small>
-          <button
-            type="button"
-            aria-label={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comments`}
-            title={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comments (⌘⇧I)`}
-            onclick={toggleInspector}
-          >{inspectorCollapsed ? '‹' : '›'}</button>
-        </div>
-      </header>
-      <div class="comment-list">
-        {#each detail.comments as comment (comment.id)}
-          <article>
-            <header><strong>{comment.actor}</strong><time>{formatTime(comment.created_at)}</time></header>
-            <p>{comment.body}</p>
-          </article>
-        {:else}
-          <p class="muted">No comments yet.</p>
-        {/each}
-      </div>
-      <form onsubmit={(event) => { event.preventDefault(); submitComment(); }}>
-        <textarea
-          bind:value={commentBody}
-          rows="2"
-          placeholder="Add a comment"
-          aria-label="Add a todo comment"
-          use:submitOnEnter
-        ></textarea>
-        <button type="submit" disabled={busy || !commentBody.trim()}>Comment</button>
-      </form>
-      {#if !inspectorCollapsed}
-        <button
-          type="button"
-          class="resize-handle"
-          aria-label="Resize comments"
-          title={`Resize comments · ${inspectorWidth}px · arrow keys`}
-          onkeydown={resizeFromKeyboard}
-          onpointerdown={(event) =>
-            startPanelResize(event, {
-              current: inspectorWidth,
-              direction: -1,
-              min: inspectorBounds.min,
-              max: inspectorBounds.max,
-              onResize: (width) => (inspectorWidth = width),
-              onEnd: persistInspector
-            })}
-        ></button>
-      {/if}
-    </aside>
-  </section>
+  </DocumentScaffold>
 {:else}
-  <div class="loading">Todo not found.</div>
+  <div class="state">Todo not found.</div>
 {/if}
 
 <style>
-  .todo-detail { display: grid; width: 100%; height: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr) var(--todo-inspector-width); background: var(--night); }
-  .todo-document { min-width: 0; overflow: auto; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .todo-actions { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--border); padding: 5px 10px; }
-  .badges { display: flex; min-width: 0; flex-wrap: wrap; gap: 5px; }
-  .badges span { border: 1px solid var(--border-strong); border-radius: 3px; padding: 2px 5px; color: #9ba1aa; background: var(--popover); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
-  .badges span.high { border-color: rgb(220 107 107 / 52%); color: #dc8a8a; }
-  .todo-actions > button, form > button { border: 1px solid var(--border-strong); border-radius: 3px; padding: 5px 8px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; cursor: pointer; }
-  button:disabled { cursor: not-allowed; opacity: 0.45; }
-  .blockers { margin: 9px 12px 0; border-left: 2px solid #6e747d; padding: 6px 8px; background: var(--popover); color: var(--text-soft); font-size: var(--font-size-sm); }
-  .blockers.blocked { border-color: var(--warning); color: #d9bd8c; }
-  .blockers strong { margin-right: 5px; }
-  .todo-body { max-width: 840px; padding: 14px 18px 28px; }
-  .todo-body > p { color: var(--muted); font-size: var(--font-size-sm); }
+  .todo-document { min-width: 0; }
+  .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 'Archivo Variable', sans-serif; letter-spacing: -0.025em; }
+  .title:hover { background: var(--card); }
+  .title:focus { background: var(--card); box-shadow: 0 0 0 2px var(--ring); }
+  .metadata { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+  .metadata-chip { display: inline-flex; min-height: 28px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; background: var(--card); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
+  .metadata-chip:disabled { cursor: default; opacity: 0.68; }
+  .metadata-chip.blocked { border-color: color-mix(in srgb, var(--destructive) 45%, var(--border)); color: var(--destructive); }
+  .metadata-chip select { max-width: 132px; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  .priority-chip > span { width: 7px; height: 7px; border-radius: 2px; background: var(--muted-foreground); }
+  .priority-chip.high { color: var(--destructive); }
+  .priority-chip.high > span { background: var(--destructive); }
+  .priority-chip.medium { color: var(--warning-token); }
+  .priority-chip.medium > span { background: var(--warning-token); }
+  .relation-row { display: grid; width: 100%; min-height: 32px; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 5px; border: 0; border-radius: var(--radius); padding: 3px 7px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .relation-row:hover { background: var(--accent); }
+  .relation-row span { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .relation-row strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 590; text-overflow: ellipsis; white-space: nowrap; }
+  .tags-editor { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px; margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; background: var(--card); }
+  .tags-editor label { padding-left: 4px; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; }
+  .tags-editor input { min-width: 0; height: 29px; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 0 8px; background: var(--background); color: var(--foreground); font-size: var(--font-size-sm); }
+  .tags-editor button, .comment-composer button { min-height: 29px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 9px; background: var(--card); color: var(--text-soft); font-size: var(--font-size-sm); cursor: pointer; }
+  button.primary { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); font-weight: 650; }
+  .body-section { height: clamp(310px, 46vh, 520px); margin-top: 22px; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--radius) + 1px); background: var(--background); }
+  .tag-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+  .tag-list button { min-height: 24px; border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; background: var(--card); color: var(--muted-foreground); font-size: var(--font-size-xs); cursor: pointer; }
+  .tag-list .add-tag { border-style: dashed; background: transparent; }
+  .activity { margin-top: 40px; border-top: 1px solid var(--border); padding-top: 22px; }
+  .activity > header { display: flex; align-items: end; justify-content: space-between; gap: var(--space-2); }
+  .activity > header span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
+  .activity h2 { margin: 4px 0 0; color: var(--foreground); font-size: 20px; line-height: 1.2; }
+  .activity > header small { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .activity-feed { display: grid; margin-top: 12px; }
+  .event-row { display: grid; min-height: 38px; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); color: var(--muted-foreground); }
+  .event-row p { margin: 0; font-size: var(--font-size-sm); }
+  .event-row strong { color: var(--text-soft); font-weight: 620; }
+  .event-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); background: var(--card); }
+  .event-row time, .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-row { margin: 12px 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .comment-row > header { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 9px; }
+  .comment-row > header strong { font-size: var(--font-size-sm); font-weight: 650; }
+  .comment-row :global(.markdown) { padding: 8px 10px 10px; }
+  .empty-activity { margin: 0; border: 1px dashed var(--border); border-radius: var(--radius); padding: 13px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .comment-composer { display: grid; gap: 6px; margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; background: var(--card); }
+  .comment-composer label { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 650; }
+  .comment-composer textarea { width: 100%; max-height: 156px; resize: none; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 8px 9px; background: var(--background); color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.45; }
+  .comment-composer > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .comment-composer small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .state { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted-foreground); font-size: var(--font-size-sm); }
 
-  .comments { position: relative; min-width: 0; border-left: 1px solid var(--border); background: var(--card); }
-  .comments > header { display: flex; min-height: 34px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 4px 6px 4px 9px; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 650; }
-  .comments > header > div { display: flex; align-items: center; gap: 5px; }
-  .comments > header small { color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
-  .comments > header button { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--text-soft); cursor: pointer; }
-  .comment-list { max-height: calc(100% - 118px); overflow-y: auto; }
-  .comment-list article { border-bottom: 1px solid var(--accent); padding: 8px 9px; }
-  .comment-list article header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--font-size-xs); }
-  .comment-list article strong { overflow: hidden; color: var(--foreground); text-overflow: ellipsis; white-space: nowrap; }
-  .comment-list article time { flex: none; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
-  .comment-list article p, .muted { margin: 4px 0 0; color: var(--text-soft); font-size: var(--font-size-sm); line-height: 1.45; white-space: pre-wrap; }
-  .muted { padding: 9px; }
-  form { position: absolute; right: 0; bottom: 0; left: 0; display: grid; gap: 5px; border-top: 1px solid var(--border); padding: 6px; background: var(--card); }
-  textarea { width: 100%; max-height: 132px; resize: none; border: 1px solid var(--border-strong); border-radius: 3px; outline: 0; padding: 6px 7px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); line-height: 1.35; }
-  form > button { justify-self: end; }
-  .resize-handle { position: absolute; z-index: 5; top: 0; bottom: 0; left: -3px; width: 6px; border: 0; padding: 0; background: transparent; cursor: col-resize; touch-action: none; }
-  .resize-handle::after { position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: transparent; content: ''; }
-  .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
-  .comments.collapsed > header { height: 100%; min-height: 120px; align-items: center; flex-direction: column; justify-content: flex-start; gap: 8px; padding: 8px 0; }
-  .comments.collapsed > header > span, .comments.collapsed .comment-list, .comments.collapsed form { display: none; }
-  .comments.collapsed > header > div { flex-direction: column-reverse; }
-  .loading { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted); font-size: var(--font-size-sm); }
+  @container (max-width: 620px) {
+    .metadata { gap: 4px; }
+    .metadata-chip { max-width: 100%; }
+    .tags-editor { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .tags-editor label { grid-column: 1 / -1; }
+    .body-section { height: 360px; margin-top: 16px; }
+    .activity { margin-top: 30px; }
+    .comment-row { margin-left: 0; }
+  }
 </style>

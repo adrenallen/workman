@@ -55,7 +55,8 @@
     ScratchpadRead,
     ScratchpadSummary,
     TodoDetail,
-    TodoPriority
+    TodoPriority,
+    UpdateTodoInput
   } from './lib/coordination';
   import {
     contextMenuRequest,
@@ -196,6 +197,7 @@
   let projectSettingsBusy = $state(false);
   let settingsOpen = $state(false);
   let todoBrowserOpen = $state(false);
+  let todoNavigationIds = $state<number[]>([]);
   let scratchpadBrowserOpen = $state(false);
   let processOverviewKind = $state<ProcessKind | null>(null);
   let scratchpadBrowserBusyId = $state<number | null>(null);
@@ -554,6 +556,14 @@
     if (quickJumpOpen || shortcutsOpen) return;
     if (isTextEditingTarget(target)) return;
     if (
+      selection?.kind === 'todo' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+    ) {
+      event.preventDefault();
+      void navigateAdjacentTodo(event.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
+    if (
       event.metaKey && !event.ctrlKey && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
@@ -581,6 +591,7 @@
       if (quickJumpOpen) closeQuickJump();
       else if (dialog) dialog = null;
       else if (settingsOpen) settingsOpen = false;
+      else if (selection?.kind === 'todo') openTodosBrowser();
       else clearSelection();
     }
   }
@@ -1244,6 +1255,10 @@
     todoDetail = null;
     scratchpadRead = null;
 
+    if (next.kind === 'todo' && !todoNavigationIds.includes(next.id)) {
+      todoNavigationIds = (coordination?.todos ?? []).map((todo) => todo.id);
+    }
+
     if (next.kind === 'agent') {
       const process = processes.find((candidate) => candidate.id === next.id);
       if (process?.agent_state.unread) void markAgentRead(process.id, process.project_id);
@@ -1282,6 +1297,22 @@
     } finally {
       detailLoading = false;
     }
+  }
+
+  async function navigateAdjacentTodo(direction: -1 | 1): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo') return;
+    const currentIndex = todoNavigationIds.indexOf(selection.id);
+    const nextId = currentIndex < 0 ? null : todoNavigationIds[currentIndex + direction];
+    if (nextId === null || nextId === undefined) return;
+    const summary = coordination?.todos.find((todo) => todo.id === nextId);
+    if (!summary) return;
+    await selectTreeItem(projectTreeSelection('todo', summary.id, summary.project_id, summary.title));
+  }
+
+  async function navigateToTodo(todoId: number): Promise<void> {
+    const summary = coordination?.todos.find((todo) => todo.id === todoId);
+    if (!summary) return;
+    await selectTreeItem(projectTreeSelection('todo', summary.id, summary.project_id, summary.title));
   }
 
   async function loadScratchpad(scratchpadId: number, showLoading = true): Promise<void> {
@@ -1547,6 +1578,83 @@
     }
   }
 
+  async function updateTodo(update: UpdateTodoInput): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo') return;
+    const projectId = selectedProject.id;
+    const todoId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.todo_update', {
+        project_id: projectId,
+        todo_id: todoId,
+        ...update
+      });
+      if (update.title) {
+        selection = projectTreeSelection('todo', todoId, projectId, update.title);
+      }
+      await Promise.all([loadTodo(todoId), refreshCoordination(projectId, false)]);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function setTodoLock(locked: boolean): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo') return;
+    const projectId = selectedProject.id;
+    const todoId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control(locked ? 'coordination.todo_lock' : 'coordination.todo_unlock', {
+        project_id: projectId,
+        todo_id: todoId
+      });
+      await Promise.all([loadTodo(todoId), refreshCoordination(projectId, false)]);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function deleteSelectedTodo(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo' || !todoDetail) return;
+    if (!window.confirm(`Delete #${selection.id} ${todoDetail.todo.title}? This cannot be undone.`)) return;
+    const projectId = selectedProject.id;
+    const todoId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.todo_delete', { project_id: projectId, todo_id: todoId });
+      openTodosBrowser();
+      await refreshCoordination(projectId, false);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function transferSelectedTodo(targetProjectId: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo') return;
+    const projectId = selectedProject.id;
+    const todoId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.todo_transfer', {
+        project_id: projectId,
+        todo_id: todoId,
+        target_project_id: targetProjectId
+      });
+      openTodosBrowser();
+      await refreshCoordination(projectId, false);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
   async function commentTodo(body: string): Promise<void> {
     if (!selectedProject || selection?.kind !== 'todo') return;
     detailBusy = true;
@@ -1587,6 +1695,9 @@
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+    if (todoNavigationIds.length === 0) {
+      todoNavigationIds = (coordination?.todos ?? []).map((todo) => todo.id);
+    }
   }
 
   function openScratchpadsBrowser(): void {
@@ -2878,7 +2989,10 @@
           <TodoBrowser
             project={selectedProject}
             todos={coordination?.todos ?? []}
-            onSelect={(todo) => void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title))}
+            onSelect={(todo, navigationIds) => {
+              todoNavigationIds = navigationIds;
+              void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
+            }}
             onCreate={() => (dialog = 'todo')}
           />
         {:else if scratchpadBrowserOpen}
@@ -2902,7 +3016,23 @@
             onCreate={() => createFromProcessOverview(processOverviewKind!)}
           />
         {:else if selection?.kind === 'todo'}
-          <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
+          <TodoDetailView
+            detail={todoDetail}
+            loading={detailLoading}
+            busy={detailBusy}
+            projectName={selectedProject.display_name ?? selectedProject.name}
+            todos={coordination?.todos ?? []}
+            navigationIds={todoNavigationIds}
+            projectOptions={projects.filter((project) => project.id !== selectedProject.id).map((project) => ({ id: project.id, name: project.display_name ?? project.name }))}
+            onBack={openTodosBrowser}
+            onNavigateTodo={(todoId) => void navigateToTodo(todoId)}
+            onUpdate={updateTodo}
+            onComplete={(completed) => void completeTodo(completed)}
+            onComment={(body) => void commentTodo(body)}
+            onLock={setTodoLock}
+            onDelete={deleteSelectedTodo}
+            onTransfer={transferSelectedTodo}
+          />
         {:else if selection?.kind === 'scratchpad'}
           <ScratchpadDetailView
             read={scratchpadRead}
