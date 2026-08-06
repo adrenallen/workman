@@ -528,6 +528,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('agent_tools.delete', { agent_tool_id: agentToolId });
   }
 
+  reorderAgentTools(agentToolIds: number[]): Promise<AgentTool[]> {
+    return this.request('agent_tools.reorder', { agent_tool_ids: agentToolIds });
+  }
+
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {
     return this.request('agents.spawn', { ...input });
   }
