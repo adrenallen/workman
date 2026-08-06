@@ -29,6 +29,8 @@ use workmand::{
     Discovery, default_data_dir, discover_or_spawn, probe,
 };
 
+mod native_notifications;
+
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
 const NATIVE_MENU_EVENT: &str = "menu://action";
@@ -284,6 +286,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
@@ -298,7 +301,10 @@ pub fn run() {
             shell_open_path,
             shell_open_url,
             shell_detect_editors,
-            shell_open_with
+            shell_open_with,
+            native_notifications::native_notification_permission_state,
+            native_notifications::native_notification_request_permission,
+            native_notifications::native_notification_show
         ])
         .setup(move |app| {
             tauri::async_runtime::spawn(run_bridge(app.handle().clone(), task_state, receiver));
