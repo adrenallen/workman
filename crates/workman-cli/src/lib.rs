@@ -41,7 +41,7 @@ const HELLO_REQUEST_ID: &str = "__workman_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
 const HELP: &str = "\
-Usage: wrk [--data-dir PATH] [--daemon PATH] [--version] [--update [--check] [--channel stable|latest]] [COMMAND]\n\
+Usage: wrk [--data-dir PATH] [--daemon PATH] [--version] [--update [--check] [--channel stable|latest] [--key KEY]] [COMMAND]\n\
 \n\
 Commands:\n\
   (none)\n\
@@ -54,9 +54,9 @@ Commands:\n\
       Stop trusted command processes for the current project.\n\
   app\n\
       Launch the workman desktop app.\n\
-  update [--check] [--channel stable|latest]\n\
-      Check GitHub Releases and securely update workman and workmand. Stable is the default;\n\
-      latest includes prereleases. --check reports only.\n\
+  update [--check] [--channel stable|latest] [--key KEY]\n\
+      Check Workman's release host and securely update workman and workmand. Stable is the default;\n\
+      latest includes prereleases. --check reports only. --key overrides the configured download key.\n\
   mcp-setup [--client claude|codex|gemini|opencode|generic] [--run]\n\
       Print setup for one MCP client, or all supported clients by default.\n\
       --run executes the Claude setup command.\n\
@@ -89,10 +89,11 @@ pub async fn run_env() -> Result<()> {
     if let Command::Update {
         check_only,
         channel,
+        key,
     } = &cli.command
     {
         let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
-        return self_update(&data_dir, *check_only, *channel).await;
+        return self_update(&data_dir, *check_only, *channel, key.as_deref()).await;
     }
 
     let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
@@ -151,6 +152,7 @@ enum Command {
     Update {
         check_only: bool,
         channel: UpdateChannel,
+        key: Option<String>,
     },
     McpSetup {
         run: bool,
@@ -255,6 +257,7 @@ impl Cli {
 fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
     let mut check_only = false;
     let mut channel = UpdateChannel::Stable;
+    let mut key = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" if !check_only => check_only = true,
@@ -263,12 +266,14 @@ fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
                     .parse()
                     .map_err(|_| cli_error("--channel must be stable or latest"))?;
             }
+            "--key" if key.is_none() => key = Some(next_value(&mut args, &arg)?),
             _ => return Err(cli_error(format!("unknown update option {arg:?}"))),
         }
     }
     Ok(Command::Update {
         check_only,
         channel,
+        key,
     })
 }
 
@@ -1160,7 +1165,12 @@ fn sibling_daemon_executable(current: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) -> Result<()> {
+async fn self_update(
+    data_dir: &Path,
+    check_only: bool,
+    channel: UpdateChannel,
+    explicit_key: Option<&str>,
+) -> Result<()> {
     let api_url = match channel {
         UpdateChannel::Stable => {
             env::var("WORKMAN_RELEASES_API_URL").unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned())
@@ -1168,7 +1178,8 @@ async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) 
         UpdateChannel::Latest => env::var("WORKMAN_LATEST_RELEASES_API_URL")
             .unwrap_or_else(|_| LATEST_RELEASES_API.to_owned()),
     };
-    let updater = UpdateClient::new_for_channel(api_url, channel)?;
+    let update_key = workmand::resolve_update_key(explicit_key)?;
+    let updater = UpdateClient::new_for_channel(api_url, channel)?.with_key(&update_key)?;
     let mut daemon_client = if let Ok(discovery) = Discovery::read(data_dir)
         && workmand::probe(&discovery).await
     {
@@ -1181,7 +1192,10 @@ async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) 
             .rpc("daemon.update_preferences", json!({ "channel": channel }))
             .await?;
         client
-            .rpc::<UpdateStatus>("daemon.update_check", json!({ "force": true }))
+            .rpc::<UpdateStatus>(
+                "daemon.update_check",
+                json!({ "force": true, "key": &update_key }),
+            )
             .await?
             .check
     } else {
@@ -1206,7 +1220,9 @@ async fn self_update(data_dir: &Path, check_only: bool, channel: UpdateChannel) 
         eprintln!(
             "workman: warning: updating restarts workmand and stops all running project processes"
         );
-        client.rpc("daemon.update_apply", json!({})).await?
+        client
+            .rpc("daemon.update_apply", json!({ "key": &update_key }))
+            .await?
     } else {
         let install_dir = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
             Some(path) => PathBuf::from(path),
@@ -1472,7 +1488,8 @@ mod tests {
             cli.command,
             Command::Update {
                 check_only: true,
-                channel: UpdateChannel::Stable
+                channel: UpdateChannel::Stable,
+                key: None,
             }
         ));
         let cli =
@@ -1482,7 +1499,8 @@ mod tests {
             cli.command,
             Command::Update {
                 check_only: true,
-                channel: UpdateChannel::Latest
+                channel: UpdateChannel::Latest,
+                key: None,
             }
         ));
         let cli = Cli::parse(["wrk", "--update"].map(OsString::from)).unwrap();
@@ -1490,9 +1508,26 @@ mod tests {
             cli.command,
             Command::Update {
                 check_only: false,
-                channel: UpdateChannel::Stable
+                channel: UpdateChannel::Stable,
+                key: None,
             }
         ));
+        let cli =
+            Cli::parse(["wrk", "update", "--key", "friends-key", "--check"].map(OsString::from))
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Update {
+                check_only: true,
+                channel: UpdateChannel::Stable,
+                key: Some(ref key),
+            } if key == "friends-key"
+        ));
+        assert!(Cli::parse(["wrk", "update", "--key"].map(OsString::from)).is_err());
+        assert!(
+            Cli::parse(["wrk", "update", "--key", "one", "--key", "two"].map(OsString::from))
+                .is_err()
+        );
         assert!(Cli::parse(["wrk", "update", "--channel", "edge"].map(OsString::from)).is_err());
 
         let cli = Cli::parse(["wrk", "add"].map(OsString::from)).unwrap();

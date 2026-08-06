@@ -87,8 +87,8 @@ pub use settings::{
 pub use updates::UpdateStatus;
 pub use user_config::{
     AgentToolSyncReport, USER_CONFIG_FILE, UserAgentTool, UserConfig, UserConfigError,
-    WORKMAN_CONFIG_ENV, parse_user_config, sync_user_agent_tools, sync_user_config_file,
-    user_config_path,
+    UserUpdateConfig, WORKMAN_CONFIG_ENV, parse_user_config, resolve_update_key,
+    sync_user_agent_tools, sync_user_config_file, user_config_path,
 };
 pub use version::{BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonVersion};
 
@@ -551,12 +551,29 @@ async fn handle_session_control(
         return Some(json!({ "id": id, "ok": true, "result": { "restarting": true } }).to_string());
     }
     if method == "daemon.update_check" {
-        let force = request
-            .get("params")
-            .and_then(|params| params.get("force"))
+        let params = request.get("params").cloned().unwrap_or_default();
+        let force = params
+            .get("force")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        return Some(match settings.updates().check(force).await {
+        let key =
+            match params.get("key") {
+                Some(value) => match value.as_str() {
+                    Some(key) => Some(key),
+                    None => {
+                        return Some(json!({
+                        "id": id, "ok": false,
+                        "error": { "code": "invalid_params", "message": "key must be a string" }
+                    }).to_string());
+                    }
+                },
+                None => None,
+            };
+        let result = match key {
+            Some(key) => settings.updates().check_with_key(force, Some(key)).await,
+            None => settings.updates().check(force).await,
+        };
+        return Some(match result {
             Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
             Err(error) => update_error_reply(id, error),
         });
@@ -606,7 +623,25 @@ async fn handle_session_control(
         );
     }
     if method == "daemon.update_apply" {
-        return Some(match settings.updates().install().await {
+        let params = request.get("params").cloned().unwrap_or_default();
+        let key =
+            match params.get("key") {
+                Some(value) => match value.as_str() {
+                    Some(key) => Some(key),
+                    None => {
+                        return Some(json!({
+                        "id": id, "ok": false,
+                        "error": { "code": "invalid_params", "message": "key must be a string" }
+                    }).to_string());
+                    }
+                },
+                None => None,
+            };
+        let result = match key {
+            Some(key) => settings.updates().install_with_key(Some(key)).await,
+            None => settings.updates().install().await,
+        };
+        return Some(match result {
             Ok(result) => {
                 let shutdown_request = shutdown_request.clone();
                 tokio::spawn(async move {

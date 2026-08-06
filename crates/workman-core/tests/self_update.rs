@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use workman_core::{ReleaseTarget, UpdateChannel, UpdateClient, UpdateError};
 
+const TEST_UPDATE_KEY: &str = "fixture-update-key";
+
 fn archive() -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = tar::Builder::new(encoder);
@@ -56,7 +58,7 @@ impl Fixture {
             checksum,
             "workman-fixture.tar.gz",
             "workman-desktop-fixture.zip",
-            3,
+            2,
         )
     }
 
@@ -71,37 +73,48 @@ impl Fixture {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut assets = vec![serde_json::json!({
             "name": binary_asset,
-            "browser_download_url": format!("{base}/archive")
+            "target": "test-binary",
+            "sha256": checksum,
+            "size": archive.len(),
+            "url": format!("{base}/archive")
         })];
         if desktop_asset != binary_asset {
             assets.push(serde_json::json!({
                 "name": desktop_asset,
-                "browser_download_url": format!("{base}/desktop")
+                "target": "test-desktop",
+                "sha256": checksum,
+                "size": archive.len(),
+                "url": format!("{base}/desktop")
             }));
         }
         assets.push(serde_json::json!({
             "name": "SHA256SUMS",
-            "browser_download_url": format!("{base}/sums")
+            "target": "checksums",
+            "sha256": "a".repeat(64),
+            "size": 1,
+            "url": format!("{base}/sums")
         }));
         let release = serde_json::json!({
-            "tag_name": "v9.0.0",
-            "html_url": format!("{base}/release"),
-            "body": "Fixture release notes",
+            "version": "9.0.0",
+            "published_at": "2026-08-06T12:00:00Z",
+            "notes_url": format!("{base}/release"),
             "assets": assets
+        });
+        let manifest = serde_json::json!({
+            "channels": {
+                "stable": release,
+                "latest": release,
+            }
         })
         .to_string()
         .into_bytes();
         let responses = Arc::new(HashMap::from([
-            ("/latest".to_owned(), release),
+            ("/latest".to_owned(), manifest),
             ("/archive".to_owned(), archive),
-            (
-                "/sums".to_owned(),
-                format!("{checksum}  {binary_asset}\n").into_bytes(),
-            ),
         ]));
         let thread = thread::spawn(move || {
             for stream in listener.incoming().flatten().take(request_count) {
-                respond(stream, &responses);
+                respond(stream, &responses, Some(TEST_UPDATE_KEY));
             }
         });
         Self {
@@ -111,7 +124,11 @@ impl Fixture {
     }
 }
 
-fn respond(mut stream: TcpStream, responses: &HashMap<String, Vec<u8>>) {
+fn respond(
+    mut stream: TcpStream,
+    responses: &HashMap<String, Vec<u8>>,
+    expected_key: Option<&str>,
+) {
     let mut request = [0_u8; 4096];
     let length = stream.read(&mut request).unwrap();
     let request = String::from_utf8_lossy(&request[..length]);
@@ -120,6 +137,23 @@ fn respond(mut stream: TcpStream, responses: &HashMap<String, Vec<u8>>) {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
+    if let Some(expected_key) = expected_key {
+        let expected = format!("Authorization: Bearer {expected_key}");
+        if !request
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case(&expected))
+        {
+            let body = b"unauthorized";
+            write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            return;
+        }
+    }
     let (status, body) = responses
         .get(path)
         .map(|body| ("200 OK", body.as_slice()))
@@ -142,6 +176,8 @@ fn fixture_client(base: &str) -> UpdateClient {
             platform_label: "test".to_owned(),
         },
     )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
     .unwrap()
 }
 
@@ -168,7 +204,7 @@ fn seed_v0_1_0_install() -> TempDir {
 }
 
 #[tokio::test]
-async fn local_release_is_checked_verified_and_swapped_in_temp_install_dir() {
+async fn bearer_authenticated_manifest_and_artifact_are_verified_and_installed() {
     let archive = archive();
     let checksum = format!("{:x}", Sha256::digest(&archive));
     let fixture = Fixture::start(archive, checksum);
@@ -229,10 +265,13 @@ async fn unified_macos_zip_updates_binaries_from_bin_directory() {
         checksum,
         &target.binary_asset_name,
         &target.desktop_asset_name,
-        3,
+        2,
     );
     let install = seed_install();
-    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target).unwrap();
+    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target)
+        .unwrap()
+        .with_key(TEST_UPDATE_KEY)
+        .unwrap();
 
     let check = client.check("0.1.0").await.unwrap();
     let report = client.install(&check, install.path()).await.unwrap();
@@ -269,79 +308,13 @@ async fn legacy_target_still_finds_transitional_macos_tarball() {
         &target.desktop_asset_name,
         1,
     );
-    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target).unwrap();
+    let client = UpdateClient::with_target(format!("{}/latest", fixture.base), target)
+        .unwrap()
+        .with_key(TEST_UPDATE_KEY)
+        .unwrap();
 
     let check = client.check("0.1.0").await.unwrap();
     assert_eq!(check.binary_asset.unwrap().name, "awm-macos-arm64.tar.gz");
-}
-
-#[tokio::test]
-async fn v0_1_0_api_route_follows_rename_and_finds_transitional_asset() {
-    let legacy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let canonical_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let legacy_base = format!("http://{}", legacy_listener.local_addr().unwrap());
-    let canonical_base = format!("http://{}", canonical_listener.local_addr().unwrap());
-    let canonical = format!("{canonical_base}/repos/adrenallen/workman/releases/latest");
-    let release = serde_json::json!({
-        "tag_name": "v0.1.1",
-        "html_url": format!("{canonical_base}/release/v0.1.1"),
-        "body": "Workman rename release",
-        "assets": [
-            {
-                "name": "awm-macos-arm64.tar.gz",
-                "browser_download_url": format!("{canonical_base}/awm-macos-arm64.tar.gz")
-            },
-            {
-                "name": "awm-desktop-macos-arm64.zip",
-                "browser_download_url": format!("{canonical_base}/awm-desktop-macos-arm64.zip")
-            }
-        ]
-    })
-    .to_string();
-    let legacy_thread = thread::spawn(move || {
-        let (mut stream, _) = legacy_listener.accept().unwrap();
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).unwrap();
-        write!(
-            stream,
-            "HTTP/1.1 301 Moved Permanently\r\nLocation: {canonical}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-    });
-    let canonical_thread = thread::spawn(move || {
-        let (mut stream, _) = canonical_listener.accept().unwrap();
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).unwrap();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            release.len(),
-            release
-        )
-        .unwrap();
-    });
-    let target = ReleaseTarget {
-        binary_asset_name: "awm-macos-arm64.tar.gz".to_owned(),
-        desktop_asset_name: "awm-desktop-macos-arm64.zip".to_owned(),
-        platform_label: "published v0.1.0 macOS updater".to_owned(),
-    };
-    let client = UpdateClient::with_target(
-        format!("{legacy_base}/repos/adrenallen/awm/releases/latest"),
-        target,
-    )
-    .unwrap();
-
-    let check = client.check("0.1.0").await.unwrap();
-    legacy_thread.join().unwrap();
-    canonical_thread.join().unwrap();
-
-    assert!(client.api_url().contains("adrenallen/awm"));
-    assert_eq!(check.latest, "0.1.1");
-    assert_eq!(check.binary_asset.unwrap().name, "awm-macos-arm64.tar.gz");
-    assert_eq!(
-        check.desktop_asset.unwrap().name,
-        "awm-desktop-macos-arm64.zip"
-    );
 }
 
 #[tokio::test]
@@ -368,58 +341,47 @@ async fn stable_ignores_prereleases_while_latest_selects_them() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let stable = serde_json::json!({
-        "tag_name": "v1.0.0",
-        "html_url": format!("{base}/release/v1.0.0"),
-        "body": "Stable",
-        "prerelease": false,
+        "version": "1.0.0",
+        "published_at": "2026-08-01T12:00:00Z",
+        "notes_url": format!("{base}/release/v1.0.0"),
         "assets": []
+    });
+    let latest = serde_json::json!({
+        "version": "1.1.0",
+        "published_at": "2026-08-06T12:00:00Z",
+        "notes_url": format!("{base}/release/v1.1.0"),
+        "assets": []
+    });
+    let manifest = serde_json::json!({
+        "channels": { "stable": stable, "latest": latest }
     })
     .to_string()
     .into_bytes();
-    let latest = serde_json::json!([
-        {
-            "tag_name": "v1.1.0",
-            "html_url": format!("{base}/release/v1.1.0"),
-            "body": "Prerelease",
-            "draft": false,
-            "prerelease": true,
-            "assets": []
-        },
-        {
-            "tag_name": "v1.0.0",
-            "html_url": format!("{base}/release/v1.0.0"),
-            "body": "Stable",
-            "draft": false,
-            "prerelease": false,
-            "assets": []
-        }
-    ])
-    .to_string()
-    .into_bytes();
-    let responses = Arc::new(HashMap::from([
-        ("/stable".to_owned(), stable),
-        ("/latest-channel".to_owned(), latest),
-    ]));
+    let responses = Arc::new(HashMap::from([("/manifest".to_owned(), manifest)]));
     let thread = thread::spawn(move || {
         for stream in listener.incoming().flatten().take(2) {
-            respond(stream, &responses);
+            respond(stream, &responses, Some(TEST_UPDATE_KEY));
         }
     });
 
     let stable = UpdateClient::with_target_for_channel(
-        format!("{base}/stable"),
+        format!("{base}/manifest"),
         fixture_target(),
         UpdateChannel::Stable,
     )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
     .unwrap()
     .check("0.9.0")
     .await
     .unwrap();
     let latest = UpdateClient::with_target_for_channel(
-        format!("{base}/latest-channel"),
+        format!("{base}/manifest"),
         fixture_target(),
         UpdateChannel::Latest,
     )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
     .unwrap()
     .check("0.9.0")
     .await
@@ -435,29 +397,110 @@ async fn stable_ignores_prereleases_while_latest_selects_them() {
 }
 
 #[tokio::test]
-async fn stable_without_a_published_release_is_current() {
+async fn http_failure_is_never_reported_as_up_to_date() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let thread = thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            respond(stream, &HashMap::new());
+            respond(stream, &HashMap::new(), Some(TEST_UPDATE_KEY));
         }
     });
 
-    let check = UpdateClient::with_target_for_channel(
+    let error = UpdateClient::with_target_for_channel(
         format!("{base}/no-stable-release"),
         fixture_target(),
         UpdateChannel::Stable,
     )
     .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap()
     .check("0.0.9")
     .await
-    .unwrap();
+    .unwrap_err();
     thread.join().unwrap();
 
-    assert_eq!(check.current, "0.0.9");
-    assert_eq!(check.latest, "0.0.9");
-    assert!(!check.available);
-    assert_eq!(check.channel, UpdateChannel::Stable);
-    assert!(check.checked_at > 0);
+    assert!(matches!(error, UpdateError::CheckFailed(_)));
+    assert!(error.to_string().starts_with("couldn't check for updates:"));
+}
+
+#[tokio::test]
+async fn malformed_manifest_surfaces_an_honest_check_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let responses = Arc::new(HashMap::from([(
+        "/manifest".to_owned(),
+        br#"{"unexpected":true}"#.to_vec(),
+    )]));
+    let thread = thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            respond(stream, &responses, Some(TEST_UPDATE_KEY));
+        }
+    });
+
+    let error = UpdateClient::with_target(format!("{base}/manifest"), fixture_target())
+        .unwrap()
+        .with_key(TEST_UPDATE_KEY)
+        .unwrap()
+        .check("0.0.9")
+        .await
+        .unwrap_err();
+    thread.join().unwrap();
+
+    assert!(matches!(error, UpdateError::CheckFailed(_)));
+    assert!(error.to_string().starts_with("couldn't check for updates:"));
+    assert!(error.to_string().contains("missing field `channels`"));
+}
+
+#[tokio::test]
+async fn rejected_manifest_key_is_an_honest_check_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let thread = thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            respond(stream, &HashMap::new(), Some(TEST_UPDATE_KEY));
+        }
+    });
+
+    let error = UpdateClient::with_target(format!("{base}/manifest"), fixture_target())
+        .unwrap()
+        .with_key("wrong-key")
+        .unwrap()
+        .check("0.0.9")
+        .await
+        .unwrap_err();
+    thread.join().unwrap();
+
+    assert!(matches!(error, UpdateError::CheckFailed(_)));
+    assert_eq!(
+        error.to_string(),
+        "couldn't check for updates: update server rejected our key"
+    );
+}
+
+#[tokio::test]
+async fn rejected_artifact_key_is_an_honest_install_failure() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let install = seed_install();
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.0").await.unwrap();
+
+    let error = client
+        .with_key("wrong-key")
+        .unwrap()
+        .install(&check, install.path())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, UpdateError::RejectedKey));
+    assert_eq!(error.to_string(), "update server rejected our key");
+    assert_eq!(
+        fs::read_to_string(install.path().join("wrk")).unwrap(),
+        "old wrk"
+    );
+    assert_eq!(
+        fs::read_to_string(install.path().join("workmand")).unwrap(),
+        "old workmand"
+    );
 }

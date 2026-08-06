@@ -10,7 +10,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use workman_core::{AgentTool, AgentToolSource, Store, StoreError};
+use workman_core::{
+    AgentTool, AgentToolSource, DEFAULT_UPDATE_KEY, Store, StoreError, WORKMAN_UPDATE_KEY_ENV,
+};
 
 /// Environment variable overriding the platform-specific user config path.
 pub const WORKMAN_CONFIG_ENV: &str = "WORKMAN_CONFIG";
@@ -23,6 +25,30 @@ pub const USER_CONFIG_FILE: &str = "config.yml";
 pub struct UserConfig {
     #[serde(default)]
     pub agent_tools: Vec<UserAgentTool>,
+    #[serde(default, skip_serializing_if = "UserUpdateConfig::is_empty")]
+    pub update: UserUpdateConfig,
+}
+
+/// Per-user release download configuration.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UserUpdateConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl UserUpdateConfig {
+    fn is_empty(&self) -> bool {
+        self.key.is_none()
+    }
+}
+
+impl fmt::Debug for UserUpdateConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserUpdateConfig")
+            .field("key", &self.key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// One agent command managed by the per-user config file.
@@ -114,6 +140,61 @@ pub fn parse_user_config(yaml: &str) -> Result<UserConfig, UserConfigError> {
         return Ok(UserConfig::default());
     }
     Ok(serde_yaml::from_str(yaml)?)
+}
+
+/// Resolve the update key in command-line, config file, environment, application order.
+pub fn resolve_update_key(explicit: Option<&str>) -> Result<String, UserConfigError> {
+    if explicit.is_some() {
+        return select_update_key(explicit, None, None);
+    }
+    let path = user_config_path();
+    let yaml = match fs::read_to_string(&path) {
+        Ok(yaml) => yaml,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let config = parse_user_config(&yaml)?;
+    let environment_key = match env::var(WORKMAN_UPDATE_KEY_ENV) {
+        Ok(key) => Some(key),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(UserConfigError::Invalid(format!(
+                "{WORKMAN_UPDATE_KEY_ENV} must be valid UTF-8"
+            )));
+        }
+    };
+    select_update_key(
+        explicit,
+        config.update.key.as_deref(),
+        environment_key.as_deref(),
+    )
+}
+
+fn select_update_key(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+    environment: Option<&str>,
+) -> Result<String, UserConfigError> {
+    if let Some(key) = explicit {
+        return nonempty_update_key(key, "--key");
+    }
+    if let Some(key) = configured {
+        return nonempty_update_key(key, "config.yml update.key");
+    }
+    if let Some(key) = environment {
+        return nonempty_update_key(key, WORKMAN_UPDATE_KEY_ENV);
+    }
+    nonempty_update_key(DEFAULT_UPDATE_KEY, "compiled-in update key")
+}
+
+fn nonempty_update_key(key: &str, source: &str) -> Result<String, UserConfigError> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(UserConfigError::Invalid(format!(
+            "update key from {source} must not be empty"
+        )));
+    }
+    Ok(key.to_owned())
 }
 
 /// Reconcile one config file into the registry. A missing file means no managed tools.
@@ -613,7 +694,7 @@ mod tests {
 
     use super::{
         UserAgentTool, delete_agent_tool_from_settings_at, parse_user_config,
-        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at,
+        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at, select_update_key,
         sync_user_agent_tools,
     };
 
@@ -691,6 +772,34 @@ mod tests {
             config.agent_tools[0].tool_type.as_deref(),
             Some("future_v9")
         );
+    }
+
+    #[test]
+    fn update_key_prefers_config_then_environment_then_application_default() {
+        let config = parse_user_config("update:\n  key: config-key\n").unwrap();
+        assert_eq!(config.update.key.as_deref(), Some("config-key"));
+        assert_eq!(
+            select_update_key(
+                Some("cli-key"),
+                config.update.key.as_deref(),
+                Some("environment-key")
+            )
+            .unwrap(),
+            "cli-key"
+        );
+        assert_eq!(
+            select_update_key(None, config.update.key.as_deref(), Some("environment-key")).unwrap(),
+            "config-key"
+        );
+        assert_eq!(
+            select_update_key(None, None, Some("environment-key")).unwrap(),
+            "environment-key"
+        );
+        assert_eq!(
+            select_update_key(None, None, None).unwrap(),
+            workman_core::DEFAULT_UPDATE_KEY
+        );
+        assert!(select_update_key(None, Some("  "), Some("fallback")).is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! GitHub Release checks and verified, same-directory binary replacement.
+//! Hosted release-manifest checks and verified, same-directory binary replacement.
 
 use std::{
+    collections::HashSet,
     env,
     error::Error,
     fmt,
@@ -15,19 +16,25 @@ use std::{
 use std::process::Command;
 
 use flate2::read::GzDecoder;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Response, StatusCode, Url};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// GitHub's latest non-draft, non-prerelease endpoint for Workman.
-pub const DEFAULT_RELEASES_API: &str =
-    "https://api.github.com/repos/adrenallen/workman/releases/latest";
-/// GitHub's ordered release listing, including prereleases, for the latest channel.
-pub const LATEST_RELEASES_API: &str =
-    "https://api.github.com/repos/adrenallen/workman/releases?per_page=20";
+/// Hosted Workman release manifest. Both stable and latest channels live in this document.
+pub const DEFAULT_RELEASES_API: &str = "https://workman.userdefined.io/releases.json";
+/// Latest-channel compatibility alias; the hosted manifest contains both channel pointers.
+pub const LATEST_RELEASES_API: &str = DEFAULT_RELEASES_API;
+/// Shared application download key embedded in shipped clients.
+///
+/// This is intentionally a lightweight download gate, not a user credential. The release host
+/// keeps a separate friends key, while explicit/configured keys can override this application key.
+pub const DEFAULT_UPDATE_KEY: &str = "2d0bc1d424deae875c3b3ec80fee422942b59c0b0b10ac8b";
+/// Environment fallback used when config.yml does not define `update.key`.
+pub const WORKMAN_UPDATE_KEY_ENV: &str = "WORKMAN_UPDATE_KEY";
 /// Courtesy interval used by the optional startup checker.
 pub const UPDATE_CHECK_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 pub type UpdateResult<T> = Result<T, UpdateError>;
@@ -78,6 +85,8 @@ pub enum UpdateError {
     Io(io::Error),
     Json(serde_json::Error),
     Version(semver::Error),
+    CheckFailed(String),
+    RejectedKey,
     UnsupportedPlatform(String),
     InvalidRelease(String),
     MissingAsset(String),
@@ -95,6 +104,10 @@ impl fmt::Display for UpdateError {
             Self::Io(error) => write!(formatter, "update file operation failed: {error}"),
             Self::Json(error) => write!(formatter, "release response was not valid JSON: {error}"),
             Self::Version(error) => write!(formatter, "release version is invalid: {error}"),
+            Self::CheckFailed(message) => {
+                write!(formatter, "couldn't check for updates: {message}")
+            }
+            Self::RejectedKey => formatter.write_str("update server rejected our key"),
             Self::UnsupportedPlatform(platform) => {
                 write!(formatter, "Workman updates are not packaged for {platform}")
             }
@@ -153,20 +166,14 @@ impl From<semver::Error> for UpdateError {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
-    /// Browser-facing URL shown in update reports and desktop instructions.
+    /// Hosted artifact URL shown in update reports and used for authenticated downloads.
     pub url: String,
-    /// Authenticated GitHub API download URL, when supplied by the release response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_url: Option<String>,
-}
-
-impl ReleaseAsset {
-    fn download_url(&self, authenticated: bool) -> (&str, bool) {
-        match (authenticated, self.api_url.as_deref()) {
-            (true, Some(api_url)) => (api_url, true),
-            _ => (&self.url, false),
-        }
-    }
+    /// Expected SHA256 from the signed-off release manifest.
+    #[serde(default)]
+    pub sha256: String,
+    /// Expected byte length from the release manifest.
+    #[serde(default)]
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -198,7 +205,7 @@ impl UpdateCheck {
             prerelease: false,
             latest: current.clone(),
             current,
-            url: "https://github.com/adrenallen/workman/releases".to_owned(),
+            url: "https://workman.userdefined.io/".to_owned(),
             notes: String::new(),
             available: false,
             checked_at: 0,
@@ -248,23 +255,11 @@ pub struct UpdateClient {
     http: Client,
     api_url: String,
     target: ReleaseTarget,
-    token: Option<String>,
     channel: UpdateChannel,
+    key: String,
 }
 
 impl UpdateClient {
-    pub fn github() -> UpdateResult<Self> {
-        Self::github_for(UpdateChannel::Stable)
-    }
-
-    pub fn github_for(channel: UpdateChannel) -> UpdateResult<Self> {
-        let api_url = match channel {
-            UpdateChannel::Stable => DEFAULT_RELEASES_API,
-            UpdateChannel::Latest => LATEST_RELEASES_API,
-        };
-        Self::new_for_channel(api_url, channel)
-    }
-
     pub fn new(api_url: impl Into<String>) -> UpdateResult<Self> {
         Self::new_for_channel(api_url, UpdateChannel::Stable)
     }
@@ -292,13 +287,22 @@ impl UpdateClient {
             http,
             api_url: api_url.into(),
             target,
-            token: env::var("WORKMAN_GITHUB_TOKEN")
-                .or_else(|_| env::var("GITHUB_TOKEN"))
-                .or_else(|_| env::var("GH_TOKEN"))
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
             channel,
+            key: DEFAULT_UPDATE_KEY.to_owned(),
         })
+    }
+
+    /// Override the shared download key for every request made by this client.
+    pub fn with_key(mut self, key: impl Into<String>) -> UpdateResult<Self> {
+        let key = key.into();
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(UpdateError::InvalidRelease(
+                "update key must not be empty".to_owned(),
+            ));
+        }
+        self.key = key.to_owned();
+        Ok(self)
     }
 
     pub fn api_url(&self) -> &str {
@@ -314,52 +318,83 @@ impl UpdateClient {
     }
 
     pub async fn check(&self, current: &str) -> UpdateResult<UpdateCheck> {
-        let response = self
-            .request(&self.api_url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?;
-        if self.channel == UpdateChannel::Stable && response.status() == StatusCode::NOT_FOUND {
-            let mut check = UpdateCheck::current_for(current, self.channel);
-            check.checked_at = unix_timestamp();
-            return Ok(check);
+        self.check_manifest(current)
+            .await
+            .map_err(|error| match error {
+                UpdateError::CheckFailed(_) => error,
+                error => UpdateError::CheckFailed(error.to_string()),
+            })
+    }
+
+    async fn check_manifest(&self, current: &str) -> UpdateResult<UpdateCheck> {
+        let manifest_url = Url::parse(&self.api_url).map_err(|error| {
+            UpdateError::InvalidRelease(format!("manifest URL is not valid: {error}"))
+        })?;
+        let response = self.successful_response(
+            self.http
+                .get(&self.api_url)
+                .bearer_auth(&self.key)
+                .send()
+                .await?,
+        )?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_MANIFEST_BYTES)
+        {
+            return Err(UpdateError::InvalidRelease(
+                "manifest exceeds the 1 MiB limit".to_owned(),
+            ));
         }
-        let response = response.error_for_status()?;
-        let release: GithubRelease = match self.channel {
-            UpdateChannel::Stable => response.json().await?,
-            UpdateChannel::Latest => response
-                .json::<Vec<GithubRelease>>()
-                .await?
-                .into_iter()
-                .find(|release| !release.draft)
-                .ok_or_else(|| {
-                    UpdateError::InvalidRelease(
-                        "latest channel contains no published releases".to_owned(),
-                    )
-                })?,
+        let body = response.bytes().await?;
+        if body.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(UpdateError::InvalidRelease(
+                "manifest exceeds the 1 MiB limit".to_owned(),
+            ));
+        }
+        let manifest: HostedManifest = serde_json::from_slice(&body)?;
+        let stable_version = parse_version(&manifest.channels.stable.version)?;
+        let latest_version = parse_version(&manifest.channels.latest.version)?;
+        if latest_version < stable_version {
+            return Err(UpdateError::InvalidRelease(format!(
+                "latest channel {} is older than stable channel {}",
+                latest_version, stable_version
+            )));
+        }
+        let release = match self.channel {
+            UpdateChannel::Stable => &manifest.channels.stable,
+            UpdateChannel::Latest => &manifest.channels.latest,
         };
         let current_version = parse_version(current)?;
-        let latest_version = parse_version(&release.tag_name)?;
-        let available = latest_version > current_version;
-        let asset = |name: &str| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name == name)
-                .map(|asset| ReleaseAsset {
-                    name: asset.name.clone(),
-                    url: asset.browser_download_url.clone(),
-                    api_url: asset.api_url.clone(),
-                })
-        };
+        let selected_version = parse_version(&release.version)?;
+        let notes_url = validate_url(&release.notes_url, "notes_url")?;
+        if release.published_at.trim().is_empty() {
+            return Err(UpdateError::InvalidRelease(
+                "published_at must not be empty".to_owned(),
+            ));
+        }
+        let mut names = HashSet::new();
+        let assets = release
+            .assets
+            .iter()
+            .map(|asset| {
+                if !names.insert(asset.name.as_str()) {
+                    return Err(UpdateError::InvalidRelease(format!(
+                        "manifest contains duplicate asset {}",
+                        asset.name
+                    )));
+                }
+                hosted_asset(asset, &manifest_url)
+            })
+            .collect::<UpdateResult<Vec<_>>>()?;
+        let asset = |name: &str| assets.iter().find(|asset| asset.name == name).cloned();
         Ok(UpdateCheck {
             channel: self.channel,
-            prerelease: release.prerelease,
+            prerelease: self.channel == UpdateChannel::Latest && selected_version != stable_version,
             current: current_version.to_string(),
-            latest: latest_version.to_string(),
-            url: release.html_url,
-            notes: release.body.unwrap_or_default(),
-            available,
+            latest: selected_version.to_string(),
+            url: notes_url,
+            notes: String::new(),
+            available: selected_version > current_version,
             checked_at: unix_timestamp(),
             binary_asset: asset(&self.target.binary_asset_name),
             desktop_asset: asset(&self.target.desktop_asset_name),
@@ -386,19 +421,19 @@ impl UpdateClient {
             .binary_asset
             .as_ref()
             .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
-        let checksums_asset = check
-            .checksums_asset
-            .as_ref()
-            .ok_or_else(|| UpdateError::MissingAsset("SHA256SUMS".to_owned()))?;
         let install_dir = install_dir.as_ref().canonicalize()?;
         let (wrk_target, workmand_target) = installed_binary_targets(&install_dir)?;
 
-        let sums = self.download(checksums_asset).await?;
-        let sums = std::str::from_utf8(&sums)
-            .map_err(|_| UpdateError::InvalidRelease("SHA256SUMS is not UTF-8".to_owned()))?;
-        let expected = checksum_for(sums, &binary_asset.name)
-            .ok_or_else(|| UpdateError::MissingAsset(format!("{} checksum", binary_asset.name)))?;
+        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
         let archive = self.download(binary_asset).await?;
+        if archive.len() as u64 != binary_asset.size {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} size mismatch: expected {} bytes, got {}",
+                binary_asset.name,
+                binary_asset.size,
+                archive.len()
+            )));
+        }
         let actual = sha256_hex(&archive);
         if !actual.eq_ignore_ascii_case(&expected) {
             return Err(UpdateError::ChecksumMismatch {
@@ -448,25 +483,21 @@ impl UpdateClient {
     }
 
     async fn download(&self, asset: &ReleaseAsset) -> UpdateResult<Vec<u8>> {
-        let (url, api_download) = asset.download_url(self.token.is_some());
-        let mut request = self.request(url);
-        if api_download {
-            request = request.header("Accept", "application/octet-stream");
-        }
-        let response = request.send().await?.error_for_status()?;
+        let response = self.successful_response(
+            self.http
+                .get(&asset.url)
+                .bearer_auth(&self.key)
+                .send()
+                .await?,
+        )?;
         limited_body(response).await
     }
 
-    fn request(&self, url: &str) -> reqwest::RequestBuilder {
-        let request = self
-            .http
-            .get(url)
-            .header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(token) = &self.token {
-            request.bearer_auth(token)
-        } else {
-            request
+    fn successful_response(&self, response: Response) -> UpdateResult<Response> {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(UpdateError::RejectedKey);
         }
+        Ok(response.error_for_status()?)
     }
 }
 
@@ -492,6 +523,63 @@ pub fn install_dir_from_executable(executable: impl AsRef<Path>) -> UpdateResult
 
 fn parse_version(value: &str) -> UpdateResult<Version> {
     Ok(Version::parse(value.trim().trim_start_matches('v'))?)
+}
+
+fn validate_url(value: &str, field: &str) -> UpdateResult<String> {
+    let url = Url::parse(value).map_err(|error| {
+        UpdateError::InvalidRelease(format!("{field} is not a valid URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(UpdateError::InvalidRelease(format!(
+            "{field} must use http or https"
+        )));
+    }
+    Ok(url.to_string())
+}
+
+fn validate_sha256(value: &str, asset_name: &str) -> UpdateResult<String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(UpdateError::InvalidRelease(format!(
+            "{asset_name} has an invalid SHA256"
+        )));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn hosted_asset(asset: &HostedAsset, manifest_url: &Url) -> UpdateResult<ReleaseAsset> {
+    if asset.name.is_empty()
+        || asset.name.contains('/')
+        || asset.name.contains('\\')
+        || asset.target.trim().is_empty()
+    {
+        return Err(UpdateError::InvalidRelease(format!(
+            "invalid hosted asset name or target: {:?}",
+            asset.name
+        )));
+    }
+    if asset.size == 0 || asset.size > MAX_DOWNLOAD_BYTES {
+        return Err(UpdateError::InvalidRelease(format!(
+            "{} has invalid size {}",
+            asset.name, asset.size
+        )));
+    }
+    let url = validate_url(&asset.url, &format!("{} URL", asset.name))?;
+    let parsed_url = Url::parse(&url).expect("validated asset URL parses");
+    if parsed_url.scheme() != manifest_url.scheme()
+        || parsed_url.host_str() != manifest_url.host_str()
+        || parsed_url.port_or_known_default() != manifest_url.port_or_known_default()
+    {
+        return Err(UpdateError::InvalidRelease(format!(
+            "{} URL must use the release manifest origin",
+            asset.name
+        )));
+    }
+    Ok(ReleaseAsset {
+        name: asset.name.clone(),
+        url,
+        sha256: validate_sha256(&asset.sha256, &asset.name)?,
+        size: asset.size,
+    })
 }
 
 fn executable_name(name: &str) -> String {
@@ -691,15 +779,6 @@ fn clear_macos_quarantine(path: &Path) -> bool {
     }
 }
 
-fn checksum_for(manifest: &str, asset_name: &str) -> Option<String> {
-    manifest.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let checksum = fields.next()?;
-        let name = fields.next()?.trim_start_matches('*');
-        (name == asset_name && checksum.len() == 64).then(|| checksum.to_ascii_lowercase())
-    })
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(64);
@@ -740,39 +819,36 @@ fn unix_timestamp() -> i64 {
 }
 
 #[derive(Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    html_url: String,
-    body: Option<String>,
-    assets: Vec<GithubAsset>,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    prerelease: bool,
+struct HostedManifest {
+    channels: HostedChannels,
 }
 
 #[derive(Deserialize)]
-struct GithubAsset {
+struct HostedChannels {
+    stable: HostedRelease,
+    latest: HostedRelease,
+}
+
+#[derive(Deserialize)]
+struct HostedRelease {
+    version: String,
+    published_at: String,
+    notes_url: String,
+    assets: Vec<HostedAsset>,
+}
+
+#[derive(Deserialize)]
+struct HostedAsset {
     name: String,
-    browser_download_url: String,
-    #[serde(default, rename = "url")]
-    api_url: Option<String>,
+    target: String,
+    sha256: String,
+    size: u64,
+    url: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn manifest_parser_accepts_common_sha256sum_forms() {
-        let hash = "a".repeat(64);
-        let manifest = format!("{hash}  workman-macos-arm64.zip\n{hash} *other.tar.gz\n");
-        assert_eq!(
-            checksum_for(&manifest, "workman-macos-arm64.zip"),
-            Some(hash)
-        );
-        assert_eq!(checksum_for(&manifest, "missing"), None);
-    }
 
     #[test]
     fn semver_comparison_ignores_tag_prefix() {
@@ -799,19 +875,12 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_assets_prefer_the_api_download_url() {
-        let asset = ReleaseAsset {
-            name: "workman-macos-arm64.zip".to_owned(),
-            url: "https://github.com/example/download".to_owned(),
-            api_url: Some("https://api.github.com/repos/example/assets/1".to_owned()),
-        };
+    fn manifest_sha256_must_be_exact_hex() {
         assert_eq!(
-            asset.download_url(true),
-            ("https://api.github.com/repos/example/assets/1", true)
+            validate_sha256(&"A".repeat(64), "asset").unwrap(),
+            "a".repeat(64)
         );
-        assert_eq!(
-            asset.download_url(false),
-            ("https://github.com/example/download", false)
-        );
+        assert!(validate_sha256(&"z".repeat(64), "asset").is_err());
+        assert!(validate_sha256("abc", "asset").is_err());
     }
 }

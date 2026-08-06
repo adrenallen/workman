@@ -14,6 +14,8 @@ use workman_core::{
     UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, install_dir_from_executable,
 };
 
+use crate::user_config::resolve_update_key;
+
 const CACHE_FILE: &str = "updates.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -66,8 +68,13 @@ impl UpdateService {
             .unwrap_or_else(|_| DEFAULT_RELEASES_API.to_owned());
         let latest_api_url = env::var("WORKMAN_LATEST_RELEASES_API_URL")
             .unwrap_or_else(|_| LATEST_RELEASES_API.to_owned());
-        let stable_client = UpdateClient::new_for_channel(stable_api_url, UpdateChannel::Stable)?;
-        let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?;
+        let update_key = resolve_update_key(None).map_err(|error| {
+            UpdateError::InvalidRelease(format!("update key configuration: {error}"))
+        })?;
+        let stable_client = UpdateClient::new_for_channel(stable_api_url, UpdateChannel::Stable)?
+            .with_key(&update_key)?;
+        let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?
+            .with_key(&update_key)?;
         let install_dir = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
             Some(path) => PathBuf::from(path),
             None => install_dir_from_executable(env::current_exe()?)?,
@@ -91,6 +98,14 @@ impl UpdateService {
     }
 
     pub(crate) async fn check(&self, force: bool) -> Result<UpdateStatus, UpdateError> {
+        self.check_with_key(force, None).await
+    }
+
+    pub(crate) async fn check_with_key(
+        &self,
+        force: bool,
+        key_override: Option<&str>,
+    ) -> Result<UpdateStatus, UpdateError> {
         let _operation = self.operation.lock().await;
         {
             let cache = self.cache.lock().expect("update cache lock poisoned");
@@ -104,7 +119,13 @@ impl UpdateService {
             .lock()
             .expect("update cache lock poisoned")
             .channel;
-        let check = self.client(channel).check(self.current_version).await?;
+        let override_client = key_override
+            .map(|key| self.client(channel).clone().with_key(key))
+            .transpose()?;
+        let client = override_client
+            .as_ref()
+            .unwrap_or_else(|| self.client(channel));
+        let check = client.check(self.current_version).await?;
         let mut cache = self.cache.lock().expect("update cache lock poisoned");
         if cache.channel != channel {
             return Ok(status_from_cache(&cache, self.current_version));
@@ -136,8 +157,20 @@ impl UpdateService {
     }
 
     pub(crate) async fn install(&self) -> Result<UpdateInstallReport, UpdateError> {
-        let status = self.check(true).await?;
-        self.client(status.channel)
+        self.install_with_key(None).await
+    }
+
+    pub(crate) async fn install_with_key(
+        &self,
+        key_override: Option<&str>,
+    ) -> Result<UpdateInstallReport, UpdateError> {
+        let status = self.check_with_key(true, key_override).await?;
+        let override_client = key_override
+            .map(|key| self.client(status.channel).clone().with_key(key))
+            .transpose()?;
+        override_client
+            .as_ref()
+            .unwrap_or_else(|| self.client(status.channel))
             .install(&status.check, &self.install_dir)
             .await
     }
