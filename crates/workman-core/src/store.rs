@@ -83,10 +83,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent_notification_rate_limit",
         include_str!("../migrations/0015_agent_notification_rate_limit.sql"),
     ),
+    (
+        16,
+        "notification_needs_input",
+        include_str!("../migrations/0016_notification_needs_input.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

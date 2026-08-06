@@ -114,6 +114,8 @@ impl Store {
             unread = false;
             unread_at = None;
         } else {
+            let needs_input =
+                previous == ObservedState::Working && current == ObservedState::NeedsInput;
             let completed_turn = previous == ObservedState::Working
                 && current == ObservedState::Idle
                 && turn_started;
@@ -132,6 +134,14 @@ impl Store {
                 unread_at = Some(now_ms);
                 last_notified_at = Some(now_ms);
                 self.create_agent_done_notification(process_id, now_ms)?;
+            }
+            if needs_input && !watched {
+                unread = true;
+                unread_at = Some(now_ms);
+                // Needs-input edges intentionally do not advance the separate
+                // completion cooldown. A fresh completion after the user
+                // responds is still eligible for its own notification.
+                self.create_agent_needs_input_notification(process_id, now_ms)?;
             }
         }
 
@@ -314,6 +324,94 @@ mod tests {
                 .unwrap()
                 .unread
         );
+    }
+
+    #[test]
+    fn needs_input_notifies_only_after_fresh_work_and_respects_watching() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, false, 10)
+            .unwrap();
+
+        let needs_input = store
+            .observe_agent_attention(7, AttentionState::NeedsInput, false, false, 20)
+            .unwrap();
+        assert_eq!(
+            needs_input,
+            AgentNotificationState {
+                unread: true,
+                unread_at: Some(20)
+            }
+        );
+        let notifications = store.list_notifications(None, 10).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].kind, crate::NotificationType::NeedsInput);
+        assert_eq!(notifications[0].body, "worker needs your input.");
+
+        store
+            .observe_agent_attention(7, AttentionState::NeedsInput, false, false, 30)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Idle, false, false, 40)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::NeedsInput, false, false, 50)
+            .unwrap();
+        assert_eq!(
+            store.list_notifications(None, 10).unwrap().len(),
+            1,
+            "leaving needs-input without fresh work must not re-notify"
+        );
+
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 60)
+            .unwrap();
+        assert!(
+            store
+                .list_notifications(Some(false), 10)
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .observe_agent_attention(7, AttentionState::NeedsInput, true, true, 70)
+            .unwrap();
+        assert_eq!(
+            store.list_notifications(None, 10).unwrap().len(),
+            1,
+            "watched needs-input edges must remain suppressed"
+        );
+
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 80)
+            .unwrap();
+        let second = store
+            .observe_agent_attention(7, AttentionState::NeedsInput, false, true, 90)
+            .unwrap();
+        assert!(second.unread);
+        assert_eq!(store.list_notifications(None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn needs_input_does_not_consume_the_completion_cooldown() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 10)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::NeedsInput, false, true, 20)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 30)
+            .unwrap();
+        let completed = store
+            .observe_agent_attention(7, AttentionState::Idle, false, true, 40)
+            .unwrap();
+
+        assert!(completed.unread);
+        let notifications = store.list_notifications(None, 10).unwrap();
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].kind, crate::NotificationType::AgentDone);
+        assert_eq!(notifications[1].kind, crate::NotificationType::NeedsInput);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub type NotificationId = i64;
 #[serde(rename_all = "snake_case")]
 pub enum NotificationType {
     AgentDone,
+    NeedsInput,
     ProcessCrashed,
     TimerFired,
 }
@@ -19,6 +20,7 @@ impl NotificationType {
     const fn as_str(self) -> &'static str {
         match self {
             Self::AgentDone => "agent_done",
+            Self::NeedsInput => "needs_input",
             Self::ProcessCrashed => "process_crashed",
             Self::TimerFired => "timer_fired",
         }
@@ -26,6 +28,7 @@ impl NotificationType {
 
     fn parse(value: &str) -> Self {
         match value {
+            "needs_input" => Self::NeedsInput,
             "process_crashed" => Self::ProcessCrashed,
             "timer_fired" => Self::TimerFired,
             _ => Self::AgentDone,
@@ -58,6 +61,25 @@ impl Store {
              FROM processes
              WHERE id = ?1",
             params![process_id, NotificationType::AgentDone.as_str(), created_at],
+        )?;
+        Ok((inserted > 0).then(|| self.connection().last_insert_rowid()))
+    }
+
+    pub(crate) fn create_agent_needs_input_notification(
+        &self,
+        process_id: ProcessId,
+        created_at: i64,
+    ) -> StoreResult<Option<NotificationId>> {
+        let inserted = self.connection().execute(
+            "INSERT INTO notifications (type, project_id, process_id, body, created_at)
+             SELECT ?2, project_id, id, name || ' needs your input.', ?3
+             FROM processes
+             WHERE id = ?1",
+            params![
+                process_id,
+                NotificationType::NeedsInput.as_str(),
+                created_at
+            ],
         )?;
         Ok((inserted > 0).then(|| self.connection().last_insert_rowid()))
     }
