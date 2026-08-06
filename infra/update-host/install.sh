@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 usage() {
   cat <<'EOF'
@@ -7,10 +7,10 @@ Install the current stable Workman release.
 
 Usage:
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    bash -s -- --key <download-key>
+    sh -s -- --key <download-key>
 
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    WORKMAN_KEY=<download-key> bash
+    WORKMAN_KEY=<download-key> sh
 
 Options:
   --key <download-key>  Shared Workman download key (overrides WORKMAN_KEY)
@@ -23,10 +23,10 @@ EOF
 }
 
 download_key="${WORKMAN_KEY:-}"
-while (($#)); do
+while [ "$#" -gt 0 ]; do
   case "$1" in
     --key)
-      if (($# < 2)); then
+      if [ "$#" -lt 2 ]; then
         echo "--key requires a value" >&2
         usage >&2
         exit 2
@@ -50,7 +50,7 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$download_key" ]]; then
+if [ -z "$download_key" ]; then
   echo "a Workman download key is required; pass --key or set WORKMAN_KEY" >&2
   usage >&2
   exit 2
@@ -64,9 +64,9 @@ for command in curl python3; do
 done
 
 case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) target="macos-arm64" ; archive_kind="zip" ;;
-  Linux-x86_64) target="linux-x86_64" ; archive_kind="tar" ;;
-  Linux-aarch64|Linux-arm64) target="linux-arm64" ; archive_kind="tar" ;;
+  Darwin-arm64) target="macos-arm64"; archive_kind="zip" ;;
+  Linux-x86_64) target="linux-x86_64"; archive_kind="tar" ;;
+  Linux-aarch64|Linux-arm64) target="linux-arm64"; archive_kind="tar" ;;
   *)
     echo "Workman does not publish a bundle for $(uname -s) $(uname -m)" >&2
     exit 1
@@ -75,22 +75,22 @@ esac
 
 base_url="${WORKMAN_UPDATE_BASE_URL:-https://workman.userdefined.io}"
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/workman-install.XXXXXX")"
-trap 'rm -rf "$temporary_dir"' EXIT
+trap 'rm -rf "$temporary_dir"' 0
 manifest_path="$temporary_dir/releases.json"
+release_metadata_path="$temporary_dir/release-metadata"
 archive_path="$temporary_dir/release"
 stage_dir="$temporary_dir/stage"
 mkdir -p "$stage_dir"
 
-curl_with_key=(
-  curl --fail --silent --show-error --location --retry 3
-  --header "Authorization: Bearer $download_key"
-)
+fetch_with_key() {
+  curl --fail --silent --show-error --location --retry 3 \
+    --header "Authorization: Bearer $download_key" "$@"
+}
 
 echo "Reading the Workman stable channel..."
-"${curl_with_key[@]}" "$base_url/releases.json" --output "$manifest_path"
+fetch_with_key "$base_url/releases.json" --output "$manifest_path"
 
-IFS=$'\t' read -r version artifact_url expected_sha256 < <(
-  python3 - "$manifest_path" "$target" "$base_url" <<'PY'
+python3 - "$manifest_path" "$target" "$base_url" > "$release_metadata_path" <<'PY'
 import json
 import re
 import sys
@@ -122,24 +122,34 @@ if (
 ):
     raise SystemExit("the update server returned an untrusted artifact URL")
 
-print(version, asset["url"], sha256, sep="\t")
+print(version)
+print(asset["url"])
+print(sha256)
 PY
-)
 
-if [[ -z "$version" || -z "$artifact_url" || -z "$expected_sha256" ]]; then
+version=
+artifact_url=
+expected_sha256=
+{
+  IFS= read -r version || :
+  IFS= read -r artifact_url || :
+  IFS= read -r expected_sha256 || :
+} < "$release_metadata_path"
+
+if [ -z "$version" ] || [ -z "$artifact_url" ] || [ -z "$expected_sha256" ]; then
   echo "the update server returned incomplete release metadata" >&2
   exit 1
 fi
 
 echo "Downloading Workman $version for $target..."
-"${curl_with_key[@]}" "$artifact_url" --output "$archive_path"
+fetch_with_key "$artifact_url" --output "$archive_path"
 
 if command -v sha256sum >/dev/null 2>&1; then
   actual_sha256="$(sha256sum "$archive_path" | awk '{print $1}')"
 else
   actual_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 fi
-if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+if [ "$actual_sha256" != "$expected_sha256" ]; then
   echo "download checksum mismatch: expected $expected_sha256, got $actual_sha256" >&2
   exit 1
 fi
@@ -157,7 +167,7 @@ esac
 install_dir="${WORKMAN_INSTALL_DIR:-$HOME/.local/share/workman/$version}"
 mkdir -p "$install_dir"
 cp -R "$stage_dir/." "$install_dir/"
-if [[ ! -f "$install_dir/install.sh" ]]; then
+if [ ! -f "$install_dir/install.sh" ]; then
   echo "the Workman bundle does not contain install.sh" >&2
   exit 1
 fi

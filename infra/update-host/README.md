@@ -106,11 +106,11 @@ To install the stable bundle from a terminal, pass the same key without putting 
 
 ```sh
 curl -fsSL https://workman.userdefined.io/install.sh | \
-  bash -s -- --key '<friends-key>'
+  sh -s -- --key '<friends-key>'
 
 # Equivalent environment-variable form:
 curl -fsSL https://workman.userdefined.io/install.sh | \
-  WORKMAN_KEY='<friends-key>' bash
+  WORKMAN_KEY='<friends-key>' sh
 ```
 
 The bootstrap sends the key as a Bearer token to both `/releases.json` and the selected artifact,
