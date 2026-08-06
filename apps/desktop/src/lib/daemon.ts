@@ -57,6 +57,18 @@ export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'cra
 export type ProcessKind = 'command' | 'terminal' | 'agent';
 export type ProcessSource = 'yml' | 'local';
 export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'exited';
+export type NotificationType = 'agent_done' | 'process_crashed' | 'timer_fired';
+
+export interface Notification {
+  id: number;
+  type: NotificationType;
+  project_id: number | null;
+  process_id: number | null;
+  todo_id: number | null;
+  body: string;
+  created_at: number;
+  read_at: number | null;
+}
 
 export interface Project {
   id: number;
@@ -392,6 +404,18 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   markProcessRead(processId: number): Promise<ProcessView> {
     return this.request('process.mark_read', { process_id: processId });
+  }
+
+  notifications(read?: boolean): Promise<Notification[]> {
+    return this.request('notifications.list', { read, limit: 100 });
+  }
+
+  markNotificationRead(notificationId: number): Promise<{ updated: number }> {
+    return this.request('notifications.mark_read', { notification_id: notificationId });
+  }
+
+  markAllNotificationsRead(): Promise<{ updated: number }> {
+    return this.request('notifications.mark_read', { all: true });
   }
 
   restartProcess(processId: number): Promise<ProcessView> {

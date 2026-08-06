@@ -50,6 +50,7 @@ fn fresh_database_migrates_to_current_schema() {
             "agent_notifications",
             "agent_tools",
             "locks",
+            "notifications",
             "process_mcp_tokens",
             "processes",
             "project_worktrees",

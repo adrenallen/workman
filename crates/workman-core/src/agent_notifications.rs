@@ -1,5 +1,7 @@
 //! Durable notification state for completed agent turns.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use rusqlite::{OptionalExtension, params};
 
 use crate::{ProcessId, Store, StoreResult, attention::AttentionState};
@@ -97,6 +99,9 @@ impl Store {
         let previous = ObservedState::parse(&previous_state).unwrap_or(current);
 
         if current == ObservedState::Working {
+            if unread {
+                self.mark_process_notifications_read(process_id, now_ms)?;
+            }
             unread = false;
             unread_at = None;
         } else {
@@ -107,6 +112,7 @@ impl Store {
             if (completed_turn || exited) && !watched {
                 unread = true;
                 unread_at = Some(now_ms);
+                self.create_agent_done_notification(process_id, now_ms)?;
             }
         }
 
@@ -121,13 +127,24 @@ impl Store {
 
     /// Clear a process's durable unread completion marker.
     pub fn mark_agent_read(&self, process_id: ProcessId) -> StoreResult<bool> {
-        Ok(self.connection().execute(
+        let updated = self.connection().execute(
             "UPDATE agent_notifications
              SET unread = 0, unread_at = NULL
              WHERE process_id = ?1 AND unread = 1",
             [process_id],
-        )? > 0)
+        )? > 0;
+        self.mark_process_notifications_read(process_id, now_millis())?;
+        Ok(updated)
     }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -201,8 +218,20 @@ mod tests {
                 unread_at: Some(20)
             }
         );
+        let unread = store.list_notifications(Some(false), 10).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].kind, crate::NotificationType::AgentDone);
+        assert_eq!(unread[0].process_id, Some(7));
+        assert_eq!(unread[0].body, "worker finished and has unread output.");
 
         assert!(store.mark_agent_read(7).unwrap());
+        assert!(
+            store
+                .list_notifications(Some(false), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.list_notifications(Some(true), 10).unwrap().len(), 1);
         assert!(
             !store
                 .observe_agent_attention(7, AttentionState::Idle, false, true, 30)
@@ -233,6 +262,7 @@ mod tests {
                 .unwrap()
                 .unread
         );
+        assert!(store.list_notifications(None, 10).unwrap().is_empty());
 
         store
             .observe_agent_attention(7, AttentionState::Working, false, true, 30)
@@ -259,6 +289,50 @@ mod tests {
                 .observe_agent_attention(7, AttentionState::Exited, false, false, 10)
                 .unwrap()
                 .unread
+        );
+    }
+
+    #[test]
+    fn notification_center_read_clears_the_agent_marker() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 10)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Idle, false, true, 20)
+            .unwrap();
+        let notification = store.list_notifications(Some(false), 10).unwrap().remove(0);
+
+        assert!(store.mark_notification_read(notification.id, 30).unwrap());
+        assert!(
+            store
+                .list_notifications(Some(false), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 40)
+                .unwrap()
+                .unread
+        );
+
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 50)
+            .unwrap();
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 60)
+                .unwrap()
+                .unread
+        );
+        assert!(!store.mark_notification_read(notification.id, 70).unwrap());
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 80)
+                .unwrap()
+                .unread,
+            "marking an old history item again must not clear a newer completion"
         );
     }
 

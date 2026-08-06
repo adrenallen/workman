@@ -4,6 +4,7 @@ pub mod agent_notifications;
 pub mod attention;
 pub mod domain;
 pub mod locks;
+pub mod notifications;
 #[cfg(unix)]
 mod output_spill;
 /// Revision-guarded project scratchpads.
@@ -21,6 +22,7 @@ pub mod pty;
 pub use agent_notifications::*;
 pub use domain::*;
 pub use locks::*;
+pub use notifications::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todo_claims::*;

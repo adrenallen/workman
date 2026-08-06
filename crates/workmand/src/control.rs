@@ -34,6 +34,19 @@ struct ProcessIdParams {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct NotificationsListParams {
+    read: Option<bool>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NotificationsMarkReadParams {
+    notification_id: Option<i64>,
+    #[serde(default)]
+    all: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct ListParams {
     project_id: Option<ProjectId>,
 }
@@ -490,6 +503,34 @@ async fn dispatch(
         return result;
     }
     match method {
+        "notifications.list" | "notifications_list" => {
+            let params: NotificationsListParams = params_as(params)?;
+            return registry
+                .store()
+                .list_notifications(params.read, params.limit.unwrap_or(100))
+                .map(json_value)
+                .map_err(project_store_error);
+        }
+        "notifications.mark_read" | "notifications_mark_read" => {
+            let params: NotificationsMarkReadParams = params_as(params)?;
+            let read_at = crate::timers::now_millis();
+            if params.all {
+                return registry
+                    .store()
+                    .mark_all_notifications_read(read_at)
+                    .map(|updated| json!({ "updated": updated }))
+                    .map_err(project_store_error);
+            }
+            let notification_id = params.notification_id.ok_or((
+                "invalid_params",
+                "notification_id is required unless all is true".to_owned(),
+            ))?;
+            return registry
+                .store()
+                .mark_notification_read(notification_id, read_at)
+                .map(|updated| json!({ "updated": usize::from(updated) }))
+                .map_err(project_store_error);
+        }
         "projects.list" => {
             return project_result(list_projects(registry.store()));
         }
