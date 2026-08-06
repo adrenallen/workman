@@ -177,6 +177,56 @@ async fn wait_for_logs(daemon: &TestDaemon, process_id: i64, needle: &str) -> St
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn help_and_parser_errors_never_mutate_a_real_daemon() {
+    let daemon = TestDaemon::start().await;
+    let before = daemon.output(&["ps", "--project", "1"]).await.stdout;
+
+    for (args, usage) in [
+        (&["--help"][..], "Usage: wrk [GLOBAL OPTIONS]"),
+        (&["help"][..], "Usage: wrk [GLOBAL OPTIONS]"),
+        (&["add", "--help"][..], "Usage: wrk add"),
+        (&["up", "--help"][..], "Usage: wrk up"),
+        (&["down", "--help"][..], "Usage: wrk down"),
+        (&["app", "--help"][..], "Usage: wrk app"),
+        (&["update", "--help"][..], "Usage: wrk update"),
+        (&["mcp-setup", "--help"][..], "Usage: wrk mcp-setup"),
+        (&["run", "--help"][..], "Usage: wrk run"),
+        (&["agent", "--help"][..], "Usage: wrk agent"),
+        (&["ps", "--help"][..], "Usage: wrk ps"),
+        (&["logs", "--help"][..], "Usage: wrk logs"),
+        (&["attach", "--help"][..], "Usage: wrk attach"),
+        (&["stop", "--help"][..], "Usage: wrk stop"),
+        (&["help", "--help"][..], "Usage: wrk help"),
+    ] {
+        let output = daemon.output(args).await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(usage), "wrk {args:?}:\n{stdout}");
+    }
+
+    for args in [
+        &["run", "--unknown"][..],
+        &["run", "--name", "--unsafe", "echo"][..],
+        &["run", "--", "--unsafe"][..],
+    ] {
+        let output = daemon.command().args(args).output().await.unwrap();
+        assert!(
+            !output.status.success(),
+            "wrk {args:?} unexpectedly succeeded"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("wrk run --help"), "wrk {args:?}:\n{stderr}");
+    }
+
+    let after = daemon.output(&["ps", "--project", "1"]).await.stdout;
+    assert_eq!(
+        String::from_utf8_lossy(&before),
+        String::from_utf8_lossy(&after),
+        "help or parser errors changed the isolated daemon's process list"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_cli_commands_drive_a_real_daemon() {
     let daemon = TestDaemon::start().await;
 

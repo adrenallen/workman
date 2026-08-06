@@ -40,45 +40,185 @@ const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 const HELLO_REQUEST_ID: &str = "__workman_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 
-const HELP: &str = "\
-Usage: wrk [--data-dir PATH] [--daemon PATH] [--version] [--update [--check] [--channel stable|latest] [--key KEY]] [COMMAND]\n\
-\n\
-Commands:\n\
-  (none)\n\
-      Register the current directory if needed, sync workman.yml, and show status.\n\
-  add [PATH]\n\
-      Register PATH (default: current directory) as a project.\n\
-  up [--project ID]\n\
-      Start trusted command processes for the current project.\n\
-  down [--project ID]\n\
-      Stop trusted command processes for the current project.\n\
-  app\n\
-      Launch the workman desktop app.\n\
-  update [--check] [--channel stable|latest] [--key KEY]\n\
-      Check Workman's release host and securely update workman and workmand. Stable is the default;\n\
-      latest includes prereleases. --check reports only. --key overrides the configured download key.\n\
-  mcp-setup [--client claude|codex|gemini|opencode|generic] [--run]\n\
-      Print setup for one MCP client, or all supported clients by default.\n\
-      --run executes the Claude setup command.\n\
-  run [--project ID] [--name NAME] [--cwd PATH] -- <command...>\n\
-      Create and start a durable command process. The current project or\n\
-      WORKMAN_PROJECT_ID is used when --project is absent.\n\
-  agent --tool ID [--project ID] [--name NAME] [-- <agent args...>]\n\
-      Launch a registered agent through the daemon's per-launch MCP wiring.\n\
-  ps [--project ID]\n\
-      List process IDs, project IDs, statuses, PIDs, names, and commands.\n\
-  logs [-f|--follow] <PROCESS_ID>\n\
-      Print daemon-rendered output, or follow the live raw stream.\n\
-  attach <PROCESS_ID>\n\
-      Replay and attach to the live PTY with raw input and resize forwarding.\n\
-  stop <PROCESS_ID>\n\
-      Gracefully stop the process group.\n";
+const ROOT_HELP: &str = concat!(
+    "wrk ",
+    env!("CARGO_PKG_VERSION"),
+    " — local workspace and process control\n",
+    "Usage: wrk [GLOBAL OPTIONS] [COMMAND] [OPTIONS]\n",
+    "\n",
+    "Workspace\n",
+    "  (no command)  Register or sync the current directory and show status\n",
+    "  add           Register a project folder\n",
+    "\n",
+    "Processes\n",
+    "  up            Start trusted commands\n",
+    "  down          Stop trusted commands\n",
+    "  run           Create and start a durable command\n",
+    "  agent         Launch a configured agent\n",
+    "  ps            List processes\n",
+    "  logs          Read or follow process output\n",
+    "  attach        Attach to a live process\n",
+    "  stop          Stop one process\n",
+    "\n",
+    "Worktrees\n",
+    "  app           Open the desktop workspace and worktree tools\n",
+    "\n",
+    "Updates\n",
+    "  update        Check for or install Workman updates\n",
+    "\n",
+    "Daemon\n",
+    "  mcp-setup     Print authenticated MCP client setup\n",
+    "\n",
+    "Misc\n",
+    "  help          Show root or command help\n",
+    "\n",
+    "Global options\n",
+    "  --data-dir PATH  Use an isolated Workman data directory\n",
+    "  --daemon PATH    Use a specific workmand executable\n",
+    "  -h, --help       Show help and exit\n",
+    "  -V, --version    Show version and exit\n",
+    "\n",
+    "Examples\n",
+    "  wrk\n",
+    "  wrk add ~/Code/my-app\n",
+    "  wrk run --name dev -- pnpm dev\n",
+    "  wrk logs --follow 42\n",
+    "\n",
+    "Run `wrk help COMMAND` for command details.\n",
+    "Docs: https://github.com/adrenallen/workman\n",
+);
+
+const ADD_HELP: &str = r#"wrk add — register a project folder
+Usage: wrk add [PATH]
+
+Arguments
+  PATH        Project folder; defaults to the current directory
+
+Options
+  -h, --help  Show help and exit
+
+Example
+  wrk add ~/Code/my-app
+"#;
+
+const UP_HELP: &str = r#"wrk up — start trusted project commands
+Usage: wrk up [--project ID]
+
+Options
+  --project ID  Target project; defaults to the current project
+  -h, --help    Show help and exit
+"#;
+
+const DOWN_HELP: &str = r#"wrk down — stop trusted project commands
+Usage: wrk down [--project ID]
+
+Options
+  --project ID  Target project; defaults to the current project
+  -h, --help    Show help and exit
+"#;
+
+const APP_HELP: &str = r#"wrk app — open the Workman desktop workspace
+Usage: wrk app
+
+Use the desktop app to manage projects, worktrees, processes, and coordination.
+
+Options
+  -h, --help  Show help and exit
+"#;
+
+const UPDATE_HELP: &str = r#"wrk update — check for or install Workman updates
+Usage: wrk update [OPTIONS]
+
+Options
+  --check                  Check without installing
+  --channel stable|latest  Select stable or prerelease updates
+  --key KEY                Override the configured download key
+  -h, --help               Show help and exit
+
+Examples
+  wrk update --check
+  wrk update --channel latest
+"#;
+
+const MCP_SETUP_HELP: &str = r#"wrk mcp-setup — print authenticated MCP client setup
+Usage: wrk mcp-setup [OPTIONS]
+
+Options
+  --client CLIENT  Limit output to claude, codex, gemini, opencode, or generic
+  --run            Run the Claude setup command
+  -h, --help       Show help and exit
+"#;
+
+const RUN_HELP: &str = r#"wrk run — create and start a durable command
+Usage: wrk run [OPTIONS] [--] COMMAND [ARG...]
+
+Options
+  --project ID  Target project; defaults to the current project
+  --name NAME   Set the stored process name
+  --cwd PATH    Set the process working directory
+  -h, --help    Show help and exit
+
+Use `--` before COMMAND when its arguments contain Workman option names.
+
+Examples
+  wrk run --name dev -- pnpm dev
+  wrk run -- npm --help
+"#;
+
+const AGENT_HELP: &str = r#"wrk agent — launch a configured agent
+Usage: wrk agent --tool ID [OPTIONS] [-- AGENT_ARG...]
+
+Options
+  --tool ID     Required agent-tool ID
+  --project ID  Target project; defaults to the current project
+  --name NAME   Set the stored agent name
+  -h, --help    Show help and exit
+"#;
+
+const PS_HELP: &str = r#"wrk ps — list processes
+Usage: wrk ps [--project ID]
+
+Options
+  --project ID  Limit output to one project
+  -h, --help    Show help and exit
+"#;
+
+const LOGS_HELP: &str = r#"wrk logs — read or follow process output
+Usage: wrk logs [-f|--follow] PROCESS_ID
+
+Options
+  -f, --follow  Follow live output until the process exits
+  -h, --help    Show help and exit
+"#;
+
+const ATTACH_HELP: &str = r#"wrk attach — attach to a live process
+Usage: wrk attach PROCESS_ID
+
+Replays saved output, forwards terminal input and resize events, then exits with the process.
+
+Options
+  -h, --help  Show help and exit
+"#;
+
+const STOP_HELP: &str = r#"wrk stop — stop one process
+Usage: wrk stop PROCESS_ID
+
+Options
+  -h, --help  Show help and exit
+"#;
+
+const HELP_HELP: &str = r#"wrk help — show root or command help
+Usage: wrk help [COMMAND]
+
+Example
+  wrk help run
+"#;
 
 /// Parse process arguments and execute one CLI invocation.
 pub async fn run_env() -> Result<()> {
     let cli = Cli::parse(env::args_os())?;
-    if matches!(cli.command, Command::Help) {
-        print!("{HELP}");
+    if let Command::Help(topic) = &cli.command {
+        print!("{}", help_text(*topic));
         return Ok(());
     }
     if matches!(cli.command, Command::Version) {
@@ -122,7 +262,7 @@ pub async fn run_env() -> Result<()> {
         Command::App
         | Command::McpSetup { .. }
         | Command::Update { .. }
-        | Command::Help
+        | Command::Help(_)
         | Command::Version => {
             unreachable!()
         }
@@ -173,8 +313,75 @@ enum Command {
     Stop {
         process_id: i64,
     },
-    Help,
+    Help(HelpTopic),
     Version,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HelpTopic {
+    Root,
+    Add,
+    Up,
+    Down,
+    App,
+    Update,
+    McpSetup,
+    Run,
+    Agent,
+    Ps,
+    Logs,
+    Attach,
+    Stop,
+    Help,
+}
+
+impl HelpTopic {
+    const SUBCOMMANDS: [(&'static str, Self); 13] = [
+        ("add", Self::Add),
+        ("up", Self::Up),
+        ("down", Self::Down),
+        ("app", Self::App),
+        ("update", Self::Update),
+        ("mcp-setup", Self::McpSetup),
+        ("run", Self::Run),
+        ("agent", Self::Agent),
+        ("ps", Self::Ps),
+        ("logs", Self::Logs),
+        ("attach", Self::Attach),
+        ("stop", Self::Stop),
+        ("help", Self::Help),
+    ];
+
+    fn command(self) -> Option<&'static str> {
+        Self::SUBCOMMANDS
+            .iter()
+            .find_map(|(command, topic)| (*topic == self).then_some(*command))
+    }
+
+    fn for_command(command: &str) -> Option<Self> {
+        Self::SUBCOMMANDS
+            .iter()
+            .find_map(|(name, topic)| (*name == command).then_some(*topic))
+    }
+}
+
+fn help_text(topic: HelpTopic) -> &'static str {
+    match topic {
+        HelpTopic::Root => ROOT_HELP,
+        HelpTopic::Add => ADD_HELP,
+        HelpTopic::Up => UP_HELP,
+        HelpTopic::Down => DOWN_HELP,
+        HelpTopic::App => APP_HELP,
+        HelpTopic::Update => UPDATE_HELP,
+        HelpTopic::McpSetup => MCP_SETUP_HELP,
+        HelpTopic::Run => RUN_HELP,
+        HelpTopic::Agent => AGENT_HELP,
+        HelpTopic::Ps => PS_HELP,
+        HelpTopic::Logs => LOGS_HELP,
+        HelpTopic::Attach => ATTACH_HELP,
+        HelpTopic::Stop => STOP_HELP,
+        HelpTopic::Help => HELP_HELP,
+    }
 }
 
 #[derive(Debug)]
@@ -197,52 +404,69 @@ impl Cli {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut args = args.into_iter();
         let _program = args.next();
-        let mut args = args
+        let args = args
             .map(|arg| {
                 arg.into_string()
                     .map_err(|_| cli_error("arguments must be valid UTF-8"))
             })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter();
+            .collect::<Result<Vec<_>>>()?;
+
+        if root_help_requested(&args) {
+            return Ok(Self {
+                data_dir: None,
+                daemon: None,
+                command: Command::Help(HelpTopic::Root),
+            });
+        }
 
         let mut data_dir = None;
         let mut daemon = None;
+        let mut args = args.into_iter();
         let command = loop {
             let Some(arg) = args.next() else {
                 break Command::Status;
             };
             match arg.as_str() {
-                "--data-dir" => data_dir = Some(PathBuf::from(next_value(&mut args, &arg)?)),
-                "--daemon" => daemon = Some(PathBuf::from(next_value(&mut args, &arg)?)),
-                "--help" | "-h" | "help" => break Command::Help,
+                "--data-dir" if data_dir.is_none() => {
+                    data_dir = Some(PathBuf::from(next_value(&mut args, &arg, HelpTopic::Root)?));
+                }
+                "--daemon" if daemon.is_none() => {
+                    daemon = Some(PathBuf::from(next_value(&mut args, &arg, HelpTopic::Root)?));
+                }
+                "--help" | "-h" => break Command::Help(HelpTopic::Root),
+                "help" => break parse_help(args.collect())?,
                 "--version" | "-V" => {
-                    require_no_args(args, "--version")?;
+                    require_no_args(args.collect(), "--version", HelpTopic::Root)?;
                     break Command::Version;
                 }
-                "--update" | "update" => break parse_update(args)?,
-                "add" => break parse_add(args)?,
-                "up" => break parse_project_action(args, true)?,
-                "down" => break parse_project_action(args, false)?,
+                "--update" | "update" => break parse_update(args.collect())?,
+                "add" => break parse_add(args.collect())?,
+                "up" => break parse_project_action(args.collect(), true)?,
+                "down" => break parse_project_action(args.collect(), false)?,
                 "app" => {
-                    require_no_args(args, "app")?;
+                    let remaining = args.collect::<Vec<_>>();
+                    if help_requested(&remaining) {
+                        break Command::Help(HelpTopic::App);
+                    }
+                    require_no_args(remaining, "app", HelpTopic::App)?;
                     break Command::App;
                 }
-                "mcp-setup" => break parse_mcp_setup(args)?,
-                "run" => break parse_run(args)?,
-                "agent" => break parse_agent(args)?,
-                "ps" => break parse_ps(args)?,
-                "logs" => break parse_logs(args)?,
-                "attach" => {
-                    break Command::Attach {
-                        process_id: parse_single_process_id(args, "attach")?,
-                    };
+                "mcp-setup" => break parse_mcp_setup(args.collect())?,
+                "run" => break parse_run(args.collect())?,
+                "agent" => break parse_agent(args.collect())?,
+                "ps" => break parse_ps(args.collect())?,
+                "logs" => break parse_logs(args.collect())?,
+                "attach" => break parse_process_id_command(args.collect(), HelpTopic::Attach)?,
+                "stop" => break parse_process_id_command(args.collect(), HelpTopic::Stop)?,
+                _ if arg.starts_with('-') => {
+                    return Err(unknown_option(HelpTopic::Root, &arg));
                 }
-                "stop" => {
-                    break Command::Stop {
-                        process_id: parse_single_process_id(args, "stop")?,
-                    };
+                _ => {
+                    return Err(usage_error(
+                        HelpTopic::Root,
+                        format!("unknown command {arg:?}"),
+                    ));
                 }
-                _ => return Err(cli_error(format!("unknown command {arg:?}\n\n{HELP}"))),
             }
         };
 
@@ -254,20 +478,90 @@ impl Cli {
     }
 }
 
-fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn root_help_requested(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return true,
+            "--data-dir" | "--daemon" => {
+                if matches!(
+                    args.get(index + 1).map(String::as_str),
+                    Some("-h" | "--help")
+                ) {
+                    return true;
+                }
+                index += 2;
+            }
+            "--version" | "-V" => {
+                return args[index + 1..]
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "-h" | "--help"));
+            }
+            "--update" | "update" | "add" | "up" | "down" | "app" | "mcp-setup" | "run"
+            | "agent" | "ps" | "logs" | "attach" | "stop" | "help" => return false,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn help_requested(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+}
+
+fn parse_help(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Help));
+    }
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return Ok(Command::Help(HelpTopic::Root));
+    };
+    if command.starts_with('-') {
+        return Err(unknown_option(HelpTopic::Help, &command));
+    }
+    let topic = HelpTopic::for_command(&command)
+        .ok_or_else(|| usage_error(HelpTopic::Help, format!("unknown command {command:?}")))?;
+    require_no_args(args.collect(), "help", HelpTopic::Help)?;
+    Ok(Command::Help(topic))
+}
+
+fn parse_update(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Update));
+    }
+    let mut args = args.into_iter();
     let mut check_only = false;
     let mut channel = UpdateChannel::Stable;
     let mut key = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" if !check_only => check_only = true,
-            "--channel" => {
-                channel = next_value(&mut args, &arg)?
-                    .parse()
-                    .map_err(|_| cli_error("--channel must be stable or latest"))?;
+            "--check" => {
+                return Err(usage_error(
+                    HelpTopic::Update,
+                    "--check may only be specified once",
+                ));
             }
-            "--key" if key.is_none() => key = Some(next_value(&mut args, &arg)?),
-            _ => return Err(cli_error(format!("unknown update option {arg:?}"))),
+            "--channel" => {
+                channel = next_value(&mut args, &arg, HelpTopic::Update)?
+                    .parse()
+                    .map_err(|_| {
+                        usage_error(HelpTopic::Update, "--channel must be stable or latest")
+                    })?;
+            }
+            "--key" if key.is_none() => {
+                key = Some(next_value(&mut args, &arg, HelpTopic::Update)?);
+            }
+            "--key" => {
+                return Err(usage_error(
+                    HelpTopic::Update,
+                    "--key may only be specified once",
+                ));
+            }
+            _ => return Err(unknown_option(HelpTopic::Update, &arg)),
         }
     }
     Ok(Command::Update {
@@ -277,20 +571,49 @@ fn parse_update(mut args: impl Iterator<Item = String>) -> Result<Command> {
     })
 }
 
-fn parse_add(mut args: impl Iterator<Item = String>) -> Result<Command> {
-    let path = args.next().map(PathBuf::from).unwrap_or_else(|| ".".into());
-    if args.next().is_some() {
-        return Err(cli_error("add accepts at most one path"));
+fn parse_add(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Add));
+    }
+    let mut args = args.into_iter();
+    let path = match args.next() {
+        Some(path) if path.starts_with('-') => return Err(unknown_option(HelpTopic::Add, &path)),
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from("."),
+    };
+    if let Some(extra) = args.next() {
+        if extra.starts_with('-') {
+            return Err(unknown_option(HelpTopic::Add, &extra));
+        }
+        return Err(usage_error(HelpTopic::Add, "add accepts at most one path"));
     }
     Ok(Command::Add { path })
 }
 
-fn parse_project_action(mut args: impl Iterator<Item = String>, start: bool) -> Result<Command> {
+fn parse_project_action(args: Vec<String>, start: bool) -> Result<Command> {
+    let topic = if start {
+        HelpTopic::Up
+    } else {
+        HelpTopic::Down
+    };
+    if help_requested(&args) {
+        return Ok(Command::Help(topic));
+    }
+    let mut args = args.into_iter();
     let mut project_id = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--project" => project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?),
-            _ => return Err(cli_error(format!("unknown option {arg:?}"))),
+            "--project" if project_id.is_none() => {
+                project_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, topic)?,
+                    "project",
+                    topic,
+                )?);
+            }
+            "--project" => {
+                return Err(usage_error(topic, "--project may only be specified once"));
+            }
+            _ => return Err(unknown_option(topic, &arg)),
         }
     }
     Ok(if start {
@@ -300,37 +623,63 @@ fn parse_project_action(mut args: impl Iterator<Item = String>, start: bool) -> 
     })
 }
 
-fn parse_mcp_setup(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn parse_mcp_setup(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::McpSetup));
+    }
+    let mut args = args.into_iter();
     let mut run = false;
     let mut client = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--run" => run = true,
+            "--run" if !run => run = true,
+            "--run" => {
+                return Err(usage_error(
+                    HelpTopic::McpSetup,
+                    "--run may only be specified once",
+                ));
+            }
             "--client" => {
                 if client.is_some() {
-                    return Err(cli_error("--client may only be specified once"));
+                    return Err(usage_error(
+                        HelpTopic::McpSetup,
+                        "--client may only be specified once",
+                    ));
                 }
-                let value = next_value(&mut args, &arg)?;
+                let value = next_value(&mut args, &arg, HelpTopic::McpSetup)?;
                 client = Some(McpClient::parse(&value).ok_or_else(|| {
-                    cli_error(format!(
-                        "unknown MCP client {value:?}; expected claude, codex, gemini, opencode, or generic"
-                    ))
+                    usage_error(
+                        HelpTopic::McpSetup,
+                        format!(
+                            "unknown MCP client {value:?}; expected claude, codex, gemini, opencode, or generic"
+                        ),
+                    )
                 })?);
             }
-            _ => return Err(cli_error(format!("unknown mcp-setup option {arg:?}"))),
+            _ => return Err(unknown_option(HelpTopic::McpSetup, &arg)),
         }
     }
     Ok(Command::McpSetup { run, client })
 }
 
-fn require_no_args(mut args: impl Iterator<Item = String>, command: &str) -> Result<()> {
-    if args.next().is_some() {
-        return Err(cli_error(format!("{command} does not accept arguments")));
+fn require_no_args(args: Vec<String>, command: &str, topic: HelpTopic) -> Result<()> {
+    if let Some(option) = args.iter().find(|arg| arg.starts_with('-')) {
+        return Err(unknown_option(topic, option));
+    }
+    if !args.is_empty() {
+        return Err(usage_error(
+            topic,
+            format!("{command} does not accept arguments"),
+        ));
     }
     Ok(())
 }
 
-fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn parse_run(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Run));
+    }
+    let mut args = args.into_iter();
     let mut project_id = None;
     let mut name = None;
     let mut cwd = None;
@@ -343,12 +692,37 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
                 break;
             }
             "--project" if command.is_empty() => {
-                project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?);
+                if project_id.is_some() {
+                    return Err(usage_error(
+                        HelpTopic::Run,
+                        "--project may only be specified once",
+                    ));
+                }
+                project_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Run)?,
+                    "project",
+                    HelpTopic::Run,
+                )?);
             }
-            "--name" if command.is_empty() => name = Some(next_value(&mut args, &arg)?),
+            "--name" if command.is_empty() => {
+                if name.is_some() {
+                    return Err(usage_error(
+                        HelpTopic::Run,
+                        "--name may only be specified once",
+                    ));
+                }
+                name = Some(next_value(&mut args, &arg, HelpTopic::Run)?);
+            }
             "--cwd" if command.is_empty() => {
-                cwd = Some(PathBuf::from(next_value(&mut args, &arg)?));
+                if cwd.is_some() {
+                    return Err(usage_error(
+                        HelpTopic::Run,
+                        "--cwd may only be specified once",
+                    ));
+                }
+                cwd = Some(PathBuf::from(next_value(&mut args, &arg, HelpTopic::Run)?));
             }
+            _ if arg.starts_with('-') => return Err(unknown_option(HelpTopic::Run, &arg)),
             _ => {
                 command.push(arg);
                 command.extend(args);
@@ -357,8 +731,9 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
         }
     }
     if command.is_empty() {
-        return Err(cli_error("run requires a command"));
+        return Err(usage_error(HelpTopic::Run, "run requires a command"));
     }
+    reject_leading_dash(&command[0], "COMMAND", HelpTopic::Run)?;
     Ok(Command::Run(RunOptions {
         project_id,
         name,
@@ -367,7 +742,11 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
     }))
 }
 
-fn parse_agent(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn parse_agent(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Agent));
+    }
+    let mut args = args.into_iter();
     let mut project_id = None;
     let mut agent_tool_id = None;
     let mut name = None;
@@ -379,69 +758,181 @@ fn parse_agent(mut args: impl Iterator<Item = String>) -> Result<Command> {
                 extra_args.extend(args);
                 break;
             }
+            "--project" if project_id.is_none() => {
+                project_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Agent)?,
+                    "project",
+                    HelpTopic::Agent,
+                )?);
+            }
             "--project" => {
-                project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?);
+                return Err(usage_error(
+                    HelpTopic::Agent,
+                    "--project may only be specified once",
+                ));
             }
             "--tool" => {
                 if agent_tool_id.is_some() {
-                    return Err(cli_error("--tool may only be specified once"));
+                    return Err(usage_error(
+                        HelpTopic::Agent,
+                        "--tool may only be specified once",
+                    ));
                 }
-                agent_tool_id = Some(parse_id(&next_value(&mut args, &arg)?, "agent tool")?);
+                agent_tool_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Agent)?,
+                    "agent tool",
+                    HelpTopic::Agent,
+                )?);
             }
-            "--name" => name = Some(next_value(&mut args, &arg)?),
-            _ => return Err(cli_error(format!("unknown agent option {arg:?}"))),
+            "--name" if name.is_none() => {
+                name = Some(next_value(&mut args, &arg, HelpTopic::Agent)?);
+            }
+            "--name" => {
+                return Err(usage_error(
+                    HelpTopic::Agent,
+                    "--name may only be specified once",
+                ));
+            }
+            _ => return Err(unknown_option(HelpTopic::Agent, &arg)),
         }
     }
     Ok(Command::Agent(AgentOptions {
         project_id,
-        agent_tool_id: agent_tool_id.ok_or_else(|| cli_error("agent requires --tool ID"))?,
+        agent_tool_id: agent_tool_id
+            .ok_or_else(|| usage_error(HelpTopic::Agent, "agent requires --tool ID"))?,
         name,
         extra_args,
     }))
 }
 
-fn parse_ps(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn parse_ps(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Ps));
+    }
+    let mut args = args.into_iter();
     let mut project_id = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--project" => project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?),
-            _ => return Err(cli_error(format!("unknown ps option {arg:?}"))),
+            "--project" if project_id.is_none() => {
+                project_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Ps)?,
+                    "project",
+                    HelpTopic::Ps,
+                )?);
+            }
+            "--project" => {
+                return Err(usage_error(
+                    HelpTopic::Ps,
+                    "--project may only be specified once",
+                ));
+            }
+            _ => return Err(unknown_option(HelpTopic::Ps, &arg)),
         }
     }
     Ok(Command::Ps { project_id })
 }
 
-fn parse_logs(mut args: impl Iterator<Item = String>) -> Result<Command> {
+fn parse_logs(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Logs));
+    }
+    let mut args = args.into_iter();
     let mut follow = false;
     let mut process_id = None;
     for arg in args.by_ref() {
         match arg.as_str() {
-            "--follow" | "-f" => follow = true,
-            _ if process_id.is_none() => process_id = Some(parse_id(&arg, "process")?),
-            _ => return Err(cli_error("logs accepts exactly one process ID")),
+            "--follow" | "-f" if !follow => follow = true,
+            "--follow" | "-f" => {
+                return Err(usage_error(
+                    HelpTopic::Logs,
+                    "--follow may only be specified once",
+                ));
+            }
+            _ if arg.starts_with('-') => return Err(unknown_option(HelpTopic::Logs, &arg)),
+            _ if process_id.is_none() => {
+                process_id = Some(parse_id_arg(&arg, "process", HelpTopic::Logs)?);
+            }
+            _ => {
+                return Err(usage_error(
+                    HelpTopic::Logs,
+                    "logs accepts exactly one process ID",
+                ));
+            }
         }
     }
     Ok(Command::Logs {
-        process_id: process_id.ok_or_else(|| cli_error("logs requires a process ID"))?,
+        process_id: process_id
+            .ok_or_else(|| usage_error(HelpTopic::Logs, "logs requires a process ID"))?,
         follow,
     })
 }
 
-fn parse_single_process_id(mut args: impl Iterator<Item = String>, command: &str) -> Result<i64> {
+fn parse_process_id_command(args: Vec<String>, topic: HelpTopic) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(topic));
+    }
+    let command = topic.command().expect("process command help topic");
+    let mut args = args.into_iter();
     let id = args
         .next()
-        .ok_or_else(|| cli_error(format!("{command} requires a process ID")))?;
-    if args.next().is_some() {
-        return Err(cli_error(format!(
-            "{command} accepts exactly one process ID"
-        )));
+        .ok_or_else(|| usage_error(topic, format!("{command} requires a process ID")))?;
+    if id.starts_with('-') {
+        return Err(unknown_option(topic, &id));
     }
-    parse_id(&id, "process")
+    if let Some(extra) = args.next() {
+        if extra.starts_with('-') {
+            return Err(unknown_option(topic, &extra));
+        }
+        return Err(usage_error(
+            topic,
+            format!("{command} accepts exactly one process ID"),
+        ));
+    }
+    let process_id = parse_id_arg(&id, "process", topic)?;
+    Ok(match topic {
+        HelpTopic::Attach => Command::Attach { process_id },
+        HelpTopic::Stop => Command::Stop { process_id },
+        _ => unreachable!("process ID command topic"),
+    })
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String> {
-    args.next()
-        .ok_or_else(|| cli_error(format!("{option} requires a value")))
+fn next_value(
+    args: &mut impl Iterator<Item = String>,
+    option: &str,
+    topic: HelpTopic,
+) -> Result<String> {
+    let value = args
+        .next()
+        .ok_or_else(|| usage_error(topic, format!("{option} requires a value")))?;
+    reject_leading_dash(&value, &format!("{option} value"), topic)?;
+    Ok(value)
+}
+
+fn reject_leading_dash(value: &str, label: &str, topic: HelpTopic) -> Result<()> {
+    if value.starts_with('-') {
+        return Err(usage_error(
+            topic,
+            format!("{label} must not start with '-'"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_id_arg(value: &str, kind: &str, topic: HelpTopic) -> Result<i64> {
+    parse_id(value, kind)
+        .map_err(|_| usage_error(topic, format!("{kind} ID must be a positive integer")))
+}
+
+fn unknown_option(topic: HelpTopic, option: &str) -> Box<dyn Error + Send + Sync> {
+    usage_error(topic, format!("unknown option {option:?}"))
+}
+
+fn usage_error(topic: HelpTopic, message: impl fmt::Display) -> Box<dyn Error + Send + Sync> {
+    let hint = topic
+        .command()
+        .map(|command| format!("wrk {command} --help"))
+        .unwrap_or_else(|| "wrk --help".into());
+    cli_error(format!("{message}\nTry `{hint}` for usage."))
 }
 
 fn parse_id(value: &str, kind: &str) -> Result<i64> {
@@ -1802,6 +2293,109 @@ mod tests {
         assert_eq!(agent.name.as_deref(), Some("reviewer"));
         assert_eq!(agent.extra_args, ["--model", "gpt-test"]);
         assert!(Cli::parse(["wrk", "agent"].map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn root_and_every_subcommand_have_safe_help() {
+        for args in [
+            vec!["wrk", "--help"],
+            vec!["wrk", "-h"],
+            vec!["wrk", "help"],
+            vec!["wrk", "--data-dir", "--help"],
+            vec!["wrk", "--unknown", "--help"],
+        ] {
+            let cli = Cli::parse(args.into_iter().map(OsString::from)).unwrap();
+            assert!(matches!(cli.command, Command::Help(HelpTopic::Root)));
+        }
+
+        assert!(ROOT_HELP.starts_with(concat!("wrk ", env!("CARGO_PKG_VERSION"))));
+        assert!(ROOT_HELP.contains("Workspace\n"));
+        assert!(ROOT_HELP.contains("Processes\n"));
+        assert!(ROOT_HELP.contains("Worktrees\n"));
+        assert!(ROOT_HELP.contains("Docs: https://github.com/adrenallen/workman"));
+
+        for (command, topic) in HelpTopic::SUBCOMMANDS {
+            for args in [
+                vec!["wrk", command, "--help"],
+                vec!["wrk", command, "-h"],
+                vec!["wrk", "help", command],
+            ] {
+                let cli = Cli::parse(args.into_iter().map(OsString::from)).unwrap();
+                assert!(
+                    matches!(cli.command, Command::Help(actual) if actual == topic),
+                    "wrong help topic for {command}"
+                );
+            }
+            let help = help_text(topic);
+            assert!(help.contains(&format!("Usage: wrk {command}")), "{help}");
+            assert!(help.ends_with('\n'), "{command} help needs a final newline");
+        }
+
+        let cli = Cli::parse(
+            ["wrk", "run", "--unknown", "--help"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap();
+        assert!(matches!(cli.command, Command::Help(HelpTopic::Run)));
+    }
+
+    #[test]
+    fn unknown_flags_and_leading_dash_values_fail_closed() {
+        let unknown_flag_cases: &[&[&str]] = &[
+            &["wrk", "--unknown"],
+            &["wrk", "add", "--unknown"],
+            &["wrk", "add", ".", "--unknown"],
+            &["wrk", "up", "--unknown"],
+            &["wrk", "down", "--unknown"],
+            &["wrk", "app", "--unknown"],
+            &["wrk", "app", "extra", "--unknown"],
+            &["wrk", "update", "--unknown"],
+            &["wrk", "mcp-setup", "--unknown"],
+            &["wrk", "run", "--unknown"],
+            &["wrk", "agent", "--unknown"],
+            &["wrk", "ps", "--unknown"],
+            &["wrk", "logs", "--unknown"],
+            &["wrk", "attach", "--unknown"],
+            &["wrk", "attach", "1", "--unknown"],
+            &["wrk", "stop", "--unknown"],
+            &["wrk", "help", "--unknown"],
+        ];
+        for args in unknown_flag_cases {
+            let error = Cli::parse(args.iter().copied().map(OsString::from)).unwrap_err();
+            let error = error.to_string();
+            assert!(error.contains("unknown option"), "{args:?}: {error}");
+            assert!(error.contains("for usage"), "{args:?}: {error}");
+        }
+
+        let leading_value_cases: &[&[&str]] = &[
+            &["wrk", "--data-dir", "--unsafe"],
+            &["wrk", "run", "--name", "--unsafe", "echo"],
+            &["wrk", "run", "--cwd", "--unsafe", "echo"],
+            &["wrk", "run", "--", "--unsafe"],
+            &["wrk", "agent", "--tool", "--unsafe"],
+            &["wrk", "agent", "--tool", "1", "--name", "--unsafe"],
+        ];
+        for args in leading_value_cases {
+            let error = Cli::parse(args.iter().copied().map(OsString::from)).unwrap_err();
+            let error = error.to_string();
+            assert!(
+                error.contains("must not start with '-'"),
+                "{args:?}: {error}"
+            );
+            assert!(error.contains("for usage"), "{args:?}: {error}");
+        }
+
+        let cli = Cli::parse(
+            ["wrk", "run", "--", "npm", "--help"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap();
+        let Command::Run(run) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(run.command, ["npm", "--help"]);
     }
 
     #[test]
