@@ -482,6 +482,7 @@ async fn control_session(
 struct TerminalSubscription {
     process_id: Option<workman_core::ProcessId>,
     offset: u64,
+    replay_end_offset: u64,
 }
 
 async fn handle_session_control(
@@ -675,6 +676,7 @@ async fn handle_session_control(
     if method == "terminal.detach" {
         terminal.process_id = None;
         terminal.offset = 0;
+        terminal.replay_end_offset = 0;
         return Some(
             json!({
                 "id": id,
@@ -704,18 +706,50 @@ async fn handle_session_control(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    match registry.lock().await.select(process_id) {
+    let mut registry = registry.lock().await;
+    match registry.select(process_id) {
         Ok(process) => {
+            let project_id = process.project_id;
+            let replay = match registry.raw_output(process_id, Some(offset), 0) {
+                Ok(replay) => replay,
+                Err(error) => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        })
+                        .to_string(),
+                    );
+                }
+            };
+            let focus_reporting = match registry.terminal_focus_reporting(process_id) {
+                Ok(focus_reporting) => focus_reporting,
+                Err(error) => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        })
+                        .to_string(),
+                    );
+                }
+            };
             terminal.process_id = Some(process_id);
             terminal.offset = offset;
+            terminal.replay_end_offset = replay.total_bytes;
             Some(
                 json!({
                     "id": id,
                     "ok": true,
                     "result": {
                         "process_id": process_id,
-                        "project_id": process.project_id,
-                        "offset": offset
+                        "project_id": project_id,
+                        "offset": offset,
+                        "replay_start_offset": replay.start_offset,
+                        "replay_end_offset": replay.total_bytes,
+                        "focus_reporting": focus_reporting
                     }
                 })
                 .to_string(),
@@ -751,11 +785,19 @@ async fn terminal_output_frames(
     let mut frames = Vec::new();
     for _ in 0..TERMINAL_STREAM_CHUNKS_PER_TICK {
         let requested_offset = terminal.offset;
-        let chunk = registry.lock().await.raw_output(
-            process_id,
-            Some(requested_offset),
-            TERMINAL_STREAM_CHUNK_BYTES,
-        )?;
+        let replay_bytes_remaining = terminal.replay_end_offset.saturating_sub(requested_offset);
+        let max_bytes = if replay_bytes_remaining > 0 {
+            usize::try_from(replay_bytes_remaining)
+                .unwrap_or(usize::MAX)
+                .min(TERMINAL_STREAM_CHUNK_BYTES)
+        } else {
+            TERMINAL_STREAM_CHUNK_BYTES
+        };
+        let chunk =
+            registry
+                .lock()
+                .await
+                .raw_output(process_id, Some(requested_offset), max_bytes)?;
         terminal.offset = chunk.end_offset;
         if chunk.data.is_empty() {
             break;
@@ -766,6 +808,13 @@ async fn terminal_output_frames(
             chunk.start_offset > requested_offset,
             &chunk.data,
         ));
+        // Keep retained replay and newly produced live output in separate xterm writes. The
+        // frontend only enables protocol replies after the replay-ending write has parsed.
+        if requested_offset < terminal.replay_end_offset
+            && chunk.end_offset >= terminal.replay_end_offset
+        {
+            break;
+        }
         if chunk.end_offset >= chunk.total_bytes {
             break;
         }

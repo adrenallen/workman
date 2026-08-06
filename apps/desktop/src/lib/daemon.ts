@@ -571,7 +571,16 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     });
   }
 
-  attachTerminal(processId: number, offset = 0): Promise<{ process_id: number; offset: number }> {
+  attachTerminal(
+    processId: number,
+    offset = 0
+  ): Promise<{
+    process_id: number;
+    offset: number;
+    replay_start_offset: number;
+    replay_end_offset: number;
+    focus_reporting: boolean;
+  }> {
     return this.request('terminal.attach', { process_id: processId, offset });
   }
 

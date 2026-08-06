@@ -867,6 +867,16 @@ impl ProcessRegistry {
         })
     }
 
+    /// Return the server emulator's current DEC private focus-reporting mode (1004).
+    pub fn terminal_focus_reporting(&mut self, process_id: ProcessId) -> RegistryResult<bool> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        Ok(self
+            .outputs
+            .get(&process_id)
+            .is_some_and(|output| output.terminal.is_focus_reporting()))
+    }
+
     /// Return a currently rendered choice/permission dialog, if recognized.
     pub fn pending_dialog(
         &mut self,

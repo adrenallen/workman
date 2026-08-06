@@ -38,8 +38,21 @@
   let inputBytes: number[] = [];
   let attachedProcessId: number | null = null;
   let attachedConnected = false;
+  let attachmentGeneration = 0;
+  let inputEnabled = false;
+  let replayState: TerminalReplayState | null = null;
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
+
+  interface TerminalReplayState {
+    generation: number;
+    processId: number;
+    replayEndOffset: number | null;
+    parsedThrough: number;
+    focusReporting: boolean;
+    finishing: boolean;
+    focusRequested: boolean;
+  }
 
   onMount(() => {
     const instance = new Terminal({
@@ -115,14 +128,21 @@
     resizeObserver.observe(host);
     terminal = instance;
     scheduleFit();
-    instance.focus();
     const focusRequested = (event: Event) => {
       const detail = (event as CustomEvent<{ processId?: number }>).detail;
-      if (detail?.processId === process.id) instance.focus();
+      if (detail?.processId !== process.id) return;
+      if (inputEnabled) {
+        instance.focus();
+      } else if (replayState?.processId === process.id) {
+        replayState.focusRequested = true;
+      }
     };
     window.addEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
 
     return () => {
+      attachmentGeneration += 1;
+      inputEnabled = false;
+      replayState = null;
       flushInput();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       resizeObserver.disconnect();
@@ -165,24 +185,59 @@
     attachedProcessId = processId;
     attachedConnected = isConnected;
 
+    flushInput();
+    inputEnabled = false;
+    replayState = null;
     instance.reset();
     hasOutput = false;
     if (!isConnected) return;
 
+    const generation = ++attachmentGeneration;
+    const processRunning = process.status === 'running';
+    const state: TerminalReplayState = {
+      generation,
+      processId,
+      replayEndOffset: null,
+      parsedThrough: 0,
+      focusReporting: false,
+      finishing: false,
+      focusRequested: true
+    };
+    replayState = state;
     let cancelled = false;
-    void client
-      .attachTerminal(processId)
-      .then(() => {
-        if (!cancelled) {
-          scheduleFit();
-          instance.focus();
-        }
-      })
-      .catch((cause) => {
-        if (!cancelled) onError(cause instanceof Error ? cause.message : String(cause));
-      });
+    void (async () => {
+      // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
+      // resizing afterward reflows the active zsh prompt differently from a native terminal.
+      await document.fonts.ready;
+      await nextAnimationFrame();
+      if (cancelled || replayState !== state) return;
+      fitTerminal();
+      if (processRunning) {
+        await client.resizeTerminal(
+          processId,
+          instance.rows,
+          instance.cols,
+          Math.round(host.clientWidth),
+          Math.round(host.clientHeight)
+        );
+      }
+      if (cancelled || replayState !== state) return;
+
+      const attached = await client.attachTerminal(processId);
+      if (cancelled || replayState !== state) return;
+      state.replayEndOffset = attached.replay_end_offset;
+      state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
+      state.focusReporting = attached.focus_reporting;
+      finishReplayIfReady(state);
+    })().catch((cause) => {
+      if (!cancelled) onError(cause instanceof Error ? cause.message : String(cause));
+    });
     return () => {
       cancelled = true;
+      if (replayState === state) {
+        inputEnabled = false;
+        replayState = null;
+      }
       flushInput();
     };
   });
@@ -190,11 +245,22 @@
   function handleTerminalFrame(frame: TerminalFrame): void {
     if (frame.process_id !== process.id || !terminal) return;
     if (frame.data.length > 0) hasOutput = true;
-    terminal.write(Uint8Array.from(frame.data));
+    const state = replayState;
+    terminal.write(Uint8Array.from(frame.data), () => {
+      if (!state || replayState !== state || frame.process_id !== state.processId) return;
+      state.parsedThrough = Math.max(
+        state.parsedThrough,
+        frame.start_offset + frame.data.length
+      );
+      finishReplayIfReady(state);
+    });
   }
 
   function queueInput(bytes: Uint8Array): void {
-    if (process.status !== 'running') return;
+    // xterm emits both physical keyboard data and terminal-protocol replies through onData.
+    // Retained output is replayed into xterm on every attach, so its DA/DSR/XTVERSION/OSC and
+    // focus replies must not be routed into the live shell until replay parsing is complete.
+    if (!inputEnabled || process.status !== 'running') return;
     if (inputProcessId !== null && inputProcessId !== process.id) flushInput();
     inputProcessId = process.id;
     for (const byte of bytes) inputBytes.push(byte);
@@ -219,8 +285,7 @@
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = 0;
       const instance = terminal;
-      if (!instance || !fitAddon || host.clientWidth === 0 || host.clientHeight === 0) return;
-      fitAddon.fit();
+      if (!instance || !fitTerminal()) return;
       if (process.status !== 'running' || !connected) return;
       void client
         .resizeTerminal(
@@ -232,6 +297,44 @@
         )
         .catch((cause) => onError(cause instanceof Error ? cause.message : String(cause)));
     });
+  }
+
+  function fitTerminal(): Terminal | null {
+    const instance = terminal;
+    if (!instance || !fitAddon || host.clientWidth === 0 || host.clientHeight === 0) return null;
+    fitAddon.fit();
+    return instance;
+  }
+
+  function nextAnimationFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  function finishReplayIfReady(state: TerminalReplayState): void {
+    if (
+      replayState !== state
+      || state.finishing
+      || state.replayEndOffset === null
+      || state.parsedThrough < state.replayEndOffset
+      || !terminal
+    ) {
+      return;
+    }
+    state.finishing = true;
+
+    const activate = () => {
+      if (replayState !== state || state.generation !== attachmentGeneration) return;
+      inputEnabled = true;
+      if (state.focusRequested) terminal?.focus();
+    };
+
+    // Both emulators consume the same stream, but the daemon's Alacritty state is the durable
+    // source of truth for mode 1004. Reconcile xterm before enabling its single reply route.
+    if (terminal.modes.sendFocusMode !== state.focusReporting) {
+      terminal.write(state.focusReporting ? '\x1b[?1004h' : '\x1b[?1004l', activate);
+    } else {
+      activate();
+    }
   }
 
 </script>

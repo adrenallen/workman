@@ -128,6 +128,8 @@ pub struct RenderedSearchMatch {
 
 /// Stateful Alacritty parser and terminal grid for one process.
 pub struct TerminalEmulator {
+    // Deliberately rendering-only: xterm is the sole live authority for terminal query replies.
+    // A listener here would emit a second DA/DSR/color response into the same PTY.
     terminal: Term<VoidListener>,
     parser: ansi::Processor,
     scrollback_lines: usize,
@@ -243,6 +245,11 @@ impl TerminalEmulator {
     pub fn is_alternate_screen(&self) -> bool {
         self.terminal.mode().contains(TermMode::ALT_SCREEN)
     }
+
+    /// Whether the application has enabled DEC private focus reporting (mode 1004).
+    pub fn is_focus_reporting(&self) -> bool {
+        self.terminal.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
 }
 
 impl fmt::Debug for TerminalEmulator {
@@ -254,6 +261,7 @@ impl fmt::Debug for TerminalEmulator {
             .field("history_rows", &self.history_rows())
             .field("scrollback_limit", &self.scrollback_lines)
             .field("alternate_screen", &self.is_alternate_screen())
+            .field("focus_reporting", &self.is_focus_reporting())
             .finish_non_exhaustive()
     }
 }
@@ -322,6 +330,11 @@ impl TerminalOutput {
 
     pub fn history_rows(&self) -> usize {
         self.lock().history_rows()
+    }
+
+    /// Whether the latest PTY output enabled DEC private focus reporting (mode 1004).
+    pub fn is_focus_reporting(&self) -> bool {
+        self.lock().is_focus_reporting()
     }
 }
 
@@ -414,6 +427,18 @@ mod tests {
         assert_eq!(matches[0].row_text, "plain red text");
         assert_eq!(matches[0].byte_range, 6..9);
         assert_eq!(matches[1].row_text, "red again");
+    }
+
+    #[test]
+    fn focus_reporting_tracks_dec_private_mode_1004() {
+        let mut emulator = TerminalEmulator::new(3, 20, 4);
+        assert!(!emulator.is_focus_reporting());
+
+        emulator.feed(b"\x1b[?1004h");
+        assert!(emulator.is_focus_reporting());
+
+        emulator.feed(b"\x1b[?1004l");
+        assert!(!emulator.is_focus_reporting());
     }
 
     #[test]

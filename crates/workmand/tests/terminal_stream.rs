@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error};
+use std::{collections::BTreeMap, error::Error, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -39,6 +39,20 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
         registry.start(101)?;
         registry.start(102)?;
     }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if registry
+                .lock()
+                .await
+                .terminal_focus_reporting(101)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server_task = tokio::spawn(server.serve_until(async move {
@@ -64,9 +78,28 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
         .await?;
     let attached = receive_response(&mut socket, "attach-one").await?;
     assert_eq!(attached["ok"], true);
+    assert!(attached["result"]["replay_start_offset"].is_u64());
+    assert!(attached["result"]["replay_end_offset"].is_u64());
+    assert_eq!(attached["result"]["focus_reporting"], true);
+    assert!(
+        attached["result"]["replay_start_offset"].as_u64().unwrap()
+            <= attached["result"]["replay_end_offset"].as_u64().unwrap()
+    );
+    let replay_end_offset = attached["result"]["replay_end_offset"].as_u64().unwrap();
     let first = receive_terminal_frame(&mut socket).await?;
-    assert_eq!(first.0, 101);
-    assert!(String::from_utf8_lossy(&first.1).contains("one:"));
+    assert_eq!(first.process_id, 101);
+    assert_frame_does_not_cross_replay_boundary(&first, replay_end_offset);
+    let mut replayed_data = first.data.clone();
+    let mut replayed_through = first.end_offset();
+    while replayed_through < replay_end_offset {
+        let frame = receive_terminal_frame(&mut socket).await?;
+        assert_eq!(frame.process_id, 101);
+        assert_frame_does_not_cross_replay_boundary(&frame, replay_end_offset);
+        replayed_data.extend_from_slice(&frame.data);
+        replayed_through = frame.end_offset();
+    }
+    assert_eq!(replayed_through, replay_end_offset);
+    assert!(String::from_utf8_lossy(&replayed_data).contains("one:"));
 
     socket
         .send(Message::Text(
@@ -84,7 +117,7 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
     for _ in 0..3 {
         let frame = receive_terminal_frame(&mut socket).await?;
         assert_eq!(
-            frame.0, 102,
+            frame.process_id, 102,
             "a background process leaked into the UI stream"
         );
     }
@@ -102,7 +135,7 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
 
 fn test_process(id: i64, label: &str, working_dir: &str) -> Process {
     let command = format!(
-        "i=0; while [ \"$i\" -lt 30000 ]; do printf '{label}:%05d\\n' \"$i\"; i=$((i+1)); done; sleep 5"
+        "printf '\\033[?1004h'; i=0; while [ \"$i\" -lt 30000 ]; do printf '{label}:%05d\\n' \"$i\"; i=$((i+1)); done; sleep 5"
     );
     Process {
         id,
@@ -149,7 +182,7 @@ async fn receive_terminal_frame(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-) -> Result<(i64, Vec<u8>), Box<dyn Error>> {
+) -> Result<DecodedTerminalFrame, Box<dyn Error>> {
     loop {
         let message = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
             .await?
@@ -159,7 +192,33 @@ async fn receive_terminal_frame(
                 continue;
             }
             let process_id = i64::from_be_bytes(bytes[4..12].try_into()?);
-            return Ok((process_id, bytes[FRAME_HEADER_LEN..].to_vec()));
+            let start_offset = u64::from_be_bytes(bytes[12..20].try_into()?);
+            return Ok(DecodedTerminalFrame {
+                process_id,
+                start_offset,
+                data: bytes[FRAME_HEADER_LEN..].to_vec(),
+            });
         }
     }
+}
+
+struct DecodedTerminalFrame {
+    process_id: i64,
+    start_offset: u64,
+    data: Vec<u8>,
+}
+
+impl DecodedTerminalFrame {
+    fn end_offset(&self) -> u64 {
+        self.start_offset + self.data.len() as u64
+    }
+}
+
+fn assert_frame_does_not_cross_replay_boundary(frame: &DecodedTerminalFrame, boundary: u64) {
+    assert!(
+        frame.end_offset() <= boundary || frame.start_offset >= boundary,
+        "terminal frame {}..{} crossed replay boundary {boundary}",
+        frame.start_offset,
+        frame.end_offset(),
+    );
 }
