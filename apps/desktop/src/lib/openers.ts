@@ -154,6 +154,10 @@ export function openProjectFinder(path: string): Promise<void> {
   return invoke('shell_open_path', { path, target: 'finder' });
 }
 
+export function openBrowserUrl(url: string): Promise<void> {
+  return invoke('shell_open_url', { url });
+}
+
 export async function openProjectCustom(path: string, state = get(openerSettings)): Promise<void> {
   const error = templateError(state.config.sidebar.customTemplate);
   if (error) throw new Error(error);

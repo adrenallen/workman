@@ -6,6 +6,8 @@
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
+  import { openBrowserUrl } from './openers';
   import type { WorktreeEntry } from './worktrees';
   import { pullRequestLabel, pullRequestTone } from './worktrees';
 
@@ -26,6 +28,7 @@
   }: Props = $props();
 
   let pullRequest = $derived(entry?.pull_request ?? null);
+  let openingPullRequest = $state(false);
   let pullRequestToneName = $derived(pullRequest ? pullRequestTone(pullRequest) : 'neutral');
   let pullRequestClass = $derived(
     pullRequestToneName === 'success'
@@ -37,8 +40,16 @@
           : 'text-muted-foreground'
   );
 
-  function openUrl(url: string): void {
-    window.open(url, '_blank', 'noopener,noreferrer');
+  async function openPullRequest(): Promise<void> {
+    if (!pullRequest || openingPullRequest) return;
+    openingPullRequest = true;
+    try {
+      await openBrowserUrl(pullRequest.url);
+    } catch (cause) {
+      console.warn('Could not open pull request', cause);
+    } finally {
+      openingPullRequest = false;
+    }
   }
 </script>
 
@@ -46,8 +57,9 @@
   {#if pullRequest}
     <IconButton
       class={`size-6 border border-border bg-card ${pullRequestClass}`}
-      label={pullRequestLabel(pullRequest)}
-      onclick={(event) => { event.stopPropagation(); openUrl(pullRequest!.url); }}
+      label={`Open ${pullRequestLabel(pullRequest)}`}
+      disabled={openingPullRequest}
+      onclick={(event) => { event.stopPropagation(); void openPullRequest(); }}
     >
       {#snippet icon()}
         {#if pullRequest.state === 'merged'}
@@ -61,6 +73,13 @@
         {/if}
       {/snippet}
     </IconButton>
+  {:else if entry}
+    {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
+    <TooltipLabel label={noPullRequestLabel}>
+      <span class="no-pull-request" aria-label={noPullRequestLabel}>
+        <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+      </span>
+    </TooltipLabel>
   {/if}
   {#if showRefresh}
     <IconButton
@@ -76,6 +95,7 @@
 
 <style>
   .worktree-meta { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
+  .no-pull-request { display: inline-flex; width: 24px; height: 24px; cursor: default; align-items: center; justify-content: center; color: var(--muted-foreground); opacity: .72; }
   :global(.spin) { animation: worktree-spin 800ms linear infinite; }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }
   @keyframes worktree-spin { to { transform: rotate(360deg); } }

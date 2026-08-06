@@ -248,6 +248,13 @@ fn shell_open_path(path: String, target: ShellOpenTarget) -> Result<(), String> 
     open_shell_target(&path, target)
 }
 
+/// Open an HTTP(S) URL in the system browser without invoking a command shell.
+#[tauri::command]
+fn shell_open_url(url: String) -> Result<(), String> {
+    let url = validated_browser_url(&url)?;
+    open_in_browser(url)
+}
+
 /// List supported editors found in standard application directories.
 #[tauri::command]
 fn shell_detect_editors() -> Vec<DetectedEditor> {
@@ -287,6 +294,7 @@ pub fn run() {
             daemon_restart,
             daemon_status,
             shell_open_path,
+            shell_open_url,
             shell_detect_editors,
             shell_open_with
         ])
@@ -600,6 +608,32 @@ fn canonical_shell_path(path: &str) -> Result<PathBuf, String> {
     }
     std::fs::canonicalize(path)
         .map_err(|error| format!("could not open workspace path {path:?}: {error}"))
+}
+
+fn validated_browser_url(url: &str) -> Result<&str, String> {
+    if url.trim() != url || url.chars().any(char::is_control) {
+        return Err(
+            "browser URL cannot contain surrounding whitespace or control characters".to_owned(),
+        );
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("browser URL must use http or https".to_owned());
+    }
+    Ok(url)
+}
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return spawn_detached(Command::new("open").arg(url), "default browser");
+
+    #[cfg(target_os = "linux")]
+    return spawn_detached(Command::new("xdg-open").arg(url), "default browser");
+
+    #[cfg(target_os = "windows")]
+    return spawn_detached(Command::new("explorer").arg(url), "default browser");
+
+    #[allow(unreachable_code)]
+    Err("opening a browser is not supported on this platform".to_owned())
 }
 
 fn open_shell_target(path: &Path, target: ShellOpenTarget) -> Result<(), String> {
@@ -972,6 +1006,22 @@ mod tests {
         );
         assert!(canonical_shell_path(root.path().join("missing").to_str().unwrap()).is_err());
         assert!(canonical_shell_path(" ").is_err());
+    }
+
+    #[test]
+    fn browser_urls_accept_http_and_https_only() {
+        assert_eq!(
+            validated_browser_url("https://github.com/adrenallen/workman/pull/1").unwrap(),
+            "https://github.com/adrenallen/workman/pull/1"
+        );
+        assert_eq!(
+            validated_browser_url("http://127.0.0.1:4173/pr/1").unwrap(),
+            "http://127.0.0.1:4173/pr/1"
+        );
+        assert!(validated_browser_url("file:///tmp/report.html").is_err());
+        assert!(validated_browser_url("javascript:alert(1)").is_err());
+        assert!(validated_browser_url(" https://github.com/example ").is_err());
+        assert!(validated_browser_url("https://github.com/example\n").is_err());
     }
 
     #[test]
