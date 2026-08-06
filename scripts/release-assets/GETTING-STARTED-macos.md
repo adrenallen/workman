@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/adrenallen/workman/main/assets/branding/workman-logo-wide.png" alt="Workman" width="720">
+</p>
+
 # Getting started with Workman on macOS
 
 This download contains all three parts of Workman. Most people start with the app.

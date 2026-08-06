@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/workman-logo-wide.png" alt="Workman" width="720">
+</p>
+
 # Workman
 
 Workman is a native terminal workspace for running AI coding agents alongside a development

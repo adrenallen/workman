@@ -18,6 +18,7 @@
   import MarkdownView from '../MarkdownView.svelte';
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
+  import workmanLogo from '../../../../../assets/branding/workman-logo-wide.png';
 
   const repositoryUrl = 'https://github.com/adrenallen/workman';
   const releasesUrl = `${repositoryUrl}/releases`;
@@ -87,6 +88,23 @@
       {connected ? 'Connected' : connection.status}
     </Badge>
   </header>
+
+  <Separator />
+
+  <div class="grid overflow-hidden bg-black text-white sm:grid-cols-[minmax(0,1fr)_170px]">
+    <img
+      src={workmanLogo}
+      alt="Workman"
+      class="h-28 w-full object-cover object-center sm:h-32"
+    />
+    <div class="flex items-center justify-between gap-4 border-t border-white/10 px-4 py-3 sm:block sm:border-t-0 sm:border-l">
+      <div>
+        <span class="block text-xs font-medium text-zinc-400">Desktop app</span>
+        <strong class="mt-1 block text-base font-semibold">Workman</strong>
+      </div>
+      <code class="text-xs text-zinc-300 sm:mt-3 sm:block">v{connection.app_version}</code>
+    </div>
+  </div>
 
   <Separator />
 
