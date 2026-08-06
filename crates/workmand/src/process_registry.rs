@@ -16,8 +16,8 @@ use workman_core::{
     ClaimedTodo, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store,
     StoreError, TimerKind,
     attention::{
-        AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionTracker, PendingDialog,
-        pending_dialog,
+        AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionState, AttentionTracker,
+        PendingDialog, pending_dialog,
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
@@ -403,7 +403,17 @@ impl ProcessRegistry {
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
         if process.kind == ProcessKind::Agent {
-            agent_state.refine_waiting(self.waiting_reasons(process.id)?);
+            let waiting_on = self.waiting_reasons(process.id)?;
+            let watched = self.process_is_watched(process.id)?;
+            agent_state.refine_waiting(waiting_on);
+            let notification = self.store.observe_agent_attention(
+                process.id,
+                agent_state.state,
+                watched,
+                agent_state.last_input_at.is_some(),
+                now_millis(),
+            )?;
+            agent_state.refine_notifications(watched, notification.unread);
         }
         let events = self
             .outputs
@@ -505,6 +515,41 @@ impl ProcessRegistry {
         Ok(reasons)
     }
 
+    fn process_is_watched(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        self.store
+            .connection()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM timers AS timer
+                    WHERE timer.fired = 0
+                      AND (
+                        timer.delivery_process_id = ?1
+                        OR (
+                          timer.kind IN ('idle_any', 'idle_all')
+                          AND EXISTS (
+                            SELECT 1
+                            FROM json_each(timer.watch_list) AS watched
+                            WHERE CAST(watched.value AS INTEGER) = ?1
+                          )
+                        )
+                      )
+                 )",
+                [process_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+            .map_err(RegistryError::from)
+    }
+
+    /// Clear a durable unread completion marker after the agent is viewed.
+    pub fn mark_agent_read(&mut self, process_id: ProcessId) -> RegistryResult<ProcessStatusView> {
+        self.refresh_exits()?;
+        let process = self.require(process_id)?;
+        self.store.mark_agent_read(process_id)?;
+        self.status_view(process)
+    }
+
     pub fn start(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         if self.running.contains_key(&process_id) {
@@ -588,6 +633,15 @@ impl ProcessRegistry {
             },
         );
         self.running.insert(process_id, hosted);
+        if process.kind == ProcessKind::Agent {
+            self.store.observe_agent_attention(
+                process_id,
+                AttentionState::Working,
+                false,
+                false,
+                now_millis(),
+            )?;
+        }
         self.refresh_exits()?;
         self.require(process_id)
     }

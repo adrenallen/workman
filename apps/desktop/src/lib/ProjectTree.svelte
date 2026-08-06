@@ -273,6 +273,7 @@
     if (rollup.working > 0) states.push(`${rollup.working} working`);
     if (rollup.waiting > 0) states.push(`${rollup.waiting} waiting for timer`);
     if (rollup.crashed > 0) states.push(`${rollup.crashed} crashed`);
+    if (rollup.unread > 0) states.push(`${rollup.unread} unread`);
     const suffix = states.length > 0 ? ` · ${states.join(', ')}` : '';
     return `${rollup.total} nested agent${rollup.total === 1 ? '' : 's'}${suffix}`;
   }
@@ -302,7 +303,10 @@
     const value = groupCount(group);
     if (group === 'todos' || group === 'scratchpads') return `${value} ${group}`;
     const [running, total] = value.split('/');
-    return `${running} running of ${total} ${group}`;
+    const unread = group === 'agents'
+      ? agents.filter((process) => process.agent_state.unread).length
+      : 0;
+    return `${running} running of ${total} ${group}${unread > 0 ? ` · ${unread} unread` : ''}`;
   }
 
   function processesForGroup(group: ProjectTreeGroup): ProcessView[] {
@@ -450,7 +454,17 @@
           </span>
           <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>
           <strong>{groupLabel[group]}</strong>
-          <CountBadge value={groupCount(group)} tone={groupTone(group)} title={groupCountTitle(group)} />
+          <span class="group-badges">
+            <CountBadge value={groupCount(group)} tone={groupTone(group)} title={groupCountTitle(group)} />
+            {#if group === 'agents' && agents.some((process) => process.agent_state.unread)}
+              {@const unreadCount = agents.filter((process) => process.agent_state.unread).length}
+              <TooltipLabel label={`${unreadCount} unread finished agent${unreadCount === 1 ? '' : 's'}`}>
+                <span class="unread-group-rollup" aria-label={`${unreadCount} unread finished agents`}>
+                  <span aria-hidden="true"></span>{unreadCount}
+                </span>
+              </TooltipLabel>
+            {/if}
+          </span>
         </button>
 
         {#if openGroups[group] && !collapsed}
@@ -507,14 +521,26 @@
                     {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
                     <AgentStatusIndicator {process} />
                     <span class="row-copy"><strong>{process.name}</strong></span>
-                    {#if row.rollup.total > 0 || stats}
+                    {#if process.agent_state.unread || row.rollup.total > 0 || stats}
                       <span class="row-badges">
+                        {#if process.agent_state.unread}
+                          <TooltipLabel label="Unread: agent finished while no timer was watching">
+                            <span class="agent-unread-dot" aria-label={`${process.name} has unread finished output`}></span>
+                          </TooltipLabel>
+                        {/if}
                         {#if row.rollup.total > 0}
                           <TooltipLabel label={lineageTitle(row.rollup)}>
                             <span
                               class={`lineage-rollup ${lineageTone(row.rollup)}`}
                               aria-label={lineageTitle(row.rollup)}
                             >↳{row.rollup.total}</span>
+                          </TooltipLabel>
+                        {/if}
+                        {#if row.rollup.unread > 0}
+                          <TooltipLabel label={`${row.rollup.unread} unread finished descendant agent${row.rollup.unread === 1 ? '' : 's'}`}>
+                            <span class="unread-lineage-rollup" aria-label={`${row.rollup.unread} unread descendant agents`}>
+                              <span aria-hidden="true"></span>{row.rollup.unread}
+                            </span>
                           </TooltipLabel>
                         {/if}
                         {#if stats?.descendant_count}
@@ -634,6 +660,7 @@
   .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .tree-group { border-bottom: 1px solid var(--border); }
   .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 13px 16px minmax(0, 1fr) auto; align-items: center; gap: 4px; border: 0; padding: 3px 7px 3px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
+  .group-badges { display: flex; align-items: center; gap: 4px; }
   .group-header:hover { background: var(--popover); }
   .group-header:focus-visible { position: relative; z-index: 1; }
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
@@ -670,6 +697,10 @@
   .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, var(--border)); color: var(--signal); }
   .lineage-rollup.waiting { border-color: color-mix(in srgb, var(--information) 42%, var(--border)); color: var(--information); }
   .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, var(--border)); color: var(--fault); }
+  .agent-unread-dot { display: block; width: 7px; height: 7px; flex: none; border-radius: 999px; background: #8fb8ff; box-shadow: 0 0 0 2px color-mix(in srgb, #8fb8ff 17%, transparent); }
+  .unread-lineage-rollup, .unread-group-rollup { display: inline-flex; height: 18px; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, #8fb8ff 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: #b9d2ff; background: color-mix(in srgb, #8fb8ff 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .unread-lineage-rollup > span, .unread-group-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: #8fb8ff; }
+  .unread-group-rollup { margin-left: -4px; }
   .scratchpad-icon { color: var(--muted-foreground); }
   .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .add-row { color: var(--text-soft); }

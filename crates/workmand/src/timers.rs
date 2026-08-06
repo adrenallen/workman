@@ -1073,7 +1073,10 @@ mod tests {
         assert!(waiting.waiting_on[0].remaining_ms <= 100);
         assert_eq!(payload["agent_state"]["state"], "waiting");
         assert_eq!(payload["agent_state"]["waiting"], true);
-        assert_eq!(payload["agent_state"]["waiting_on"][0]["timer_id"], timer_id);
+        assert_eq!(
+            payload["agent_state"]["waiting_on"][0]["timer_id"],
+            timer_id
+        );
 
         assert_eq!(
             TimerService::new(&mut registry)
@@ -1402,6 +1405,12 @@ mod tests {
                 .is_empty()
         );
         wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let watched_done = registry.get_status(WORKER_ID).unwrap().agent_state;
+        assert!(watched_done.watched);
+        assert!(
+            !watched_done.unread,
+            "a pending idle watch must suppress the human unread notification"
+        );
         let fired = TimerService::new(&mut registry).tick(20).unwrap();
         assert!(fired.iter().any(|fire| {
             fire.timer_id == any_timer_id && fire.reason == TimerFireReason::IdleTransition
@@ -1437,6 +1446,44 @@ mod tests {
             fire.timer_id == timeout_timer_id && fire.reason == TimerFireReason::MaxWait
         }));
         wait_for_output(&mut registry, DELIVERY_ID, "received:[timeout wake]");
+    }
+
+    #[test]
+    fn unwatched_done_agent_is_unread_until_viewed_or_work_resumes() {
+        let mut registry = test_registry(true);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let baseline = registry.get_status(WORKER_ID).unwrap().agent_state;
+        assert!(!baseline.watched);
+        assert!(!baseline.unread);
+
+        registry.send_input(WORKER_ID, b"go\r").unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let unread = registry.get_status(WORKER_ID).unwrap();
+        assert!(unread.agent_state.unread);
+        assert!(!unread.agent_state.watched);
+        let payload = serde_json::to_value(&unread).unwrap();
+        assert_eq!(payload["agent_state"]["unread"], true);
+        assert_eq!(payload["agent_state"]["watched"], false);
+
+        registry.send_input(WORKER_ID, b"go\r").unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        assert!(
+            !registry.get_status(WORKER_ID).unwrap().agent_state.unread,
+            "starting another turn must self-clear unread"
+        );
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        assert!(registry.get_status(WORKER_ID).unwrap().agent_state.unread);
+
+        let read = registry.mark_agent_read(WORKER_ID).unwrap();
+        assert!(!read.agent_state.unread);
+        registry.stop(WORKER_ID).unwrap();
+        let exited = registry.get_status(WORKER_ID).unwrap();
+        assert_eq!(exited.agent_state.state, AttentionState::Exited);
+        assert!(
+            exited.agent_state.unread,
+            "an unwatched exit must create a new unread completion"
+        );
     }
 
     #[test]

@@ -13,8 +13,10 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
+  import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
   import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
+  import TooltipLabel from './lib/components/ds/TooltipLabel.svelte';
   import { Button } from './lib/components/ui/button';
   import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
@@ -217,7 +219,11 @@
   let branchOptions = $state<WorktreeBranchOption[]>([]);
   let originBranchesLoading = $state(false);
   let activeWorktreeOperationId = $state<string | null>(null);
+  let agentDoneNotices = $state<AgentDoneNotice[]>([]);
+  let agentDoneNoticeSequence = 0;
   const reconciledWorktreeOperations = new Set<string>();
+  const notifiedUnreadProcessIds = new Set<number>();
+  const markReadPending = new Set<number>();
   let removeWorktreeDialog = $state<{
     project: Project;
     repository: WorktreeRepository;
@@ -353,6 +359,7 @@
       if (selectedProject) {
         applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
       }
+      reconcileAgentDoneNotices(next);
     });
     let lastNavigationRequest = 0;
     const stopNavigation = appNavigation.subscribe(({ request }) => {
@@ -585,6 +592,95 @@
       changed = true;
     }
     if (changed) navigationIndex = updated;
+  }
+
+  function clearAgentUnreadLocally(processId: number): void {
+    const clear = (process: ProcessView): ProcessView => process.id === processId
+      ? { ...process, agent_state: { ...process.agent_state, unread: false } }
+      : process;
+    processes = processes.map(clear);
+    const updated = { ...navigationIndex };
+    for (const [projectId, snapshot] of Object.entries(updated)) {
+      updated[Number(projectId)] = { ...snapshot, processes: snapshot.processes.map(clear) };
+    }
+    navigationIndex = updated;
+    notifiedUnreadProcessIds.delete(processId);
+    agentDoneNotices = agentDoneNotices.filter((notice) => notice.processId !== processId);
+  }
+
+  async function markAgentRead(processId: number, projectId: number): Promise<void> {
+    if (markReadPending.has(processId)) return;
+    markReadPending.add(processId);
+    clearAgentUnreadLocally(processId);
+    try {
+      await client.markProcessRead(processId);
+    } catch (cause) {
+      reportError(cause);
+      await refreshProcesses(projectId);
+    } finally {
+      markReadPending.delete(processId);
+    }
+  }
+
+  function reconcileAgentDoneNotices(next: ProcessView[]): void {
+    const unreadIds = new Set(
+      next
+        .filter((process) =>
+          process.kind === 'agent'
+          && process.agent_state.unread
+          && !markReadPending.has(process.id)
+        )
+        .map((process) => process.id)
+    );
+    for (const processId of notifiedUnreadProcessIds) {
+      if (!unreadIds.has(processId)) notifiedUnreadProcessIds.delete(processId);
+    }
+    agentDoneNotices = agentDoneNotices.filter((notice) => unreadIds.has(notice.processId));
+
+    for (const process of next) {
+      if (process.kind !== 'agent' || !process.agent_state.unread) continue;
+      if (markReadPending.has(process.id)) continue;
+      const alreadyViewing = selectedProject?.id === process.project_id
+        && selection?.kind === 'agent'
+        && selection.id === process.id;
+      if (alreadyViewing) {
+        void markAgentRead(process.id, process.project_id);
+        continue;
+      }
+      if (notifiedUnreadProcessIds.has(process.id)) continue;
+      notifiedUnreadProcessIds.add(process.id);
+      agentDoneNotices = [
+        ...agentDoneNotices,
+        {
+          id: `${process.id}:${++agentDoneNoticeSequence}`,
+          processId: process.id,
+          projectId: process.project_id,
+          name: process.name
+        }
+      ].slice(-4);
+    }
+  }
+
+  function openAgentDoneNotice(notice: AgentDoneNotice): void {
+    void markAgentRead(notice.processId, notice.projectId);
+    appNavigation.navigate(
+      {
+        type: 'item',
+        selection: projectTreeSelection(
+          'agent',
+          notice.processId,
+          notice.projectId,
+          notice.name
+        )
+      },
+      'api'
+    );
+  }
+
+  function projectUnreadAgentCount(projectId: number): number {
+    return (navigationIndex[projectId]?.processes ?? [])
+      .filter((process) => process.kind === 'agent' && process.agent_state.unread)
+      .length;
   }
 
   function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
@@ -929,6 +1025,11 @@
     selection = next;
     todoDetail = null;
     scratchpadRead = null;
+
+    if (next.kind === 'agent') {
+      const process = processes.find((candidate) => candidate.id === next.id);
+      if (process?.agent_state.unread) void markAgentRead(process.id, process.project_id);
+    }
 
     if (next.kind === 'todo') {
       await loadTodo(next.id);
@@ -1838,6 +1939,9 @@
         );
         return;
       }
+      case 'mark-read':
+        await markAgentRead(process.id, process.project_id);
+        return;
       case 'reveal-config':
         await openWorkspacePath(`${projectForProcess(process)?.path ?? process.working_dir}/workman.yml`, 'reveal');
         return;
@@ -2061,6 +2165,12 @@
   </section>
 {/if}
 
+<AgentDoneToasts
+  notices={agentDoneNotices}
+  onOpen={openAgentDoneNotice}
+  onDismiss={(id) => (agentDoneNotices = agentDoneNotices.filter((notice) => notice.id !== id))}
+/>
+
 {#snippet projectRailRow(project: Project, nested: boolean, group: ProjectRailGroup)}
   {@const repository = worktreeRepositoryFor(project)}
   {@const worktree = worktreeEntryFor(project)}
@@ -2068,6 +2178,7 @@
   {@const fullTitle = projectTitle(project)}
   {@const projectKind = nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
   {@const hasRepositoryChildren = group.grouped || worktreeOperationsFor(group.repositoryId).length > 0}
+  {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
   <article
     class:active={project.selected}
     class:nested
@@ -2097,7 +2208,7 @@
         type="button"
         title={fullTitle}
         aria-current={project.selected ? 'page' : undefined}
-        aria-label={`${fullTitle} · ${projectKind} · ${project.status}`}
+        aria-label={`${fullTitle} · ${projectKind} · ${project.status}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
         use:reorderItem={{
           id: project.id,
           group: projectReorderGroup(project),
@@ -2124,6 +2235,13 @@
           <strong>{rowLabel}</strong>
           <small>{project.path}</small>
         </span>
+        {#if unreadAgentCount > 0}
+          <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
+            <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+              <span aria-hidden="true"></span>{unreadAgentCount}
+            </span>
+          </TooltipLabel>
+        {/if}
       </button>
       {#if repository && !projectRailCollapsed}
         <WorktreeRowMeta
@@ -2530,6 +2648,8 @@
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, #8fb8ff 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: #b9d2ff; background: color-mix(in srgb, #8fb8ff 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: #8fb8ff; }
   .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
@@ -2549,6 +2669,8 @@
   .project-rail.collapsed .project-row { min-height: 38px; }
   .project-rail.collapsed .project-select { position: relative; justify-content: center; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 25px; height: 25px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
+  .project-rail.collapsed .project-unread-rollup { position: absolute; top: 1px; right: 1px; min-width: 13px; height: 13px; gap: 0; padding: 0 3px; font-size: 9px; }
+  .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
   .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }

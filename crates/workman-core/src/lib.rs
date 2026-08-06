@@ -1,5 +1,6 @@
 //! Shared domain and service code for workman.
 
+pub mod agent_notifications;
 pub mod attention;
 pub mod domain;
 pub mod locks;
@@ -17,6 +18,7 @@ pub mod update;
 #[cfg(unix)]
 pub mod pty;
 
+pub use agent_notifications::*;
 pub use domain::*;
 pub use locks::*;
 pub use scratchpads::*;

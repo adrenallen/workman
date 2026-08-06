@@ -47,6 +47,7 @@ fn fresh_database_migrates_to_current_schema() {
         tables,
         [
             "actors",
+            "agent_notifications",
             "agent_tools",
             "locks",
             "process_mcp_tokens",

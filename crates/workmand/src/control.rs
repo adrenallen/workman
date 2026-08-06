@@ -694,6 +694,10 @@ async fn dispatch(
             let params: ProcessIdParams = params_as(params)?;
             registry.get_status(params.process_id).map(json_value)
         }
+        "process.mark_read" => {
+            let params: ProcessIdParams = params_as(params)?;
+            registry.mark_agent_read(params.process_id).map(json_value)
+        }
         "process.list" => {
             let params: ListParams = params_as(params)?;
             registry.list_statuses(params.project_id).map(json_value)

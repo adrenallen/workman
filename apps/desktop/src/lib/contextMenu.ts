@@ -22,6 +22,7 @@ export type ContextActionId =
   | 'copy-id'
   | 'send-prompt'
   | 'view-parent'
+  | 'mark-read'
   | 'reveal-config'
   | 'complete-todo'
   | 'reopen-todo'
@@ -283,6 +284,13 @@ function processItems(process: ProcessView): ContextMenuItem[] {
     });
     if (process.spawned_by_process_id !== null) {
       items.push({ id: 'view-parent', label: 'View parent' });
+    }
+    if (process.agent_state.unread) {
+      items.push({
+        id: 'mark-read',
+        label: 'Mark read',
+        detail: 'Clears the finished-agent notification'
+      });
     }
   }
 

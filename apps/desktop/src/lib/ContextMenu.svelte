@@ -46,7 +46,7 @@
     if (id === 'adopt-worktree') return ImportIcon;
     if (id === 'fork-worktree') return GitForkIcon;
     if (id === 'rename') return PencilIcon;
-    if (id === 'complete-todo' || id === 'select') return CheckIcon;
+    if (id === 'complete-todo' || id === 'select' || id === 'mark-read') return CheckIcon;
     if (id === 'send-prompt') return MessageSquareIcon;
     if (id === 'view-parent') return GitBranchIcon;
     if (id === 'reveal-config') return FileCodeIcon;

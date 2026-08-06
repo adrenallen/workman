@@ -53,10 +53,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "todo_claims",
         include_str!("../migrations/0009_todo_claims.sql"),
     ),
+    (
+        10,
+        "agent_notifications",
+        include_str!("../migrations/0010_agent_notifications.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+pub const LATEST_SCHEMA_VERSION: i64 = 10;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

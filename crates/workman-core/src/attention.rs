@@ -92,6 +92,12 @@ pub struct AgentState {
     /// True only when an idle process has a pending timer or idle watch.
     #[serde(default)]
     pub waiting: bool,
+    /// True when a pending timer will react to this process or deliver to it.
+    #[serde(default)]
+    pub watched: bool,
+    /// True when an unwatched completed turn has not yet been viewed.
+    #[serde(default)]
+    pub unread: bool,
     pub idle: bool,
     pub exited: bool,
     pub thinking: bool,
@@ -137,6 +143,8 @@ impl AgentState {
             working: state == AttentionState::Working,
             needs_input: state == AttentionState::NeedsInput,
             waiting: state == AttentionState::Waiting,
+            watched: false,
+            unread: false,
             idle: state == AttentionState::Idle,
             exited: state == AttentionState::Exited,
             thinking: flags.thinking,
@@ -164,6 +172,12 @@ impl AgentState {
             self.idle = true;
         }
         self.waiting_on = waiting_on;
+    }
+
+    /// Attach durable completion-notification metadata to a live snapshot.
+    pub fn refine_notifications(&mut self, watched: bool, unread: bool) {
+        self.watched = watched;
+        self.unread = unread;
     }
 
     /// Construct the best available status for a process without a live tracker.

@@ -148,6 +148,8 @@ export interface AgentState {
   working: boolean;
   needs_input: boolean;
   waiting?: boolean;
+  watched?: boolean;
+  unread?: boolean;
   idle: boolean;
   exited: boolean;
   thinking: boolean;
@@ -386,6 +388,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   stopProcess(processId: number): Promise<ProcessView> {
     return this.request('process.stop', { process_id: processId });
+  }
+
+  markProcessRead(processId: number): Promise<ProcessView> {
+    return this.request('process.mark_read', { process_id: processId });
   }
 
   restartProcess(processId: number): Promise<ProcessView> {
