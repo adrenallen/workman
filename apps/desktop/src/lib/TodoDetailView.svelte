@@ -3,6 +3,7 @@
 
   import MarkdownView from './MarkdownView.svelte';
   import type { TodoDetail } from './coordination';
+  import { submitOnEnter } from './formInputConventions';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -152,7 +153,13 @@
         {/each}
       </div>
       <form onsubmit={(event) => { event.preventDefault(); submitComment(); }}>
-        <textarea bind:value={commentBody} rows="2" placeholder="Add a comment" aria-label="Add a todo comment"></textarea>
+        <textarea
+          bind:value={commentBody}
+          rows="2"
+          placeholder="Add a comment"
+          aria-label="Add a todo comment"
+          use:submitOnEnter
+        ></textarea>
         <button type="submit" disabled={busy || !commentBody.trim()}>Comment</button>
       </form>
       {#if !inspectorCollapsed}
@@ -207,7 +214,7 @@
   .comment-list article p, .muted { margin: 4px 0 0; color: var(--text-soft); font-size: var(--font-size-sm); line-height: 1.45; white-space: pre-wrap; }
   .muted { padding: 9px; }
   form { position: absolute; right: 0; bottom: 0; left: 0; display: grid; gap: 5px; border-top: 1px solid var(--border); padding: 6px; background: var(--card); }
-  textarea { width: 100%; resize: none; border: 1px solid var(--border-strong); border-radius: 3px; outline: 0; padding: 6px 7px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); line-height: 1.35; }
+  textarea { width: 100%; max-height: 132px; resize: none; border: 1px solid var(--border-strong); border-radius: 3px; outline: 0; padding: 6px 7px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); line-height: 1.35; }
   form > button { justify-self: end; }
   .resize-handle { position: absolute; z-index: 5; top: 0; bottom: 0; left: -3px; width: 6px; border: 0; padding: 0; background: transparent; cursor: col-resize; touch-action: none; }
   .resize-handle::after { position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: transparent; content: ''; }

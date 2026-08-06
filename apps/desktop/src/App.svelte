@@ -32,6 +32,7 @@
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
+  import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
   import TerminalView from './lib/TerminalView.svelte';
@@ -2959,7 +2960,7 @@
         </header>
         <div class="dialog-body">
           <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
-          <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context"></textarea></label>
+          <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context" use:submitOnEnter></textarea></label>
           <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
         </div>
         <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
@@ -3101,7 +3102,7 @@
   .dialog-surface label { display: grid; gap: 4px; }
   .dialog-surface label small { color: var(--muted-foreground); font: inherit; }
   .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
-  .dialog-surface textarea { resize: vertical; line-height: 1.4; }
+  .dialog-surface textarea { max-height: 192px; resize: none; line-height: 1.4; }
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
   .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }

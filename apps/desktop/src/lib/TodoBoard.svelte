@@ -3,6 +3,7 @@
 
   import MarkdownView from './MarkdownView.svelte';
   import type { TodoDetail, TodoStatus, TodoSummary } from './coordination';
+  import { submitOnEnter } from './formInputConventions';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -277,7 +278,13 @@
                 onComment(detail.todo.id, body);
               }}
             >
-              <textarea bind:value={commentBody} rows="2" placeholder="Add a comment" aria-label="Add a todo comment"></textarea>
+              <textarea
+                bind:value={commentBody}
+                rows="2"
+                placeholder="Add a comment"
+                aria-label="Add a todo comment"
+                use:submitOnEnter
+              ></textarea>
               <button type="submit" disabled={busy || !commentBody.trim()}>Comment</button>
             </form>
             {#if !inspectorCollapsed}
@@ -596,7 +603,7 @@
   .comments article p { margin: 6px 0 0; color: #aebfc5; font-size: var(--font-size-sm); line-height: 1.45; white-space: pre-wrap; }
   .comment-list > .muted { padding: 12px; line-height: 1.5; }
   .comment-form { display: grid; gap: 6px; border-top: 1px solid var(--border); padding: 7px; }
-  .comment-form textarea { width: 100%; resize: vertical; border: 1px solid #304b56; border-radius: 3px; padding: 8px; background: #081820; color: #d7e1e4; font-size: var(--font-size-sm); line-height: 1.4; outline: 0; }
+  .comment-form textarea { width: 100%; max-height: 132px; resize: none; border: 1px solid #304b56; border-radius: 3px; padding: 8px; background: #081820; color: #d7e1e4; font-size: var(--font-size-sm); line-height: 1.4; outline: 0; }
   .comment-form textarea:focus { border-color: var(--signal); }
   .comment-form button { justify-self: end; padding: 7px 10px; }
   .muted, .detail-empty { color: #607680; font-size: var(--font-size-sm); }

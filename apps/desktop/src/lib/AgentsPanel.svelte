@@ -4,6 +4,7 @@
 
   import { agentStatusPresentation } from './agentStatus';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
+  import { submitOnEnter } from './formInputConventions';
   import TerminalView from './TerminalView.svelte';
   import {
     getAgentToolsStore,
@@ -318,7 +319,7 @@
       <form class="prompt-composer" onsubmit={(event) => { event.preventDefault(); void submitPrompt(); }}>
         <label for="agent-prompt">
           <span>{selectedAgent.agent_state.needs_input ? 'Reply requested' : 'Prompt agent'}</span>
-          <small>Enter sends as a separate submit key</small>
+          <small>Enter sends · Shift+Enter adds a line</small>
         </label>
         <textarea
           id="agent-prompt"
@@ -326,12 +327,7 @@
           rows="2"
           placeholder={selectedAgent.agent_state.needs_input ? 'Answer the agent or trust prompt…' : `Send a prompt to ${selectedAgent.name}…`}
           disabled={!connected || selectedAgent.status !== 'running'}
-          onkeydown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              void submitPrompt();
-            }
-          }}
+          use:submitOnEnter
         ></textarea>
         <button type="submit" disabled={!connected || selectedAgent.status !== 'running' || !prompt || prompting}>
           {prompting ? 'Sending…' : 'Send'}
@@ -823,7 +819,8 @@
 
   .prompt-composer textarea {
     min-height: 38px;
-    resize: vertical;
+    max-height: 168px;
+    resize: none;
     border: 1px solid #334e56;
     border-radius: 3px;
     outline: 0;

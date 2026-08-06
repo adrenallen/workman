@@ -1,6 +1,7 @@
 <script lang="ts">
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import ScratchpadPanel from './ScratchpadPanel.svelte';
+  import { submitOnEnter } from './formInputConventions';
   import TodoBoard from './TodoBoard.svelte';
   import type {
     CoordinationClient,
@@ -313,27 +314,34 @@
         </div>
         <button type="button" aria-label="Close" disabled={mutating} onclick={() => (createOpen = false)}>×</button>
       </header>
-      <label>
-        <span>Title</span>
-        <input bind:value={createTitle} use:focusInput placeholder="Ship the first useful slice" required />
-      </label>
-      <label>
-        <span>Notes <small>optional</small></span>
-        <textarea bind:value={createBody} rows="4" placeholder="Outcome, constraints, or context"></textarea>
-      </label>
-      <div class="form-row">
+      <div class="create-body">
         <label>
-          <span>Priority</span>
-          <select bind:value={createPriority}>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
+          <span>Title</span>
+          <input bind:value={createTitle} use:focusInput placeholder="Ship the first useful slice" required />
         </label>
         <label>
-          <span>Tags <small>comma separated</small></span>
-          <input bind:value={createTags} placeholder="ui, follow-up" />
+          <span>Notes <small>optional</small></span>
+          <textarea
+            bind:value={createBody}
+            rows="4"
+            placeholder="Outcome, constraints, or context"
+            use:submitOnEnter
+          ></textarea>
         </label>
+        <div class="form-row">
+          <label>
+            <span>Priority</span>
+            <select bind:value={createPriority}>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+          <label>
+            <span>Tags <small>comma separated</small></span>
+            <input bind:value={createTags} placeholder="ui, follow-up" />
+          </label>
+        </div>
       </div>
       <footer>
         <button type="button" disabled={mutating} onclick={() => (createOpen = false)}>Cancel</button>
@@ -354,17 +362,18 @@
   .loading span { width: 12px; height: 12px; border: 1px solid #36535e; border-top-color: var(--signal); border-radius: 50%; animation: spin 0.8s linear infinite; }
 
   .dialog-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(3 4 5 / 74%); }
-  .create-dialog { width: min(500px, 100%); border: 1px solid var(--border-strong); border-radius: 4px; padding: 0; background: var(--popover); color: var(--foreground); box-shadow: 0 18px 55px rgb(0 0 0 / 42%); }
+  .create-dialog { display: grid; width: min(500px, 100%); min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0; background: var(--popover); color: var(--foreground); box-shadow: 0 18px 55px rgb(0 0 0 / 42%); }
   .create-dialog header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 13px 15px 11px; }
   .create-dialog header span, label > span { color: var(--muted-foreground); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; letter-spacing: 0.06em; text-transform: uppercase; }
   .create-dialog h2 { margin: 4px 0 0; color: var(--foreground); font-size: 19px; font-weight: 630; }
   .create-dialog header button { border: 0; background: transparent; color: #718892; font-size: 22px; cursor: pointer; }
-  .create-dialog > label, .form-row { margin: 12px 15px 0; }
+  .create-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 15px 15px; }
+  .create-body > label + label, .form-row { margin-top: 12px; }
   .create-dialog label { display: grid; gap: 5px; }
   label small { color: #506974; font: inherit; }
   input, textarea, select { width: 100%; border: 1px solid var(--border-strong); border-radius: 3px; padding: 8px 9px; background: var(--background); color: var(--foreground); font-size: var(--font-size-sm); outline: 0; }
   input:focus, textarea:focus, select:focus { border-color: #757c85; }
-  textarea { resize: vertical; line-height: 1.5; }
+  textarea { max-height: 192px; resize: none; line-height: 1.5; }
   .form-row { display: grid; grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr); gap: 12px; }
   .create-dialog footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 15px; border-top: 1px solid var(--border); padding: 10px 15px; }
   .create-dialog footer button { min-height: 31px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 10px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-sm); cursor: pointer; }
