@@ -63,6 +63,7 @@
     onCreateTodo: () => void;
     onBrowseTodos: () => void;
     onBrowseScratchpads: () => void;
+    onBrowseProcesses: (kind: ProcessKind) => void;
     onAddAgent: () => void;
     onAddTerminal: () => void;
     onAddCommand: () => void;
@@ -88,6 +89,7 @@
     onCreateTodo,
     onBrowseTodos,
     onBrowseScratchpads,
+    onBrowseProcesses,
     onAddAgent,
     onAddTerminal,
     onAddCommand,
@@ -190,8 +192,12 @@
       onBrowseTodos();
     } else if (group === 'scratchpads') {
       onBrowseScratchpads();
+    } else if (group === 'agents') {
+      onBrowseProcesses('agent');
+    } else if (group === 'terminals') {
+      onBrowseProcesses('terminal');
     } else {
-      toggleGroup(group);
+      onBrowseProcesses('command');
     }
   }
 
@@ -501,7 +507,7 @@
             data-tree-row
             data-group={group}
             aria-expanded={openGroups[group]}
-            title={group === 'todos' || group === 'scratchpads' ? `Browse all ${groupLabel[group].toLowerCase()}` : `${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
+            title={`Browse all ${groupLabel[group].toLowerCase()}`}
             onclick={() => openGroup(group)}
           >
             <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>

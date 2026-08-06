@@ -6,6 +6,7 @@
 
   import { Button } from '$lib/components/ui/button';
   import * as Tabs from '$lib/components/ui/tabs';
+  import SectionOverview from './SectionOverview.svelte';
   import type { ScratchpadSummary } from './coordination';
 
   interface Props {
@@ -74,39 +75,43 @@
   }
 </script>
 
-<section class="scratchpad-browser" aria-label="Scratchpads browser">
-  <header class="browser-heading">
-    <div>
-      <span class="eyebrow">Project notebook</span>
-      <h2>Scratchpads</h2>
-      <p>Open working notes or revisit archived handoffs.</p>
-    </div>
+<SectionOverview
+  ariaLabel="Scratchpads browser"
+  eyebrow="Project notebook"
+  title="Scratchpads"
+  description="Open working notes or revisit archived handoffs."
+  summaryLayout="split"
+>
+  {#snippet icon()}<NotebookTextIcon strokeWidth={1.8} />{/snippet}
+  {#snippet action()}
     <Button size="sm" onclick={onCreate}>New scratchpad</Button>
-  </header>
+  {/snippet}
 
-  <div class="browser-controls">
-    <Tabs.Root value={view} onValueChange={(value) => (view = value as typeof view)}>
-      <Tabs.List variant="line" class="scratchpad-tabs" aria-label="Scratchpad views">
-        <Tabs.Trigger value="open">Open <span>{scratchpads.length}</span></Tabs.Trigger>
-        <Tabs.Trigger value="archived">Archived <span>{archivedScratchpads.length}</span></Tabs.Trigger>
-      </Tabs.List>
-    </Tabs.Root>
+  {#snippet controls()}
+    <div class="browser-controls">
+      <Tabs.Root value={view} onValueChange={(value) => (view = value as typeof view)}>
+        <Tabs.List variant="line" class="scratchpad-tabs" aria-label="Scratchpad views">
+          <Tabs.Trigger value="open">Open <span>{scratchpads.length}</span></Tabs.Trigger>
+          <Tabs.Trigger value="archived">Archived <span>{archivedScratchpads.length}</span></Tabs.Trigger>
+        </Tabs.List>
+      </Tabs.Root>
 
-    <label class="search-field">
-      <SearchIcon size={14} strokeWidth={1.8} aria-hidden="true" />
-      <input bind:value={query} aria-label="Search scratchpads" placeholder="Search name, tag, or ID" />
-      {#if query}
-        <button type="button" aria-label="Clear scratchpad search" title="Clear search" onclick={() => (query = '')}>
-          <XIcon size={13} aria-hidden="true" />
-        </button>
-      {/if}
-    </label>
-  </div>
+      <label class="search-field">
+        <SearchIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+        <input bind:value={query} aria-label="Search scratchpads" placeholder="Search name, tag, or ID" />
+        {#if query}
+          <button type="button" aria-label="Clear scratchpad search" title="Clear search" onclick={() => (query = '')}>
+            <XIcon size={13} aria-hidden="true" />
+          </button>
+        {/if}
+      </label>
+    </div>
+  {/snippet}
 
-  <div class="result-strip">
+  {#snippet summary()}
     <span>{visibleScratchpads.length} of {source.length} {view}</span>
-    {#if query}<button type="button" onclick={() => (query = '')}>Clear search</button>{/if}
-  </div>
+    {#if query}<button class="summary-reset" type="button" onclick={() => (query = '')}>Clear search</button>{/if}
+  {/snippet}
 
   <div class="scratchpad-ledger" aria-live="polite">
     {#each visibleScratchpads as scratchpad (scratchpad.id)}
@@ -167,25 +172,19 @@
       </div>
     {/each}
   </div>
-</section>
+</SectionOverview>
 
 <style>
-  .scratchpad-browser { container-type: inline-size; display: grid; width: 100%; height: 100%; min-width: 0; grid-template-rows: auto auto auto minmax(0, 1fr); background: var(--background); color: var(--foreground); }
-  .browser-heading { display: flex; min-height: 78px; align-items: center; justify-content: space-between; gap: var(--space-4); border-bottom: 1px solid var(--border); padding: 12px 16px; }
-  .browser-heading h2 { margin: 2px 0 0; font-size: var(--font-size-xl); font-weight: 650; letter-spacing: -0.025em; }
-  .browser-heading p { margin: 3px 0 0; color: var(--muted-foreground); font-size: var(--font-size-sm); }
-  .eyebrow, .result-strip, .scratchpad-id, .scratchpad-copy small { font-family: var(--terminal-font-family); }
-  .eyebrow { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
+  .summary-reset, .scratchpad-id, .scratchpad-copy small { font-family: var(--terminal-font-family); }
 
-  .browser-controls { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: var(--space-4); border-bottom: 1px solid var(--border); padding: 5px 10px; background: var(--card); }
+  .browser-controls { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 5px 10px; }
   .browser-controls :global(.scratchpad-tabs) { min-width: 240px; }
   .browser-controls :global([data-slot='tabs-trigger'] span) { margin-left: 5px; color: var(--muted-foreground); font-family: var(--terminal-font-family); font-size: var(--font-size-xs); }
   .search-field { display: flex; width: min(300px, 42%); height: 28px; align-items: center; gap: 5px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 7px; background: var(--background); color: var(--muted-foreground); }
   .search-field input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 0; background: transparent; color: var(--foreground); font-size: var(--font-size-sm); }
   .search-field button { display: grid; width: 20px; height: 20px; place-items: center; border: 0; padding: 0; background: transparent; color: var(--muted-foreground); cursor: pointer; }
 
-  .result-strip { display: flex; min-height: 28px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 12px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .result-strip button { border: 0; padding: 3px 0; background: transparent; color: var(--ring); font-size: inherit; cursor: pointer; }
+  .summary-reset { border: 0; padding: 3px 0; background: transparent; color: var(--ring); font-size: inherit; cursor: pointer; }
   .scratchpad-ledger { min-height: 0; overflow-y: auto; padding: 4px 7px 10px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .scratchpad-row { display: grid; min-height: 44px; grid-template-columns: minmax(180px, 1fr) auto; align-items: center; gap: var(--space-2); border-bottom: 1px solid var(--border); padding: 3px 4px 3px 8px; }
   .scratchpad-row:hover { background: var(--popover); }

@@ -23,6 +23,7 @@
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
+  import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectOpeners from './lib/ProjectOpeners.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
@@ -68,6 +69,7 @@
     isUnsupportedControlMethod,
     type ConnectionStatus,
     type Notification,
+    type ProcessKind,
     type ProcessView,
     type Project,
     type TrustReview
@@ -185,6 +187,7 @@
   let settingsOpen = $state(false);
   let todoBrowserOpen = $state(false);
   let scratchpadBrowserOpen = $state(false);
+  let processOverviewKind = $state<ProcessKind | null>(null);
   let scratchpadBrowserBusyId = $state<number | null>(null);
   let trustReview = $state<TrustReview | null>(null);
   let trustBusy = $state(false);
@@ -288,7 +291,9 @@
           ? 'Todos'
           : scratchpadBrowserOpen
             ? 'Scratchpads'
-            : (selection?.label ?? 'Project')
+            : processOverviewKind
+              ? `${processOverviewKind[0].toUpperCase()}${processOverviewKind.slice(1)}s`
+              : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
     selectedProject && selectedProcess
@@ -334,6 +339,7 @@
       settingsOpen = false;
       todoBrowserOpen = false;
       scratchpadBrowserOpen = false;
+      processOverviewKind = null;
       activeWorktreeOperationId = null;
       loadedProjectId = null;
       return;
@@ -349,6 +355,7 @@
       settingsOpen = false;
       todoBrowserOpen = false;
       scratchpadBrowserOpen = false;
+      processOverviewKind = null;
       activeWorktreeOperationId = null;
       void loadProject(projectId);
     }
@@ -882,6 +889,7 @@
           if (selectedProject) {
             todoBrowserOpen = false;
             scratchpadBrowserOpen = false;
+            processOverviewKind = null;
             settingsOpen = true;
           }
           return;
@@ -946,6 +954,7 @@
       settingsOpen = false;
       todoBrowserOpen = false;
       scratchpadBrowserOpen = false;
+      processOverviewKind = null;
       await tick();
       await loadProject(projectId);
       await refreshWorktreeMetadata(projects);
@@ -1023,6 +1032,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     selection = null;
   }
 
@@ -1152,6 +1162,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = next;
     todoDetail = null;
@@ -1290,6 +1301,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     selection = projectTreeSelection('command', id, project.id, input.name);
     return id;
   }
@@ -1351,6 +1363,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, tool.name);
     await tick();
     try {
@@ -1484,6 +1497,7 @@
     scratchpadRead = null;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     activeWorktreeOperationId = null;
   }
 
@@ -1492,6 +1506,7 @@
     settingsOpen = false;
     todoBrowserOpen = true;
     scratchpadBrowserOpen = false;
+    processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = null;
     todoDetail = null;
@@ -1503,10 +1518,33 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = true;
+    processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+  }
+
+  function openProcessOverview(kind: ProcessKind): void {
+    if (!selectedProject) return;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
+    processOverviewKind = kind;
+    activeWorktreeOperationId = null;
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+  }
+
+  function createFromProcessOverview(kind: ProcessKind): void {
+    if (kind === 'agent') {
+      void openAgentDialog();
+    } else if (kind === 'terminal') {
+      void spawnTerminal();
+    } else {
+      dialog = 'command';
+    }
   }
 
   async function renameBrowserScratchpad(
@@ -2619,11 +2657,12 @@
         onCreateTodo={() => (dialog = 'todo')}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
+        onBrowseProcesses={openProcessOverview}
         onAddAgent={() => void openAgentDialog()}
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
         onAddScratchpad={() => void createScratchpad()}
-        onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; settingsOpen = true; dialog = null; }}
+        onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
@@ -2704,6 +2743,13 @@
             onRename={(scratchpad, name) => void renameBrowserScratchpad(scratchpad, name)}
             onArchive={(scratchpad) => void archiveBrowserScratchpad(scratchpad)}
             onDelete={(scratchpad) => void deleteBrowserScratchpad(scratchpad)}
+          />
+        {:else if processOverviewKind}
+          <ProcessOverview
+            kind={processOverviewKind}
+            {processes}
+            onSelect={(process) => void selectTreeItem(projectTreeSelection(process.kind, process.id, process.project_id, processLabel(process)))}
+            onCreate={() => createFromProcessOverview(processOverviewKind!)}
           />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
@@ -2843,7 +2889,7 @@
         <div class="agent-choices">
           {#if agentToolsLoading}<p>Loading agent tools…</p>{:else}{#each agentTools as tool (tool.id)}<button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}><strong>{tool.name}</strong><small>{tool.command}</small><span>Spawn</span></button>{:else}<p>No enabled agent tools. Add one in Settings.</p>{/each}{/if}
         </div>
-        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
+        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
       </section>
       </Dialog.Content>
     {/if}
