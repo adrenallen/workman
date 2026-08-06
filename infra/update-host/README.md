@@ -113,5 +113,12 @@ curl -fsSL https://workman.userdefined.io/install.sh | \
   WORKMAN_KEY='<friends-key>' sh
 ```
 
+Before a prerelease is promoted, install it from the latest channel explicitly:
+
+```sh
+curl -fsSL https://workman.userdefined.io/install.sh | \
+  sh -s -- --key '<friends-key>' --channel latest
+```
+
 The bootstrap sends the key as a Bearer token to both `/releases.json` and the selected artifact,
 checks the manifest SHA-256 before extracting, and then runs the bundle-local installer.

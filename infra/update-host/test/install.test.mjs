@@ -20,7 +20,7 @@ function availableShells() {
   });
 }
 
-test("bootstrap installer has valid shell syntax and documents both key forms", () => {
+test("bootstrap installer has valid shell syntax and documents key and channel forms", () => {
   for (const shell of availableShells()) {
     const syntax = spawnSync(shell, ["-n", installer], { encoding: "utf8" });
     assert.equal(syntax.status, 0, `${shell}: ${syntax.stderr}`);
@@ -28,13 +28,27 @@ test("bootstrap installer has valid shell syntax and documents both key forms", 
     const help = spawnSync(shell, [installer, "--help"], { encoding: "utf8" });
     assert.equal(help.status, 0, `${shell}: ${help.stderr}`);
     assert.match(help.stdout, /--key <download-key>/);
-    assert.match(help.stdout, /WORKMAN_KEY=<download-key> sh/);
+    assert.match(help.stdout, /WORKMAN_KEY=<download-key>/);
+    assert.match(help.stdout, /--channel <channel>/);
+    assert.match(help.stdout, /WORKMAN_CHANNEL=latest/);
   }
 
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /\[\[/);
   assert.doesNotMatch(source, /<\s*<\(/);
   assert.doesNotMatch(source, /\$'[^']*'/);
+});
+
+test("bootstrap installer rejects unknown release channels before fetching", () => {
+  for (const shell of availableShells()) {
+    const result = spawnSync(
+      shell,
+      [installer, "--key", "test-key", "--channel", "nightly"],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 2, `${shell}: ${result.stderr}`);
+    assert.match(result.stderr, /expected stable or latest/i);
+  }
 });
 
 test("bootstrap installer refuses to fetch without a key", () => {

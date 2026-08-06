@@ -3,26 +3,29 @@ set -eu
 
 usage() {
   cat <<'EOF'
-Install the current stable Workman release.
+Install Workman from the stable channel (default) or latest channel.
 
 Usage:
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    sh -s -- --key <download-key>
+    sh -s -- --key <download-key> [--channel stable|latest]
 
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    WORKMAN_KEY=<download-key> sh
+    WORKMAN_KEY=<download-key> WORKMAN_CHANNEL=latest sh
 
 Options:
   --key <download-key>  Shared Workman download key (overrides WORKMAN_KEY)
+  --channel <channel>   Release channel: stable (default) or latest
   --help, -h            Show this help
 
 Environment:
   WORKMAN_KEY          Shared Workman download key
+  WORKMAN_CHANNEL      Release channel: stable (default) or latest
   WORKMAN_INSTALL_DIR  Versioned bundle destination
 EOF
 }
 
 download_key="${WORKMAN_KEY:-}"
+channel="${WORKMAN_CHANNEL:-stable}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --key)
@@ -38,6 +41,19 @@ while [ "$#" -gt 0 ]; do
       download_key="${1#--key=}"
       shift
       ;;
+    --channel)
+      if [ "$#" -lt 2 ]; then
+        echo "--channel requires a value" >&2
+        usage >&2
+        exit 2
+      fi
+      channel="$2"
+      shift 2
+      ;;
+    --channel=*)
+      channel="${1#--channel=}"
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -49,6 +65,15 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$channel" in
+  stable|latest) ;;
+  *)
+    echo "invalid Workman channel: $channel (expected stable or latest)" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
 
 if [ -z "$download_key" ]; then
   echo "a Workman download key is required; pass --key or set WORKMAN_KEY" >&2
@@ -87,23 +112,23 @@ fetch_with_key() {
     --header "Authorization: Bearer $download_key" "$@"
 }
 
-echo "Reading the Workman stable channel..."
+echo "Reading the Workman $channel channel..."
 fetch_with_key "$base_url/releases.json" --output "$manifest_path"
 
-python3 - "$manifest_path" "$target" "$base_url" > "$release_metadata_path" <<'PY'
+python3 - "$manifest_path" "$target" "$base_url" "$channel" > "$release_metadata_path" <<'PY'
 import json
 import re
 import sys
 from urllib.parse import urlparse
 
-manifest_path, target, base_url = sys.argv[1:]
+manifest_path, target, base_url, channel = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as source:
     manifest = json.load(source)
 
-release = manifest["channels"]["stable"]
+release = manifest["channels"][channel]
 version = release["version"]
 if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
-    raise SystemExit("the update server returned an invalid stable version")
+    raise SystemExit(f"the update server returned an invalid {channel} version")
 
 asset = next((candidate for candidate in release["assets"] if candidate["target"] == target), None)
 if asset is None:

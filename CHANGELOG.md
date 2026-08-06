@@ -23,7 +23,8 @@ and completes the authenticated self-hosted release path from download through p
 ### Release operations
 
 - Added Cloudflare R2-backed stable/latest release manifests, authenticated artifact downloads,
-  keyed POSIX installer delivery, and updater key support with honest authorization failures.
+  keyed POSIX installer delivery with explicit channel selection, and updater key support with
+  honest authorization failures.
 - Kept GitHub prereleases as the compatibility bridge for older updaters while local release and
   promotion scripts publish the complete macOS/Linux artifact set without triggering Actions.
 - Updated `wrk app` to launch the installed macOS bundle through LaunchServices so the branded
