@@ -246,7 +246,7 @@ impl RawOutput {
 pub struct PtySpawnOptions {
     /// Stable workman database ID injected into the child environment.
     pub process_id: i64,
-    /// Command passed as a single argument to `/bin/sh -c`.
+    /// Command passed as a single argument to the configured shell's `-c` flag.
     pub command: String,
     /// Optional command working directory.
     pub working_dir: Option<PathBuf>,
@@ -260,6 +260,9 @@ pub struct PtySpawnOptions {
     pub scrollback_lines: usize,
     /// Agent tool family used for terminal-attention classification.
     pub tool_type: Option<String>,
+    shell: PathBuf,
+    login_shell: bool,
+    interactive_shell: bool,
     output_spill: Option<OutputSpillOptions>,
     mcp_token: String,
 }
@@ -281,6 +284,9 @@ impl PtySpawnOptions {
             raw_buffer_capacity: DEFAULT_RAW_BUFFER_CAPACITY,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             tool_type: None,
+            shell: PathBuf::from("/bin/sh"),
+            login_shell: false,
+            interactive_shell: false,
             output_spill: None,
             mcp_token: mcp_token.into(),
         }
@@ -320,6 +326,22 @@ impl PtySpawnOptions {
     /// Select the per-tool attention adapter for this process.
     pub fn with_tool_type(mut self, tool_type: impl Into<String>) -> Self {
         self.tool_type = Some(tool_type.into());
+        self
+    }
+
+    /// Run the command through `<shell> -l -c <command>`.
+    pub fn with_login_shell_command(mut self, shell: impl Into<PathBuf>) -> Self {
+        self.shell = shell.into();
+        self.login_shell = true;
+        self.interactive_shell = false;
+        self
+    }
+
+    /// Start `<shell> -l` as an interactive login-shell session.
+    pub fn with_login_shell(mut self, shell: impl Into<PathBuf>) -> Self {
+        self.shell = shell.into();
+        self.login_shell = true;
+        self.interactive_shell = true;
         self
     }
 
@@ -409,7 +431,7 @@ pub struct PtySubmissionEvent {
 }
 
 impl PtyProcess {
-    /// Spawn `/bin/sh -c <command>` in a new PTY session.
+    /// Spawn the configured shell command in a new PTY session.
     pub fn spawn(options: PtySpawnOptions) -> Result<Self> {
         if options.mcp_token.is_empty() {
             bail!("WORKMAN_MCP_TOKEN must not be empty");
@@ -419,9 +441,16 @@ impl PtyProcess {
             .openpty(options.size)
             .context("open PTY")?;
 
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.arg("-c");
-        command.arg(&options.command);
+        let mut command = CommandBuilder::new(&options.shell);
+        if options.login_shell {
+            command.arg("-l");
+        }
+        if !options.interactive_shell {
+            command.arg("-c");
+            // Keep the complete command as one argv item. The login shell, not Workman,
+            // owns its quoting and expansion semantics.
+            command.arg(&options.command);
+        }
         if let Some(working_dir) = &options.working_dir {
             command.cwd(working_dir.as_os_str());
         }
@@ -971,6 +1000,9 @@ fn signal_process_group(pid: u32, signal: Signal) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn wait_for_output(process: &PtyProcess, needle: &[u8]) -> Vec<u8> {
@@ -1107,6 +1139,49 @@ mod tests {
             "TERM trap should exit cleanly: {status:?}"
         );
         wait_for_output(&process, b"cleanup-complete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_keeps_command_quoting_and_injected_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = temp.path().join("login-shell");
+        std::fs::write(
+            &shell,
+            concat!(
+                "#!/bin/sh\n",
+                "[ \"$1\" = -l ] || exit 91\n",
+                "[ \"$2\" = -c ] || exit 92\n",
+                ". \"$HOME/.profile\"\n",
+                "shift\n",
+                "exec /bin/sh \"$@\"\n",
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shell, permissions).unwrap();
+        std::fs::write(
+            temp.path().join(".profile"),
+            "export PROFILE_MARKER='profile sourced'\n",
+        )
+        .unwrap();
+
+        let command = r#"printf 'login:%s|token:%s|quoted:%s\n' "$PROFILE_MARKER" "$WORKMAN_MCP_TOKEN" "two words and a ' quote""#;
+        let mut process = PtyProcess::spawn(
+            PtySpawnOptions::new(48, "real-token", command)
+                .with_env("HOME", temp.path())
+                .with_env(WORKMAN_MCP_TOKEN_ENV, "wrong")
+                .with_login_shell_command(&shell),
+        )
+        .expect("spawn command through login shell");
+        let output = wait_for_output(&process, b"login:profile sourced|token:real-token");
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output.contains("quoted:two words and a ' quote"),
+            "command was reinterpreted or split: {output}"
+        );
+        assert!(process.wait().unwrap().success());
     }
 
     #[test]

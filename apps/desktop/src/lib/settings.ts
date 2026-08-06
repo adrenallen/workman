@@ -23,6 +23,15 @@ export interface McpConnectionInfo {
   setups: McpClientSetup[];
 }
 
+export interface UserEnvironmentInfo {
+  active_shell: string;
+  configured_shell: string | null;
+  inferred_shell: string;
+  inferred_from: string;
+  using_override: boolean;
+  warning: string | null;
+}
+
 export interface DaemonSettingsInfo {
   data_dir: string;
   port: number;
@@ -32,6 +41,7 @@ export interface DaemonSettingsInfo {
   control_protocol_version: number;
   uptime_ms: number;
   mcp: McpConnectionInfo;
+  user_environment: UserEnvironmentInfo;
   update: UpdateStatus;
 }
 
@@ -74,6 +84,13 @@ export function loadDaemonSettings(client: DaemonClient): Promise<DaemonSettings
 
 export function restartDaemon(client: DaemonClient): Promise<DaemonRestartResult> {
   return client.restartDaemon();
+}
+
+export function setUserShell(
+  client: DaemonClient,
+  shell: string | null
+): Promise<UserEnvironmentInfo> {
+  return client.control<UserEnvironmentInfo>('settings.user_shell', { shell });
 }
 
 export function checkForUpdates(client: DaemonClient, force = true): Promise<UpdateStatus> {

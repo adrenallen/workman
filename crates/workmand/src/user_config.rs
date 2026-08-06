@@ -29,6 +29,21 @@ pub struct UserConfig {
     pub agent_tools: Vec<UserAgentTool>,
     #[serde(default, skip_serializing_if = "UserUpdateConfig::is_empty")]
     pub update: UserUpdateConfig,
+    #[serde(default, skip_serializing_if = "UserTerminalConfig::is_empty")]
+    pub terminal: UserTerminalConfig,
+}
+
+/// User-selected terminal and process-launch preferences.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UserTerminalConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
+impl UserTerminalConfig {
+    fn is_empty(&self) -> bool {
+        self.shell.is_none()
+    }
 }
 
 /// Per-user release download configuration.
@@ -317,6 +332,51 @@ pub(crate) fn delete_agent_tool_from_settings(
     delete_agent_tool_from_settings_at(store, &user_config_path(), agent_tool_id)
 }
 
+/// Persist Settings → Terminal's shell choice while preserving unrelated YAML/comments.
+pub(crate) fn save_user_shell_from_settings_at(
+    path: &Path,
+    shell: Option<&str>,
+) -> Result<(), UserConfigError> {
+    let shell = shell
+        .map(|shell| {
+            let shell = shell.trim();
+            if shell.is_empty() {
+                return Err(UserConfigError::Invalid(
+                    "custom shell path must not be empty".to_owned(),
+                ));
+            }
+            crate::user_environment::validate_shell_override(Path::new(shell))
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(UserConfigError::Invalid)
+        })
+        .transpose()?;
+    let (source, mut root) = read_user_config_document(path)?;
+    let terminal_key = serde_yaml::Value::String("terminal".to_owned());
+    if let Some(shell) = shell {
+        let terminal = root
+            .entry(terminal_key.clone())
+            .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()))
+            .as_mapping_mut()
+            .ok_or_else(|| {
+                UserConfigError::Invalid("per-user config terminal must be a mapping".to_owned())
+            })?;
+        terminal.insert(
+            serde_yaml::Value::String("shell".to_owned()),
+            serde_yaml::Value::String(shell),
+        );
+    } else if let Some(terminal) = root.get_mut(&terminal_key) {
+        let terminal = terminal.as_mapping_mut().ok_or_else(|| {
+            UserConfigError::Invalid("per-user config terminal must be a mapping".to_owned())
+        })?;
+        terminal.remove(serde_yaml::Value::String("shell".to_owned()));
+        if terminal.is_empty() {
+            root.remove(&terminal_key);
+        }
+    }
+    validated_document(&root)?;
+    write_user_config_block(path, &source, &root, "terminal")
+}
+
 fn delete_agent_tool_from_settings_at(
     store: &Store,
     path: &Path,
@@ -485,14 +545,26 @@ fn write_user_config_document(
     source: &str,
     root: &serde_yaml::Mapping,
 ) -> Result<(), UserConfigError> {
-    let entries = root
-        .get(serde_yaml::Value::String("agent_tools".to_owned()))
-        .cloned()
-        .unwrap_or_else(|| serde_yaml::Value::Sequence(Vec::new()));
+    write_user_config_block(path, source, root, "agent_tools")
+}
+
+fn write_user_config_block(
+    path: &Path,
+    source: &str,
+    root: &serde_yaml::Mapping,
+    key: &str,
+) -> Result<(), UserConfigError> {
+    let entries = root.get(serde_yaml::Value::String(key.to_owned())).cloned();
     let mut block = serde_yaml::Mapping::new();
-    block.insert(serde_yaml::Value::String("agent_tools".to_owned()), entries);
-    let rendered = serde_yaml::to_string(&serde_yaml::Value::Mapping(block))?;
-    let updated = replace_top_level_yaml_block(source, "agent_tools", &rendered);
+    if let Some(entries) = entries {
+        block.insert(serde_yaml::Value::String(key.to_owned()), entries);
+    }
+    let rendered = if block.is_empty() {
+        String::new()
+    } else {
+        serde_yaml::to_string(&serde_yaml::Value::Mapping(block))?
+    };
+    let updated = replace_top_level_yaml_block(source, key, &rendered);
     write_private_atomic(path, updated.as_bytes())?;
     Ok(())
 }
@@ -694,12 +766,14 @@ fn infer_tool_type(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use workman_core::{AgentTool, AgentToolSource, Store};
 
     use super::{
         UserAgentTool, delete_agent_tool_from_settings_at, parse_user_config,
-        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at, select_update_key,
-        sync_user_agent_tools,
+        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at,
+        save_user_shell_from_settings_at, select_update_key, sync_user_agent_tools,
     };
 
     fn configured(name: &str, command: &str, tool_type: Option<&str>) -> UserAgentTool {
@@ -879,5 +953,35 @@ mod tests {
         let yaml = std::fs::read_to_string(path).unwrap();
         assert!(!yaml.contains("Added agent"));
         assert!(yaml.contains("# keep this heading"));
+    }
+
+    #[test]
+    fn shell_setting_roundtrips_and_auto_mode_preserves_other_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        let shell = temp.path().join("shell with spaces");
+        std::fs::write(&shell, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            &path,
+            "# keep heading\nagent_tools: []\ntelemetry: false # keep note\n",
+        )
+        .unwrap();
+
+        save_user_shell_from_settings_at(&path, Some(shell.to_str().unwrap())).unwrap();
+        let configured = std::fs::read_to_string(&path).unwrap();
+        assert!(configured.contains("# keep heading"));
+        assert!(configured.contains("telemetry: false # keep note"));
+        assert_eq!(
+            parse_user_config(&configured).unwrap().terminal.shell,
+            Some(shell.to_string_lossy().into_owned())
+        );
+
+        save_user_shell_from_settings_at(&path, None).unwrap();
+        let automatic = std::fs::read_to_string(&path).unwrap();
+        assert!(!automatic.contains("terminal:"));
+        assert!(automatic.contains("agent_tools: []"));
+        assert!(automatic.contains("telemetry: false # keep note"));
+        assert!(save_user_shell_from_settings_at(&path, Some("relative-shell")).is_err());
     }
 }

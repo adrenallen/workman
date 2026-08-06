@@ -7,6 +7,7 @@
     loadDaemonSettings,
     restartDaemon,
     setAutomaticUpdateChecks,
+    setUserShell,
     setUpdateChannel,
     type DaemonSettingsInfo,
     type UpdateInstallReport,
@@ -118,6 +119,16 @@
     }
   }
 
+  async function saveUserShell(shell: string | null): Promise<void> {
+    if (!info || connection.status !== 'connected') return;
+    try {
+      info = { ...info, user_environment: await setUserShell(client, shell) };
+    } catch (cause) {
+      onError(message(cause));
+      throw cause;
+    }
+  }
+
   async function checkUpdate(): Promise<void> {
     if (!info || updateBusy) return;
     updateBusy = 'check';
@@ -206,7 +217,11 @@
       {#if $settingsSection === 'appearance'}
         <AppearanceCard />
       {:else if $settingsSection === 'terminal'}
-        <TerminalAppearanceCard />
+        <TerminalAppearanceCard
+          environment={info?.user_environment ?? null}
+          connected={connection.status === 'connected'}
+          onShellChange={saveUserShell}
+        />
       {:else if $settingsSection === 'sidebar'}
         <SidebarCard />
       {:else if $settingsSection === 'hotkeys'}

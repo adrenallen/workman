@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    env,
     time::{Duration, Instant},
 };
 
@@ -196,14 +195,20 @@ impl WorkmanMcp {
         description = "Run cheap PATH, version, and config-presence checks for every agent runtime"
     )]
     async fn agent_tools_health(&self) -> CallToolResult {
-        let tools = {
+        let (tools, user_environment) = {
             let registry = self.registry.lock().await;
             match load_agent_tools(&registry) {
-                Ok(tools) => tools,
+                Ok(tools) => (tools, registry.resolved_user_environment()),
                 Err(error) => return failure("store_error", error),
             }
         };
-        success(crate::runtime_doctor::check_agent_tools(tools).await)
+        success(
+            crate::runtime_doctor::check_agent_tools_with_user_environment(
+                tools,
+                &user_environment,
+            )
+            .await,
+        )
     }
 
     #[tool(
@@ -308,12 +313,17 @@ impl WorkmanMcp {
                     );
                 }
                 process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
+                    let shell = registry
+                        .resolved_user_environment()
+                        .active_shell()
+                        .to_string_lossy()
+                        .into_owned();
                     spawn(
                         &mut registry,
                         &project,
                         ProcessKind::Terminal,
                         name,
-                        default_shell(),
+                        shell,
                         None,
                         None,
                         BTreeMap::new(),
@@ -610,7 +620,7 @@ pub(crate) async fn deep_check_registered_agent(
     spawned_by_process_id: Option<ProcessId>,
 ) -> Result<AgentToolDeepCheckResult, String> {
     let started = Instant::now();
-    let (tool, project) = {
+    let (tool, project, user_environment) = {
         let registry = registry.lock().await;
         let tool = load_agent_tool(&registry, agent_tool_id)?;
         let project = registry
@@ -618,7 +628,7 @@ pub(crate) async fn deep_check_registered_agent(
             .get_project(project_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("project {project_id} was not found"))?;
-        (tool, project)
+        (tool, project, registry.resolved_user_environment())
     };
     let capability = mcp_launch_capability(&tool.tool_type);
     if !capability.supported {
@@ -633,7 +643,11 @@ pub(crate) async fn deep_check_registered_agent(
             ),
         });
     }
-    let health = crate::runtime_doctor::check_agent_tools(vec![tool.clone()]).await;
+    let health = crate::runtime_doctor::check_agent_tools_with_user_environment(
+        vec![tool.clone()],
+        &user_environment,
+    )
+    .await;
     if !health
         .tools
         .first()
@@ -869,13 +883,6 @@ fn spawn(
         kind: running.kind,
         agent_instructions,
     })
-}
-
-fn default_shell() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|shell| !shell.trim().is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_owned())
 }
 
 fn process_name(

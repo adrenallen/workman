@@ -103,6 +103,7 @@ pub struct DaemonSettingsInfo {
     pub control_protocol_version: u32,
     pub uptime_ms: u64,
     pub mcp: McpConnectionInfo,
+    pub user_environment: crate::UserEnvironmentInfo,
     pub update: UpdateStatus,
 }
 
@@ -112,6 +113,7 @@ pub(crate) struct DaemonRuntimeSettings {
     discovery: Discovery,
     started_at: Instant,
     updates: UpdateService,
+    user_environment: crate::UserEnvironmentResolver,
 }
 
 impl DaemonRuntimeSettings {
@@ -120,12 +122,14 @@ impl DaemonRuntimeSettings {
         discovery: Discovery,
         started_at: Instant,
         updates: UpdateService,
+        user_environment: crate::UserEnvironmentResolver,
     ) -> Self {
         Self {
             data_dir,
             discovery,
             started_at,
             updates,
+            user_environment,
         }
     }
 
@@ -144,6 +148,7 @@ impl DaemonRuntimeSettings {
                 .try_into()
                 .unwrap_or(u64::MAX),
             mcp: mcp_connection_info(&self.discovery),
+            user_environment: self.user_environment.resolve().info().clone(),
             update: self.updates.status(),
         }
     }

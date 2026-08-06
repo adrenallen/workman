@@ -1,8 +1,9 @@
 //! Cheap runtime diagnostics and consent-gated MCP self-configuration for agent tools.
 
 use std::{
+    collections::BTreeMap,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -80,24 +81,49 @@ pub struct AgentToolConfigWrite {
 struct DoctorEnvironment {
     home: PathBuf,
     path: OsString,
+    variables: BTreeMap<OsString, OsString>,
     version_timeout: Duration,
 }
 
 impl DoctorEnvironment {
     fn current() -> Self {
+        let variables = env::vars_os().collect::<BTreeMap<_, _>>();
         Self {
             home: env::var_os("HOME")
                 .map(PathBuf::from)
                 .or_else(dirs::home_dir)
                 .unwrap_or_else(|| PathBuf::from(".")),
             path: env::var_os("PATH").unwrap_or_default(),
+            variables,
             version_timeout: VERSION_TIMEOUT,
         }
     }
 }
 
-pub async fn check_agent_tools(tools: Vec<AgentTool>) -> AgentToolsHealth {
-    let environment = DoctorEnvironment::current();
+pub async fn check_agent_tools_with_user_environment(
+    tools: Vec<AgentTool>,
+    resolved: &crate::user_environment::ResolvedUserEnvironment,
+) -> AgentToolsHealth {
+    let variables = resolved.login_environment().unwrap_or_else(|_| {
+        let mut variables = env::vars_os().collect::<BTreeMap<_, _>>();
+        variables.extend(resolved.pty_environment().clone());
+        variables
+    });
+    let home = variables
+        .get(OsStr::new("HOME"))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let path = variables
+        .get(OsStr::new("PATH"))
+        .cloned()
+        .unwrap_or_default();
+    let environment = DoctorEnvironment {
+        home,
+        path,
+        variables,
+        version_timeout: VERSION_TIMEOUT,
+    };
     check_agent_tools_in(tools, environment).await
 }
 
@@ -144,7 +170,14 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
         .as_deref()
         .and_then(|executable| resolve_executable(executable, &environment.path));
     let (version, version_error) = match resolved.as_deref() {
-        Some(executable) => capture_version(executable, environment.version_timeout).await,
+        Some(executable) => {
+            capture_version(
+                executable,
+                &environment.variables,
+                environment.version_timeout,
+            )
+            .await
+        }
         None => (None, None),
     };
     let target = config_target(&tool, &environment.home);
@@ -301,11 +334,14 @@ fn apply_config_in(
 
 async fn capture_version(
     executable: &Path,
+    environment: &BTreeMap<OsString, OsString>,
     version_timeout: Duration,
 ) -> (Option<String>, Option<String>) {
     let mut command = Command::new(executable);
     command
         .arg("--version")
+        .env_clear()
+        .envs(environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -663,13 +699,17 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
+    use std::{
+        collections::BTreeMap, ffi::OsString, fs, os::unix::fs::PermissionsExt, path::Path,
+        time::Duration,
+    };
 
     use workman_core::{AgentTool, AgentToolSource};
 
     use super::{
-        DoctorEnvironment, apply_config_in, check_agent_tools_in, command_executable,
-        config_preview_in, config_target,
+        DoctorEnvironment, apply_config_in, check_agent_tools_in,
+        check_agent_tools_with_user_environment, command_executable, config_preview_in,
+        config_target,
     };
 
     fn tool(id: i64, name: &str, command: &str, tool_type: &str, enabled: bool) -> AgentTool {
@@ -694,6 +734,16 @@ mod tests {
         let environment = DoctorEnvironment {
             home: temp.path().join("home"),
             path: std::env::join_paths([&bin]).unwrap(),
+            variables: BTreeMap::from([
+                (
+                    OsString::from("HOME"),
+                    temp.path().join("home").into_os_string(),
+                ),
+                (
+                    OsString::from("PATH"),
+                    std::env::join_paths([&bin]).unwrap(),
+                ),
+            ]),
             version_timeout: Duration::from_secs(2),
         };
         let health = check_agent_tools_in(
@@ -717,6 +767,45 @@ mod tests {
         assert!(!health.tools[1].found_on_path);
         assert!(health.tools[2].found_on_path);
         assert!(!health.tools[2].launch_ready);
+    }
+
+    #[tokio::test]
+    async fn health_uses_the_resolved_login_shell_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("profile-bin");
+        fs::create_dir(&bin).unwrap();
+        let ready = bin.join("profile-agent");
+        fs::write(&ready, "#!/bin/sh\nprintf 'profile-agent 9.1\\n'\n").unwrap();
+        fs::set_permissions(&ready, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let shell = temp.path().join("fixture-shell");
+        fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\nexport PATH='{}'\nshift\nexec /bin/sh \"$@\"\n",
+                bin.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = temp.path().join("config.yml");
+        fs::write(
+            &config,
+            format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
+        )
+        .unwrap();
+        let resolved = crate::UserEnvironmentResolver::new(&config).resolve();
+
+        let health = check_agent_tools_with_user_environment(
+            vec![tool(8, "Profile", "profile-agent", "codex", true)],
+            &resolved,
+        )
+        .await;
+        assert!(health.tools[0].found_on_path);
+        assert_eq!(
+            health.tools[0].version.as_deref(),
+            Some("profile-agent 9.1")
+        );
     }
 
     #[test]

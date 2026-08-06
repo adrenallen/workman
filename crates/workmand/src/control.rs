@@ -271,6 +271,12 @@ struct AgentToolOrderParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct UserShellParams {
+    #[serde(default)]
+    shell: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentToolConfigWriteParams {
     agent_tool_id: AgentToolId,
     confirm_write: bool,
@@ -464,13 +470,20 @@ async fn dispatch(
                 .map_err(readiness_error);
         }
         "agent_tools.health" => {
-            let tools = {
+            let (tools, user_environment) = {
                 let registry = registry.lock().await;
-                crate::mcp::agent_spawning::load_agent_tools(&registry)
-                    .map_err(|error| ("agent_tool_error", error))?
+                (
+                    crate::mcp::agent_spawning::load_agent_tools(&registry)
+                        .map_err(|error| ("agent_tool_error", error))?,
+                    registry.resolved_user_environment(),
+                )
             };
             return Ok(json_value(
-                crate::runtime_doctor::check_agent_tools(tools).await,
+                crate::runtime_doctor::check_agent_tools_with_user_environment(
+                    tools,
+                    &user_environment,
+                )
+                .await,
             ));
         }
         "agent_tools.configure_preview" => {
@@ -528,6 +541,17 @@ async fn dispatch(
         return result;
     }
     match method {
+        "settings.user_shell" => {
+            let params: UserShellParams = params_as(params)?;
+            crate::user_config::save_user_shell_from_settings_at(
+                registry.user_environment_resolver().config_path(),
+                params.shell.as_deref(),
+            )
+            .map_err(|error| ("user_config_error", error.to_string()))?;
+            return Ok(json_value(
+                registry.resolved_user_environment().info().clone(),
+            ));
+        }
         "notifications.list" | "notifications_list" => {
             let params: NotificationsListParams = params_as(params)?;
             return registry
@@ -904,7 +928,11 @@ fn spawn_terminal(
             suffix += 1;
         }
     });
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let shell = registry
+        .resolved_user_environment()
+        .active_shell()
+        .to_string_lossy()
+        .into_owned();
     let process = registry.create(Process {
         id: 0,
         project_id: params.project_id,

@@ -51,6 +51,7 @@ mod timer_events;
 mod timers;
 mod updates;
 mod user_config;
+mod user_environment;
 mod version;
 mod worktree_integrations;
 mod worktree_operations;
@@ -92,9 +93,10 @@ pub use settings::{
 pub use updates::UpdateStatus;
 pub use user_config::{
     AgentToolSyncReport, USER_CONFIG_FILE, UserAgentTool, UserConfig, UserConfigError,
-    UserUpdateConfig, WORKMAN_CONFIG_ENV, parse_user_config, resolve_update_key,
-    sync_user_agent_tools, sync_user_config_file, user_config_path,
+    UserTerminalConfig, UserUpdateConfig, WORKMAN_CONFIG_ENV, parse_user_config,
+    resolve_update_key, sync_user_agent_tools, sync_user_config_file, user_config_path,
 };
+pub use user_environment::{ResolvedUserEnvironment, UserEnvironmentInfo, UserEnvironmentResolver};
 pub use version::{BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonVersion};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
@@ -168,6 +170,7 @@ pub struct DaemonServer {
     data_dir: PathBuf,
     started_at: Instant,
     updates: updates::UpdateService,
+    user_environment: UserEnvironmentResolver,
 }
 
 impl DaemonServer {
@@ -188,11 +191,13 @@ impl DaemonServer {
         if let Err(error) = worktrees::reconcile_existing_projects(&store) {
             eprintln!("workman daemon: worktree metadata reconciliation skipped: {error}");
         }
+        let user_environment = UserEnvironmentResolver::new(user_config_path);
         let registry = Arc::new(Mutex::new(
-            ProcessRegistry::with_output_persistence(
+            ProcessRegistry::with_output_persistence_and_environment(
                 store,
                 config.data_dir.join(OUTPUT_DIRECTORY),
                 output_spill_capacity_from_env(),
+                user_environment.clone(),
             )
             .map_err(registry_io_error)?,
         ));
@@ -216,6 +221,7 @@ impl DaemonServer {
             data_dir: config.data_dir,
             started_at,
             updates,
+            user_environment,
         })
     }
 
@@ -259,6 +265,7 @@ impl DaemonServer {
             self.discovery.clone(),
             self.started_at,
             self.updates,
+            self.user_environment,
         );
         let state = AppState {
             token: self.discovery.token.clone(),

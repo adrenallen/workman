@@ -38,6 +38,8 @@ use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
 };
+use crate::user_config::user_config_path;
+use crate::user_environment::{ResolvedUserEnvironment, UserEnvironmentResolver};
 
 const DEFAULT_STOP_GRACE: Duration = Duration::from_millis(500);
 
@@ -255,6 +257,7 @@ pub struct ProcessRegistry {
     trust_snapshots: HashMap<ProcessId, TrustFields>,
     stop_grace: Duration,
     output_persistence: Option<OutputPersistence>,
+    user_environment: UserEnvironmentResolver,
 }
 
 #[derive(Clone, Debug)]
@@ -266,11 +269,29 @@ struct OutputPersistence {
 impl ProcessRegistry {
     /// Create a registry and mark process rows left running by an earlier daemon as crashed.
     pub fn new(store: Store) -> RegistryResult<Self> {
-        Self::with_options(store, DEFAULT_STOP_GRACE, None)
+        Self::with_options(
+            store,
+            DEFAULT_STOP_GRACE,
+            None,
+            UserEnvironmentResolver::new(user_config_path()),
+        )
     }
 
     pub fn with_stop_grace(store: Store, stop_grace: Duration) -> RegistryResult<Self> {
-        Self::with_options(store, stop_grace, None)
+        Self::with_options(
+            store,
+            stop_grace,
+            None,
+            UserEnvironmentResolver::new(user_config_path()),
+        )
+    }
+
+    /// Create a registry with an explicit resolver (primarily for isolated embedding/tests).
+    pub fn with_user_environment(
+        store: Store,
+        user_environment: UserEnvironmentResolver,
+    ) -> RegistryResult<Self> {
+        Self::with_options(store, DEFAULT_STOP_GRACE, None, user_environment)
     }
 
     /// Create a registry whose PTY output survives daemon restarts in `output_directory`.
@@ -279,6 +300,21 @@ impl ProcessRegistry {
         output_directory: impl Into<PathBuf>,
         capacity: usize,
     ) -> RegistryResult<Self> {
+        Self::with_output_persistence_and_environment(
+            store,
+            output_directory,
+            capacity,
+            UserEnvironmentResolver::new(user_config_path()),
+        )
+    }
+
+    /// Create a persistent registry using one shared user-environment resolver.
+    pub fn with_output_persistence_and_environment(
+        store: Store,
+        output_directory: impl Into<PathBuf>,
+        capacity: usize,
+        user_environment: UserEnvironmentResolver,
+    ) -> RegistryResult<Self> {
         Self::with_options(
             store,
             DEFAULT_STOP_GRACE,
@@ -286,6 +322,7 @@ impl ProcessRegistry {
                 directory: output_directory.into(),
                 capacity,
             }),
+            user_environment,
         )
     }
 
@@ -293,6 +330,7 @@ impl ProcessRegistry {
         store: Store,
         stop_grace: Duration,
         output_persistence: Option<OutputPersistence>,
+        user_environment: UserEnvironmentResolver,
     ) -> RegistryResult<Self> {
         let trust_snapshots = store
             .list_processes(None)?
@@ -308,6 +346,7 @@ impl ProcessRegistry {
             trust_snapshots,
             stop_grace,
             output_persistence,
+            user_environment,
         };
         registry.reconcile_stale_processes()?;
         registry.reload_persisted_outputs()?;
@@ -320,6 +359,14 @@ impl ProcessRegistry {
 
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    pub fn resolved_user_environment(&self) -> ResolvedUserEnvironment {
+        self.user_environment.resolve()
+    }
+
+    pub fn user_environment_resolver(&self) -> &UserEnvironmentResolver {
+        &self.user_environment
     }
 
     /// Insert a new stopped process. An ID <= 0 is replaced with the next database ID.
@@ -574,6 +621,12 @@ impl ProcessRegistry {
             .filter(|command| !command.trim().is_empty())
             .ok_or(RegistryError::MissingCommand(process_id))?
             .to_owned();
+        // Terminals created by Workman store the shell executable as their command. Keep that
+        // interactive, including legacy/custom shell paths; terminal-kind fixtures with an actual
+        // command still run through the resolved login shell like every other command.
+        let interactive_terminal = process.kind == ProcessKind::Terminal
+            && Path::new(&command).is_absolute()
+            && Path::new(&command).is_file();
 
         process.status = ProcessStatus::Starting;
         process.pid = None;
@@ -586,7 +639,11 @@ impl ProcessRegistry {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         self.store
             .set_process_mcp_token(process.id, &token, now_millis())?;
+        let user_environment = self.resolved_user_environment();
         let mut options = PtySpawnOptions::new(process.id, token, command);
+        for (key, value) in user_environment.pty_environment() {
+            options = options.with_env(key, value);
+        }
         if let Some(tool_type) = tool_type {
             options = options.with_tool_type(tool_type);
         }
@@ -596,6 +653,17 @@ impl ProcessRegistry {
         for (key, value) in &process.env {
             options = options.with_env(key, value);
         }
+        // Terminal capability and shell identity are Workman's spawn contract, not optional
+        // process metadata. Apply them last so every PTY gets a consistent baseline.
+        options = options
+            .with_env("TERM", "xterm-256color")
+            .with_env("COLORTERM", "truecolor")
+            .with_env("SHELL", user_environment.active_shell());
+        options = if interactive_terminal {
+            options.with_login_shell(user_environment.active_shell())
+        } else {
+            options.with_login_shell_command(user_environment.active_shell())
+        };
         if let Some(persistence) = &self.output_persistence {
             options = options
                 .with_raw_buffer_capacity(persistence.capacity)
@@ -1527,6 +1595,7 @@ fn ascii_case_insensitive_matches(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
     use std::{thread, time::Instant};
 
     use workman_core::{AgentTool, ProcessSource, Project, attention::AttentionState};
@@ -1619,6 +1688,101 @@ mod tests {
         assert_eq!(process.status, ProcessStatus::Crashed);
         assert_eq!(process.pid, None);
         assert!(process.exited_at.is_some());
+    }
+
+    #[test]
+    fn command_spawn_uses_login_profile_and_complete_pty_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = temp.path().join("fixture-shell");
+        std::fs::write(
+            &shell,
+            concat!(
+                "#!/bin/sh\n",
+                "[ \"$1\" = -l ] || exit 91\n",
+                "[ \"$2\" = -c ] || exit 92\n",
+                ". \"$HOME/.profile\"\n",
+                "shift\n",
+                "exec /bin/sh \"$@\"\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            temp.path().join(".profile"),
+            "export PROFILE_VALUE='from login profile'\n",
+        )
+        .unwrap();
+        let config = temp.path().join("config.yml");
+        std::fs::write(
+            &config,
+            format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
+        )
+        .unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "environment-fixture".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry =
+            ProcessRegistry::with_user_environment(store, UserEnvironmentResolver::new(&config))
+                .unwrap();
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "HOME".to_owned(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "WORKMAN_MCP_URL".to_owned(),
+            "http://127.0.0.1:4777/mcp".to_owned(),
+        );
+        registry
+            .create(Process {
+                id: 41,
+                project_id: 1,
+                kind: ProcessKind::Command,
+                name: "environment command".into(),
+                command: Some(
+                    r#"printf 'ENV:%s|%s|%s|%s|%s|%s|%s\n' "$PROFILE_VALUE" "$TERM" "$COLORTERM" "$LANG" "$SHELL" "$WORKMAN_MCP_URL" "two words and a ' quote""#.into(),
+                ),
+                working_dir: temp.path().to_string_lossy().into_owned(),
+                env: environment,
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        registry.start(41).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let output = loop {
+            let output = registry.raw_output(41, None, usize::MAX).unwrap().data;
+            if output.windows(4).any(|window| window == b"ENV:") {
+                break String::from_utf8_lossy(&output).into_owned();
+            }
+            assert!(Instant::now() < deadline, "timed out: {output:?}");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(output.contains("ENV:from login profile|xterm-256color|truecolor|"));
+        assert!(output.contains(shell.to_string_lossy().as_ref()));
+        assert!(output.contains("|http://127.0.0.1:4777/mcp|two words and a ' quote"));
     }
 
     #[test]

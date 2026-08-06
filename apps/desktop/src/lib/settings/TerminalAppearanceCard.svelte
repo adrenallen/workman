@@ -9,8 +9,27 @@
     updateAppearance,
     type TerminalFontId
   } from '../appearance';
+  import type { UserEnvironmentInfo } from '../settings';
+
+  interface Props {
+    environment: UserEnvironmentInfo | null;
+    connected: boolean;
+    onShellChange: (shell: string | null) => Promise<void>;
+  }
+
+  let { environment, connected, onShellChange }: Props = $props();
 
   let fontChoices = $state(installedTerminalFonts());
+  let shellMode = $state<'auto' | 'custom'>('auto');
+  let customShell = $state('');
+  let savingShell = $state(false);
+  let shellError = $state<string | null>(null);
+
+  $effect(() => {
+    if (!environment) return;
+    shellMode = environment.configured_shell ? 'custom' : 'auto';
+    customShell = environment.configured_shell ?? environment.inferred_shell;
+  });
 
   onMount(() => {
     fontChoices = installedTerminalFonts();
@@ -19,17 +38,91 @@
   function setSize(value: number): void {
     updateAppearance({ terminalFontSize: Math.min(20, Math.max(10, value)) });
   }
+
+  async function saveShell(): Promise<void> {
+    if (!connected || savingShell) return;
+    const shell = shellMode === 'custom' ? customShell.trim() : null;
+    if (shellMode === 'custom' && !shell?.startsWith('/')) {
+      shellError = 'Enter an absolute shell path, such as /bin/zsh.';
+      return;
+    }
+    savingShell = true;
+    shellError = null;
+    try {
+      await onShellChange(shell);
+    } catch (cause) {
+      shellError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      savingShell = false;
+    }
+  }
 </script>
 
 <section class="terminal-section" aria-labelledby="terminal-appearance-title">
   <header>
     <div>
       <span class="eyebrow">Terminal</span>
-      <h2 id="terminal-appearance-title">Terminal typography</h2>
-      <p>Terminal changes refit the visible PTY immediately.</p>
+      <h2 id="terminal-appearance-title">Terminal environment</h2>
+      <p>Shell and typography shared by terminals, agents, and commands.</p>
     </div>
     <span class="geometry">{$appearance.terminalFontSize}px</span>
   </header>
+
+  <div class="setting-row shell-row">
+    <div class="setting-copy">
+      <strong>Shell</strong>
+      <small>Login profiles provide the PATH used by launches and runtime checks.</small>
+    </div>
+    <div class="shell-control">
+      <div class="shell-fields">
+        <span class="select-wrap">
+          <select
+            aria-label="Terminal shell mode"
+            value={shellMode}
+            disabled={!connected || savingShell}
+            oninput={(event) => {
+              shellMode = event.currentTarget.value as 'auto' | 'custom';
+              shellError = null;
+            }}
+          >
+            <option value="auto">Auto-detect (default)</option>
+            <option value="custom">Custom path</option>
+          </select>
+          <span aria-hidden="true">⌄</span>
+        </span>
+        {#if shellMode === 'custom'}
+          <input
+            class="shell-path"
+            aria-label="Custom shell path"
+            placeholder="/bin/zsh"
+            bind:value={customShell}
+            disabled={!connected || savingShell}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') void saveShell();
+            }}
+          />
+        {/if}
+        <button
+          class="apply-shell"
+          type="button"
+          disabled={!connected || !environment || savingShell}
+          onclick={() => void saveShell()}
+        >{savingShell ? 'Saving…' : 'Apply'}</button>
+      </div>
+      {#if environment}
+        <p class="shell-summary">
+          <span>{environment.using_override ? 'Custom' : 'Auto-detected'}</span>
+          <code>{environment.active_shell}</code>
+          <small>Inferred from {environment.inferred_from}: {environment.inferred_shell}</small>
+        </p>
+      {:else}
+        <p class="shell-summary unavailable">Connect to the daemon to inspect the login shell.</p>
+      {/if}
+      {#if shellError || environment?.warning}
+        <p class="shell-warning" role="status">{shellError ?? environment?.warning}</p>
+      {/if}
+    </div>
+  </div>
 
   <label class="setting-row">
     <span class="setting-copy"><strong>Font family</strong><small>Bundled or installed monospace faces.</small></span>
@@ -101,6 +194,20 @@
   .select-wrap { position: relative; display: block; }
   select { width: 100%; height: 30px; appearance: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 28px 0 9px; background: var(--night); color: var(--text-soft); font-size: var(--font-size-sm); cursor: pointer; }
   .select-wrap > span { position: absolute; top: 7px; right: 9px; color: var(--muted); font-size: var(--font-size-sm); pointer-events: none; }
+  select:disabled, input:disabled, button:disabled { cursor: default; opacity: .5; }
+
+  .shell-row { grid-template-columns: 1fr; align-items: start; gap: 8px; padding-block: 10px; }
+  .shell-control { min-width: 0; }
+  .shell-fields { display: flex; align-items: center; gap: 6px; }
+  .shell-fields .select-wrap { flex: 1 1 180px; }
+  .shell-path { width: min(220px, 100%); height: 30px; min-width: 0; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 8px; background: var(--night); color: var(--text-soft); font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace; }
+  .apply-shell { min-width: 58px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 9px; background: var(--surface-raised); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
+  .shell-summary { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 6px; margin: 6px 0 0; color: var(--muted); font: var(--font-size-xs)/1.35 'JetBrains Mono Variable', monospace; }
+  .shell-summary > span { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; color: var(--text-soft); }
+  .shell-summary code { min-width: 0; overflow: hidden; color: var(--text-soft); text-overflow: ellipsis; white-space: nowrap; }
+  .shell-summary small { grid-column: 1 / -1; overflow: hidden; font-size: inherit; text-overflow: ellipsis; white-space: nowrap; }
+  .shell-summary.unavailable { display: block; }
+  .shell-warning { margin: 5px 0 0; border-left: 2px solid var(--warning-token); padding-left: 7px; color: var(--text-soft); font-size: var(--font-size-xs); line-height: 1.35; }
 
   .size-control { display: grid; grid-template-columns: 28px minmax(110px, 1fr) 42px 28px; align-items: center; gap: 6px; }
   .size-control button { width: 28px; height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--surface-raised); color: var(--text-soft); font-size: 13px; cursor: pointer; }
@@ -123,4 +230,5 @@
   footer button:disabled { opacity: .38; cursor: default; }
 
   @media (max-width: 760px) { .setting-row { grid-template-columns: 1fr; gap: 7px; padding-block: 9px; } }
+  @media (max-width: 560px) { .shell-fields { align-items: stretch; flex-direction: column; } .shell-fields .select-wrap, .shell-path, .apply-shell { width: 100%; flex: none; } }
 </style>
