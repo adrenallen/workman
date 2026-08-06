@@ -111,6 +111,10 @@ curl -fsSL https://workman.userdefined.io/install.sh | \
 # Equivalent environment-variable form:
 curl -fsSL https://workman.userdefined.io/install.sh | \
   WORKMAN_KEY='<friends-key>' sh
+
+# Skip the interactive replacement/restart confirmations:
+curl -fsSL https://workman.userdefined.io/install.sh | \
+  sh -s -- --key '<friends-key>' --yes
 ```
 
 Before a prerelease is promoted, install it from the latest channel explicitly:
@@ -120,5 +124,21 @@ curl -fsSL https://workman.userdefined.io/install.sh | \
   sh -s -- --key '<friends-key>' --channel latest
 ```
 
-The bootstrap sends the key as a Bearer token to both `/releases.json` and the selected artifact,
-checks the manifest SHA-256 before extracting, and then runs the bundle-local installer.
+The bootstrap prints the selected channel and the exact version that channel currently serves,
+sends the key as a Bearer token to both `/releases.json` and the selected artifact, and checks the
+manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand`, and historical
+`awm`/`awmd` launchers from PATH and known install locations. Versioned bundle directories remain
+available as rollback files; superseded launchers are backed up before being replaced.
+
+When old launchers or daemons are present, an interactive install reads confirmation from
+`/dev/tty`, so prompting works under `curl | sh`. `--yes` skips the prompts; a non-interactive
+install also proceeds. A confirmed daemon restart preserves its existing data directory. At the
+end, the bootstrap performs a fresh PATH walk, verifies that the selected `wrk` is the newly
+installed version, and fails with the offending path when another binary still wins. It also
+prints a `hash -r` reminder for shells that cached the old command location.
+
+On macOS, the bootstrap also offers to copy the bundled `Workman.app` to `/Applications` so the
+app is available through Launchpad and Spotlight. Updates refresh that copy. An existing app is
+replaced only when its `CFBundleIdentifier` is `com.workman.desktop`; a different bundle is left
+untouched and the install fails with an explanation. `--yes` and non-interactive installs accept
+the app-copy step as well.
