@@ -9,6 +9,7 @@ export type AppNavigationTarget =
   | { type: 'item'; selection: ProjectTreeSelection }
   | { type: 'settings'; projectId?: number }
   | { type: 'new-worktree'; projectId: number }
+  | { type: 'new-agent'; projectId: number }
   | { type: 'new-terminal'; projectId: number }
   | { type: 'spawn-agent'; projectId: number; agentToolId: number; agentToolName: string }
   | { type: 'add-command'; projectId: number }
@@ -76,6 +77,8 @@ export function navigationTargetKey(target: AppNavigationTarget): string {
       return `new-terminal:${target.projectId}`;
     case 'new-worktree':
       return `new-worktree:${target.projectId}`;
+    case 'new-agent':
+      return `new-agent:${target.projectId}`;
     case 'spawn-agent':
       return `spawn-agent:${target.projectId}:${target.agentToolId}`;
     case 'add-command':

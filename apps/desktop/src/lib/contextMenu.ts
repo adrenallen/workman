@@ -29,6 +29,11 @@ export type ContextActionId =
   | 'copy-title'
   | 'archive-scratchpad'
   | 'delete-scratchpad'
+  | 'new-agent'
+  | 'new-terminal'
+  | 'add-command'
+  | 'new-todo'
+  | 'new-scratchpad'
   | 'start-all-commands'
   | 'stop-all-commands'
   | 'remove-project'
@@ -254,6 +259,11 @@ function projectItems(
   return [
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
     { id: 'rename', label: 'Rename' },
+    { id: 'new-agent', label: 'New agent…', separatorBefore: true },
+    { id: 'new-terminal', label: 'New terminal' },
+    { id: 'add-command', label: 'Add command…' },
+    { id: 'new-todo', label: 'New todo…' },
+    { id: 'new-scratchpad', label: 'New scratchpad' },
     ...worktreeItems.map((item, index) => ({ ...item, separatorBefore: index === 0 })),
     { id: 'start-all-commands', label: 'Start all commands', separatorBefore: true },
     { id: 'stop-all-commands', label: 'Stop all commands' },

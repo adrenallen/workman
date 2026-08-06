@@ -880,6 +880,9 @@
         case 'new-terminal':
           await spawnTerminal();
           return;
+        case 'new-agent':
+          await openAgentDialog();
+          return;
         case 'spawn-agent': {
           let tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           if (!tool) {
@@ -1923,6 +1926,30 @@
         return;
       case 'rename':
         beginRename(project);
+        return;
+      case 'new-agent':
+        if (!(await activateProject(project.id))) return;
+        await openAgentDialog();
+        return;
+      case 'new-terminal':
+        if (!(await activateProject(project.id))) return;
+        await spawnTerminal();
+        return;
+      case 'add-command':
+        if (!(await activateProject(project.id))) return;
+        settingsOpen = false;
+        dialog = 'command';
+        return;
+      case 'new-todo':
+        if (!(await activateProject(project.id))) return;
+        settingsOpen = false;
+        resetTodoForm();
+        dialog = 'todo';
+        return;
+      case 'new-scratchpad':
+        if (!(await activateProject(project.id))) return;
+        settingsOpen = false;
+        await createScratchpad();
         return;
       case 'new-worktree':
         await openWorktreeDialog('create', project);

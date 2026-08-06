@@ -107,6 +107,16 @@
       }
       next.push(
         {
+          key: `action:new-agent:${project.id}`,
+          kind: 'action',
+          label: `New agent in ${name}`,
+          detail: 'Choose an enabled agent tool',
+          projectName: name,
+          searchText: `new add create agent ${name} ${project.name} ${project.path}`,
+          target: { type: 'new-agent', projectId: project.id },
+          creation: true
+        },
+        {
           key: `action:new-terminal:${project.id}`,
           kind: 'action',
           label: `New terminal in ${name}`,
@@ -304,6 +314,7 @@
 
   function entryIcon(entry: PaletteEntry) {
     if (entry.kind === 'action') {
+      if (entry.target.type === 'new-agent') return BotIcon;
       if (entry.target.type === 'new-terminal') return SquareTerminalIcon;
       if (entry.target.type === 'new-worktree') return GitBranchPlusIcon;
       if (entry.target.type === 'add-command') return PlayIcon;
