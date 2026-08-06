@@ -204,13 +204,12 @@
       focusRequested: true
     };
     replayState = state;
-    let cancelled = false;
     void (async () => {
       // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
       // resizing afterward reflows the active zsh prompt differently from a native terminal.
       await document.fonts.ready;
       await nextAnimationFrame();
-      if (cancelled || replayState !== state) return;
+      if (replayState !== state) return;
       fitTerminal();
       if (processRunning) {
         await client.resizeTerminal(
@@ -221,25 +220,17 @@
           Math.round(host.clientHeight)
         );
       }
-      if (cancelled || replayState !== state) return;
+      if (replayState !== state) return;
 
       const attached = await client.attachTerminal(processId);
-      if (cancelled || replayState !== state) return;
+      if (replayState !== state) return;
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
       state.focusReporting = attached.focus_reporting;
       finishReplayIfReady(state);
     })().catch((cause) => {
-      if (!cancelled) onError(cause instanceof Error ? cause.message : String(cause));
+      if (replayState === state) onError(cause instanceof Error ? cause.message : String(cause));
     });
-    return () => {
-      cancelled = true;
-      if (replayState === state) {
-        inputEnabled = false;
-        replayState = null;
-      }
-      flushInput();
-    };
   });
 
   function handleTerminalFrame(frame: TerminalFrame): void {
