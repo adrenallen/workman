@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::time::Instant;
 
-use crate::Discovery;
+use crate::{Discovery, RuntimeIdentity};
 use crate::{UpdateStatus, updates::UpdateService};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -154,15 +154,24 @@ impl DaemonRuntimeSettings {
 }
 
 pub fn mcp_connection_info(discovery: &Discovery) -> McpConnectionInfo {
+    mcp_connection_info_for(discovery, RuntimeIdentity::current())
+}
+
+pub fn mcp_connection_info_for(
+    discovery: &Discovery,
+    identity: RuntimeIdentity,
+) -> McpConnectionInfo {
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let authorization = format!("Bearer {}", discovery.token);
+    let server_name = identity.mcp_server_name();
+    let authorization_env = identity.mcp_authorization_env();
     let claude_command = [
         "claude".to_owned(),
         "mcp".to_owned(),
         "add".to_owned(),
         "--transport".to_owned(),
         "http".to_owned(),
-        "workman".to_owned(),
+        server_name.to_owned(),
         endpoint.clone(),
         "--header".to_owned(),
         format!("Authorization: {authorization}"),
@@ -171,39 +180,44 @@ pub fn mcp_connection_info(discovery: &Discovery) -> McpConnectionInfo {
     .map(|argument| shell_quote(argument))
     .collect::<Vec<_>>()
     .join(" ");
-    let codex_environment = format!(
-        "export WORKMAN_MCP_AUTHORIZATION={}",
-        shell_quote(&authorization)
-    );
+    let codex_environment = format!("export {authorization_env}={}", shell_quote(&authorization));
     let codex_config = format!(
-        "[mcp_servers.workman]\nurl = {endpoint:?}\nenv_http_headers = {{ \"Authorization\" = \"WORKMAN_MCP_AUTHORIZATION\" }}"
+        "[mcp_servers.{server_name}]\nurl = {endpoint:?}\nenv_http_headers = {{ \"Authorization\" = \"{authorization_env}\" }}"
     );
+    let gemini_servers = serde_json::Map::from_iter([(
+        server_name.to_owned(),
+        json!({
+            "httpUrl": endpoint.clone(),
+            "headers": { "Authorization": authorization.clone() }
+        }),
+    )]);
     let gemini_config = serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "workman": {
-                "httpUrl": endpoint.clone(),
-                "headers": { "Authorization": authorization.clone() }
-            }
-        }
+        "mcpServers": gemini_servers
     }))
     .expect("static MCP setup JSON serializes");
+    let opencode_servers = serde_json::Map::from_iter([(
+        server_name.to_owned(),
+        json!({
+            "type": "remote",
+            "url": endpoint.clone(),
+            "enabled": true,
+            "headers": { "Authorization": authorization.clone() }
+        }),
+    )]);
     let opencode_config = serde_json::to_string_pretty(&json!({
         "$schema": "https://opencode.ai/config.json",
-        "mcp": {
-            "workman": {
-                "type": "remote",
-                "url": endpoint.clone(),
-                "enabled": true,
-                "headers": { "Authorization": authorization.clone() }
-            }
-        }
+        "mcp": opencode_servers
     }))
     .expect("static MCP setup JSON serializes");
     let setups = vec![
         McpClientSetup {
             client: McpClient::Claude,
             label: McpClient::Claude.label(),
-            description: "Run once to add workman to Claude Code's local MCP configuration.",
+            description: if identity.is_dev() {
+                "Run once to add workman-dev to Claude Code's local MCP configuration."
+            } else {
+                "Run once to add workman to Claude Code's local MCP configuration."
+            },
             fields: vec![field(
                 "Shell command",
                 claude_command,
@@ -352,5 +366,46 @@ mod tests {
         assert_eq!(generic.fields[0].value, info.endpoint);
         assert_eq!(generic.fields[1].value, "Authorization");
         assert_eq!(generic.fields[2].value, "Bearer secret-token");
+    }
+
+    #[test]
+    fn dev_mcp_setup_uses_a_non_colliding_registration_name() {
+        let info = mcp_connection_info_for(
+            &Discovery {
+                port: 41732,
+                token: "dev-token".into(),
+                pid: 43,
+            },
+            RuntimeIdentity::Dev,
+        );
+        let claude = info.setup(McpClient::Claude).unwrap();
+        assert!(
+            claude.fields[0]
+                .value
+                .contains("mcp add --transport http workman-dev ")
+        );
+        let codex = info.setup(McpClient::Codex).unwrap();
+        assert!(
+            codex.fields[0]
+                .value
+                .starts_with("export WORKMAN_DEV_MCP_AUTHORIZATION=")
+        );
+        assert!(codex.fields[1].value.contains("[mcp_servers.workman-dev]"));
+        assert!(
+            codex.fields[1]
+                .value
+                .contains("WORKMAN_DEV_MCP_AUTHORIZATION")
+        );
+
+        let gemini: serde_json::Value =
+            serde_json::from_str(&info.setup(McpClient::Gemini).unwrap().fields[0].value).unwrap();
+        assert_eq!(
+            gemini["mcpServers"]["workman-dev"]["httpUrl"],
+            info.endpoint
+        );
+        let opencode: serde_json::Value =
+            serde_json::from_str(&info.setup(McpClient::Opencode).unwrap().fields[0].value)
+                .unwrap();
+        assert_eq!(opencode["mcp"]["workman-dev"]["url"], info.endpoint);
     }
 }

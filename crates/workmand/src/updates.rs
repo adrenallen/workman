@@ -14,7 +14,7 @@ use workman_core::{
     UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, install_dir_from_executable,
 };
 
-use crate::user_config::resolve_update_key;
+use crate::{RuntimeIdentity, user_config::resolve_update_key};
 
 const CACHE_FILE: &str = "updates.json";
 
@@ -60,6 +60,7 @@ pub(crate) struct UpdateService {
     cache_path: PathBuf,
     cache: Arc<Mutex<UpdateCache>>,
     operation: Arc<AsyncMutex<()>>,
+    updates_enabled: bool,
 }
 
 impl UpdateService {
@@ -80,7 +81,13 @@ impl UpdateService {
             None => install_dir_from_executable(env::current_exe()?)?,
         };
         let cache_path = data_dir.join(CACHE_FILE);
-        let cache = read_cache(&cache_path).unwrap_or_default();
+        let updates_enabled = !RuntimeIdentity::current().is_dev();
+        let mut cache = read_cache(&cache_path).unwrap_or_default();
+        if !updates_enabled {
+            cache.automatic_checks = false;
+            cache.last_checked_at = None;
+            cache.last_check = None;
+        }
         Ok(Self {
             stable_client,
             latest_client,
@@ -89,6 +96,7 @@ impl UpdateService {
             cache_path,
             cache: Arc::new(Mutex::new(cache)),
             operation: Arc::new(AsyncMutex::new(())),
+            updates_enabled,
         })
     }
 
@@ -106,6 +114,9 @@ impl UpdateService {
         force: bool,
         key_override: Option<&str>,
     ) -> Result<UpdateStatus, UpdateError> {
+        if !self.updates_enabled {
+            return Ok(self.status());
+        }
         let _operation = self.operation.lock().await;
         {
             let cache = self.cache.lock().expect("update cache lock poisoned");
@@ -142,7 +153,9 @@ impl UpdateService {
         channel: Option<UpdateChannel>,
     ) -> Result<UpdateStatus, UpdateError> {
         let mut cache = self.cache.lock().expect("update cache lock poisoned");
-        if let Some(enabled) = automatic_checks {
+        if let Some(enabled) = automatic_checks
+            && self.updates_enabled
+        {
             cache.automatic_checks = enabled;
         }
         if let Some(channel) = channel {
@@ -164,6 +177,12 @@ impl UpdateService {
         &self,
         key_override: Option<&str>,
     ) -> Result<UpdateInstallReport, UpdateError> {
+        if !self.updates_enabled {
+            return Err(UpdateError::InvalidRelease(
+                "development install — rebuild it from the current working tree with scripts/dev-install.sh"
+                    .to_owned(),
+            ));
+        }
         let status = self.check_with_key(true, key_override).await?;
         let override_client = key_override
             .map(|key| self.client(status.channel).clone().with_key(key))

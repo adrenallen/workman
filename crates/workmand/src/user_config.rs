@@ -14,6 +14,8 @@ use workman_core::{
     AgentTool, AgentToolSource, DEFAULT_UPDATE_KEY, Store, StoreError, WORKMAN_UPDATE_KEY_ENV,
 };
 
+use crate::RuntimeIdentity;
+
 /// Environment variable overriding the platform-specific user config path.
 pub const WORKMAN_CONFIG_ENV: &str = "WORKMAN_CONFIG";
 
@@ -124,8 +126,10 @@ fn enabled_by_default() -> bool {
 
 /// Resolve the user config path, honoring `WORKMAN_CONFIG` before platform defaults.
 pub fn user_config_path() -> PathBuf {
-    env::var_os(WORKMAN_CONFIG_ENV)
-        .map_or_else(|| default_user_config_path("workman"), PathBuf::from)
+    env::var_os(WORKMAN_CONFIG_ENV).map_or_else(
+        || default_user_config_path(RuntimeIdentity::current().application_name()),
+        PathBuf::from,
+    )
 }
 
 pub(crate) fn default_user_config_path(app_name: &str) -> PathBuf {

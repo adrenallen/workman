@@ -1,6 +1,7 @@
 //! Command-line client for the authenticated workman daemon control channel.
 
 use std::{
+    borrow::Cow,
     env,
     error::Error,
     ffi::OsString,
@@ -28,7 +29,8 @@ use workman_core::{
     ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, install_dir_from_executable,
 };
 use workmand::{
-    DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, Service, UpdateStatus,
+    DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, RuntimeIdentity,
+    Service, UpdateStatus,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -140,6 +142,16 @@ Examples
   wrk update --channel latest
 "#;
 
+const DEV_UPDATE_HELP: &str = r#"wrk-dev update — development installs are rebuilt from source
+Usage: wrk-dev update
+
+The dev identity never replaces stable Workman files or downloads a release over the current
+working-tree build. Re-run scripts/dev-install.sh from the repository to refresh it.
+
+Options
+  -h, --help  Show help and exit
+"#;
+
 const MCP_SETUP_HELP: &str = r#"wrk mcp-setup — print authenticated MCP client setup
 Usage: wrk mcp-setup [OPTIONS]
 
@@ -216,13 +228,14 @@ Example
 
 /// Parse process arguments and execute one CLI invocation.
 pub async fn run_env() -> Result<()> {
+    let identity = RuntimeIdentity::current();
     let cli = Cli::parse(env::args_os())?;
     if let Command::Help(topic) = &cli.command {
-        print!("{}", help_text(*topic));
+        print!("{}", help_text_for(identity, *topic));
         return Ok(());
     }
     if matches!(cli.command, Command::Version) {
-        println!("workman {}", env!("CARGO_PKG_VERSION"));
+        println!("{}", version_text(identity));
         return Ok(());
     }
 
@@ -232,15 +245,20 @@ pub async fn run_env() -> Result<()> {
         key,
     } = &cli.command
     {
+        if identity.is_dev() {
+            println!("{}", dev_update_notice());
+            return Ok(());
+        }
         let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
         return self_update(&data_dir, *check_only, *channel, key.as_deref()).await;
     }
 
     let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
-    let daemon = daemon_executable(cli.daemon);
+    let daemon = daemon_executable(cli.daemon, identity);
 
     if matches!(&cli.command, Command::App) {
-        return launch_app(&data_dir, &daemon).await;
+        let config = workmand::user_config_path();
+        return launch_app(&data_dir, &config, &daemon, identity).await;
     }
     if let Command::McpSetup { run, client } = &cli.command {
         return mcp_setup(&data_dir, &daemon, *client, *run).await;
@@ -382,6 +400,32 @@ fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::Stop => STOP_HELP,
         HelpTopic::Help => HELP_HELP,
     }
+}
+
+fn help_text_for(identity: RuntimeIdentity, topic: HelpTopic) -> Cow<'static, str> {
+    if !identity.is_dev() {
+        return Cow::Borrowed(help_text(topic));
+    }
+    if topic == HelpTopic::Update {
+        return Cow::Borrowed(DEV_UPDATE_HELP);
+    }
+    Cow::Owned(help_text(topic).replace("wrk ", "wrk-dev "))
+}
+
+fn version_text(identity: RuntimeIdentity) -> String {
+    if identity.is_dev() {
+        format!(
+            "workman-dev {} (build {})",
+            env!("CARGO_PKG_VERSION"),
+            workmand::BUILD_ID
+        )
+    } else {
+        format!("workman {}", env!("CARGO_PKG_VERSION"))
+    }
+}
+
+fn dev_update_notice() -> &'static str {
+    "workman dev install — rebuild from the current working tree with scripts/dev-install.sh; stable Workman was not changed."
 }
 
 #[derive(Debug)]
@@ -1562,12 +1606,13 @@ async fn mcp_setup(
     }
 
     let authorization = format!("Authorization: Bearer {}", connection.token);
+    let server_name = RuntimeIdentity::current().mcp_server_name();
     let args = [
         "mcp",
         "add",
         "--transport",
         "http",
-        "workman",
+        server_name,
         connection.endpoint.as_str(),
         "--header",
         authorization.as_str(),
@@ -1584,9 +1629,17 @@ async fn mcp_setup(
     Ok(())
 }
 
-async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
-    let target = desktop_launch_target().ok_or_else(|| {
-        cli_error("could not find workman-desktop; run the installer again or set WORKMAN_DESKTOP")
+async fn launch_app(
+    data_dir: &Path,
+    config: &Path,
+    daemon: &Path,
+    identity: RuntimeIdentity,
+) -> Result<()> {
+    let target = desktop_launch_target(identity).ok_or_else(|| {
+        cli_error(format!(
+            "could not find {}; run the installer again or set WORKMAN_DESKTOP",
+            identity.app_bundle_name()
+        ))
     })?;
     let client = Client::connect(data_dir, daemon).await?;
     match client.daemon_version.as_ref() {
@@ -1598,7 +1651,9 @@ async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
     }
     drop(client);
     match target {
-        DesktopLaunchTarget::Bundle(bundle) => launch_macos_bundle(&bundle, data_dir, daemon)?,
+        DesktopLaunchTarget::Bundle(bundle) => {
+            launch_macos_bundle(&bundle, data_dir, config, daemon)?
+        }
         DesktopLaunchTarget::Executable(executable) => {
             #[cfg(target_os = "macos")]
             eprintln!(
@@ -1607,6 +1662,7 @@ async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
             );
             let child = ProcessCommand::new(&executable)
                 .env("WORKMAN_DATA_DIR", data_dir)
+                .env("WORKMAN_CONFIG", config)
                 .env("WORKMAN_DAEMON_BIN", daemon)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -1630,7 +1686,7 @@ enum DesktopLaunchTarget {
     Executable(PathBuf),
 }
 
-fn desktop_launch_target() -> Option<DesktopLaunchTarget> {
+fn desktop_launch_target(identity: RuntimeIdentity) -> Option<DesktopLaunchTarget> {
     if let Some(explicit) = env::var_os("WORKMAN_DESKTOP") {
         let path = PathBuf::from(explicit);
         if path.is_file() {
@@ -1645,13 +1701,17 @@ fn desktop_launch_target() -> Option<DesktopLaunchTarget> {
         &current,
         env::var_os("HOME").as_deref().map(Path::new),
         Path::new("/Applications"),
+        identity.app_bundle_name(),
     ) {
         return Some(DesktopLaunchTarget::Bundle(bundle));
     }
 
     [
         directory.join("workman-desktop"),
-        directory.join("bundle/macos/Workman.app/Contents/MacOS/workman-desktop"),
+        directory
+            .join("bundle/macos")
+            .join(identity.app_bundle_name())
+            .join("Contents/MacOS/workman-desktop"),
         directory.join("bundle/appimage/workman-desktop"),
     ]
     .into_iter()
@@ -1664,24 +1724,25 @@ fn macos_app_bundle_from(
     current: &Path,
     home: Option<&Path>,
     system_applications: &Path,
+    bundle_name: &str,
 ) -> Option<PathBuf> {
     let directory = current.parent()?;
-    let mut candidates = vec![system_applications.join("Workman.app")];
+    let mut candidates = vec![system_applications.join(bundle_name)];
     if let Some(home) = home {
-        candidates.push(home.join("Applications/Workman.app"));
+        candidates.push(home.join("Applications").join(bundle_name));
     }
-    candidates.push(directory.join("bundle/macos/Workman.app"));
+    candidates.push(directory.join("bundle/macos").join(bundle_name));
     if let Some(package_root) = directory.parent() {
-        candidates.push(package_root.join("Workman.app"));
+        candidates.push(package_root.join(bundle_name));
     }
-    candidates.push(directory.join("Workman.app"));
+    candidates.push(directory.join(bundle_name));
     candidates
         .into_iter()
         .find(|bundle| bundle.is_dir() && bundle.join("Contents/MacOS/workman-desktop").is_file())
 }
 
 #[cfg(target_os = "macos")]
-fn launch_macos_bundle(bundle: &Path, data_dir: &Path, daemon: &Path) -> Result<()> {
+fn launch_macos_bundle(bundle: &Path, data_dir: &Path, config: &Path, daemon: &Path) -> Result<()> {
     let open = Path::new("/usr/bin/open");
     let supports_env = ProcessCommand::new(open)
         .arg("-h")
@@ -1690,7 +1751,13 @@ fn launch_macos_bundle(bundle: &Path, data_dir: &Path, daemon: &Path) -> Result<
             open_help_supports_env(&output.stdout) || open_help_supports_env(&output.stderr)
         });
     let status = ProcessCommand::new(open)
-        .args(macos_open_args(bundle, data_dir, daemon, supports_env))
+        .args(macos_open_args(
+            bundle,
+            data_dir,
+            config,
+            daemon,
+            supports_env,
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1702,12 +1769,23 @@ fn launch_macos_bundle(bundle: &Path, data_dir: &Path, daemon: &Path) -> Result<
             bundle.display()
         )));
     }
-    println!("✓ Opened Workman.app through LaunchServices");
+    println!(
+        "✓ Opened {} through LaunchServices",
+        bundle
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Workman app")
+    );
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn launch_macos_bundle(_bundle: &Path, _data_dir: &Path, _daemon: &Path) -> Result<()> {
+fn launch_macos_bundle(
+    _bundle: &Path,
+    _data_dir: &Path,
+    _config: &Path,
+    _daemon: &Path,
+) -> Result<()> {
     unreachable!("bundle launch targets are only resolved on macOS")
 }
 
@@ -1715,6 +1793,7 @@ fn launch_macos_bundle(_bundle: &Path, _data_dir: &Path, _daemon: &Path) -> Resu
 fn macos_open_args(
     bundle: &Path,
     data_dir: &Path,
+    config: &Path,
     daemon: &Path,
     supports_env: bool,
 ) -> Vec<OsString> {
@@ -1724,6 +1803,8 @@ fn macos_open_args(
             OsString::from("--env"),
             environment_assignment("WORKMAN_DATA_DIR", data_dir),
             OsString::from("--env"),
+            environment_assignment("WORKMAN_CONFIG", config),
+            OsString::from("--env"),
             environment_assignment("WORKMAN_DAEMON_BIN", daemon),
         ]);
     } else {
@@ -1731,6 +1812,8 @@ fn macos_open_args(
             OsString::from("--args"),
             OsString::from("--workman-data-dir"),
             data_dir.as_os_str().to_owned(),
+            OsString::from("--workman-config"),
+            config.as_os_str().to_owned(),
             OsString::from("--workman-daemon-bin"),
             daemon.as_os_str().to_owned(),
         ]);
@@ -1751,7 +1834,7 @@ fn open_help_supports_env(output: &[u8]) -> bool {
     String::from_utf8_lossy(output).contains("--env")
 }
 
-fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
+fn daemon_executable(explicit: Option<PathBuf>, identity: RuntimeIdentity) -> PathBuf {
     if let Some(path) = explicit {
         return path;
     }
@@ -1759,14 +1842,18 @@ fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
         return PathBuf::from(path);
     }
     if let Ok(current) = env::current_exe()
-        && let Some(sibling) = sibling_daemon_executable(&current)
+        && let Some(sibling) = sibling_daemon_executable(&current, identity)
     {
         return sibling;
     }
-    PathBuf::from("workmand")
+    PathBuf::from(identity.daemon_binary_name())
 }
 
-fn sibling_daemon_executable(current: &Path) -> Option<PathBuf> {
+fn sibling_daemon_executable(current: &Path, identity: RuntimeIdentity) -> Option<PathBuf> {
+    if identity.is_dev() {
+        let daemon = current.with_file_name(identity.daemon_binary_name());
+        return daemon.is_file().then_some(daemon);
+    }
     // The one-release v0.1.0 updater bridge installs the Workman daemon beneath the old filename.
     // Prefer the canonical sibling, but keep that upgraded installation usable.
     ["workmand", "awmd"]
@@ -2091,6 +2178,28 @@ mod tests {
     }
 
     #[test]
+    fn dev_identity_is_visible_and_updates_only_by_rebuild() {
+        assert_eq!(
+            version_text(RuntimeIdentity::Stable),
+            concat!("workman ", env!("CARGO_PKG_VERSION"))
+        );
+        let dev_version = version_text(RuntimeIdentity::Dev);
+        assert!(dev_version.starts_with(concat!(
+            "workman-dev ",
+            env!("CARGO_PKG_VERSION"),
+            " (build "
+        )));
+        assert!(dev_version.ends_with(')'));
+
+        let root_help = help_text_for(RuntimeIdentity::Dev, HelpTopic::Root);
+        assert!(root_help.starts_with(concat!("wrk-dev ", env!("CARGO_PKG_VERSION"))));
+        assert!(root_help.contains("Usage: wrk-dev "));
+        let update_help = help_text_for(RuntimeIdentity::Dev, HelpTopic::Update);
+        assert!(update_help.contains("scripts/dev-install.sh"));
+        assert!(dev_update_notice().contains("stable Workman was not changed"));
+    }
+
+    #[test]
     fn macos_bundle_resolution_covers_build_and_installed_layouts() {
         let root = tempfile::tempdir().unwrap();
         let wrk = root.path().join("bin/wrk");
@@ -2100,7 +2209,12 @@ mod tests {
         create_test_app_bundle(&bundled);
 
         assert_eq!(
-            macos_app_bundle_from(&wrk, None, &root.path().join("Applications")),
+            macos_app_bundle_from(
+                &wrk,
+                None,
+                &root.path().join("Applications"),
+                RuntimeIdentity::Stable.app_bundle_name(),
+            ),
             Some(bundled)
         );
     }
@@ -2117,8 +2231,34 @@ mod tests {
         create_test_app_bundle(&user_bundle);
 
         assert_eq!(
-            macos_app_bundle_from(&wrk, Some(&home), &system_applications),
+            macos_app_bundle_from(
+                &wrk,
+                Some(&home),
+                &system_applications,
+                RuntimeIdentity::Stable.app_bundle_name(),
+            ),
             Some(system_bundle)
+        );
+    }
+
+    #[test]
+    fn dev_bundle_resolution_never_selects_the_stable_app() {
+        let root = tempfile::tempdir().unwrap();
+        let wrk_dev = root.path().join("bin/wrk-dev");
+        let home = root.path().join("home");
+        let system_applications = root.path().join("Applications");
+        create_test_app_bundle(&system_applications.join("Workman.app"));
+        let dev_bundle = home.join("Applications/Workman Dev.app");
+        create_test_app_bundle(&dev_bundle);
+
+        assert_eq!(
+            macos_app_bundle_from(
+                &wrk_dev,
+                Some(&home),
+                &system_applications,
+                RuntimeIdentity::Dev.app_bundle_name(),
+            ),
+            Some(dev_bundle)
         );
     }
 
@@ -2128,6 +2268,7 @@ mod tests {
         let args = macos_open_args(
             bundle,
             Path::new("/tmp/workman data"),
+            Path::new("/tmp/workman config.yml"),
             Path::new("/tmp/workmand"),
             true,
         );
@@ -2138,6 +2279,8 @@ mod tests {
                 bundle.as_os_str().to_owned(),
                 OsString::from("--env"),
                 OsString::from("WORKMAN_DATA_DIR=/tmp/workman data"),
+                OsString::from("--env"),
+                OsString::from("WORKMAN_CONFIG=/tmp/workman config.yml"),
                 OsString::from("--env"),
                 OsString::from("WORKMAN_DAEMON_BIN=/tmp/workmand"),
             ]
@@ -2150,11 +2293,13 @@ mod tests {
         let args = macos_open_args(
             Path::new("/tmp/Workman.app"),
             Path::new("/tmp/data"),
+            Path::new("/tmp/config.yml"),
             Path::new("/tmp/workmand"),
             false,
         );
         assert!(args.contains(&OsString::from("--args")));
         assert!(args.contains(&OsString::from("--workman-data-dir")));
+        assert!(args.contains(&OsString::from("--workman-config")));
         assert!(args.contains(&OsString::from("--workman-daemon-bin")));
         assert!(open_help_supports_env(b"open options: --env VAR"));
         assert!(!open_help_supports_env(b"open options: --args"));
@@ -2434,10 +2579,31 @@ mod tests {
         let cli = directory.path().join("awm");
         let legacy = directory.path().join("awmd");
         std::fs::write(&legacy, "legacy filename containing workmand").unwrap();
-        assert_eq!(sibling_daemon_executable(&cli), Some(legacy));
+        assert_eq!(
+            sibling_daemon_executable(&cli, RuntimeIdentity::Stable),
+            Some(legacy)
+        );
 
         let canonical = directory.path().join("workmand");
         std::fs::write(&canonical, "workmand").unwrap();
-        assert_eq!(sibling_daemon_executable(&cli), Some(canonical));
+        assert_eq!(
+            sibling_daemon_executable(&cli, RuntimeIdentity::Stable),
+            Some(canonical)
+        );
+    }
+
+    #[test]
+    fn dev_daemon_sibling_never_falls_back_to_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = directory.path().join("wrk-dev");
+        std::fs::write(directory.path().join("workmand"), "stable daemon").unwrap();
+        assert_eq!(sibling_daemon_executable(&cli, RuntimeIdentity::Dev), None);
+
+        let dev = directory.path().join("workmand-dev");
+        std::fs::write(&dev, "dev daemon").unwrap();
+        assert_eq!(
+            sibling_daemon_executable(&cli, RuntimeIdentity::Dev),
+            Some(dev)
+        );
     }
 }

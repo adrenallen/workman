@@ -390,13 +390,16 @@ pub fn embedded_daemon_data_dir(args: impl IntoIterator<Item = OsString>) -> Opt
 /// Parse the argument fallback used by older macOS `open` versions without `--env` support.
 pub fn launch_environment(
     args: impl IntoIterator<Item = OsString>,
-) -> (Option<OsString>, Option<OsString>) {
+) -> (Option<OsString>, Option<OsString>, Option<OsString>) {
     let mut args = args.into_iter().skip(1);
     let mut data_dir = None;
+    let mut config = None;
     let mut daemon_bin = None;
     while let Some(argument) = args.next() {
         let destination = if argument == "--workman-data-dir" {
             Some(&mut data_dir)
+        } else if argument == "--workman-config" {
+            Some(&mut config)
         } else if argument == "--workman-daemon-bin" {
             Some(&mut daemon_bin)
         } else {
@@ -408,7 +411,7 @@ pub fn launch_environment(
             *destination = Some(value);
         }
     }
-    (data_dir, daemon_bin)
+    (data_dir, config, daemon_bin)
 }
 
 /// Run the loopback daemon from the desktop executable as a headless child-process fallback.
@@ -997,15 +1000,18 @@ mod tests {
     #[test]
     fn launch_environment_arguments_restore_wrk_overrides() {
         let data_dir = OsString::from("/tmp/workman-launch-data");
+        let config = OsString::from("/tmp/workman-launch-config.yml");
         let daemon = OsString::from("/tmp/workman-launch-workmand");
         let environment = launch_environment([
             OsString::from("workman-desktop"),
             OsString::from("--workman-data-dir"),
             data_dir.clone(),
+            OsString::from("--workman-config"),
+            config.clone(),
             OsString::from("--workman-daemon-bin"),
             daemon.clone(),
         ]);
-        assert_eq!(environment, (Some(data_dir), Some(daemon)));
+        assert_eq!(environment, (Some(data_dir), Some(config), Some(daemon)));
     }
 
     #[test]

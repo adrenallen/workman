@@ -37,6 +37,7 @@ pub mod config;
 mod context_actions;
 mod control;
 mod coordination;
+mod identity;
 pub mod lifecycle;
 mod mcp;
 mod migration;
@@ -61,6 +62,10 @@ pub use config::{
     parse_workman_yml, project_config_path, sync_workman_yml, sync_workman_yml_file,
     trust_hash_for_process,
 };
+pub use identity::{
+    DEV_APP_BUNDLE_NAME, DEV_APPLICATION_NAME, RuntimeIdentity, STABLE_APP_BUNDLE_NAME,
+    STABLE_APPLICATION_NAME, identity_from_executable,
+};
 pub use lifecycle::{
     LifecycleOptions, auto_start_project, spawn_lifecycle_supervisor,
     spawn_lifecycle_supervisor_with_options,
@@ -82,7 +87,7 @@ pub use readiness::{
 };
 pub use settings::{
     DaemonSettingsInfo, McpClient, McpClientSetup, McpConnectionInfo, McpSetupField,
-    McpSetupFormat, mcp_connection_info,
+    McpSetupFormat, mcp_connection_info, mcp_connection_info_for,
 };
 pub use updates::UpdateStatus;
 pub use user_config::{
@@ -903,7 +908,7 @@ pub fn default_data_dir() -> PathBuf {
     if let Some(path) = env::var_os("WORKMAN_DATA_DIR") {
         return PathBuf::from(path);
     }
-    migration::platform_data_dir("workman")
+    migration::platform_data_dir(RuntimeIdentity::current().application_name())
 }
 
 struct DiscoveryGuard {
