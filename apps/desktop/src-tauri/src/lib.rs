@@ -201,6 +201,8 @@ struct TerminalFrame {
     process_id: i64,
     start_offset: u64,
     gap: bool,
+    kitty_keyboard_flags: u8,
+    modify_other_keys: u8,
     data: Vec<u8>,
 }
 
@@ -615,10 +617,13 @@ fn parse_terminal_frame(bytes: &[u8]) -> Option<TerminalFrame> {
     }
     let process_id = i64::from_be_bytes(bytes[4..12].try_into().ok()?);
     let start_offset = u64::from_be_bytes(bytes[12..20].try_into().ok()?);
+    let flags = bytes[20];
     Some(TerminalFrame {
         process_id,
         start_offset,
-        gap: bytes[20] & 1 == 1,
+        gap: flags & 1 == 1,
+        kitty_keyboard_flags: (flags >> 1) & 1,
+        modify_other_keys: (flags >> 2) & 3,
         data: bytes[TERMINAL_FRAME_HEADER_LEN..].to_vec(),
     })
 }
@@ -1019,13 +1024,15 @@ mod tests {
         let mut bytes = Vec::from(*TERMINAL_FRAME_MAGIC);
         bytes.extend_from_slice(&42_i64.to_be_bytes());
         bytes.extend_from_slice(&8192_u64.to_be_bytes());
-        bytes.push(1);
+        bytes.push(1 | (1 << 1) | (2 << 2));
         bytes.extend_from_slice(b"\x1b[31mraw\x00bytes");
 
         let frame = parse_terminal_frame(&bytes).unwrap();
         assert_eq!(frame.process_id, 42);
         assert_eq!(frame.start_offset, 8192);
         assert!(frame.gap);
+        assert_eq!(frame.kitty_keyboard_flags, 1);
+        assert_eq!(frame.modify_other_keys, 2);
         assert_eq!(frame.data, b"\x1b[31mraw\x00bytes");
         assert!(parse_terminal_frame(b"not-a-terminal-frame").is_none());
     }

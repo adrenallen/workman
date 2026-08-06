@@ -462,7 +462,9 @@ impl PtyProcess {
         command.env(WORKMAN_MCP_TOKEN_ENV, &options.mcp_token);
 
         let reader = pair.master.try_clone_reader().context("clone PTY reader")?;
-        let writer = pair.master.take_writer().context("take PTY writer")?;
+        let writer = Arc::new(Mutex::new(
+            pair.master.take_writer().context("take PTY writer")?,
+        ));
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -486,6 +488,7 @@ impl PtyProcess {
             options.scrollback_lines,
         );
         let reader_terminal = terminal_output.clone();
+        let reader_response_writer = Arc::clone(&writer);
         let attention = AttentionTracker::new(options.tool_type);
         let reader_attention = attention.clone();
         let output_spill = match options
@@ -513,6 +516,7 @@ impl PtyProcess {
                     reader_terminal,
                     reader_attention,
                     reader_spill,
+                    reader_response_writer,
                 );
                 reader_finished_flag.store(true, Ordering::Release);
             }) {
@@ -524,7 +528,6 @@ impl PtyProcess {
                 return Err(error).context("spawn PTY output reader");
             }
         };
-        let writer = Arc::new(Mutex::new(writer));
         let submission_writer = Arc::clone(&writer);
         let (submission_tx, submission_rx) = mpsc::channel();
         let (submission_event_tx, submission_event_rx) = mpsc::channel();
@@ -966,17 +969,33 @@ fn capture_output(
     terminal_output: TerminalOutput,
     attention: AttentionTracker,
     output_spill: Option<OutputSpillSink>,
+    response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
 ) {
     let mut chunk = [0_u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
+                let (rendered, replies) =
+                    terminal_output.feed_and_read_viewport_with_replies(&chunk[..count]);
+                // Publish raw bytes only after their terminal modes have been parsed. The daemon
+                // attaches the current keyboard mode to each raw-output frame, so exposing the
+                // bytes first could strand the frontend on the previous mode until more output.
                 raw_output.push(&chunk[..count]);
                 if let Some(spill) = &output_spill {
                     spill.push(&chunk[..count]);
                 }
-                let rendered = terminal_output.feed_and_read_viewport(&chunk[..count]);
+                if !replies.is_empty() {
+                    let mut writer = response_writer
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for reply in replies {
+                        if writer.write_all(&reply).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.flush();
+                }
                 attention.observe_output(
                     &chunk[..count],
                     &rendered.text(),
@@ -1139,6 +1158,28 @@ mod tests {
             "TERM trap should exit cleanly: {status:?}"
         );
         wait_for_output(&process, b"cleanup-complete");
+    }
+
+    #[test]
+    fn pty_answers_supported_keyboard_protocol_queries_once() {
+        let command = r#"stty raw -echo; printf '\033[>1u\033[>4;2m\033[?u\033[?4m'; exec perl -e '$|=1; my $reply=""; while (length($reply) < 12) { my $count = sysread(STDIN, my $chunk, 12 - length($reply)); exit 2 unless defined($count) && $count > 0; $reply .= $chunk; } print "REPLY:", unpack("H*", $reply), "\r\n";'"#;
+        let mut process = PtyProcess::spawn(PtySpawnOptions::new(49, "token", command))
+            .expect("spawn keyboard query fixture");
+
+        wait_for_output(&process, b"REPLY:1b5b3f31751b5b3e343b326d");
+        assert_eq!(
+            process.terminal_output().keyboard_protocol(),
+            crate::terminal::TerminalKeyboardProtocol {
+                kitty_flags: 1,
+                modify_other_keys: 2,
+            }
+        );
+        assert!(
+            process
+                .wait()
+                .expect("reap keyboard query fixture")
+                .success()
+        );
     }
 
     #[cfg(unix)]

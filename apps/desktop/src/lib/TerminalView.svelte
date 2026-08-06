@@ -41,6 +41,8 @@
   let attachmentGeneration = 0;
   let inputEnabled = false;
   let replayState: TerminalReplayState | null = null;
+  let kittyKeyboardFlags = 0;
+  let modifyOtherKeys = 0;
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
 
@@ -50,6 +52,8 @@
     replayEndOffset: number | null;
     parsedThrough: number;
     focusReporting: boolean;
+    kittyKeyboardFlags: number;
+    modifyOtherKeys: number;
     finishing: boolean;
     focusRequested: boolean;
   }
@@ -117,6 +121,11 @@
         if (event.type === 'keydown') onUnfocus?.();
         return false;
       }
+      const modifiedKey = negotiatedModifiedKey(event);
+      if (modifiedKey !== null) {
+        if (event.type === 'keydown') queueInput(encoder.encode(modifiedKey));
+        return false;
+      }
       return true;
     });
     const dataDisposable = instance.onData((data) => queueInput(encoder.encode(data)));
@@ -143,6 +152,7 @@
       attachmentGeneration += 1;
       inputEnabled = false;
       replayState = null;
+      setKeyboardProtocol(0, 0);
       flushInput();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       resizeObserver.disconnect();
@@ -188,6 +198,7 @@
     flushInput();
     inputEnabled = false;
     replayState = null;
+    setKeyboardProtocol(0, 0);
     instance.reset();
     hasOutput = false;
     if (!isConnected) return;
@@ -200,6 +211,8 @@
       replayEndOffset: null,
       parsedThrough: 0,
       focusReporting: false,
+      kittyKeyboardFlags: 0,
+      modifyOtherKeys: 0,
       finishing: false,
       focusRequested: true
     };
@@ -227,6 +240,9 @@
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
       state.focusReporting = attached.focus_reporting;
+      state.kittyKeyboardFlags = attached.keyboard_protocol.kitty_flags;
+      state.modifyOtherKeys = attached.keyboard_protocol.modify_other_keys;
+      setKeyboardProtocol(state.kittyKeyboardFlags, state.modifyOtherKeys);
       finishReplayIfReady(state);
     })().catch((cause) => {
       if (replayState === state) onError(cause instanceof Error ? cause.message : String(cause));
@@ -237,6 +253,11 @@
     if (frame.process_id !== process.id || !terminal) return;
     if (frame.data.length > 0) hasOutput = true;
     const state = replayState;
+    if (state) {
+      state.kittyKeyboardFlags = frame.kitty_keyboard_flags;
+      state.modifyOtherKeys = frame.modify_other_keys;
+    }
+    setKeyboardProtocol(frame.kitty_keyboard_flags, frame.modify_other_keys);
     terminal.write(Uint8Array.from(frame.data), () => {
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
       state.parsedThrough = Math.max(
@@ -299,6 +320,30 @@
 
   function nextAnimationFrame(): Promise<void> {
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  function setKeyboardProtocol(kittyFlags: number, modifyOtherKeysLevel: number): void {
+    kittyKeyboardFlags = kittyFlags & 1;
+    modifyOtherKeys = modifyOtherKeysLevel === 1 || modifyOtherKeysLevel === 2
+      ? modifyOtherKeysLevel
+      : 0;
+  }
+
+  function negotiatedModifiedKey(event: KeyboardEvent): string | null {
+    const codepoint = event.key === 'Enter' ? 13 : event.key === 'Tab' ? 9 : null;
+    if (codepoint === null) return null;
+    if (!event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) return null;
+
+    const modifier = 1
+      + Number(event.shiftKey)
+      + 2 * Number(event.altKey)
+      + 4 * Number(event.ctrlKey)
+      + 8 * Number(event.metaKey);
+    if ((kittyKeyboardFlags & 1) !== 0) return `\x1b[${codepoint};${modifier}u`;
+
+    const modifyOtherKeysApplies = modifyOtherKeys === 2
+      || (modifyOtherKeys === 1 && (event.altKey || event.metaKey));
+    return modifyOtherKeysApplies ? `\x1b[27;${modifier};${codepoint}~` : null;
   }
 
   function finishReplayIfReady(state: TerminalReplayState): void {

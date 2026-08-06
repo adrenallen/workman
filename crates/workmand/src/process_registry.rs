@@ -23,7 +23,7 @@ use workman_core::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
         PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
     },
-    terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput},
+    terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
 };
 
 // Preserve a minimum packet boundary; the process-local worker additionally
@@ -659,6 +659,14 @@ impl ProcessRegistry {
             .with_env("TERM", "xterm-256color")
             .with_env("COLORTERM", "truecolor")
             .with_env("SHELL", user_environment.active_shell());
+        // Current agent TUIs gate standards-based modified-key negotiation on a known terminal
+        // program identity. Workman's agent PTYs implement the CSI-u subset used by WezTerm and
+        // advertised at runtime. Avoid the literal `kitty` identity: Bun takes that as permission
+        // to run Kitty-specific probes beyond the keyboard protocol. Ordinary terminals and
+        // commands keep their exact existing environment and input behavior.
+        if process.kind == ProcessKind::Agent {
+            options = options.with_env("TERM_PROGRAM", "WezTerm");
+        }
         options = if interactive_terminal {
             options.with_login_shell(user_environment.active_shell())
         } else {
@@ -943,6 +951,20 @@ impl ProcessRegistry {
             .outputs
             .get(&process_id)
             .is_some_and(|output| output.terminal.is_focus_reporting()))
+    }
+
+    /// Return the keyboard protocol negotiated by the application running in this PTY.
+    pub fn terminal_keyboard_protocol(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<TerminalKeyboardProtocol> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        Ok(self
+            .outputs
+            .get(&process_id)
+            .map(|output| output.terminal.keyboard_protocol())
+            .unwrap_or_default())
     }
 
     /// Return a currently rendered choice/permission dialog, if recognized.
@@ -1772,10 +1794,10 @@ mod tests {
                 kind: ProcessKind::Command,
                 name: "environment command".into(),
                 command: Some(
-                    r#"printf 'ENV:%s|%s|%s|%s|%s|%s|%s\n' "$PROFILE_VALUE" "$TERM" "$COLORTERM" "$LANG" "$SHELL" "$WORKMAN_MCP_URL" "two words and a ' quote""#.into(),
+                    r#"printf 'ENV:%s|%s|%s|%s|%s|%s|%s|%s\n' "$PROFILE_VALUE" "$TERM" "$COLORTERM" "$LANG" "$SHELL" "$WORKMAN_MCP_URL" "two words and a ' quote" "$TERM_PROGRAM""#.into(),
                 ),
                 working_dir: temp.path().to_string_lossy().into_owned(),
-                env: environment,
+                env: environment.clone(),
                 auto_start: false,
                 auto_restart: false,
                 restart_when_changed: Vec::new(),
@@ -1804,7 +1826,47 @@ mod tests {
         };
         assert!(output.contains("ENV:from login profile|xterm-256color|truecolor|"));
         assert!(output.contains(shell.to_string_lossy().as_ref()));
-        assert!(output.contains("|http://127.0.0.1:4777/mcp|two words and a ' quote"));
+        assert!(output.contains("|http://127.0.0.1:4777/mcp|two words and a ' quote|"));
+
+        registry
+            .create(Process {
+                id: 42,
+                project_id: 1,
+                kind: ProcessKind::Agent,
+                name: "agent terminal capability".into(),
+                command: Some(r#"printf 'AGENT_TERM_PROGRAM:%s\n' "$TERM_PROGRAM""#.into()),
+                working_dir: temp.path().to_string_lossy().into_owned(),
+                env: environment,
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        registry.start(42).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let output = loop {
+            let output = registry.raw_output(42, None, usize::MAX).unwrap().data;
+            if output
+                .windows(b"AGENT_TERM_PROGRAM:WezTerm".len())
+                .any(|window| window == b"AGENT_TERM_PROGRAM:WezTerm")
+            {
+                break String::from_utf8_lossy(&output).into_owned();
+            }
+            assert!(Instant::now() < deadline, "timed out: {output:?}");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(output.contains("AGENT_TERM_PROGRAM:WezTerm"));
     }
 
     #[test]

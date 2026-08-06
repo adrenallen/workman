@@ -225,6 +225,8 @@ export interface TerminalFrame {
   process_id: number;
   start_offset: number;
   gap: boolean;
+  kitty_keyboard_flags: number;
+  modify_other_keys: number;
   data: number[];
 }
 
@@ -580,6 +582,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     replay_start_offset: number;
     replay_end_offset: number;
     focus_reporting: boolean;
+    keyboard_protocol: {
+      kitty_flags: number;
+      modify_other_keys: number;
+    };
   }> {
     return this.request('terminal.attach', { process_id: processId, offset });
   }

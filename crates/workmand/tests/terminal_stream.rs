@@ -41,12 +41,13 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
     }
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if registry
-                .lock()
-                .await
-                .terminal_focus_reporting(101)
-                .unwrap_or(false)
-            {
+            let ready = {
+                let mut registry = registry.lock().await;
+                let focus_reporting = registry.terminal_focus_reporting(101).unwrap_or(false);
+                let keyboard = registry.terminal_keyboard_protocol(101).unwrap_or_default();
+                focus_reporting && keyboard.kitty_flags == 1 && keyboard.modify_other_keys == 2
+            };
+            if ready {
                 break;
             }
             tokio::task::yield_now().await;
@@ -81,6 +82,11 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
     assert!(attached["result"]["replay_start_offset"].is_u64());
     assert!(attached["result"]["replay_end_offset"].is_u64());
     assert_eq!(attached["result"]["focus_reporting"], true);
+    assert_eq!(attached["result"]["keyboard_protocol"]["kitty_flags"], 1);
+    assert_eq!(
+        attached["result"]["keyboard_protocol"]["modify_other_keys"],
+        2
+    );
     assert!(
         attached["result"]["replay_start_offset"].as_u64().unwrap()
             <= attached["result"]["replay_end_offset"].as_u64().unwrap()
@@ -88,6 +94,8 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
     let replay_end_offset = attached["result"]["replay_end_offset"].as_u64().unwrap();
     let first = receive_terminal_frame(&mut socket).await?;
     assert_eq!(first.process_id, 101);
+    assert_eq!(first.kitty_keyboard_flags, 1);
+    assert_eq!(first.modify_other_keys, 2);
     assert_frame_does_not_cross_replay_boundary(&first, replay_end_offset);
     let mut replayed_data = first.data.clone();
     let mut replayed_through = first.end_offset();
@@ -135,7 +143,7 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
 
 fn test_process(id: i64, label: &str, working_dir: &str) -> Process {
     let command = format!(
-        "printf '\\033[?1004h'; i=0; while [ \"$i\" -lt 30000 ]; do printf '{label}:%05d\\n' \"$i\"; i=$((i+1)); done; sleep 5"
+        "printf '\\033[?1004h\\033[>1u\\033[>4;2m'; i=0; while [ \"$i\" -lt 30000 ]; do printf '{label}:%05d\\n' \"$i\"; i=$((i+1)); done; sleep 5"
     );
     Process {
         id,
@@ -193,9 +201,12 @@ async fn receive_terminal_frame(
             }
             let process_id = i64::from_be_bytes(bytes[4..12].try_into()?);
             let start_offset = u64::from_be_bytes(bytes[12..20].try_into()?);
+            let flags = bytes[20];
             return Ok(DecodedTerminalFrame {
                 process_id,
                 start_offset,
+                kitty_keyboard_flags: (flags >> 1) & 1,
+                modify_other_keys: (flags >> 2) & 3,
                 data: bytes[FRAME_HEADER_LEN..].to_vec(),
             });
         }
@@ -205,6 +216,8 @@ async fn receive_terminal_frame(
 struct DecodedTerminalFrame {
     process_id: i64,
     start_offset: u64,
+    kitty_keyboard_flags: u8,
+    modify_other_keys: u8,
     data: Vec<u8>,
 }
 

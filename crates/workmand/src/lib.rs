@@ -743,6 +743,19 @@ async fn handle_session_control(
                     );
                 }
             };
+            let keyboard_protocol = match registry.terminal_keyboard_protocol(process_id) {
+                Ok(keyboard_protocol) => keyboard_protocol,
+                Err(error) => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        })
+                        .to_string(),
+                    );
+                }
+            };
             terminal.process_id = Some(process_id);
             terminal.offset = offset;
             terminal.replay_end_offset = replay.total_bytes;
@@ -756,7 +769,11 @@ async fn handle_session_control(
                         "offset": offset,
                         "replay_start_offset": replay.start_offset,
                         "replay_end_offset": replay.total_bytes,
-                        "focus_reporting": focus_reporting
+                        "focus_reporting": focus_reporting,
+                        "keyboard_protocol": {
+                            "kitty_flags": keyboard_protocol.kitty_flags,
+                            "modify_other_keys": keyboard_protocol.modify_other_keys
+                        }
                     }
                 })
                 .to_string(),
@@ -800,11 +817,12 @@ async fn terminal_output_frames(
         } else {
             TERMINAL_STREAM_CHUNK_BYTES
         };
-        let chunk =
-            registry
-                .lock()
-                .await
-                .raw_output(process_id, Some(requested_offset), max_bytes)?;
+        let (chunk, keyboard_protocol) = {
+            let mut registry = registry.lock().await;
+            let chunk = registry.raw_output(process_id, Some(requested_offset), max_bytes)?;
+            let keyboard_protocol = registry.terminal_keyboard_protocol(process_id)?;
+            (chunk, keyboard_protocol)
+        };
         terminal.offset = chunk.end_offset;
         if chunk.data.is_empty() {
             break;
@@ -813,6 +831,7 @@ async fn terminal_output_frames(
             process_id,
             chunk.start_offset,
             chunk.start_offset > requested_offset,
+            keyboard_protocol,
             &chunk.data,
         ));
         // Keep retained replay and newly produced live output in separate xterm writes. The
@@ -833,13 +852,17 @@ fn encode_terminal_frame(
     process_id: workman_core::ProcessId,
     start_offset: u64,
     gap: bool,
+    keyboard_protocol: workman_core::terminal::TerminalKeyboardProtocol,
     data: &[u8],
 ) -> Vec<u8> {
     let mut frame = Vec::with_capacity(TERMINAL_FRAME_HEADER_LEN + data.len());
     frame.extend_from_slice(TERMINAL_FRAME_MAGIC);
     frame.extend_from_slice(&process_id.to_be_bytes());
     frame.extend_from_slice(&start_offset.to_be_bytes());
-    frame.push(u8::from(gap));
+    let flags = u8::from(gap)
+        | ((keyboard_protocol.kitty_flags & 1) << 1)
+        | ((keyboard_protocol.modify_other_keys & 3) << 2);
+    frame.push(flags);
     frame.extend_from_slice(data);
     frame
 }
