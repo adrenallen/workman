@@ -193,7 +193,7 @@
   </header>
 
   <SettingsStatusStrip {project} {connection} {info} />
-  <SettingsSectionNav connected={connection.status === 'connected'} />
+  <SettingsSectionNav />
 
   <ScrollArea class="min-h-0 min-w-0 w-full overflow-hidden px-0.5 pb-3" bind:viewportRef={viewport}>
     <div
