@@ -24,6 +24,21 @@ struct TodoParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetTodoBlockersParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    #[serde(default)]
+    blocker_ids: Vec<TodoId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoBlockerParams {
+    project_id: ProjectId,
+    todo_id: TodoId,
+    blocker_id: TodoId,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateTodoParams {
     project_id: ProjectId,
     title: String,
@@ -33,6 +48,8 @@ struct CreateTodoParams {
     priority: TodoPriority,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    blocker_ids: Vec<TodoId>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +137,9 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.todo_unlock" => Some(todo_unlock(params, store)),
         "coordination.todo_delete" => Some(todo_delete(params, store)),
         "coordination.todo_transfer" => Some(todo_transfer(params, store)),
+        "coordination.todo_set_blockers" => Some(todo_set_blockers(params, store)),
+        "coordination.todo_add_blocker" => Some(todo_add_blocker(params, store)),
+        "coordination.todo_remove_blocker" => Some(todo_remove_blocker(params, store)),
         "coordination.scratchpad" => Some(scratchpad_read(params, store)),
         "coordination.scratchpad_create" => Some(scratchpad_create(params, store)),
         "coordination.scratchpad_update" => Some(scratchpad_update(params, store)),
@@ -202,7 +222,8 @@ fn todo_detail(params: Value, store: &Store) -> ControlResult {
 
 fn todo_create(params: Value, store: &Store) -> ControlResult {
     let params: CreateTodoParams = params_as(params)?;
-    TodoService::new(store)
+    let service = TodoService::new(store);
+    let todo = service
         .create(
             params.project_id,
             NewTodo {
@@ -213,8 +234,15 @@ fn todo_create(params: Value, store: &Store) -> ControlResult {
             },
             now_millis(),
         )
-        .map(json_value)
-        .map_err(todo_error)
+        .map_err(todo_error)?;
+    if params.blocker_ids.is_empty() {
+        Ok(json_value(todo))
+    } else {
+        service
+            .set_blockers(params.project_id, todo.id, params.blocker_ids, now_millis())
+            .map(json_value)
+            .map_err(todo_error)
+    }
 }
 
 fn todo_complete(params: Value, store: &Store) -> ControlResult {
@@ -320,6 +348,45 @@ fn todo_transfer(params: Value, store: &Store) -> ControlResult {
         "todo": todo,
         "affected_todo_ids": affected_todo_ids,
     }))
+}
+
+fn todo_set_blockers(params: Value, store: &Store) -> ControlResult {
+    let params: SetTodoBlockersParams = params_as(params)?;
+    TodoService::new(store)
+        .set_blockers(
+            params.project_id,
+            params.todo_id,
+            params.blocker_ids,
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
+fn todo_add_blocker(params: Value, store: &Store) -> ControlResult {
+    let params: TodoBlockerParams = params_as(params)?;
+    TodoService::new(store)
+        .add_blocker(
+            params.project_id,
+            params.todo_id,
+            params.blocker_id,
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
+}
+
+fn todo_remove_blocker(params: Value, store: &Store) -> ControlResult {
+    let params: TodoBlockerParams = params_as(params)?;
+    TodoService::new(store)
+        .remove_blocker(
+            params.project_id,
+            params.todo_id,
+            params.blocker_id,
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(todo_error)
 }
 
 fn scratchpad_read(params: Value, store: &Store) -> ControlResult {

@@ -183,7 +183,8 @@
         tags: createTags
           .split(',')
           .map((tag) => tag.trim())
-          .filter(Boolean)
+          .filter(Boolean),
+        blocker_ids: []
       });
       selectedTodoId = todo.id;
       createOpen = false;

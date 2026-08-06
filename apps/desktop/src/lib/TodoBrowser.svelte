@@ -101,6 +101,12 @@
     if (todo.status === 'in_progress') return 'in progress';
     return todo.status;
   }
+
+  function blockerCopy(todo: TodoSummary): string {
+    const visible = todo.blocker_ids.slice(0, 2).map((id) => `#${id}`).join(', ');
+    const overflow = todo.blocker_ids.length > 2 ? ` +${todo.blocker_ids.length - 2}` : '';
+    return `${todo.is_blocked ? 'Blocked by' : 'Resolved'} ${visible}${overflow}`;
+  }
 </script>
 
 <SectionOverview
@@ -158,6 +164,7 @@
           <small>
             <span>{statusCopy(todo)}</span>
             {#if todo.tags.length > 0}<span>{todo.tags.join(' · ')}</span>{/if}
+            {#if todo.blocker_ids.length > 0}<span class:resolved={!todo.is_blocked} class="blocker-hint">{blockerCopy(todo)}</span>{/if}
           </small>
         </span>
         <span class="claim-copy">
@@ -208,6 +215,8 @@
   .todo-copy strong, .todo-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .todo-copy strong { font-size: var(--font-size-sm); font-weight: 590; }
   .todo-copy small { display: flex; gap: 8px; margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .todo-copy .blocker-hint { color: var(--todo-state-blocked); }
+  .todo-copy .blocker-hint.resolved { color: var(--todo-state-completed); }
   .claim-copy { min-width: 0; font-size: var(--font-size-xs); }
   .claim-copy strong, .claim-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .claim-copy strong { color: var(--text-soft); font-weight: 650; text-transform: uppercase; }

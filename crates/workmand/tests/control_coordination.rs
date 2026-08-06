@@ -227,6 +227,7 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     assert_eq!(target["comment_count"], 1);
     assert_eq!(target["locked_by"], "codex-w2");
     let todo_id = target["id"].as_i64().unwrap();
+    let fixture_id = target["blocker_ids"][0].as_i64().unwrap();
     let scratchpad_id = snapshot["scratchpads"][0]["id"].as_i64().unwrap();
 
     let created_scratchpad = rpc(
@@ -301,12 +302,64 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
             "title": "Verify the desktop flow",
             "body": "Created from the project todo section.",
             "priority": "medium",
-            "tags": ["desktop"]
+            "tags": ["desktop"],
+            "blocker_ids": [todo_id]
         }),
     )
     .await;
     let created_id = created["id"].as_i64().unwrap();
     assert_eq!(created["status"], "open");
+    assert_eq!(created["blocker_ids"], json!([todo_id]));
+    assert_eq!(created["is_blocked"], true);
+
+    let added_blocker = rpc(
+        &mut socket,
+        "todo-add-blocker",
+        "coordination.todo_add_blocker",
+        json!({
+            "project_id": 1,
+            "todo_id": created_id,
+            "blocker_id": fixture_id
+        }),
+    )
+    .await;
+    assert_eq!(added_blocker["blocker_ids"], json!([fixture_id, todo_id]));
+    let removed_blocker = rpc(
+        &mut socket,
+        "todo-remove-blocker",
+        "coordination.todo_remove_blocker",
+        json!({
+            "project_id": 1,
+            "todo_id": created_id,
+            "blocker_id": fixture_id
+        }),
+    )
+    .await;
+    assert_eq!(removed_blocker["blocker_ids"], json!([todo_id]));
+    let set_blockers = rpc(
+        &mut socket,
+        "todo-set-blockers",
+        "coordination.todo_set_blockers",
+        json!({
+            "project_id": 1,
+            "todo_id": created_id,
+            "blocker_ids": [fixture_id]
+        }),
+    )
+    .await;
+    assert_eq!(set_blockers["blocker_ids"], json!([fixture_id]));
+    let cycle = rpc_error(
+        &mut socket,
+        "todo-blocker-cycle",
+        "coordination.todo_set_blockers",
+        json!({
+            "project_id": 1,
+            "todo_id": fixture_id,
+            "blocker_ids": [todo_id]
+        }),
+    )
+    .await;
+    assert_eq!(cycle["code"], "todo_blocker_cycle");
 
     let updated = rpc(
         &mut socket,

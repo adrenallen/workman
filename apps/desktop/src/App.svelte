@@ -37,6 +37,7 @@
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
   import TerminalView from './lib/TerminalView.svelte';
   import TodoBrowser from './lib/TodoBrowser.svelte';
+  import TodoBlockerPicker from './lib/TodoBlockerPicker.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
   import WorktreeDialog from './lib/WorktreeDialog.svelte';
@@ -213,6 +214,7 @@
   let todoBody = $state('');
   let todoPriority = $state<TodoPriority>('medium');
   let todoTags = $state('');
+  let todoBlockerIds = $state<number[]>([]);
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
@@ -1499,7 +1501,8 @@
       title: todoTitle.trim(),
       body: todoBody.trim(),
       priority: todoPriority,
-      tags: todoTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+      tags: todoTags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      blocker_ids: todoBlockerIds
     };
     try {
       const todo = await client.coordinationTodoCreate(selectedProject.id, input);
@@ -1618,6 +1621,25 @@
     }
   }
 
+  async function setTodoBlockers(blockerIds: number[]): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'todo') {
+      throw new Error('Select a todo before editing blockers.');
+    }
+    const projectId = selectedProject.id;
+    const todoId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.todo_set_blockers', {
+        project_id: projectId,
+        todo_id: todoId,
+        blocker_ids: blockerIds
+      });
+      await Promise.all([loadTodo(todoId), refreshCoordination(projectId, false)]);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
   async function deleteSelectedTodo(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'todo' || !todoDetail) return;
     if (!window.confirm(`Delete #${selection.id} ${todoDetail.todo.title}? This cannot be undone.`)) return;
@@ -1673,6 +1695,7 @@
     todoBody = '';
     todoPriority = 'medium';
     todoTags = '';
+    todoBlockerIds = [];
   }
 
   function clearSelection(): void {
@@ -3030,6 +3053,7 @@
             onComplete={(completed) => void completeTodo(completed)}
             onComment={(body) => void commentTodo(body)}
             onLock={setTodoLock}
+            onSetBlockers={setTodoBlockers}
             onDelete={deleteSelectedTodo}
             onTransfer={transferSelectedTodo}
           />
@@ -3159,6 +3183,16 @@
           <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
           <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context" use:submitOnEnter></textarea></label>
           <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
+          <div class="todo-blockers-field">
+            <TodoBlockerPicker
+              todos={coordination?.todos ?? []}
+              selectedIds={todoBlockerIds}
+              label="Blocked by · optional"
+              description="Create this todo with its prerequisites already linked."
+              compact
+              onChange={(blockerIds) => { todoBlockerIds = blockerIds; }}
+            />
+          </div>
         </div>
         <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
       </form>
@@ -3301,6 +3335,7 @@
   .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .dialog-surface textarea { max-height: 192px; resize: none; line-height: 1.4; }
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
+  .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
   .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }
   .agent-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; border: 0; border-bottom: 1px solid var(--border); padding: 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }

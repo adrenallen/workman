@@ -16,6 +16,7 @@
   import * as Popover from '$lib/components/ui/popover';
 
   import DocumentScaffold from './DocumentScaffold.svelte';
+  import TodoBlockerPicker from './TodoBlockerPicker.svelte';
   import type {
     TodoActivity,
     TodoComment,
@@ -49,6 +50,7 @@
     onComplete: (completed: boolean) => void;
     onComment: (body: string) => void;
     onLock?: (locked: boolean) => Promise<void> | void;
+    onSetBlockers?: (blockerIds: number[]) => Promise<void> | void;
     onDelete?: () => Promise<void> | void;
     onTransfer?: (projectId: number) => Promise<void> | void;
   }
@@ -67,6 +69,7 @@
     onComplete,
     onComment,
     onLock,
+    onSetBlockers,
     onDelete,
     onTransfer
   }: Props = $props();
@@ -87,9 +90,6 @@
     currentIndex >= 0 && currentIndex < navigationIds.length - 1
       ? navigationIds[currentIndex + 1]
       : null
-  );
-  let blockerTodos = $derived(
-    detail ? detail.todo.blocker_ids.map((id) => todos.find((todo) => todo.id === id)).filter(Boolean) as TodoSummary[] : []
   );
   let blockingTodos = $derived(
     detail ? todos.filter((todo) => todo.blocker_ids.includes(detail!.todo.id)) : []
@@ -332,29 +332,36 @@
         <Popover.Root>
           <Popover.Trigger>
             {#snippet child({ props })}
-              <button {...props} class:blocked={detail.todo.is_blocked} class="metadata-chip" type="button" disabled={blockerTodos.length === 0}>
-                Blocked by {blockerTodos.length}
+              <button {...props} class:blocked={detail.todo.is_blocked} class="metadata-chip" type="button">
+                Blocked by {detail.todo.blocker_ids.length}
               </button>
             {/snippet}
           </Popover.Trigger>
-          <Popover.Content align="start" class="w-80 gap-1 p-1.5">
-            <Popover.Header class="px-2 py-1"><Popover.Title>Blocked by</Popover.Title><Popover.Description>Todos that must finish first.</Popover.Description></Popover.Header>
-            {#each blockerTodos as todo (todo.id)}
-              <button class="relation-row" type="button" onclick={() => navigate(todo.id)}><span>#{todo.id}</span><strong>{todo.title}</strong></button>
-            {/each}
+          <Popover.Content align="start" class="w-96 gap-1 p-2">
+            <TodoBlockerPicker
+              {todos}
+              selectedIds={detail.todo.blocker_ids}
+              currentTodoId={detail.todo.id}
+              disabled={busy || !onSetBlockers}
+              onChange={(blockerIds) => onSetBlockers?.(blockerIds)}
+              onNavigate={(todoId) => navigate(todoId)}
+            />
           </Popover.Content>
         </Popover.Root>
 
         <Popover.Root>
           <Popover.Trigger>
             {#snippet child({ props })}
-              <button {...props} class="metadata-chip" type="button" disabled={blockingTodos.length === 0}>Blocking {blockingTodos.length}</button>
+              <button {...props} class="metadata-chip" type="button" disabled={blockingTodos.length === 0}>Unblocks {blockingTodos.length}</button>
             {/snippet}
           </Popover.Trigger>
           <Popover.Content align="start" class="w-80 gap-1 p-1.5">
-            <Popover.Header class="px-2 py-1"><Popover.Title>Blocking</Popover.Title><Popover.Description>Todos waiting on this one.</Popover.Description></Popover.Header>
+            <Popover.Header class="px-2 py-1"><Popover.Title>Unblocks</Popover.Title><Popover.Description>Todos waiting on this one.</Popover.Description></Popover.Header>
             {#each blockingTodos as todo (todo.id)}
-              <button class="relation-row" type="button" onclick={() => navigate(todo.id)}><span>#{todo.id}</span><strong>{todo.title}</strong></button>
+              <button class:resolved={todo.completed} class="relation-row" type="button" onclick={() => navigate(todo.id)}>
+                <TodoStatusIndicator state={todoClaimState(todo)} label={todoClaimLabel(todo)} />
+                <span>#{todo.id}</span><strong>{todo.title}</strong><small>{todo.completed ? 'Resolved' : statusLabel(todo.status)}</small>
+              </button>
             {/each}
           </Popover.Content>
         </Popover.Root>
@@ -436,10 +443,12 @@
   .priority-chip.high > span { background: var(--destructive); }
   .priority-chip.medium { color: var(--warning-token); }
   .priority-chip.medium > span { background: var(--warning-token); }
-  .relation-row { display: grid; width: 100%; min-height: 32px; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 5px; border: 0; border-radius: var(--radius); padding: 3px 7px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .relation-row { display: grid; width: 100%; min-height: 34px; grid-template-columns: 14px 42px minmax(0, 1fr) auto; align-items: center; gap: 6px; border: 0; border-radius: var(--radius); padding: 3px 7px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .relation-row:hover { background: var(--accent); }
+  .relation-row.resolved { opacity: 0.65; }
   .relation-row span { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
   .relation-row strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 590; text-overflow: ellipsis; white-space: nowrap; }
+  .relation-row small { color: var(--muted-foreground); font-size: 10px; }
   .tags-editor { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px; margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; background: var(--card); }
   .tags-editor label { padding-left: 4px; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; }
   .tags-editor input { min-width: 0; height: 29px; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 0 8px; background: var(--background); color: var(--foreground); font-size: var(--font-size-sm); }

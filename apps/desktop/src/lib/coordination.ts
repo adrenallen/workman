@@ -89,6 +89,7 @@ export interface NewTodoInput {
   body: string;
   priority: TodoPriority;
   tags: string[];
+  blocker_ids: number[];
 }
 
 export interface UpdateTodoInput {
