@@ -44,6 +44,7 @@ export type ContextActionId =
   | 'copy-path'
   | 'new-worktree'
   | 'adopt-worktree'
+  | 'import-worktrees'
   | 'fork-worktree'
   | 'remove-worktree'
   | 'refresh-worktrees'
@@ -67,6 +68,7 @@ export type ContextMenuTarget =
       project: Project;
       repository?: WorktreeRepository | null;
       worktree?: WorktreeEntry | null;
+      importableWorktreeCount?: number;
     }
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
@@ -219,9 +221,17 @@ function projectItems(
   if (repository && worktree?.kind === 'main') {
     worktreeItems.push(
       { id: 'new-worktree', label: 'New worktree…', detail: `Managed under ${repository.managed_root}` },
-      { id: 'adopt-worktree', label: 'Adopt existing…', detail: 'Register in place' },
-      { id: 'refresh-worktrees', label: 'Refresh worktrees and PRs' }
+      { id: 'adopt-worktree', label: 'Adopt existing…', detail: 'Register one folder in place' }
     );
+    if ((target.importableWorktreeCount ?? 0) > 0) {
+      const count = target.importableWorktreeCount!;
+      worktreeItems.push({
+        id: 'import-worktrees',
+        label: 'Import worktrees…',
+        detail: `${count} unregistered worktree${count === 1 ? '' : 's'} found`
+      });
+    }
+    worktreeItems.push({ id: 'refresh-worktrees', label: 'Refresh worktrees and PRs' });
   } else if (repository && worktree) {
     worktreeItems.push({
       id: 'fork-worktree',

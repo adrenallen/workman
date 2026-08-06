@@ -43,7 +43,7 @@
     if (id === 'stop' || id === 'stop-all-commands') return SquareIcon;
     if (id === 'restart' || id === 'refresh-worktrees' || id === 'refresh-pull-request') return RefreshCwIcon;
     if (id === 'new-worktree') return GitBranchPlusIcon;
-    if (id === 'adopt-worktree') return ImportIcon;
+    if (id === 'adopt-worktree' || id === 'import-worktrees') return ImportIcon;
     if (id === 'fork-worktree') return GitForkIcon;
     if (id === 'rename') return PencilIcon;
     if (id === 'complete-todo' || id === 'select' || id === 'mark-read') return CheckIcon;

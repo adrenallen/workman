@@ -251,7 +251,6 @@
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
   let importError = $state<string | null>(null);
-  const offeredImportRepositories = new Set<number>();
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let projectRailGroups = $derived(buildProjectRailGroups(projects));
@@ -959,9 +958,6 @@
       await tick();
       await loadProject(projectId);
       await refreshWorktreeMetadata(projects);
-      const activeProject = projects.find((project) => project.id === projectId);
-      const activeList = activeProject ? worktreeListFor(activeProject) : null;
-      if (activeList) maybeOfferExistingWorktrees(activeList);
       return selectedProject?.id === projectId;
     } finally {
       busy = false;
@@ -1024,6 +1020,27 @@
         (left, right) => left.sort_order - right.sort_order || left.id - right.id
       );
     }
+    if (operation.mode === 'adopt' && operation.repository_id !== null && operation.path) {
+      const currentList = worktreeLists[operation.repository_id];
+      if (currentList) {
+        worktreeLists = {
+          ...worktreeLists,
+          [operation.repository_id]: {
+            ...currentList,
+            worktrees: currentList.worktrees.map((entry) => entry.path === operation.path
+              ? {
+                  ...entry,
+                  project_id: optimisticProject.id,
+                  parent_project_id: optimisticProject.parent_project_id,
+                  kind: 'adopted',
+                  registered: true,
+                  can_adopt: false
+                }
+              : entry)
+          }
+        };
+      }
+    }
     await tick();
     appNavigation.navigate({ type: 'project', projectId: optimisticProject.id }, 'api');
   }
@@ -1075,24 +1092,12 @@
       try {
         const list = await client.worktrees(root.id, refreshPullRequests);
         worktreeLists = { ...worktreeLists, [repositoryId]: list };
-        maybeOfferExistingWorktrees(list, projectList);
       } catch (cause) {
         console.warn(`workman worktree metadata failed for project ${root.id}`, cause);
       } finally {
         if (worktreeRefreshingRepositoryId === repositoryId) worktreeRefreshingRepositoryId = null;
       }
     }
-  }
-
-  function maybeOfferExistingWorktrees(list: WorktreeList, projectList = projects): void {
-    if (offeredImportRepositories.has(list.repository.id)) return;
-    const selected = projectList.find((project) => project.selected);
-    if (!selected || selected.repository_id !== list.repository.id || selected.parent_project_id !== null) return;
-    const entries = list.worktrees.filter((entry) => entry.can_adopt);
-    if (entries.length === 0) return;
-    offeredImportRepositories.add(list.repository.id);
-    importError = null;
-    importOffer = { repository: list.repository, entries };
   }
 
   async function refreshWorktreeRepository(project: Project, refreshPullRequests = true): Promise<void> {
@@ -1667,6 +1672,17 @@
     };
   }
 
+  async function openWorktreeImport(project: Project): Promise<void> {
+    const root = rootProjectFor(project) ?? project;
+    if (root.repository_id === null) return;
+    await refreshWorktreeMetadata(projects, false, true, root.repository_id);
+    const list = worktreeLists[root.repository_id];
+    const entries = list?.worktrees.filter((entry) => entry.can_adopt) ?? [];
+    if (!list || entries.length === 0) return;
+    importError = null;
+    importOffer = { repository: list.repository, entries };
+  }
+
   function closeWorktreeDialog(): void {
     if (worktreeDialogBusy) return;
     worktreeDialog = null;
@@ -2014,11 +2030,15 @@
   }
 
   function projectContextTarget(project: Project): Extract<ContextMenuTarget, { kind: 'project' }> {
+    const worktree = worktreeEntryFor(project);
     return {
       kind: 'project',
       project,
       repository: worktreeRepositoryFor(project),
-      worktree: worktreeEntryFor(project)
+      worktree,
+      importableWorktreeCount: worktree?.kind === 'main'
+        ? worktreeListFor(project)?.worktrees.filter((entry) => entry.can_adopt).length ?? 0
+        : 0
     };
   }
 
@@ -2130,6 +2150,9 @@
         return;
       case 'adopt-worktree':
         await openWorktreeDialog('adopt', project);
+        return;
+      case 'import-worktrees':
+        await openWorktreeImport(project);
         return;
       case 'fork-worktree':
         await openWorktreeDialog('fork', project);
