@@ -77,6 +77,7 @@ export interface Project {
   display_name: string | null;
   icon: string | null;
   icon_color: string | null;
+  icon_image: ProjectIconImage | null;
   selected: boolean;
   sort_order: number;
   status: ProjectStatus;
@@ -85,6 +86,12 @@ export interface Project {
   parent_project_id: number | null;
   branch: string | null;
   worktree_managed: boolean;
+}
+
+export interface ProjectIconImage {
+  data_url: string;
+  source: 'auto' | 'custom';
+  path: string;
 }
 
 export interface ConnectionStatus {
@@ -301,6 +308,17 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
       icon,
       icon_color: iconColor
     });
+  }
+
+  setProjectCustomIcon(projectId: number, sourcePath: string): Promise<Project[]> {
+    return this.request('projects.set_custom_icon', {
+      project_id: projectId,
+      source_path: sourcePath
+    });
+  }
+
+  refreshProjectIcon(projectId: number): Promise<ProjectIconImage | null> {
+    return this.request('projects.refresh_icon', { project_id: projectId });
   }
 
   reorderProjects(orderedIds: number[]): Promise<Project[]> {

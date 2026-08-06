@@ -19,6 +19,8 @@ use crate::{
     SharedProcessRegistry,
 };
 
+mod project_icons;
+
 #[derive(Debug, Deserialize)]
 struct ControlRequest {
     #[serde(default)]
@@ -104,6 +106,12 @@ struct UpdateProjectSettingsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct CustomProjectIconParams {
+    project_id: ProjectId,
+    source_path: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProjectReorderParams {
     ordered_ids: Vec<ProjectId>,
 }
@@ -181,6 +189,7 @@ struct ProjectSummary {
     #[serde(flatten)]
     project: Project,
     icon_color: Option<String>,
+    icon_image: Option<project_icons::ProjectIconImage>,
     repository_id: Option<i64>,
     repository_root: Option<String>,
     parent_project_id: Option<ProjectId>,
@@ -571,6 +580,20 @@ async fn dispatch(
             let params: UpdateProjectSettingsParams = params_as(params)?;
             update_project_settings(registry.store(), params)?;
             return project_result(list_projects(registry.store()));
+        }
+        "projects.set_custom_icon" => {
+            let params: CustomProjectIconParams = params_as(params)?;
+            set_custom_project_icon(registry.store(), params)?;
+            return project_result(list_projects(registry.store()));
+        }
+        "projects.refresh_icon" => {
+            let params: ProjectParams = params_as(params)?;
+            let project = registry
+                .store()
+                .get_project(params.project_id)
+                .map_err(project_store_error)?
+                .ok_or(("project_not_found", "project not found".to_owned()))?;
+            return Ok(json_value(project_icons::refresh_auto(&project)));
         }
         "project.reorder" => {
             let params: ProjectReorderParams = params_as(params)?;
@@ -1042,9 +1065,6 @@ fn update_project_settings(
     store: &Store,
     params: UpdateProjectSettingsParams,
 ) -> Result<(), (&'static str, String)> {
-    const ICONS: &[&str] = &[
-        "bot", "boxes", "code-2", "database", "globe-2", "rocket", "terminal", "workflow",
-    ];
     const COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
 
     let display_name = params.display_name.trim();
@@ -1057,11 +1077,11 @@ fn update_project_settings(
     if params
         .icon
         .as_deref()
-        .is_some_and(|icon| !ICONS.contains(&icon))
+        .is_some_and(|icon| !valid_project_icon(icon))
     {
         return Err((
             "invalid_project_icon",
-            "project icon is not one of the supported choices".to_owned(),
+            "project icon must be a Lucide icon name or a managed project image".to_owned(),
         ));
     }
     if params
@@ -1076,7 +1096,9 @@ fn update_project_settings(
     }
 
     let icon = params.icon.as_deref();
-    let icon_color = icon.and(params.icon_color.as_deref());
+    let icon_color = icon
+        .filter(|icon| !project_icons::is_custom_reference(icon))
+        .and(params.icon_color.as_deref());
     let changed = store
         .connection()
         .execute(
@@ -1089,7 +1111,45 @@ fn update_project_settings(
     if changed == 0 {
         return Err(("project_not_found", "project not found".to_owned()));
     }
+    if let Some(project) = store
+        .get_project(params.project_id)
+        .map_err(project_store_error)?
+    {
+        project_icons::invalidate(&project.path);
+    }
     Ok(())
+}
+
+fn set_custom_project_icon(
+    store: &Store,
+    params: CustomProjectIconParams,
+) -> Result<(), (&'static str, String)> {
+    let project = store
+        .get_project(params.project_id)
+        .map_err(project_store_error)?
+        .ok_or(("project_not_found", "project not found".to_owned()))?;
+    let reference = project_icons::copy_custom_image(&project, Path::new(&params.source_path))
+        .map_err(|error| ("invalid_project_icon_image", error.to_string()))?;
+    store
+        .connection()
+        .execute(
+            "UPDATE projects SET icon = ?1, icon_color = NULL WHERE id = ?2",
+            (&reference, params.project_id),
+        )
+        .map_err(project_store_error)?;
+    project_icons::invalidate(&project.path);
+    Ok(())
+}
+
+fn valid_project_icon(icon: &str) -> bool {
+    project_icons::is_custom_reference(icon)
+        || (icon.len() <= 80
+            && !icon.is_empty()
+            && !icon.starts_with('-')
+            && !icon.ends_with('-')
+            && icon
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
 }
 
 fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, String)> {
@@ -1126,9 +1186,11 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
             };
             let envelope =
                 crate::worktrees::project_envelope(store, project).map_err(worktree_error)?;
+            let icon_image = project_icons::resolve(&envelope.project);
             Ok(ProjectSummary {
                 project: envelope.project,
                 icon_color,
+                icon_image,
                 repository_id: envelope.repository_id,
                 repository_root: envelope.repository_root,
                 parent_project_id: envelope.parent_project_id,
