@@ -121,8 +121,9 @@
     scratchpads: NotebookTextIcon
   };
 
+  const sidebarTodoLimit = 7;
+
   let query = $state('');
-  let showAllTodos = $state(false);
   let openGroups = $state<Record<ProjectTreeGroup, boolean>>({
     todos: true,
     agents: true,
@@ -135,10 +136,15 @@
   let terminals = $derived(processes.filter((process) => process.kind === 'terminal'));
   let commands = $derived(processes.filter((process) => process.kind === 'command'));
   let openTodos = $derived(todos.filter((todo) => !todo.completed));
-  let visibleTodos = $derived.by(() => {
-    const matches = openTodos.filter((todo) => matchesQuery(todo.title));
-    return showAllTodos || query.trim() ? matches : matches.slice(0, 5);
-  });
+  let matchingTodos = $derived.by(() => openTodos
+    .filter((todo) => matchesQuery(todo.title))
+    .sort((left, right) => {
+      const claimPriority = Number(todoClaimState(right) === 'claimed')
+        - Number(todoClaimState(left) === 'claimed');
+      return claimPriority || right.id - left.id;
+    }));
+  let visibleTodos = $derived(matchingTodos.slice(0, sidebarTodoLimit));
+  let hiddenTodoCount = $derived(Math.max(0, matchingTodos.length - sidebarTodoLimit));
   let visibleAgentRows = $derived(agentLineageRows(agents, query));
   let visibleTerminals = $derived(
     terminals.filter((process) => matchesQuery(`${workingDirLabel(process.working_dir)} ${process.name}`))
@@ -447,8 +453,8 @@
           data-tree-row
           data-group={group}
           aria-expanded={openGroups[group]}
-          title={group === 'todos' ? 'Browse all todos · Left/Right collapses this group' : collapsed ? groupLabel[group] : undefined}
-          onclick={() => (group === 'todos' ? onBrowseTodos() : toggleGroup(group))}
+          title={collapsed ? groupLabel[group] : `${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
+          onclick={() => toggleGroup(group)}
         >
           <span class="caret" aria-hidden="true">
             {#if openGroups[group]}<ChevronDownIcon size={13} />{:else}<ChevronRightIcon size={13} />{/if}
@@ -492,9 +498,16 @@
               {:else}
                 <p class="empty-row">{query ? 'No matching todos' : 'No open todos'}</p>
               {/each}
-              {#if !query && openTodos.length > 5}
-                <button class="show-all" type="button" data-tree-row onclick={() => (showAllTodos = !showAllTodos)}>
-                  {showAllTodos ? 'Show first 5' : `Show all ${openTodos.length} todos`}
+              {#if hiddenTodoCount > 0}
+                <button
+                  class="show-all"
+                  type="button"
+                  data-tree-row
+                  aria-label={`${hiddenTodoCount} more todos; browse all todos`}
+                  title="Browse all todos"
+                  onclick={onBrowseTodos}
+                >
+                  +{hiddenTodoCount} more
                 </button>
               {/if}
               <button class="add-row" type="button" data-tree-row onclick={onCreateTodo}>+ Add todo</button>
