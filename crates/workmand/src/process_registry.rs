@@ -1127,8 +1127,22 @@ impl ProcessRegistry {
     }
 
     /// Send raw bytes to a live process's PTY.
+    ///
+    /// Terminal protocol replies, focus reports, navigation keys, and ordinary
+    /// draft edits are attention-neutral. Only a line submission may
+    /// optimistically start a turn before the agent produces its own output.
     pub fn send_input(&mut self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
         self.refresh_exits()?;
+        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        if !submits_prompt
+            && let Some(output) = self.outputs.get(&process_id)
+            && matches!(
+                output.attention.snapshot().state,
+                AttentionState::Idle | AttentionState::Waiting
+            )
+        {
+            output.attention.suppress_ui_activity();
+        }
         let hosted = self
             .running
             .get_mut(&process_id)
@@ -1137,7 +1151,7 @@ impl ProcessRegistry {
             process_id,
             message: error.to_string(),
         })?;
-        if let Some(output) = self.outputs.get(&process_id) {
+        if submits_prompt && let Some(output) = self.outputs.get(&process_id) {
             output.attention.observe_input();
         }
         self.require(process_id)
@@ -1200,6 +1214,14 @@ impl ProcessRegistry {
         pixel_height: u16,
     ) -> RegistryResult<Process> {
         self.refresh_exits()?;
+        if let Some(output) = self.outputs.get(&process_id)
+            && matches!(
+                output.attention.snapshot().state,
+                AttentionState::Idle | AttentionState::Waiting
+            )
+        {
+            output.attention.suppress_ui_activity();
+        }
         let hosted = self
             .running
             .get(&process_id)

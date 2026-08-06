@@ -6,6 +6,10 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{ProcessId, Store, StoreResult, attention::AttentionState};
 
+/// Backstop against repeated completion notifications for one process when an
+/// adapter or client oscillates despite attention hysteresis.
+const AGENT_DONE_NOTIFICATION_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
+
 /// Persisted human-attention metadata for one agent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentNotificationState {
@@ -70,7 +74,8 @@ impl Store {
         let previous = self
             .connection()
             .query_row(
-                "SELECT observed_state, unread, unread_at
+                "SELECT observed_state, unread, unread_at,
+                        last_notified_at, last_viewed_at
                  FROM agent_notifications
                  WHERE process_id = ?1",
                 [process_id],
@@ -79,12 +84,16 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, bool>(1)?,
                         row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((previous_state, mut unread, mut unread_at)) = previous else {
+        let Some((previous_state, mut unread, mut unread_at, mut last_notified_at, last_viewed_at)) =
+            previous
+        else {
             self.connection().execute(
                 "INSERT INTO agent_notifications
                     (process_id, observed_state, unread, unread_at)
@@ -109,32 +118,58 @@ impl Store {
                 && current == ObservedState::Idle
                 && turn_started;
             let exited = current == ObservedState::Exited && previous != ObservedState::Exited;
-            if (completed_turn || exited) && !watched {
+            let cooldown_elapsed = last_notified_at.map_or(true, |notified_at| {
+                now_ms.saturating_sub(notified_at) >= AGENT_DONE_NOTIFICATION_COOLDOWN_MS
+            });
+            let viewed_since_notification = last_viewed_at
+                .zip(last_notified_at)
+                .is_some_and(|(viewed_at, notified_at)| viewed_at >= notified_at);
+            if (completed_turn || exited)
+                && !watched
+                && (cooldown_elapsed || viewed_since_notification)
+            {
                 unread = true;
                 unread_at = Some(now_ms);
+                last_notified_at = Some(now_ms);
                 self.create_agent_done_notification(process_id, now_ms)?;
             }
         }
 
         self.connection().execute(
             "UPDATE agent_notifications
-             SET observed_state = ?2, unread = ?3, unread_at = ?4
+             SET observed_state = ?2, unread = ?3, unread_at = ?4,
+                 last_notified_at = ?5
              WHERE process_id = ?1",
-            params![process_id, current.as_str(), unread, unread_at],
+            params![
+                process_id,
+                current.as_str(),
+                unread,
+                unread_at,
+                last_notified_at
+            ],
         )?;
         Ok(AgentNotificationState { unread, unread_at })
     }
 
     /// Clear a process's durable unread completion marker.
     pub fn mark_agent_read(&self, process_id: ProcessId) -> StoreResult<bool> {
+        let was_unread = self
+            .connection()
+            .query_row(
+                "SELECT unread FROM agent_notifications WHERE process_id = ?1",
+                [process_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
         let updated = self.connection().execute(
             "UPDATE agent_notifications
-             SET unread = 0, unread_at = NULL
-             WHERE process_id = ?1 AND unread = 1",
-            [process_id],
-        )? > 0;
+             SET unread = 0, unread_at = NULL, last_viewed_at = ?2
+             WHERE process_id = ?1",
+            params![process_id, now_millis()],
+        )?;
         self.mark_process_notifications_read(process_id, now_millis())?;
-        Ok(updated)
+        Ok(updated > 0 && was_unread)
     }
 }
 
@@ -347,6 +382,95 @@ mod tests {
                 .observe_agent_attention(7, AttentionState::Idle, false, false, 20)
                 .unwrap()
                 .unread
+        );
+    }
+
+    #[test]
+    fn rapid_completion_cycles_are_suppressed_until_the_cooldown_expires() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 0)
+            .unwrap();
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 100)
+                .unwrap()
+                .unread
+        );
+
+        // Resumed activity keeps 381's self-clear behavior, but is not a user
+        // view and therefore must not reset the notification backstop.
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 200)
+            .unwrap();
+        assert!(
+            !store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 300)
+                .unwrap()
+                .unread
+        );
+        assert_eq!(store.list_notifications(None, 10).unwrap().len(), 1);
+
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 400)
+            .unwrap();
+        let after_cooldown = 100 + AGENT_DONE_NOTIFICATION_COOLDOWN_MS;
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, after_cooldown,)
+                .unwrap()
+                .unread
+        );
+        assert_eq!(store.list_notifications(None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn explicit_user_view_allows_the_next_sustained_completion() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 0)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Idle, false, true, 100)
+            .unwrap();
+        let notification = store.list_notifications(None, 10).unwrap().remove(0);
+        assert!(store.mark_notification_read(notification.id, 150).unwrap());
+
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 200)
+            .unwrap();
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 300)
+                .unwrap()
+                .unread
+        );
+        assert_eq!(store.list_notifications(None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn viewing_after_activity_self_clear_still_resets_the_backstop() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 0)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Idle, false, true, 100)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 200)
+            .unwrap();
+
+        assert!(
+            !store.mark_agent_read(7).unwrap(),
+            "activity already cleared unread"
+        );
+        assert!(
+            store
+                .observe_agent_attention(7, AttentionState::Idle, false, true, 300)
+                .unwrap()
+                .unread,
+            "opening the process is an intervening user view even after self-clear"
         );
     }
 

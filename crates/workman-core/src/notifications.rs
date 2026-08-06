@@ -115,6 +115,16 @@ impl Store {
              WHERE id = ?1 AND read_at IS NULL",
             params![notification_id, read_at],
         )?;
+        if updated > 0 {
+            self.connection().execute(
+                "UPDATE agent_notifications
+                 SET last_viewed_at = ?2
+                 WHERE process_id = (
+                     SELECT process_id FROM notifications WHERE id = ?1
+                 )",
+                params![notification_id, read_at],
+            )?;
+        }
         self.connection().execute(
             "UPDATE agent_notifications
              SET unread = 0, unread_at = NULL
@@ -133,6 +143,14 @@ impl Store {
 
     /// Mark every notification read and clear all corresponding agent markers.
     pub fn mark_all_notifications_read(&self, read_at: i64) -> StoreResult<usize> {
+        self.connection().execute(
+            "UPDATE agent_notifications
+             SET last_viewed_at = ?1
+             WHERE process_id IN (
+                 SELECT process_id FROM notifications WHERE read_at IS NULL
+             )",
+            [read_at],
+        )?;
         let updated = self.connection().execute(
             "UPDATE notifications SET read_at = ?1 WHERE read_at IS NULL",
             [read_at],

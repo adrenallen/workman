@@ -78,10 +78,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent_tool_yolo_defaults",
         include_str!("../migrations/0014_agent_tool_yolo_defaults.sql"),
     ),
+    (
+        15,
+        "agent_notification_rate_limit",
+        include_str!("../migrations/0015_agent_notification_rate_limit.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 14;
+pub const LATEST_SCHEMA_VERSION: i64 = 15;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

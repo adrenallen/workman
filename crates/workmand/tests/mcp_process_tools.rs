@@ -91,7 +91,7 @@ async fn wait_for_state(
     process_id: i64,
     expected: AttentionState,
 ) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(7);
     loop {
         let state = registry
             .lock()

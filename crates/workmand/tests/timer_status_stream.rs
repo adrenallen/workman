@@ -269,7 +269,7 @@ async fn wait_for_state(
     process_id: i64,
     expected: AttentionState,
 ) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(7);
     loop {
         let state = registry
             .lock()
@@ -320,7 +320,7 @@ async fn timer_status_stream_reconciles_every_lifecycle_path() -> Result<(), Box
         "timer_fire_when_idle_any",
         json!({
             "processes": [WORKER_ID],
-            "max_wait_ms": 5_000,
+            "max_wait_ms": 12_000,
             "body": "early idle",
         }),
     )

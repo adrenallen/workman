@@ -868,7 +868,7 @@ mod tests {
         process_id: ProcessId,
         expected: AttentionState,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(7);
         loop {
             let state = registry.get_status(process_id).unwrap().agent_state.state;
             if state == expected {
@@ -1449,7 +1449,122 @@ mod tests {
     }
 
     #[test]
-    fn unwatched_done_agent_is_unread_until_viewed_or_work_resumes() {
+    fn idle_watch_ignores_a_transient_prompt_frame_and_fires_after_stable_idle() {
+        const FLICKER_ID: ProcessId = 13;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                FLICKER_ID,
+                "bursty-worker",
+                "printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = go ]; then printf '\\033[2J\\033[Hthinking...\\nesc to interrupt\\n'; sleep 0.2; printf '\\033[2J\\033[Hpartial answer\\n❯\\n'; sleep 1; printf '\\033[2J\\033[Hthinking...\\nesc to interrupt\\n'; sleep 0.2; printf '\\033[2J\\033[Hfinal answer\\n❯\\n'; fi; done",
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(FLICKER_ID).unwrap();
+        wait_for_state(&mut registry, FLICKER_ID, AttentionState::Idle);
+
+        let timer_id = match TimerService::new(&mut registry)
+            .set_idle(
+                "actor-flicker".into(),
+                DELIVERY_ID,
+                "stable idle wake".into(),
+                TimerKind::IdleAny,
+                vec![FLICKER_ID],
+                100_000,
+                0,
+            )
+            .unwrap()
+        {
+            IdleTimerOutcome::Created(timer) => timer.timer.id,
+            IdleTimerOutcome::AlreadySatisfied { .. } => panic!("idle_any fired immediately"),
+        };
+
+        registry.send_input(FLICKER_ID, b"go\r").unwrap();
+        wait_for_state(&mut registry, FLICKER_ID, AttentionState::Working);
+        let transient_window = Instant::now() + Duration::from_millis(1_600);
+        while Instant::now() < transient_window {
+            let fired = TimerService::new(&mut registry).tick(10).unwrap();
+            assert!(
+                fired.iter().all(|event| event.timer_id != timer_id),
+                "a prompt-shaped frame inside a running turn fired the idle watch"
+            );
+            assert_eq!(
+                registry.get_status(FLICKER_ID).unwrap().agent_state.state,
+                AttentionState::Working
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        wait_for_state(&mut registry, FLICKER_ID, AttentionState::Idle);
+        let fired = TimerService::new(&mut registry).tick(20).unwrap();
+        assert!(fired.iter().any(|event| {
+            event.timer_id == timer_id && event.reason == TimerFireReason::IdleTransition
+        }));
+        wait_for_output(&mut registry, DELIVERY_ID, "received:[stable idle wake]");
+    }
+
+    #[test]
+    fn focus_in_and_out_redraws_leave_an_idle_agent_idle_without_notifications() {
+        const FOCUSED_ID: ProcessId = 14;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                FOCUSED_ID,
+                "focus-reporting-worker",
+                r#"stty raw -echo; exec perl -e '$|=1; $SIG{WINCH}=sub { print "\e[2J\e[Hresize redraw\r\n❯ " }; print "\e[?1004h❯ "; while (1) { my $count=sysread(STDIN, my $chunk, 3); next unless defined($count); last unless $count; print "\e[2J\e[Hview refresh\r\n❯ "; }'"#,
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(FOCUSED_ID).unwrap();
+        wait_for_state(&mut registry, FOCUSED_ID, AttentionState::Idle);
+        assert!(registry.terminal_focus_reporting(FOCUSED_ID).unwrap());
+        assert!(
+            registry
+                .store()
+                .list_notifications(None, 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        registry.send_input(FOCUSED_ID, b"\x1b[I").unwrap();
+        wait_for_output(&mut registry, FOCUSED_ID, "view refresh");
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            registry.get_status(FOCUSED_ID).unwrap().agent_state.state,
+            AttentionState::Idle,
+            "clicking into the terminal must be attention-neutral"
+        );
+
+        registry.send_input(FOCUSED_ID, b"\x1b[O").unwrap();
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            registry.get_status(FOCUSED_ID).unwrap().agent_state.state,
+            AttentionState::Idle,
+            "clicking away from the terminal must be attention-neutral"
+        );
+
+        registry.resize(FOCUSED_ID, 30, 100, 0, 0).unwrap();
+        wait_for_output(&mut registry, FOCUSED_ID, "resize redraw");
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            registry.get_status(FOCUSED_ID).unwrap().agent_state.state,
+            AttentionState::Idle,
+            "a UI resize redraw must be attention-neutral"
+        );
+        assert!(
+            registry
+                .store()
+                .list_notifications(None, 10)
+                .unwrap()
+                .is_empty(),
+            "focus selection produced a completion notification"
+        );
+    }
+
+    #[test]
+    fn unwatched_done_agent_self_clears_without_rapidly_refiring() {
         let mut registry = test_registry(true);
         wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
         let baseline = registry.get_status(WORKER_ID).unwrap().agent_state;
@@ -1473,16 +1588,16 @@ mod tests {
             "starting another turn must self-clear unread"
         );
         wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
-        assert!(registry.get_status(WORKER_ID).unwrap().agent_state.unread);
-
-        let read = registry.mark_agent_read(WORKER_ID).unwrap();
-        assert!(!read.agent_state.unread);
+        assert!(
+            !registry.get_status(WORKER_ID).unwrap().agent_state.unread,
+            "a second completion inside the backstop window must not re-fire without a user view"
+        );
         registry.stop(WORKER_ID).unwrap();
         let exited = registry.get_status(WORKER_ID).unwrap();
         assert_eq!(exited.agent_state.state, AttentionState::Exited);
         assert!(
-            exited.agent_state.unread,
-            "an unwatched exit must create a new unread completion"
+            !exited.agent_state.unread,
+            "an immediate exit must share the same per-process notification backstop"
         );
     }
 

@@ -14,8 +14,20 @@ pub const DEFAULT_QUIESCENCE: Duration = Duration::from_millis(500);
 /// Conservative idle fallback when no adapter recognizes the terminal contents.
 pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(5);
 
+/// Stable silence required before a resting prompt becomes orchestration-idle.
+///
+/// This deliberately matches the established conservative fallback window. A
+/// prompt-shaped frame is useful evidence, but interactive agents can briefly
+/// redraw their composer between bursts while a turn is still running.
+pub const DEFAULT_IDLE_CONFIRMATION: Duration = Duration::from_secs(5);
+
 /// Grace period in which newly delivered input keeps a process out of idle.
 pub const RECENT_INPUT_GRACE: Duration = Duration::from_secs(2);
+
+/// Grace window for output caused by UI/protocol activity such as focus reports
+/// and SIGWINCH redraws. These bytes still update rendered adapter facts, but
+/// do not restart the agent's work/idle clock.
+pub const UI_ORIGINATED_OUTPUT_GRACE: Duration = Duration::from_millis(500);
 
 /// The orchestration-relevant state derived from output and terminal contents.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -79,6 +91,12 @@ pub struct AdapterObservation<'a> {
 /// Classifies terminal contents for one family of interactive tools.
 pub trait ToolAttentionAdapter: Send + Sync {
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags;
+
+    /// Sustained no-output window required before this adapter's idle evidence
+    /// is published to notifications, timers, and other consumers.
+    fn idle_confirmation(&self) -> Duration {
+        DEFAULT_IDLE_CONFIRMATION
+    }
 }
 
 /// Public status payload shaped for orchestration and UI consumers.
@@ -224,6 +242,7 @@ struct AttentionEngine {
     last_rendered: String,
     last_alternate_screen: bool,
     flags: AdapterFlags,
+    attention_neutral_until: Option<i64>,
     exited: bool,
 }
 
@@ -239,12 +258,19 @@ impl AttentionEngine {
             return;
         }
 
-        self.last_output_at = Some(now_ms);
+        let attention_neutral = self
+            .attention_neutral_until
+            .is_some_and(|until| now_ms <= until);
+        if !attention_neutral {
+            self.last_output_at = Some(now_ms);
+        }
         if rendered != self.last_rendered || alternate_screen != self.last_alternate_screen {
             self.last_rendered.clear();
             self.last_rendered.push_str(rendered);
             self.last_alternate_screen = alternate_screen;
-            self.last_content_change_at = Some(now_ms);
+            if !attention_neutral {
+                self.last_content_change_at = Some(now_ms);
+            }
         }
         self.flags = self.adapter.inspect(AdapterObservation {
             rendered,
@@ -287,17 +313,29 @@ impl AttentionEngine {
             return AttentionState::Working;
         }
 
-        let idle_since = self.last_output_at.unwrap_or(self.started_at);
-        let output_quiet = elapsed(now_ms, idle_since);
-        if output_quiet < self.config.quiescence {
+        // Treat idle as a stable state, not a single prompt-shaped frame. PTY
+        // output, rendered state changes, and input all reset the same candidate
+        // window so every downstream consumer sees one debounced stream.
+        let stable_since = [
+            Some(self.started_at),
+            self.last_output_at,
+            self.last_content_change_at,
+            self.last_input_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(self.started_at);
+        let stable_for = elapsed(now_ms, stable_since);
+        let confirmation = self.adapter.idle_confirmation().max(self.config.quiescence);
+        if stable_for < confirmation {
             return AttentionState::Working;
         }
         if self.flags.resting_prompt {
             return AttentionState::Idle;
         }
 
-        let content_since = self.last_content_change_at.unwrap_or(self.started_at);
-        if elapsed(now_ms, content_since) >= self.config.idle_after {
+        if stable_for >= self.config.idle_after.max(confirmation) {
             AttentionState::Idle
         } else {
             AttentionState::Working
@@ -344,6 +382,7 @@ impl AttentionTracker {
                 last_rendered: String::new(),
                 last_alternate_screen: false,
                 flags: AdapterFlags::default(),
+                attention_neutral_until: None,
                 exited: false,
             })),
         }
@@ -380,6 +419,28 @@ impl AttentionTracker {
     /// Deterministic form of [`Self::observe_input`].
     pub fn observe_input_at(&self, now_ms: i64) {
         self.lock().last_input_at = Some(now_ms);
+    }
+
+    /// Keep UI-originated PTY writes and their immediate redraw output from
+    /// perturbing the agent attention clock.
+    pub fn suppress_ui_activity(&self) {
+        self.suppress_ui_activity_at(now_millis());
+    }
+
+    /// Deterministic form of [`Self::suppress_ui_activity`].
+    pub fn suppress_ui_activity_at(&self, now_ms: i64) {
+        let until = now_ms.saturating_add(
+            UI_ORIGINATED_OUTPUT_GRACE
+                .as_millis()
+                .try_into()
+                .unwrap_or(i64::MAX),
+        );
+        let mut engine = self.lock();
+        engine.attention_neutral_until = Some(
+            engine
+                .attention_neutral_until
+                .map_or(until, |existing| existing.max(until)),
+        );
     }
 
     /// Permanently transition this tracker to `exited`.
@@ -812,7 +873,11 @@ mod tests {
     fn codex_adapter_distinguishes_a_visible_draft_from_a_started_turn() {
         let mut session = ScriptedSession::codex();
         session.emit(1_100, "\x1b[2J\x1b[H› queued wake body".as_bytes());
-        let draft = session.tracker.snapshot_at(1_700);
+        assert_eq!(
+            session.tracker.snapshot_at(6_099).state,
+            AttentionState::Working
+        );
+        let draft = session.tracker.snapshot_at(6_100);
         assert_eq!(draft.state, AttentionState::Idle);
         assert_eq!(draft.classification.as_deref(), Some("resting_prompt"));
 
@@ -888,7 +953,11 @@ mod tests {
             62_100,
             b"\x1b[2J\x1b[HFinished successfully\r\n\xe2\x9d\xaf ",
         );
-        let idle = session.tracker.snapshot_at(62_700);
+        assert_eq!(
+            session.tracker.snapshot_at(67_099).state,
+            AttentionState::Working
+        );
+        let idle = session.tracker.snapshot_at(67_100);
         assert_eq!(idle.state, AttentionState::Idle);
         assert!(idle.idle);
 
@@ -930,7 +999,11 @@ mod tests {
             b"\xe2\x9c\xbb Thinking\xe2\x80\xa6\r\nAnswer complete\r\n\xe2\x9d\xaf ",
         );
 
-        let state = session.tracker.snapshot_at(2_600);
+        assert_eq!(
+            session.tracker.snapshot_at(6_999).state,
+            AttentionState::Working
+        );
+        let state = session.tracker.snapshot_at(7_000);
         assert_eq!(state.state, AttentionState::Idle);
         assert_eq!(state.classification.as_deref(), Some("resting_prompt"));
     }
@@ -945,7 +1018,8 @@ mod tests {
         );
         tracker.observe_output_at(rendered.as_bytes(), rendered, false, 2_000);
 
-        assert_eq!(tracker.snapshot_at(2_500).state, AttentionState::Idle);
+        assert_eq!(tracker.snapshot_at(6_999).state, AttentionState::Working);
+        assert_eq!(tracker.snapshot_at(7_000).state, AttentionState::Idle);
         let state = tracker.snapshot_at(85_000);
         assert_eq!(state.state, AttentionState::Idle);
         assert!(!state.working);
@@ -1004,22 +1078,104 @@ mod tests {
         let mut session = ScriptedSession::claude();
         session.emit(2_000, b"Answer complete\r\n\xe2\x9d\xaf ");
         assert_eq!(
-            session.tracker.snapshot_at(2_600).state,
+            session.tracker.snapshot_at(7_000).state,
             AttentionState::Idle
         );
 
-        session.tracker.observe_input_at(2_700);
-        let prompted = session.tracker.snapshot_at(2_700);
+        session.tracker.observe_input_at(7_100);
+        let prompted = session.tracker.snapshot_at(7_100);
         assert_eq!(prompted.state, AttentionState::Working);
-        assert_eq!(prompted.last_input_at, Some(2_700));
+        assert_eq!(prompted.last_input_at, Some(7_100));
         assert_eq!(prompted.last_input_seconds, Some(0.0));
         assert_eq!(
-            session.tracker.snapshot_at(4_699).state,
+            session.tracker.snapshot_at(12_099).state,
             AttentionState::Working
         );
         assert_eq!(
-            session.tracker.snapshot_at(4_700).state,
+            session.tracker.snapshot_at(12_100).state,
             AttentionState::Idle
+        );
+    }
+
+    #[test]
+    fn bursty_prompt_frames_never_publish_idle_until_the_final_stable_gap() {
+        let mut session = ScriptedSession::claude();
+        session.emit(2_000, b"partial answer\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(6_999).state,
+            AttentionState::Working
+        );
+
+        session.emit(7_000, b"\x1b[2J\x1b[H\xe2\x9c\xbb Thinking\xe2\x80\xa6");
+        assert_eq!(
+            session.tracker.snapshot_at(20_000).state,
+            AttentionState::Working,
+            "an explicit busy frame remains working regardless of silence"
+        );
+        session.emit(20_100, b"\x1b[2J\x1b[Hfinal answer\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(25_099).state,
+            AttentionState::Working
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(25_100).state,
+            AttentionState::Idle
+        );
+    }
+
+    #[test]
+    fn adapter_can_override_the_idle_confirmation_window() {
+        struct FastRecordedAdapter;
+
+        impl ToolAttentionAdapter for FastRecordedAdapter {
+            fn inspect(&self, _observation: AdapterObservation<'_>) -> AdapterFlags {
+                AdapterFlags {
+                    resting_prompt: true,
+                    classification: Some("recorded_resting_prompt".into()),
+                    ..AdapterFlags::default()
+                }
+            }
+
+            fn idle_confirmation(&self) -> Duration {
+                Duration::from_secs(1)
+            }
+        }
+
+        let tracker = AttentionTracker::with_adapter_at(
+            Some("recorded".into()),
+            AttentionConfig::default(),
+            1_000,
+            Box::new(FastRecordedAdapter),
+        );
+        tracker.observe_output_at(b">", ">", false, 2_000);
+        assert_eq!(tracker.snapshot_at(2_999).state, AttentionState::Working);
+        assert_eq!(tracker.snapshot_at(3_000).state, AttentionState::Idle);
+    }
+
+    #[test]
+    fn ui_originated_redraws_are_attention_neutral() {
+        let mut session = ScriptedSession::claude();
+        session.emit(2_000, b"finished\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(7_000).state,
+            AttentionState::Idle
+        );
+
+        session.tracker.suppress_ui_activity_at(7_100);
+        session.emit(7_200, b"\x1b[2J\x1b[Hfocused redraw\r\n\xe2\x9d\xaf ");
+        let focused = session.tracker.snapshot_at(7_200);
+        assert_eq!(focused.state, AttentionState::Idle);
+        assert_eq!(focused.last_output_at, Some(2_000));
+        assert_eq!(focused.last_content_change_at, Some(2_000));
+
+        session.emit(7_601, b"\x1b[2J\x1b[Hagent output\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(7_601).state,
+            AttentionState::Working
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(7_601).last_output_at,
+            Some(7_601)
         );
     }
 
