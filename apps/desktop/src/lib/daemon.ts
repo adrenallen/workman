@@ -316,7 +316,9 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
         todos: [],
         todo_total_count: 0,
         scratchpads: [],
-        scratchpad_total_count: 0
+        scratchpad_total_count: 0,
+        archived_scratchpads: [],
+        archived_scratchpad_total_count: 0
       }
     );
   }

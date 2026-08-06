@@ -29,6 +29,7 @@
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
+  import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
@@ -48,6 +49,7 @@
     CoordinationSnapshot,
     NewTodoInput,
     ScratchpadRead,
+    ScratchpadSummary,
     TodoDetail,
     TodoPriority
   } from './lib/coordination';
@@ -182,6 +184,8 @@
   let projectSettingsBusy = $state(false);
   let settingsOpen = $state(false);
   let todoBrowserOpen = $state(false);
+  let scratchpadBrowserOpen = $state(false);
+  let scratchpadBrowserBusyId = $state<number | null>(null);
   let trustReview = $state<TrustReview | null>(null);
   let trustBusy = $state(false);
   let projectRailWidth = $state(238);
@@ -282,7 +286,9 @@
         ? activeWorktreeOperation.label
         : todoBrowserOpen
           ? 'Todos'
-          : (selection?.label ?? 'Project')
+          : scratchpadBrowserOpen
+            ? 'Scratchpads'
+            : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
     selectedProject && selectedProcess
@@ -327,6 +333,7 @@
       scratchpadRead = null;
       settingsOpen = false;
       todoBrowserOpen = false;
+      scratchpadBrowserOpen = false;
       activeWorktreeOperationId = null;
       loadedProjectId = null;
       return;
@@ -341,6 +348,7 @@
       scratchpadRead = null;
       settingsOpen = false;
       todoBrowserOpen = false;
+      scratchpadBrowserOpen = false;
       activeWorktreeOperationId = null;
       void loadProject(projectId);
     }
@@ -873,6 +881,7 @@
         case 'settings':
           if (selectedProject) {
             todoBrowserOpen = false;
+            scratchpadBrowserOpen = false;
             settingsOpen = true;
           }
           return;
@@ -936,6 +945,7 @@
       scratchpadRead = null;
       settingsOpen = false;
       todoBrowserOpen = false;
+      scratchpadBrowserOpen = false;
       await tick();
       await loadProject(projectId);
       await refreshWorktreeMetadata(projects);
@@ -1012,6 +1022,7 @@
     activeWorktreeOperationId = operation.id;
     settingsOpen = false;
     todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
     selection = null;
   }
 
@@ -1140,6 +1151,7 @@
     quickJumpRecentKeys = readRecentNavigationKeys();
     settingsOpen = false;
     todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
     activeWorktreeOperationId = null;
     selection = next;
     todoDetail = null;
@@ -1277,6 +1289,7 @@
     activeWorktreeOperationId = null;
     settingsOpen = false;
     todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
     selection = projectTreeSelection('command', id, project.id, input.name);
     return id;
   }
@@ -1337,6 +1350,7 @@
     activeWorktreeOperationId = null;
     settingsOpen = false;
     todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
     selection = projectTreeSelection('agent', optimisticId, project.id, tool.name);
     await tick();
     try {
@@ -1469,6 +1483,7 @@
     todoDetail = null;
     scratchpadRead = null;
     todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
     activeWorktreeOperationId = null;
   }
 
@@ -1476,10 +1491,61 @@
     if (!selectedProject) return;
     settingsOpen = false;
     todoBrowserOpen = true;
+    scratchpadBrowserOpen = false;
     activeWorktreeOperationId = null;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+  }
+
+  function openScratchpadsBrowser(): void {
+    if (!selectedProject) return;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    scratchpadBrowserOpen = true;
+    activeWorktreeOperationId = null;
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+  }
+
+  async function renameBrowserScratchpad(
+    scratchpad: ScratchpadSummary,
+    name: string
+  ): Promise<void> {
+    await runBrowserScratchpadAction(scratchpad, 'coordination.scratchpad_rename', { name });
+  }
+
+  async function archiveBrowserScratchpad(scratchpad: ScratchpadSummary): Promise<void> {
+    await runBrowserScratchpadAction(scratchpad, 'coordination.scratchpad_archive');
+  }
+
+  async function deleteBrowserScratchpad(scratchpad: ScratchpadSummary): Promise<void> {
+    if (!window.confirm(`Delete ${scratchpad.name}? This cannot be undone.`)) return;
+    await runBrowserScratchpadAction(scratchpad, 'coordination.scratchpad_delete');
+  }
+
+  async function runBrowserScratchpadAction(
+    scratchpad: ScratchpadSummary,
+    method: 'coordination.scratchpad_rename' | 'coordination.scratchpad_archive' | 'coordination.scratchpad_delete',
+    extra: Record<string, unknown> = {}
+  ): Promise<void> {
+    const projectId = selectedProject?.id;
+    if (projectId === undefined || scratchpadBrowserBusyId !== null) return;
+    scratchpadBrowserBusyId = scratchpad.id;
+    try {
+      await client.control(method, {
+        project_id: projectId,
+        scratchpad_id: scratchpad.id,
+        expected_revision: scratchpad.revision,
+        ...extra
+      });
+      await refreshCoordination(projectId, false);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      scratchpadBrowserBusyId = null;
+    }
   }
 
   function selectProcessById(processId: number): void {
@@ -2552,11 +2618,12 @@
         onSelect={(next) => void selectTreeItem(next)}
         onCreateTodo={() => (dialog = 'todo')}
         onBrowseTodos={openTodosBrowser}
+        onBrowseScratchpads={openScratchpadsBrowser}
         onAddAgent={() => void openAgentDialog()}
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
         onAddScratchpad={() => void createScratchpad()}
-        onOpenSettings={() => { todoBrowserOpen = false; settingsOpen = true; dialog = null; }}
+        onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
@@ -2626,6 +2693,17 @@
             todos={coordination?.todos ?? []}
             onSelect={(todo) => void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title))}
             onCreate={() => (dialog = 'todo')}
+          />
+        {:else if scratchpadBrowserOpen}
+          <ScratchpadBrowser
+            scratchpads={coordination?.scratchpads ?? []}
+            archivedScratchpads={coordination?.archived_scratchpads ?? []}
+            busyId={scratchpadBrowserBusyId}
+            onOpen={(scratchpad) => void selectTreeItem(projectTreeSelection('scratchpad', scratchpad.id, scratchpad.project_id, scratchpad.name))}
+            onCreate={() => void createScratchpad()}
+            onRename={(scratchpad, name) => void renameBrowserScratchpad(scratchpad, name)}
+            onArchive={(scratchpad) => void archiveBrowserScratchpad(scratchpad)}
+            onDelete={(scratchpad) => void deleteBrowserScratchpad(scratchpad)}
           />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView detail={todoDetail} loading={detailLoading} busy={detailBusy} onComplete={(completed) => void completeTodo(completed)} onComment={(body) => void commentTodo(body)} />
@@ -2765,7 +2843,7 @@
         <div class="agent-choices">
           {#if agentToolsLoading}<p>Loading agent tools…</p>{:else}{#each agentTools as tool (tool.id)}<button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}><strong>{tool.name}</strong><small>{tool.command}</small><span>Spawn</span></button>{:else}<p>No enabled agent tools. Add one in Settings.</p>{/each}{/if}
         </div>
-        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
+        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
       </section>
       </Dialog.Content>
     {/if}

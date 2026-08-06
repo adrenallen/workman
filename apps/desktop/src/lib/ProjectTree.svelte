@@ -61,6 +61,7 @@
     onSelect: (selection: ProjectTreeSelection) => void;
     onCreateTodo: () => void;
     onBrowseTodos: () => void;
+    onBrowseScratchpads: () => void;
     onAddAgent: () => void;
     onAddTerminal: () => void;
     onAddCommand: () => void;
@@ -85,6 +86,7 @@
     onSelect,
     onCreateTodo,
     onBrowseTodos,
+    onBrowseScratchpads,
     onAddAgent,
     onAddTerminal,
     onAddCommand,
@@ -179,6 +181,16 @@
       localStorage.setItem('workman.tree.groups.v1', JSON.stringify(openGroups));
     } catch {
       // Persistence is a convenience; the tree still works without it.
+    }
+  }
+
+  function openGroup(group: ProjectTreeGroup): void {
+    if (group === 'todos') {
+      onBrowseTodos();
+    } else if (group === 'scratchpads') {
+      onBrowseScratchpads();
+    } else {
+      toggleGroup(group);
     }
   }
 
@@ -447,20 +459,33 @@
     {#each groupOrder as group}
       {@const GroupIcon = groupIcon[group]}
       <section class="tree-group" class:closed={!openGroups[group]}>
-        <button
-          class="group-header"
-          type="button"
-          data-tree-row
-          data-group={group}
-          aria-expanded={openGroups[group]}
-          title={collapsed ? groupLabel[group] : `${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
-          onclick={() => toggleGroup(group)}
-        >
-          <span class="caret" aria-hidden="true">
-            {#if openGroups[group]}<ChevronDownIcon size={13} />{:else}<ChevronRightIcon size={13} />{/if}
-          </span>
-          <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>
-          <strong>{groupLabel[group]}</strong>
+        <div class="group-header">
+          <button
+            class="group-toggle"
+            type="button"
+            data-tree-row
+            data-group={group}
+            aria-expanded={openGroups[group]}
+            aria-label={`${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
+            title={`${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
+            onclick={() => toggleGroup(group)}
+          >
+            <span class="caret" aria-hidden="true">
+              {#if openGroups[group]}<ChevronDownIcon size={13} />{:else}<ChevronRightIcon size={13} />{/if}
+            </span>
+          </button>
+          <button
+            class="group-title"
+            type="button"
+            data-tree-row
+            data-group={group}
+            aria-expanded={openGroups[group]}
+            title={group === 'todos' || group === 'scratchpads' ? `Browse all ${groupLabel[group].toLowerCase()}` : `${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
+            onclick={() => openGroup(group)}
+          >
+            <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>
+            <strong>{groupLabel[group]}</strong>
+          </button>
           <span class="group-badges">
             <CountBadge value={groupCount(group)} tone={groupTone(group)} title={groupCountTitle(group)} />
             {#if group === 'agents' && agents.some((process) => process.agent_state.unread)}
@@ -472,7 +497,7 @@
               </TooltipLabel>
             {/if}
           </span>
-        </button>
+        </div>
 
         {#if openGroups[group] && !collapsed}
           <div class="group-rows">
@@ -630,7 +655,7 @@
                 {:else}
                   <button
                     type="button"
-                    class="tree-row"
+                    class="tree-row scratchpad-row"
                     class:selected={selection?.key === `scratchpad:${scratchpad.id}`}
                     data-tree-row
                     data-context-kind="scratchpad"
@@ -639,9 +664,7 @@
                     oncontextmenu={(event) => openPointerMenu(event, scratchpadTarget(scratchpad))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
                   >
-                    <TooltipLabel label={`Scratchpad · revision ${scratchpad.revision}`}>
-                      <NotebookTextIcon class="scratchpad-icon" size={14} strokeWidth={1.8} aria-hidden="true" />
-                    </TooltipLabel>
+                    <span class="scratchpad-ref" title={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
                     <span class="row-copy"><strong>{scratchpad.name}</strong></span>
                     <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
                   </button>
@@ -673,10 +696,13 @@
 
   .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .tree-group { border-bottom: 1px solid var(--border); }
-  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 13px 16px minmax(0, 1fr) auto; align-items: center; gap: 4px; border: 0; padding: 3px 7px 3px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
+  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 19px minmax(0, 1fr) auto; align-items: center; gap: 0; padding: 3px 7px 3px 3px; color: var(--text-soft); }
+  .group-toggle, .group-title { min-width: 0; min-height: 22px; border: 0; border-radius: var(--radius); padding: 0; background: transparent; color: inherit; cursor: pointer; }
+  .group-toggle { display: grid; place-items: center; }
+  .group-title { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 4px; text-align: left; }
   .group-badges { display: flex; align-items: center; gap: 4px; }
   .group-header:hover { background: var(--popover); }
-  .group-header:focus-visible { position: relative; z-index: 1; }
+  .group-toggle:focus-visible, .group-title:focus-visible { position: relative; z-index: 1; }
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
   .caret { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; }
   .group-icon { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; text-align: center; }
@@ -715,7 +741,8 @@
   .unread-lineage-rollup, .unread-group-rollup { display: inline-flex; height: 18px; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, #8fb8ff 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: #b9d2ff; background: color-mix(in srgb, #8fb8ff 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .unread-lineage-rollup > span, .unread-group-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: #8fb8ff; }
   .unread-group-rollup { margin-left: -4px; }
-  .scratchpad-icon { color: var(--muted-foreground); }
+  .scratchpad-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .scratchpad-ref { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
   .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .add-row { color: var(--text-soft); }
   .empty-row { margin: 0; padding: 5px 5px 5px 22px; color: #686f78; font-size: var(--font-size-sm); }
@@ -727,9 +754,10 @@
   .project-tree.collapsed .tree-groups { padding-inline: 4px; }
   .project-tree.collapsed .tree-group { border: 0; }
   .project-tree.collapsed .group-header { min-height: 36px; grid-template-columns: 1fr; justify-items: center; padding: 4px; }
-  .project-tree.collapsed .caret,
-  .project-tree.collapsed .group-header strong,
+  .project-tree.collapsed .group-toggle,
+  .project-tree.collapsed .group-title strong,
   .project-tree.collapsed .group-header :global(.badge) { display: none; }
+  .project-tree.collapsed .group-title { width: 100%; grid-template-columns: 1fr; justify-items: center; }
   .project-tree.collapsed .group-icon { font-size: var(--font-size-sm); }
   .project-tree.collapsed .tree-footer { justify-content: center; padding-inline: 4px; }
 </style>

@@ -69,6 +69,8 @@ export interface CoordinationSnapshot {
   todo_total_count: number;
   scratchpads: ScratchpadSummary[];
   scratchpad_total_count: number;
+  archived_scratchpads: ScratchpadSummary[];
+  archived_scratchpad_total_count: number;
 }
 
 export interface NewTodoInput {
