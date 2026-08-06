@@ -162,7 +162,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         spawned["result"]["agent_instructions"]
             .as_str()
             .unwrap()
-            .contains("Call whoami() through workman first")
+            .contains("Workman MCP identity check is unavailable")
     );
     assert!(
         spawned["result"]["agent_instructions"]

@@ -1,4 +1,4 @@
-use std::{process::Stdio, time::Duration};
+use std::{os::unix::fs::PermissionsExt, process::Stdio, time::Duration};
 
 use tempfile::TempDir;
 use tokio::{
@@ -6,7 +6,7 @@ use tokio::{
     process::{Child, Command},
     sync::oneshot,
 };
-use workman_core::Project;
+use workman_core::{AgentTool, AgentToolSource, Project};
 use workmand::{
     DaemonConfig, DaemonServer, Discovery, sync_workman_yml_file, trust_hash_for_process,
 };
@@ -17,12 +17,26 @@ struct TestDaemon {
     discovery: Discovery,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
+    agent_marker: std::path::PathBuf,
 }
 
 impl TestDaemon {
     async fn start() -> Self {
         let data_dir = tempfile::tempdir().unwrap();
         let project_dir = tempfile::tempdir().unwrap();
+        let fake_agent = project_dir.path().join("fake-codex-agent.sh");
+        let agent_marker = project_dir.path().join("agent-launch.txt");
+        std::fs::write(
+            &fake_agent,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$WORKMAN_MCP_URL\" > '{}'\nif [ -n \"$WORKMAN_MCP_TOKEN\" ]; then printf 'token-present\\n' >> '{}'; fi\nprintf '%s\\n' \"$@\" >> '{}'\nsleep 30\n",
+                agent_marker.display(),
+                agent_marker.display(),
+                agent_marker.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_agent, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             project_dir.path().join("workman.yml"),
             "processes:\n  Saved:\n    command: \"trap 'exit 0' TERM; sleep 30\"\n",
@@ -50,6 +64,17 @@ impl TestDaemon {
                 sort_order: 0,
             })
             .unwrap();
+        registry
+            .store()
+            .put_agent_tool(&AgentTool {
+                id: 900,
+                name: "CLI fake Codex".into(),
+                command: fake_agent.to_string_lossy().into_owned(),
+                tool_type: "codex".into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+            })
+            .unwrap();
         sync_workman_yml_file(&mut registry, 1).unwrap();
         let saved = registry
             .list(Some(1))
@@ -70,6 +95,7 @@ impl TestDaemon {
             discovery,
             shutdown: Some(shutdown),
             task,
+            agent_marker,
         }
     }
 
@@ -192,6 +218,36 @@ async fn all_cli_commands_drive_a_real_daemon() {
     );
     let down = daemon.output(&["down"]).await;
     assert!(String::from_utf8_lossy(&down.stdout).contains("Stopped 1 command"));
+
+    let agent = daemon
+        .output(&[
+            "agent",
+            "--tool",
+            "900",
+            "--name",
+            "cli-agent",
+            "--",
+            "--probe",
+        ])
+        .await;
+    let agent_id = parse_started_id(&agent.stdout);
+    let agent_launch = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&daemon.agent_marker) {
+                break contents;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for CLI agent launch context");
+    assert!(agent_launch.contains(&format!("http://127.0.0.1:{}/mcp", daemon.discovery.port)));
+    assert!(agent_launch.contains("token-present"));
+    assert!(agent_launch.contains("mcp_servers.workman.url"));
+    assert!(agent_launch.contains("WORKMAN_MCP_TOKEN"));
+    assert!(agent_launch.contains("--probe"));
+    let stopped = daemon.output(&["stop", &agent_id.to_string()]).await;
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("Stopped process"));
 
     let extra = tempfile::tempdir().unwrap();
     let added = daemon

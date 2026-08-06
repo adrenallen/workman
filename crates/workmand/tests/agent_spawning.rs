@@ -176,8 +176,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     assert!(instructions.contains(&format!("WORKMAN_PROCESS_ID={process_id}")));
     assert!(instructions.contains(&format!("WORKMAN_MCP_URL={endpoint}")));
     assert!(instructions.contains("${WORKMAN_MCP_TOKEN}"));
-    assert!(instructions.contains("configure one from WORKMAN_MCP_URL and WORKMAN_MCP_TOKEN"));
-    assert!(instructions.contains("Call whoami() through workman first"));
+    assert!(instructions.contains("This runtime is not auto-wired"));
+    assert!(instructions.contains("no registered per-launch Workman MCP adapter"));
+    assert!(instructions.contains("Workman MCP identity check is unavailable"));
 
     let (injected_process_id, injected_token, injected_url) =
         wait_for_fake_agent_context(&context_file).await?;

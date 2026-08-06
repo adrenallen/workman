@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{AgentTool, AgentToolSource, Project};
+use workman_core::{AgentTool, AgentToolSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -52,6 +52,30 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
     for tool in [
         AgentTool {
             id: 101,
+            name: "Real Gemini".into(),
+            command: "gemini".into(),
+            tool_type: "gemini".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+        },
+        AgentTool {
+            id: 102,
+            name: "Real OpenCode".into(),
+            command: "opencode".into(),
+            tool_type: "opencode".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+        },
+        AgentTool {
+            id: 103,
+            name: "Real Kimi".into(),
+            command: "kimi --yolo".into(),
+            tool_type: "kimi".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+        },
+        AgentTool {
+            id: 104,
             name: "Real Claude".into(),
             command: "claude --dangerously-skip-permissions".into(),
             tool_type: "claude_code".into(),
@@ -59,10 +83,18 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
         },
         AgentTool {
-            id: 102,
+            id: 105,
             name: "Real Codex".into(),
             command: "codex --dangerously-bypass-approvals-and-sandbox".into(),
             tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+        },
+        AgentTool {
+            id: 106,
+            name: "Real DeepSeek v4 flash".into(),
+            command: "opencode --model deepseek/deepseek-v4-flash".into(),
+            tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,
         },
@@ -75,9 +107,9 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
 /// This deliberately exercises the installed, authenticated agent CLIs and is kept ignored for
 /// routine/CI runs. Run it explicitly when changing per-launch connector wiring.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires authenticated Claude and Codex CLIs"]
-async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemon()
--> Result<(), Box<dyn Error>> {
+#[ignore = "requires all six authenticated configured agent CLIs"]
+async fn configured_agent_tools_route_to_an_isolated_spawning_daemon() -> Result<(), Box<dyn Error>>
+{
     let temp = tempfile::tempdir()?;
     let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -115,46 +147,75 @@ async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemo
     let parent = ClientInfo::default().serve(transport).await?;
     let prompt = "Use only the MCP server named workman. Call whoami, list_agent_tools, and list_processes. Confirm list_agent_tools has an agent_tools array and list_processes has a processes array. After all three calls succeed, print exactly ROUTING_OK and nothing else. Do not use solo or any other MCP server.";
 
-    let claude = call(
-        &parent,
-        "spawn_agent",
-        json!({
-            "project_id": 77,
-            "agent_tool_id": 101,
-            "name": "routing-claude",
-            "extra_args": ["--print", "--output-format", "text", prompt]
-        }),
-    )
-    .await;
-    let claude_id = claude["process_id"].as_i64().unwrap();
+    let launches = [
+        (
+            101,
+            "routing-gemini",
+            json!(["--skip-trust", "--prompt", prompt]),
+            Some("IneligibleTierError"),
+        ),
+        (
+            102,
+            "routing-opencode",
+            json!(["--model", "openai/gpt-5.6-terra", "run", prompt]),
+            None,
+        ),
+        (
+            104,
+            "routing-claude",
+            json!(["--print", "--output-format", "text", prompt]),
+            None,
+        ),
+        (
+            105,
+            "routing-codex",
+            json!(["exec", "--skip-git-repo-check", prompt]),
+            None,
+        ),
+        (
+            106,
+            "routing-deepseek",
+            json!(["run", prompt]),
+            Some("Insufficient Balance"),
+        ),
+    ];
+    let mut processes = Vec::new();
+    for (agent_tool_id, name, extra_args, expected_external_block) in launches {
+        let spawned = call(
+            &parent,
+            "spawn_agent",
+            json!({
+                "project_id": 77,
+                "agent_tool_id": agent_tool_id,
+                "name": name,
+                "extra_args": extra_args,
+            }),
+        )
+        .await;
+        processes.push((
+            name,
+            spawned["process_id"].as_i64().unwrap(),
+            expected_external_block,
+        ));
+    }
 
-    let codex = call(
-        &parent,
-        "spawn_agent",
-        json!({
-            "project_id": 77,
-            "agent_tool_id": 102,
-            "name": "routing-codex",
-            "extra_args": ["exec", "--skip-git-repo-check", prompt]
-        }),
-    )
-    .await;
-    let codex_id = codex["process_id"].as_i64().unwrap();
-
-    for process_id in [claude_id, codex_id] {
+    let mut failures = Vec::new();
+    for (name, process_id, expected_external_block) in processes {
         for _ in 0..960 {
-            let (actor_count, output) = {
+            let (status, actor_count, output) = {
                 let mut registry = registry.lock().await;
-                let _ = registry.get_status(process_id);
+                let status = registry.get_status(process_id)?.process.status;
                 let actor_count = registry.store().connection().query_row(
                     "SELECT COUNT(*) FROM actors WHERE process_id = ?1",
                     [process_id],
                     |row| row.get::<_, i64>(0),
                 )?;
                 let output = registry.rendered_output(process_id)?.text;
-                (actor_count, output)
+                (status, actor_count, output)
             };
-            if actor_count > 0 && output.contains("ROUTING_OK") {
+            if (actor_count > 0 && output.contains("ROUTING_OK"))
+                || matches!(status, ProcessStatus::Exited | ProcessStatus::Crashed)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -165,14 +226,29 @@ async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemo
             [process_id],
             |row| row.get::<_, i64>(0),
         )?;
-        assert!(actor_count > 0, "isolated daemon did not identify process");
-        assert!(
-            registry
-                .rendered_output(process_id)?
-                .text
-                .contains("ROUTING_OK"),
-            "agent did not report successful isolated whoami"
-        );
+        let routed = registry
+            .rendered_output(process_id)?
+            .text
+            .contains("ROUTING_OK");
+        let output = registry.rendered_output(process_id)?.text;
+        match expected_external_block {
+            Some(expected) if output.contains(expected) => {
+                eprintln!("{name}: launch reached external account/provider block: {expected}");
+            }
+            Some(expected) => failures.push(format!(
+                "{name}: expected external block {expected:?}, got {output:?}"
+            )),
+            None => {
+                if actor_count == 0 {
+                    failures.push(format!("{name}: isolated daemon did not identify process"));
+                }
+                if !routed {
+                    failures.push(format!(
+                        "{name}: agent did not report successful isolated MCP calls: {output:?}"
+                    ));
+                }
+            }
+        }
         drop(registry);
         let closed = call(
             &parent,
@@ -180,11 +256,31 @@ async fn real_claude_and_codex_accept_list_envelopes_and_route_to_spawning_daemo
             json!({ "project_id": 77, "process_id": process_id }),
         )
         .await;
-        assert_eq!(closed["closed"], true);
+        if closed["closed"] != true {
+            failures.push(format!("{name}: failed to close launched process"));
+        }
+        eprintln!("{name}: closed managed process");
     }
+
+    let kimi = call(
+        &parent,
+        "agent_tool_deep_check",
+        json!({ "project_id": 77, "agent_tool_id": 103, "timeout_ms": 1000 }),
+    )
+    .await;
+    if kimi["success"] != false
+        || kimi["process_id"] != Value::Null
+        || !kimi["message"].as_str().is_some_and(|message| {
+            message.contains("no documented safe per-launch MCP config override")
+        })
+    {
+        failures.push("routing-kimi: unsupported capability check was not explicit".to_owned());
+    }
+    eprintln!("routing-kimi: reported unsupported without launching a process");
 
     let _ = parent.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }

@@ -26,7 +26,10 @@ export interface AgentToolHealth extends AgentTool {
   config_exists: boolean;
   launch_ready: boolean;
   install_url: string | null;
-  configuration_mode: 'per_launch' | 'self_config';
+  mcp_launch_supported: boolean;
+  mcp_launch_mechanism: string;
+  mcp_launch_note: string;
+  configuration_mode: 'per_launch' | 'self_config' | 'unsupported';
   configuration_note: string;
 }
 

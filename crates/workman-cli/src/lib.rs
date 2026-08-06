@@ -63,6 +63,8 @@ Commands:\n\
   run [--project ID] [--name NAME] [--cwd PATH] -- <command...>\n\
       Create and start a durable command process. The current project or\n\
       WORKMAN_PROJECT_ID is used when --project is absent.\n\
+  agent --tool ID [--project ID] [--name NAME] [-- <agent args...>]\n\
+      Launch a registered agent through the daemon's per-launch MCP wiring.\n\
   ps [--project ID]\n\
       List process IDs, project IDs, statuses, PIDs, names, and commands.\n\
   logs [-f|--follow] <PROCESS_ID>\n\
@@ -111,6 +113,7 @@ pub async fn run_env() -> Result<()> {
         Command::Up { project_id } => set_commands(&mut client, project_id, true).await,
         Command::Down { project_id } => set_commands(&mut client, project_id, false).await,
         Command::Run(options) => run_command(&mut client, options).await,
+        Command::Agent(options) => run_agent(&mut client, options).await,
         Command::Ps { project_id } => ps(&mut client, project_id).await,
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
@@ -154,6 +157,7 @@ enum Command {
         client: Option<McpClient>,
     },
     Run(RunOptions),
+    Agent(AgentOptions),
     Ps {
         project_id: Option<ProjectId>,
     },
@@ -177,6 +181,14 @@ struct RunOptions {
     name: Option<String>,
     cwd: Option<PathBuf>,
     command: Vec<String>,
+}
+
+#[derive(Debug)]
+struct AgentOptions {
+    project_id: Option<ProjectId>,
+    agent_tool_id: i64,
+    name: Option<String>,
+    extra_args: Vec<String>,
 }
 
 impl Cli {
@@ -215,6 +227,7 @@ impl Cli {
                 }
                 "mcp-setup" => break parse_mcp_setup(args)?,
                 "run" => break parse_run(args)?,
+                "agent" => break parse_agent(args)?,
                 "ps" => break parse_ps(args)?,
                 "logs" => break parse_logs(args)?,
                 "attach" => {
@@ -346,6 +359,39 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Result<Command> {
         name,
         cwd,
         command,
+    }))
+}
+
+fn parse_agent(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let mut project_id = None;
+    let mut agent_tool_id = None;
+    let mut name = None;
+    let mut extra_args = Vec::new();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" => {
+                extra_args.extend(args);
+                break;
+            }
+            "--project" => {
+                project_id = Some(parse_id(&next_value(&mut args, &arg)?, "project")?);
+            }
+            "--tool" => {
+                if agent_tool_id.is_some() {
+                    return Err(cli_error("--tool may only be specified once"));
+                }
+                agent_tool_id = Some(parse_id(&next_value(&mut args, &arg)?, "agent tool")?);
+            }
+            "--name" => name = Some(next_value(&mut args, &arg)?),
+            _ => return Err(cli_error(format!("unknown agent option {arg:?}"))),
+        }
+    }
+    Ok(Command::Agent(AgentOptions {
+        project_id,
+        agent_tool_id: agent_tool_id.ok_or_else(|| cli_error("agent requires --tool ID"))?,
+        name,
+        extra_args,
     }))
 }
 
@@ -697,6 +743,34 @@ async fn run_command(client: &mut Client, options: RunOptions) -> Result<()> {
         .rpc("process.start", json!({ "process_id": created.id }))
         .await?;
     println!("Started process {} ({})", started.id, started.name);
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct SpawnAgentReceipt {
+    process_id: i64,
+    project_id: ProjectId,
+    name: String,
+}
+
+async fn run_agent(client: &mut Client, options: AgentOptions) -> Result<()> {
+    let cwd = canonical_directory(&env::current_dir()?)?;
+    let project_id = resolve_project_id(client, options.project_id, &cwd).await?;
+    let spawned: SpawnAgentReceipt = client
+        .rpc(
+            "agents.spawn",
+            json!({
+                "project_id": project_id,
+                "agent_tool_id": options.agent_tool_id,
+                "name": options.name,
+                "extra_args": options.extra_args,
+            }),
+        )
+        .await?;
+    println!(
+        "Started agent {} ({}) in project {}",
+        spawned.process_id, spawned.name, spawned.project_id
+    );
     Ok(())
 }
 
@@ -1472,6 +1546,32 @@ mod tests {
         };
         assert_eq!(run.project_id, Some(7));
         assert_eq!(run.command, ["npm", "run", "dev"]);
+
+        let cli = Cli::parse(
+            [
+                "wrk",
+                "agent",
+                "--tool",
+                "6",
+                "--project",
+                "7",
+                "--name",
+                "reviewer",
+                "--",
+                "--model",
+                "gpt-test",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+        let Command::Agent(agent) = cli.command else {
+            panic!("expected agent command");
+        };
+        assert_eq!(agent.agent_tool_id, 6);
+        assert_eq!(agent.project_id, Some(7));
+        assert_eq!(agent.name.as_deref(), Some("reviewer"));
+        assert_eq!(agent.extra_args, ["--model", "gpt-test"]);
+        assert!(Cli::parse(["wrk", "agent"].map(OsString::from)).is_err());
     }
 
     #[test]

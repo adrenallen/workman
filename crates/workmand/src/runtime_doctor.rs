@@ -35,6 +35,9 @@ pub struct AgentToolHealth {
     pub config_exists: bool,
     pub launch_ready: bool,
     pub install_url: Option<String>,
+    pub mcp_launch_supported: bool,
+    pub mcp_launch_mechanism: String,
+    pub mcp_launch_note: String,
     pub configuration_mode: String,
     pub configuration_note: String,
 }
@@ -145,6 +148,7 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
         None => (None, None),
     };
     let target = config_target(&tool, &environment.home);
+    let capability = crate::mcp::agent_spawning::mcp_launch_capability(&tool.tool_type);
     let found_on_path = resolved.is_some();
     let launch_ready = tool.enabled && found_on_path;
 
@@ -163,13 +167,20 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
         config_exists: target.exists(),
         launch_ready,
         install_url: install_url(&target.normalized_type).map(str::to_owned),
+        mcp_launch_supported: capability.supported,
+        mcp_launch_mechanism: capability.mechanism.to_owned(),
+        mcp_launch_note: capability.note.to_owned(),
         configuration_mode: if target.automatic_wiring {
             "per_launch".to_owned()
+        } else if !target.can_write {
+            "unsupported".to_owned()
         } else {
             "self_config".to_owned()
         },
         configuration_note: if target.automatic_wiring {
-            "Per-launch workman MCP wiring is automatic.".to_owned()
+            capability.note.to_owned()
+        } else if !target.can_write {
+            capability.note.to_owned()
         } else {
             "Preview and approve a Workman MCP entry for this runtime.".to_owned()
         },
@@ -198,6 +209,22 @@ fn config_preview_in(
             preview_sha256: None,
             already_configured: true,
             message: "This runtime receives an isolated workman MCP connector on every launch; no user config change is needed.".to_owned(),
+        });
+    }
+    if !target.can_write {
+        return Ok(AgentToolConfigPreview {
+            agent_tool_id: tool.id,
+            tool_type: tool.tool_type.clone(),
+            automatic_wiring: false,
+            can_write: false,
+            requires_consent: false,
+            path: target.path.to_string_lossy().into_owned(),
+            preview: None,
+            preview_sha256: None,
+            already_configured: false,
+            message: crate::mcp::agent_spawning::mcp_launch_capability(&tool.tool_type)
+                .note
+                .to_owned(),
         });
     }
 
@@ -413,6 +440,7 @@ struct ConfigTarget {
     detect_directory: bool,
     detect_parent_directory: bool,
     automatic_wiring: bool,
+    can_write: bool,
 }
 
 impl ConfigTarget {
@@ -429,34 +457,48 @@ impl ConfigTarget {
 
 fn config_target(tool: &AgentTool, home: &Path) -> ConfigTarget {
     let normalized_type = normalize_tool_type(&tool.tool_type);
+    let automatic_wiring =
+        crate::mcp::agent_spawning::mcp_launch_capability(&tool.tool_type).supported;
     match normalized_type.as_str() {
         "claude" | "claude_code" => ConfigTarget {
             normalized_type,
             path: home.join(".claude"),
             detect_directory: true,
             detect_parent_directory: false,
-            automatic_wiring: true,
+            automatic_wiring,
+            can_write: false,
         },
         "codex" => ConfigTarget {
             normalized_type,
             path: home.join(".codex"),
             detect_directory: true,
             detect_parent_directory: false,
-            automatic_wiring: true,
+            automatic_wiring,
+            can_write: false,
         },
         "gemini" | "gemini_cli" => ConfigTarget {
             normalized_type: "gemini".to_owned(),
             path: home.join(".gemini/settings.json"),
             detect_directory: false,
             detect_parent_directory: false,
-            automatic_wiring: false,
+            automatic_wiring,
+            can_write: false,
         },
         "opencode" | "open_code" => ConfigTarget {
             normalized_type: "opencode".to_owned(),
             path: home.join(".config/opencode/opencode.json"),
             detect_directory: false,
             detect_parent_directory: true,
+            automatic_wiring,
+            can_write: false,
+        },
+        "kimi" | "kimi_code" => ConfigTarget {
+            normalized_type: "kimi".to_owned(),
+            path: home.join(".kimi-code/mcp.json"),
+            detect_directory: false,
+            detect_parent_directory: false,
             automatic_wiring: false,
+            can_write: false,
         },
         _ => {
             let slug = safe_slug(&normalized_type);
@@ -466,6 +508,7 @@ fn config_target(tool: &AgentTool, home: &Path) -> ConfigTarget {
                 detect_directory: false,
                 detect_parent_directory: true,
                 automatic_wiring: false,
+                can_write: true,
             }
         }
     }
@@ -502,6 +545,7 @@ fn install_url(tool_type: &str) -> Option<&'static str> {
         "codex" => Some("https://developers.openai.com/codex/cli/"),
         "gemini" => Some("https://github.com/google-gemini/gemini-cli"),
         "opencode" => Some("https://opencode.ai/docs/"),
+        "kimi" => Some("https://moonshotai.github.io/kimi-code/"),
         _ => None,
     }
 }
@@ -539,7 +583,7 @@ fn desired_server(tool_type: &str, mcp_url: &str) -> Value {
 
 fn current_server<'a>(root: &'a Map<String, Value>, tool_type: &str) -> Option<&'a Value> {
     if tool_type == "opencode" {
-        root.get("mcp")?.get("servers")?.as_object()?.get("workman")
+        root.get("mcp")?.as_object()?.get("workman")
     } else {
         root.get("mcpServers")?.as_object()?.get("workman")
     }
@@ -547,9 +591,7 @@ fn current_server<'a>(root: &'a Map<String, Value>, tool_type: &str) -> Option<&
 
 fn put_server(root: &mut Map<String, Value>, tool_type: &str, server: Value) -> Result<(), String> {
     if tool_type == "opencode" {
-        let mcp = object_entry(root, "mcp")?;
-        let servers = object_entry(mcp, "servers")?;
-        servers.insert("workman".to_owned(), server);
+        object_entry(root, "mcp")?.insert("workman".to_owned(), server);
     } else {
         object_entry(root, "mcpServers")?.insert("workman".to_owned(), server);
     }
@@ -621,7 +663,7 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
     use workman_core::{AgentTool, AgentToolSource};
 
@@ -652,7 +694,7 @@ mod tests {
         let environment = DoctorEnvironment {
             home: temp.path().join("home"),
             path: std::env::join_paths([&bin]).unwrap(),
-            version_timeout: Duration::from_millis(200),
+            version_timeout: Duration::from_secs(2),
         };
         let health = check_agent_tools_in(
             vec![
@@ -678,21 +720,17 @@ mod tests {
     }
 
     #[test]
-    fn opencode_preview_preserves_config_and_write_requires_exact_consent() {
+    fn custom_preview_preserves_config_and_write_requires_exact_consent() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        let path = home.join(".config/opencode/opencode.json");
+        let path = home.join(".config/future_agent/mcp.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            "{\"theme\":\"workman-fixture\",\"mcp\":{\"servers\":{}}}\n",
-        )
-        .unwrap();
-        let tool = tool(7, "OpenCode", "opencode", "opencode", true);
+        fs::write(&path, "{\"theme\":\"workman-fixture\",\"mcpServers\":{}}\n").unwrap();
+        let tool = tool(7, "Future", "future-agent", "future-agent", true);
         let preview = config_preview_in(&tool, "http://127.0.0.1:4100/mcp", home).unwrap();
         let contents = preview.preview.as_deref().unwrap();
         assert!(contents.contains("workman-fixture"));
-        assert!(contents.contains("{env:WORKMAN_MCP_TOKEN}"));
+        assert!(contents.contains("$WORKMAN_MCP_TOKEN"));
         assert!(
             apply_config_in(&tool, "http://127.0.0.1:4100/mcp", false, "", home)
                 .unwrap_err()
@@ -746,5 +784,26 @@ mod tests {
         assert!(target.exists());
         assert_eq!(target.path, directory.join("opencode.json"));
         assert!(!target.path.exists());
+        assert!(target.automatic_wiring);
+        assert!(!target.can_write);
+    }
+
+    #[test]
+    fn supported_runtimes_are_automatic_and_kimi_is_explicitly_unsupported() {
+        let home = Path::new("/tmp/workman-runtime-doctor-home");
+        for tool_type in ["claude", "codex", "gemini", "opencode"] {
+            let target = config_target(&tool(1, tool_type, tool_type, tool_type, true), home);
+            assert!(target.automatic_wiring, "{tool_type}");
+            assert!(!target.can_write, "{tool_type}");
+        }
+
+        let kimi = tool(2, "Kimi", "kimi --yolo", "kimi", true);
+        let target = config_target(&kimi, home);
+        assert_eq!(target.path, home.join(".kimi-code/mcp.json"));
+        assert!(!target.automatic_wiring);
+        assert!(!target.can_write);
+        let preview = config_preview_in(&kimi, "http://127.0.0.1:4100/mcp", home).unwrap();
+        assert!(!preview.can_write);
+        assert!(preview.message.contains("no documented safe per-launch"));
     }
 }

@@ -157,7 +157,8 @@
     if (!tool.enabled) {
       return tool.found_on_path ? 'Disabled · runtime found' : 'Disabled · not found on PATH';
     }
-    return tool.found_on_path ? 'Ready' : 'Not found on PATH';
+    if (!tool.found_on_path) return 'Not found on PATH';
+    return tool.mcp_launch_supported ? 'Ready' : 'Runtime ready · MCP unavailable';
   }
 
   function message(cause: unknown): string {
@@ -206,6 +207,7 @@
             <div class="runtime-facts">
               <span title={tool.version_error ?? undefined}>{tool.version ?? 'Version unavailable'}</span>
               <code title={tool.config_path}>{tool.config_path}</code>
+              <span title={tool.mcp_launch_note}>MCP: {tool.mcp_launch_mechanism}</span>
             </div>
             <p>{tool.configuration_note}</p>
             {#if deepChecks[tool.id]}
@@ -233,7 +235,7 @@
                 {busy === `preview-${tool.id}` ? 'Preparing…' : 'Configure'}
               </button>
             {/if}
-            <button type="button" disabled={!connected || busy !== null || !tool.launch_ready} onclick={() => void deepCheck(tool)}>
+            <button type="button" title={tool.mcp_launch_note} disabled={!connected || busy !== null || !tool.launch_ready || !tool.mcp_launch_supported} onclick={() => void deepCheck(tool)}>
               {busy === `deep-${tool.id}` ? 'Running…' : 'Deep check'}
             </button>
             <button type="button" disabled={!connected || busy !== null} onclick={() => edit(tool)}>Edit</button>

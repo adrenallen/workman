@@ -26,6 +26,7 @@ use super::{
 use crate::ProcessRegistry;
 
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
+const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -114,6 +115,66 @@ pub(crate) struct SpawnResult {
     kind: ProcessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_instructions: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct McpLaunchCapability {
+    pub supported: bool,
+    pub mechanism: &'static str,
+    pub note: &'static str,
+}
+
+#[derive(Debug)]
+struct AgentLaunchPlan {
+    command: String,
+    env: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpLaunchAdapter {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    KimiUnsupported,
+    Unsupported,
+}
+
+impl McpLaunchAdapter {
+    fn capability(self) -> McpLaunchCapability {
+        match self {
+            Self::Claude => McpLaunchCapability {
+                supported: true,
+                mechanism: "--mcp-config + --strict-mcp-config",
+                note: "Workman injects a strict inline MCP config for every launch.",
+            },
+            Self::Codex => McpLaunchCapability {
+                supported: true,
+                mechanism: "-c mcp_servers.workman overrides",
+                note: "Workman injects URL and environment-backed header overrides for every launch.",
+            },
+            Self::Gemini => McpLaunchCapability {
+                supported: true,
+                mechanism: "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+                note: "Workman injects a private, ephemeral highest-precedence settings file for every launch.",
+            },
+            Self::OpenCode => McpLaunchCapability {
+                supported: true,
+                mechanism: "OPENCODE_CONFIG_CONTENT",
+                note: "Workman injects an inline runtime config for every launch, including model variants.",
+            },
+            Self::KimiUnsupported => McpLaunchCapability {
+                supported: false,
+                mechanism: "unsupported",
+                note: "Kimi Code exposes only user/project mcp.json and has no documented safe per-launch MCP config override.",
+            },
+            Self::Unsupported => McpLaunchCapability {
+                supported: false,
+                mechanism: "unsupported",
+                note: "This tool type has no registered per-launch Workman MCP adapter.",
+            },
+        }
+    }
 }
 
 #[tool_router(router = agent_spawning_tool_router, vis = "pub(crate)")]
@@ -491,19 +552,18 @@ pub(crate) fn spawn_registered_agent(
             tool.id, tool.name
         ));
     }
-    let command = command_with_mcp_wiring(&tool.command, &tool.tool_type, mcp_url, &extra_args)?;
+    let launch = prepare_agent_launch(&tool.command, &tool.tool_type, mcp_url, &extra_args)?;
     let name = process_name(registry, project.id, name, &tool.name)?;
-    let env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
     let tool_type = tool.tool_type;
     let result = spawn(
         registry,
         project,
         ProcessKind::Agent,
         name,
-        command,
+        launch.command,
         Some(tool.id),
         Some(tool_type.clone()),
-        env,
+        launch.env,
         spawned_by_process_id,
     )?;
     if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
@@ -540,6 +600,19 @@ pub(crate) async fn deep_check_registered_agent(
             .ok_or_else(|| format!("project {project_id} was not found"))?;
         (tool, project)
     };
+    let capability = mcp_launch_capability(&tool.tool_type);
+    if !capability.supported {
+        return Ok(AgentToolDeepCheckResult {
+            agent_tool_id,
+            process_id: None,
+            success: false,
+            elapsed_ms: elapsed_millis(started),
+            message: format!(
+                "Workman cannot deep-check this runtime: {}",
+                capability.note
+            ),
+        });
+    }
     let health = crate::runtime_doctor::check_agent_tools(vec![tool.clone()]).await;
     if !health
         .tools
@@ -843,20 +916,56 @@ fn command_with_args(command: &str, extra_args: &[String]) -> Result<String, Str
     Ok(format!("{command} {args}"))
 }
 
-fn command_with_mcp_wiring(
+fn prepare_agent_launch(
     command: &str,
     tool_type: &str,
     mcp_url: &str,
     extra_args: &[String],
-) -> Result<String, String> {
-    let mut launch_args = mcp_launch_args(tool_type, mcp_url);
-    launch_args.extend(extra_args.iter().cloned());
-    command_with_args(command, &launch_args)
+) -> Result<AgentLaunchPlan, String> {
+    let adapter = mcp_launch_adapter(tool_type);
+    let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
+    let command = match adapter {
+        McpLaunchAdapter::Claude | McpLaunchAdapter::Codex => {
+            let mut launch_args = mcp_launch_args(adapter, mcp_url);
+            launch_args.extend(extra_args.iter().cloned());
+            command_with_args(command, &launch_args)?
+        }
+        McpLaunchAdapter::Gemini => {
+            let command = command_with_args(command, extra_args)?;
+            gemini_command_with_ephemeral_settings(&command, mcp_url)
+        }
+        McpLaunchAdapter::OpenCode => {
+            env.insert(
+                OPENCODE_CONFIG_CONTENT_ENV.to_owned(),
+                opencode_inline_config(mcp_url),
+            );
+            command_with_args(command, extra_args)?
+        }
+        McpLaunchAdapter::KimiUnsupported | McpLaunchAdapter::Unsupported => {
+            command_with_args(command, extra_args)?
+        }
+    };
+    Ok(AgentLaunchPlan { command, env })
 }
 
-fn mcp_launch_args(tool_type: &str, mcp_url: &str) -> Vec<String> {
+pub(crate) fn mcp_launch_capability(tool_type: &str) -> McpLaunchCapability {
+    mcp_launch_adapter(tool_type).capability()
+}
+
+fn mcp_launch_adapter(tool_type: &str) -> McpLaunchAdapter {
     match normalize_tool_type(tool_type).as_str() {
-        "claude" | "claude_code" => vec![
+        "claude" | "claude_code" => McpLaunchAdapter::Claude,
+        "codex" => McpLaunchAdapter::Codex,
+        "gemini" | "gemini_cli" => McpLaunchAdapter::Gemini,
+        "opencode" | "open_code" => McpLaunchAdapter::OpenCode,
+        "kimi" | "kimi_code" => McpLaunchAdapter::KimiUnsupported,
+        _ => McpLaunchAdapter::Unsupported,
+    }
+}
+
+fn mcp_launch_args(adapter: McpLaunchAdapter, mcp_url: &str) -> Vec<String> {
+    match adapter {
+        McpLaunchAdapter::Claude => vec![
             "--mcp-config".to_owned(),
             json!({
                 "mcpServers": {
@@ -872,7 +981,7 @@ fn mcp_launch_args(tool_type: &str, mcp_url: &str) -> Vec<String> {
             .to_string(),
             "--strict-mcp-config".to_owned(),
         ],
-        "codex" => vec![
+        McpLaunchAdapter::Codex => vec![
             "-c".to_owned(),
             format!(
                 "mcp_servers.workman.url={}",
@@ -884,6 +993,45 @@ fn mcp_launch_args(tool_type: &str, mcp_url: &str) -> Vec<String> {
         ],
         _ => Vec::new(),
     }
+}
+
+fn gemini_command_with_ephemeral_settings(command: &str, mcp_url: &str) -> String {
+    let settings = json!({
+        "mcp": { "allowed": ["workman"] },
+        "mcpServers": {
+            "workman": {
+                "httpUrl": mcp_url,
+                "headers": {
+                    "x-workman-mcp-token": "$WORKMAN_MCP_TOKEN"
+                }
+            }
+        }
+    })
+    .to_string();
+    format!(
+        "umask 077; workman_mcp_config_dir=$(mktemp -d \"${{TMPDIR:-/tmp}}/workman-gemini-mcp.XXXXXX\") || exit 1; \
+         workman_mcp_config_file=\"$workman_mcp_config_dir/settings.json\"; \
+         trap 'rm -f -- \"$workman_mcp_config_file\"; rmdir -- \"$workman_mcp_config_dir\"' EXIT; \
+         printf '%s\\n' {} > \"$workman_mcp_config_file\" || exit 1; \
+         GEMINI_CLI_SYSTEM_SETTINGS_PATH=\"$workman_mcp_config_file\" {command}",
+        shell_quote(&settings)
+    )
+}
+
+fn opencode_inline_config(mcp_url: &str) -> String {
+    json!({
+        "mcp": {
+            "workman": {
+                "type": "remote",
+                "url": mcp_url,
+                "oauth": false,
+                "headers": {
+                    "x-workman-mcp-token": "{env:WORKMAN_MCP_TOKEN}"
+                }
+            }
+        }
+    })
+    .to_string()
 }
 
 fn normalize_tool_type(tool_type: &str) -> String {
@@ -914,16 +1062,25 @@ fn agent_instructions(
     mcp_url: &str,
     tool_type: &str,
 ) -> String {
-    let client_wiring = match normalize_tool_type(tool_type).as_str() {
-        "claude" | "claude_code" => {
-            "This Claude launch already has a strict per-launch MCP config for the server named workman."
-        }
-        "codex" => {
-            "This Codex launch already has per-launch mcp_servers.workman URL and header overrides."
-        }
-        _ => {
-            "If this client does not expose a Workman connector automatically, configure one from WORKMAN_MCP_URL and WORKMAN_MCP_TOKEN before using coordination tools."
-        }
+    let capability = mcp_launch_capability(tool_type);
+    let client_wiring = if capability.supported {
+        format!(
+            "This launch already has the server named workman wired through {}.",
+            capability.mechanism
+        )
+    } else {
+        format!(
+            "This runtime is not auto-wired: {} Do not claim Workman MCP access unless the client exposes it.",
+            capability.note
+        )
+    };
+    let identity_guidance = if capability.supported {
+        format!(
+            "Call whoami() through workman first to confirm that you auto-identify as process {}. Use identify_session(process_id={}) only if whoami cannot identify you.",
+            process.id, process.id
+        )
+    } else {
+        "The Workman MCP identity check is unavailable for this launch.".to_owned()
     };
     format!(
         "[workman context] You are Workman process ID {process_id} ({process_name}), in project \
@@ -932,9 +1089,7 @@ fn agent_instructions(
          WORKMAN_MCP_TOKEN environment variable. {client_wiring} The connector must use the exact \
          URL in ${{WORKMAN_MCP_URL}} ({mcp_url}) and send the x-workman-mcp-token header from \
          ${{WORKMAN_MCP_TOKEN}}. Use the MCP server named workman, never a globally configured Solo \
-         or unrelated workman server. Call whoami() through workman first to confirm that you \
-         auto-identify as process {process_id}. Use \
-         identify_session(process_id={process_id}) only if whoami cannot identify you. \
+         or unrelated workman server. {identity_guidance} \
          {worktree_agent_guidance} \
          {scratchpad_handoff_guidance} \
          [END WORKMAN CONTEXT]",
@@ -944,6 +1099,7 @@ fn agent_instructions(
         project_name = project.name,
         project_path = project.path,
         client_wiring = client_wiring,
+        identity_guidance = identity_guidance,
         mcp_url = mcp_url,
         scratchpad_handoff_guidance = SCRATCHPAD_HANDOFF_GUIDANCE,
         worktree_agent_guidance = WORKTREE_AGENT_GUIDANCE,
@@ -1045,13 +1201,14 @@ mod tests {
 
     #[test]
     fn claude_launch_uses_only_the_per_process_workman_connector() {
-        let command = command_with_mcp_wiring(
+        let launch = prepare_agent_launch(
             "claude --dangerously-skip-permissions",
             "claude_code",
             "http://127.0.0.1:43123/mcp",
             &["--model".into(), "opus".into()],
         )
         .unwrap();
+        let command = launch.command;
         assert!(command.contains("--mcp-config"));
         assert!(command.contains("--strict-mcp-config"));
         assert!(command.contains("http://127.0.0.1:43123/mcp"));
@@ -1062,13 +1219,14 @@ mod tests {
 
     #[test]
     fn codex_launch_overrides_workman_url_and_process_token_header() {
-        let command = command_with_mcp_wiring(
+        let launch = prepare_agent_launch(
             "codex --dangerously-bypass-approvals-and-sandbox",
             "codex",
             "http://127.0.0.1:43124/mcp",
             &["--model".into(), "gpt-test".into()],
         )
         .unwrap();
+        let command = launch.command;
         assert!(command.contains("mcp_servers.workman.url="));
         assert!(command.contains("http://127.0.0.1:43124/mcp"));
         assert!(command.contains("mcp_servers.workman.env_http_headers="));
@@ -1077,17 +1235,67 @@ mod tests {
     }
 
     #[test]
-    fn generic_launch_keeps_command_and_relies_on_injected_environment() {
+    fn gemini_launch_uses_an_ephemeral_system_settings_file() {
+        let launch = prepare_agent_launch(
+            "gemini --yolo",
+            "gemini",
+            "http://127.0.0.1:43125/mcp",
+            &["--model".into(), "gemini-test".into()],
+        )
+        .unwrap();
+        assert!(launch.command.contains("GEMINI_CLI_SYSTEM_SETTINGS_PATH"));
+        assert!(launch.command.contains("mktemp -d"));
+        assert!(launch.command.contains("http://127.0.0.1:43125/mcp"));
+        assert!(launch.command.contains("x-workman-mcp-token"));
+        assert!(launch.command.contains("$WORKMAN_MCP_TOKEN"));
+        assert!(launch.command.contains("gemini --yolo --model gemini-test"));
+        assert!(!launch.command.contains(".gemini/settings.json"));
+    }
+
+    #[test]
+    fn opencode_and_model_variants_use_inline_runtime_config() {
+        let launch = prepare_agent_launch(
+            "opencode --model deepseek/deepseek-v4-flash",
+            "opencode",
+            "http://127.0.0.1:43126/mcp",
+            &["run".into(), "call workman".into()],
+        )
+        .unwrap();
         assert_eq!(
-            command_with_mcp_wiring(
-                "future-agent --interactive",
-                "future_v9",
-                "http://127.0.0.1:43125/mcp",
-                &["two words".into()],
-            )
-            .unwrap(),
-            "future-agent --interactive 'two words'"
+            launch.command,
+            "opencode --model deepseek/deepseek-v4-flash run 'call workman'"
         );
+        let config: serde_json::Value = serde_json::from_str(
+            launch
+                .env
+                .get(OPENCODE_CONFIG_CONTENT_ENV)
+                .expect("inline OpenCode config"),
+        )
+        .unwrap();
+        assert_eq!(
+            config["mcp"]["workman"]["url"],
+            "http://127.0.0.1:43126/mcp"
+        );
+        assert_eq!(
+            config["mcp"]["workman"]["headers"]["x-workman-mcp-token"],
+            "{env:WORKMAN_MCP_TOKEN}"
+        );
+    }
+
+    #[test]
+    fn unsupported_launch_is_explicit_and_keeps_the_registered_command() {
+        let launch = prepare_agent_launch(
+            "kimi --yolo",
+            "kimi",
+            "http://127.0.0.1:43127/mcp",
+            &["--model".into(), "kimi-test".into()],
+        )
+        .unwrap();
+        assert_eq!(launch.command, "kimi --yolo --model kimi-test");
+        assert!(!launch.env.contains_key(OPENCODE_CONFIG_CONTENT_ENV));
+        let capability = mcp_launch_capability("kimi");
+        assert!(!capability.supported);
+        assert!(capability.note.contains("no documented safe per-launch"));
     }
 
     #[test]
