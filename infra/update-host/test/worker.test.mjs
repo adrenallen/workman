@@ -5,17 +5,31 @@ import worker from "../src/index.ts";
 const artifact = Uint8Array.from({ length: 64 }, (_, index) => index);
 const logo = new TextEncoder().encode("fixture-logo");
 const installer = new TextEncoder().encode("#!/usr/bin/env bash\necho installer\n");
+function releaseAsset(name, target, size) {
+  return {
+    name,
+    target,
+    sha256: "0".repeat(64),
+    size,
+    url: `https://workman.userdefined.io/versions/1.2.3/${name}`,
+  };
+}
+
 const release = {
   version: "1.2.3",
   published_at: "2026-08-06T12:34:56.000Z",
   notes_url: "https://example.com/releases/1.2.3",
-  assets: [{
-    name: "fixture.zip",
-    target: "fixture",
-    sha256: "0".repeat(64),
-    size: artifact.byteLength,
-    url: "https://workman.userdefined.io/versions/1.2.3/fixture.zip",
-  }],
+  assets: [
+    releaseAsset("fixture.zip", "fixture", artifact.byteLength),
+    releaseAsset("workman-macos-arm64.zip", "macos-arm64", 80 * 1024 * 1024),
+    releaseAsset("workman-linux-x86_64.AppImage", "linux-x86_64-appimage", 91 * 1024 * 1024),
+    releaseAsset("workman-linux-x86_64.deb", "linux-x86_64-deb", 72 * 1024 * 1024),
+    releaseAsset("workman-linux-x86_64.tar.gz", "linux-x86_64", 70 * 1024 * 1024),
+    releaseAsset("workman-linux-arm64.AppImage", "linux-arm64-appimage", 88 * 1024 * 1024),
+    releaseAsset("workman-linux-arm64.deb", "linux-arm64-deb", 69 * 1024 * 1024),
+    releaseAsset("workman-linux-arm64.tar.gz", "linux-arm64", 67 * 1024 * 1024),
+    releaseAsset("SHA256SUMS", "checksums", 812),
+  ],
 };
 
 function object(body, contentType = "application/octet-stream", size = body.byteLength) {
@@ -45,7 +59,9 @@ function rangedBody(body, range) {
 }
 
 function storedObject(key) {
-  if (key === "versions/1.2.3/fixture.zip") return [artifact, "application/zip"];
+  if (key.startsWith("versions/1.2.3/") && release.assets.some((asset) => key.endsWith(`/${asset.name}`))) {
+    return [artifact, "application/octet-stream"];
+  }
   if (key === "branding/workman-logo-wide-transparent.png") return [logo, "image/png"];
   if (key === "install.sh") return [installer, "text/x-shellscript; charset=utf-8"];
   if (key === "channels/stable.json" || key === "channels/latest.json") {
@@ -82,12 +98,38 @@ test("keeps the black logo lander and its R2 image public", async () => {
   assert.match(html, /<title>Workman<\/title>/);
   assert.match(html, /background: #000/);
   assert.match(html, /src="\/workman-logo-wide-transparent\.png"/);
+  assert.match(html, /href="\/download"/);
 
   const image = await worker.fetch(request("/workman-logo-wide-transparent.png"), env);
   assert.equal(image.status, 200);
   assert.equal(image.headers.get("content-type"), "image/png");
   assert.equal(image.headers.get("cache-control"), "public, max-age=31536000, immutable");
   assert.deepEqual(new Uint8Array(await image.arrayBuffer()), logo);
+});
+
+test("renders the public stable download page entirely from its channel manifest", async () => {
+  const response = await worker.fetch(request("/download"), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60, must-revalidate");
+  assert.match(response.headers.get("content-security-policy"), /default-src 'none'/);
+  const html = await response.text();
+
+  assert.match(html, /Current stable/);
+  assert.match(html, /Workman <span>v1\.2\.3<\/span>/);
+  assert.match(html, /Aug 6, 2026/);
+  assert.match(html, /Downloads require the access password/);
+  assert.match(html, /browser will ask once/);
+  assert.match(html, /href="\/versions\/1\.2\.3\/workman-macos-arm64\.zip"/);
+  assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-x86_64\.AppImage"/);
+  assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-arm64\.deb"/);
+  assert.match(html, /href="\/versions\/1\.2\.3\/SHA256SUMS"/);
+  assert.match(html, /80 MB/);
+  assert.match(html, /WORKMAN_KEY='your-password'/);
+  assert.doesNotMatch(html, /app-key|friend-key/);
+
+  const head = await worker.fetch(request("/download", { method: "HEAD" }), env);
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
 });
 
 test("returns contract-specific 401 responses before reading protected objects", async () => {
@@ -106,6 +148,13 @@ test("returns contract-specific 401 responses before reading protected objects",
   assert.equal(browser.status, 401);
   assert.equal(browser.headers.get("www-authenticate"), 'Basic realm="workman"');
   assert.match(await browser.text(), /download key is required/i);
+
+  const secondAsset = await worker.fetch(
+    request("/versions/1.2.3/workman-linux-x86_64.AppImage", { headers: { accept: "text/html" } }),
+    env,
+  );
+  assert.equal(secondAsset.status, 401);
+  assert.equal(secondAsset.headers.get("www-authenticate"), 'Basic realm="workman"');
 });
 
 test("accepts Bearer, X-Workman-Key, query, and Basic credentials", async () => {
