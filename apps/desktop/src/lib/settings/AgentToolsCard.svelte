@@ -2,6 +2,7 @@
   import {
     getAgentToolsStore,
     type AgentTool,
+    type AgentToolHealth,
     type AgentToolInput,
     type AgentToolsSnapshot
   } from '../agentTools';
@@ -20,6 +21,7 @@
   let draft = $state<AgentToolInput>(emptyDraft());
   let saving = $state(false);
   let busyId = $state<number | null>(null);
+  let healthById = $state<Record<number, AgentToolHealth>>({});
 
   $effect(() => {
     snapshot = store.current();
@@ -29,6 +31,7 @@
   $effect(() => {
     if (connected) {
       void store.refresh().catch((cause) => onError(message(cause)));
+      void refreshHealth();
     }
   });
 
@@ -42,7 +45,6 @@
   }
 
   function beginEdit(tool: AgentTool): void {
-    if (tool.source === 'config') return;
     draft = {
       id: tool.id,
       name: tool.name,
@@ -64,6 +66,7 @@
         tool_type: draft.tool_type.trim()
       });
       editing = null;
+      await refreshHealth();
     } catch (cause) {
       onError(message(cause));
     } finally {
@@ -72,10 +75,10 @@
   }
 
   async function toggle(tool: AgentTool): Promise<void> {
-    if (tool.source === 'config') return;
     busyId = tool.id;
     try {
       await store.save({ ...tool, enabled: !tool.enabled });
+      await refreshHealth();
     } catch (cause) {
       onError(message(cause));
     } finally {
@@ -84,17 +87,57 @@
   }
 
   async function remove(tool: AgentTool): Promise<void> {
-    if (tool.source === 'config') return;
     if (!window.confirm(`Delete the ${tool.name} agent tool? Existing agents may require it.`)) return;
     busyId = tool.id;
     try {
       await store.remove(tool.id);
       if (editing === tool.id) editing = null;
+      await refreshHealth();
     } catch (cause) {
       onError(message(cause));
     } finally {
       busyId = null;
     }
+  }
+
+  async function move(tool: AgentTool, direction: -1 | 1): Promise<void> {
+    const index = snapshot.tools.findIndex((candidate) => candidate.id === tool.id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= snapshot.tools.length) return;
+    busyId = tool.id;
+    try {
+      const reordered = [...snapshot.tools];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      await store.reorder(reordered.map((candidate) => candidate.id));
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      busyId = null;
+    }
+  }
+
+  async function refreshHealth(): Promise<void> {
+    try {
+      const health = await client.agentToolsHealth();
+      healthById = Object.fromEntries(health.tools.map((tool) => [tool.id, tool]));
+    } catch (cause) {
+      onError(message(cause));
+    }
+  }
+
+  function healthLabel(tool: AgentTool): string {
+    const health = healthById[tool.id];
+    if (!tool.enabled) return 'Disabled';
+    if (!health) return 'Checking…';
+    if (!health.found_on_path) return 'Not found';
+    return health.mcp_launch_supported ? 'Ready' : 'MCP unavailable';
+  }
+
+  function healthClass(tool: AgentTool): string {
+    const health = healthById[tool.id];
+    if (!tool.enabled || !health) return 'neutral';
+    if (!health.found_on_path) return 'missing';
+    return health.mcp_launch_supported ? 'ready' : 'degraded';
   }
 
   function message(cause: unknown): string {
@@ -107,7 +150,7 @@
     <div>
       <span class="eyebrow">Shared registry</span>
       <h2 id="agent-tools-title">Agent tools</h2>
-      <p>Commands available when the Agents section starts a coding session. Config-file entries are read-only here.</p>
+      <p>Edit the launch command and arguments, availability, and order stored in <code>config.yml</code>.</p>
     </div>
     <button class="add" type="button" disabled={!connected || editing !== null} onclick={beginNew}>
       <span aria-hidden="true">+</span> Add tool
@@ -124,13 +167,18 @@
     </div>
   {:else}
     <div class="tool-list">
-      {#each snapshot.tools as tool (tool.id)}
+      {#each snapshot.tools as tool, index (tool.id)}
         <article class:disabled={!tool.enabled}>
+          <div class="order-actions" aria-label={`Reorder ${tool.name}`}>
+            <button type="button" aria-label={`Move ${tool.name} up`} title="Move up" disabled={!connected || busyId !== null || index === 0} onclick={() => void move(tool, -1)}>↑</button>
+            <button type="button" aria-label={`Move ${tool.name} down`} title="Move down" disabled={!connected || busyId !== null || index === snapshot.tools.length - 1} onclick={() => void move(tool, 1)}>↓</button>
+          </div>
           <div class="tool-mark" aria-hidden="true">{tool.name.slice(0, 1).toUpperCase()}</div>
           <div class="tool-copy">
             <div><strong>{tool.name}</strong><span>{tool.tool_type}</span>{#if tool.source === 'config'}<span>config</span>{/if}</div>
             <code>{tool.command}</code>
           </div>
+          <span class={`health-badge ${healthClass(tool)}`} title={healthById[tool.id]?.mcp_launch_note ?? healthLabel(tool)}>{healthLabel(tool)}</span>
           <button
             class:enabled={tool.enabled}
             class="toggle"
@@ -138,12 +186,12 @@
             role="switch"
             aria-checked={tool.enabled}
             title={`${tool.name} · ${tool.enabled ? 'enabled' : 'disabled'}`}
-            disabled={!connected || busyId !== null || tool.source === 'config'}
+            disabled={!connected || busyId !== null}
             onclick={() => void toggle(tool)}
           ><i aria-hidden="true"></i><span>{tool.enabled ? 'Enabled' : 'Disabled'}</span></button>
           <div class="row-actions">
-            <button type="button" disabled={!connected || editing !== null || busyId !== null || tool.source === 'config'} onclick={() => beginEdit(tool)}>Edit</button>
-            <button class="delete" type="button" disabled={!connected || busyId !== null || tool.source === 'config'} onclick={() => void remove(tool)}>Delete</button>
+            <button type="button" disabled={!connected || editing !== null || busyId !== null} onclick={() => beginEdit(tool)}>Edit</button>
+            <button class="delete" type="button" disabled={!connected || busyId !== null} onclick={() => void remove(tool)}>Delete</button>
           </div>
         </article>
       {/each}
@@ -165,12 +213,12 @@
       <div class="fields">
         <label><span>Name</span><input type="text" bind:value={draft.name} placeholder="Claude" /></label>
         <label><span>Tool type</span><input type="text" bind:value={draft.tool_type} list="agent-tool-types" placeholder="claude_code" /></label>
-        <label class="command"><span>Command</span><input type="text" bind:value={draft.command} placeholder="claude" /></label>
-        <datalist id="agent-tool-types"><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="custom"></option></datalist>
+        <label class="command"><span>Command and arguments</span><input type="text" bind:value={draft.command} placeholder="claude --dangerously-skip-permissions" /></label>
+        <datalist id="agent-tool-types"><option value="claude"></option><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="kimi"></option><option value="custom"></option></datalist>
         <label class="enabled-check"><input type="checkbox" bind:checked={draft.enabled} /><span>Available for new agents</span></label>
       </div>
       <footer>
-        <p>The command runs inside the selected project. Extra launch arguments are added from Agents.</p>
+        <p>Saved to the per-user config; unknown top-level settings remain untouched.</p>
         <div><button type="button" class="cancel" onclick={() => (editing = null)}>Cancel</button><button type="submit" class="save" disabled={saving || !draft.name.trim() || !draft.command.trim() || !draft.tool_type.trim()}>{saving ? 'Saving…' : 'Save tool'}</button></div>
       </footer>
     </form>
@@ -183,15 +231,16 @@
   .card > header { justify-content: space-between; gap: 12px; padding: 11px 12px 10px; }
   .card > header > div { flex-wrap: wrap; gap: 5px 10px; }
   .card > header p { width: 100%; margin: 0; color: var(--text-soft); font-size: var(--font-size-sm); }
-  .eyebrow, .add, .tool-copy span, .tool-copy code, .toggle, .row-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
+  .eyebrow, .add, .tool-copy span, .tool-copy code, .health-badge, .toggle, .row-actions, .order-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
   .eyebrow { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
   h2 { margin: 0; color: var(--foreground); font-size: 16px; }
+  .card > header p code { color: #8bc9c0; font-family: 'JetBrains Mono Variable', monospace; }
   .add { gap: 5px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 8px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 650; cursor: pointer; }
   .add span { color: var(--text-soft); font-size: 13px; }
   button:disabled { opacity: 0.42; cursor: default; }
 
   .tool-list { border-top: 1px solid #243e49; }
-  article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px; }
+  article { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px; }
   article:last-child { border-bottom: 0; }
   article.disabled { opacity: 0.58; }
   .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); font-weight: 700; }
@@ -200,6 +249,14 @@
   .tool-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); }
   .tool-copy span { border: 1px solid #304c57; border-radius: 999px; padding: 2px 5px; color: #708a94; font-size: var(--font-size-xs); text-transform: uppercase; }
   .tool-copy code { display: block; overflow: hidden; margin-top: 4px; color: #66808a; font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+
+  .order-actions { display: grid; gap: 2px; }
+  .order-actions button { width: 20px; height: 16px; border: 1px solid #29444e; border-radius: 2px; padding: 0; background: transparent; color: #78909a; font-size: 10px; line-height: 14px; cursor: pointer; }
+  .order-actions button:hover:not(:disabled) { border-color: #55727b; color: #cbd9dc; }
+  .health-badge { border: 1px solid #3b4a50; border-radius: 999px; padding: 3px 7px; color: #839098; font-size: var(--font-size-xs); white-space: nowrap; }
+  .health-badge.ready { border-color: #356a63; background: rgb(99 215 197 / 8%); color: var(--signal); }
+  .health-badge.degraded { border-color: #6e563c; background: rgb(224 165 87 / 9%); color: var(--warning); }
+  .health-badge.missing { border-color: #70443f; background: rgb(231 110 101 / 8%); color: var(--fault); }
 
   .toggle { gap: 5px; border: 0; background: transparent; color: #718993; font-size: var(--font-size-xs); cursor: pointer; }
   .toggle i { position: relative; width: 25px; height: 13px; border: 1px solid #405862; border-radius: 999px; background: #152832; }
@@ -239,5 +296,5 @@
   .cancel { background: transparent; color: #899da5; }
   .save { background: var(--signal); color: #071a20; font-weight: 680; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 760px) { article { grid-template-columns: auto minmax(0, 1fr); } .toggle, .row-actions { grid-column: 2; justify-self: start; } .fields { grid-template-columns: 1fr; } .command, .enabled-check { grid-column: auto; } .editor footer { align-items: flex-start; flex-direction: column; } }
+  @media (max-width: 860px) { article { grid-template-columns: auto auto minmax(0, 1fr); } .health-badge, .toggle, .row-actions { grid-column: 3; justify-self: start; } .fields { grid-template-columns: 1fr; } .command, .enabled-check { grid-column: auto; } .editor footer { align-items: flex-start; flex-direction: column; } }
 </style>

@@ -103,6 +103,7 @@ export interface AgentToolsClient {
   deepCheckAgentTool(projectId: number, agentToolId: number): Promise<AgentToolDeepCheck>;
   saveAgentTool(tool: AgentToolInput): Promise<AgentTool>;
   deleteAgentTool(agentToolId: number): Promise<DeleteAgentToolResult>;
+  reorderAgentTools(agentToolIds: number[]): Promise<AgentTool[]>;
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult>;
   submitInput(processId: number, input: string): Promise<ProcessView>;
 }
@@ -156,9 +157,10 @@ export class AgentToolsStore {
 
   async save(input: AgentToolInput): Promise<AgentTool> {
     const saved = await this.client.saveAgentTool(input);
-    const tools = [...this.snapshot.tools.filter((tool) => tool.id !== saved.id), saved].sort(
-      (left, right) => left.id - right.id
-    );
+    const index = this.snapshot.tools.findIndex((tool) => tool.id === saved.id);
+    const tools = [...this.snapshot.tools];
+    if (index >= 0) tools[index] = saved;
+    else tools.push(saved);
     this.publish({ tools, loading: false, error: null });
     return saved;
   }
@@ -173,6 +175,12 @@ export class AgentToolsStore {
       });
     }
     return result;
+  }
+
+  async reorder(agentToolIds: number[]): Promise<AgentTool[]> {
+    const tools = await this.client.reorderAgentTools(agentToolIds);
+    this.publish({ tools, loading: false, error: null });
+    return tools;
   }
 
   private publish(snapshot: AgentToolsSnapshot): void {
