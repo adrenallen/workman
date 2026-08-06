@@ -24,6 +24,7 @@
   import DaemonCard from './settings/DaemonCard.svelte';
   import HotkeysCard from './settings/HotkeysCard.svelte';
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
+  import NotificationsCard from './settings/NotificationsCard.svelte';
   import OpenersCard from './settings/OpenersCard.svelte';
   import RuntimeDoctor from './settings/RuntimeDoctor.svelte';
   import WorktreeHealthCard from './settings/WorktreeHealthCard.svelte';
@@ -226,6 +227,8 @@
         <SidebarCard />
       {:else if $settingsSection === 'hotkeys'}
         <HotkeysCard />
+      {:else if $settingsSection === 'notifications'}
+        <NotificationsCard />
       {:else if $settingsSection === 'agents'}
         <div class="section-stack">
           <AgentToolsCard {client} connected={connection.status === 'connected'} {onError} />

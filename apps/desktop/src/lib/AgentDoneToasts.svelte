@@ -1,5 +1,6 @@
 <script lang="ts">
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
   import XIcon from '@lucide/svelte/icons/x';
 
   import IconButton from './components/ds/IconButton.svelte';
@@ -9,6 +10,7 @@
     processId: number;
     projectId: number;
     name: string;
+    kind: 'agent_done' | 'needs_input';
   }
 
   interface Props {
@@ -20,19 +22,27 @@
   let { notices, onOpen, onDismiss }: Props = $props();
 </script>
 
-<section class="toast-stack" aria-label="Agent completion notifications" aria-live="polite">
+<section class="toast-stack" aria-label="Agent notifications" aria-live="polite">
   {#each notices as notice (notice.id)}
     <article class="done-toast">
       <button
         class="toast-open"
         type="button"
-        aria-label={`Open ${notice.name}, which finished with unread output`}
+        aria-label={notice.kind === 'needs_input'
+          ? `Open ${notice.name}, which needs input`
+          : `Open ${notice.name}, which finished with unread output`}
         onclick={() => onOpen(notice)}
       >
-        <span class="toast-icon" aria-hidden="true"><CircleCheckIcon size={18} strokeWidth={2} /></span>
+        <span class="toast-icon" aria-hidden="true">
+          {#if notice.kind === 'needs_input'}
+            <CircleHelpIcon size={18} strokeWidth={2} />
+          {:else}
+            <CircleCheckIcon size={18} strokeWidth={2} />
+          {/if}
+        </span>
         <span class="toast-copy">
-          <strong>{notice.name} finished</strong>
-          <small>Unread output · click to view</small>
+          <strong>{notice.kind === 'needs_input' ? `${notice.name} needs input` : `${notice.name} finished`}</strong>
+          <small>{notice.kind === 'needs_input' ? 'Waiting for you · click to view' : 'Unread output · click to view'}</small>
         </span>
       </button>
       <IconButton label={`Dismiss ${notice.name} notification`} onclick={() => onDismiss(notice.id)}>

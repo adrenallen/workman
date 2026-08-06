@@ -1,5 +1,6 @@
 <script lang="ts">
   import BotIcon from '@lucide/svelte/icons/bot';
+  import BellIcon from '@lucide/svelte/icons/bell';
   import InfoIcon from '@lucide/svelte/icons/info';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
   import MonitorIcon from '@lucide/svelte/icons/monitor';
@@ -22,6 +23,7 @@
     terminal: SquareTerminalIcon,
     sidebar: PanelLeftIcon,
     hotkeys: KeyboardIcon,
+    notifications: BellIcon,
     agents: BotIcon,
     tools: MonitorIcon,
     mcp: PlugIcon,

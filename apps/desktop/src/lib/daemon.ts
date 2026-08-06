@@ -57,7 +57,7 @@ export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'cra
 export type ProcessKind = 'command' | 'terminal' | 'agent';
 export type ProcessSource = 'yml' | 'local';
 export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'exited';
-export type NotificationType = 'agent_done' | 'process_crashed' | 'timer_fired';
+export type NotificationType = 'agent_done' | 'needs_input' | 'process_crashed' | 'timer_fired';
 
 export interface Notification {
   id: number;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import BellIcon from '@lucide/svelte/icons/bell';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
@@ -55,6 +56,7 @@
     switch (notification.type) {
       case 'process_crashed': return 'Process crashed';
       case 'timer_fired': return 'Timer fired';
+      case 'needs_input': return 'Agent needs input';
       default: return 'Agent finished';
     }
   }
@@ -134,7 +136,11 @@
             <article class:read={notification.read_at !== null}>
               <button type="button" class="notification-open" onclick={() => choose(notification)}>
                 <span class="type-icon" aria-hidden="true">
-                  <CircleCheckIcon size={16} strokeWidth={1.8} />
+                  {#if notification.type === 'needs_input'}
+                    <CircleHelpIcon size={16} strokeWidth={1.8} />
+                  {:else}
+                    <CircleCheckIcon size={16} strokeWidth={1.8} />
+                  {/if}
                 </span>
                 <span class="notification-copy">
                   <span class="notification-meta">

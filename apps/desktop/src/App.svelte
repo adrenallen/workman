@@ -86,6 +86,12 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import {
+    deliverNativeNotification,
+    listenForNativeNotificationActions,
+    refreshNativeNotificationPermission,
+    syncDockUnreadBadge
+  } from './lib/nativeNotifications';
   import type { ProjectSettingsInput } from './lib/projectAppearance';
   import {
     NATIVE_MENU_EVENT,
@@ -241,8 +247,12 @@
   let notificationBusy = $state(false);
   let notificationRequest = 0;
   let notificationUnreadSignature: string | null = null;
+  let nativeNotificationBaselineReady = false;
+  let nativeDeliveryQueue = Promise.resolve();
+  let dockUnreadCount = -1;
   const reconciledWorktreeOperations = new Set<string>();
   const notifiedUnreadProcessIds = new Set<number>();
+  const seenNativeNotificationIds = new Set<number>();
   const markReadPending = new Set<number>();
   let removeWorktreeDialog = $state<{
     project: Project;
@@ -314,6 +324,13 @@
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
+  });
+
+  $effect(() => {
+    const unreadCount = notifications.filter((notification) => notification.read_at === null).length;
+    if (unreadCount === dockUnreadCount) return;
+    dockUnreadCount = unreadCount;
+    void syncDockUnreadBadge(unreadCount);
   });
 
   $effect(() => {
@@ -410,6 +427,14 @@
       if (active) stopNativeMenu = stop;
       else stop();
     }).catch(reportError);
+    let stopNativeNotifications = (): void => {};
+    void listenForNativeNotificationActions((notificationId) => {
+      if (active) void openNativeNotification(notificationId);
+    }).then((stop) => {
+      if (active) stopNativeNotifications = stop;
+      else stop();
+    }).catch(reportError);
+    void refreshNativeNotificationPermission();
     const projectTimer = setInterval(() => {
       if (active && connection.status === 'connected' && !busy) void refreshProjects();
     }, 5000);
@@ -423,6 +448,15 @@
         void refreshCoordination(selectedProject.id, false);
       }
     }, 2500);
+    const notificationTimer = setInterval(() => {
+      if (
+        active
+        && connection.status === 'connected'
+        && connection.version_compatible
+      ) {
+        void refreshNotifications();
+      }
+    }, 1000);
 
     void client
       .start(
@@ -436,9 +470,11 @@
       active = false;
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
+      clearInterval(notificationTimer);
       stopStatuses();
       stopNavigation();
       stopNativeMenu();
+      stopNativeNotifications();
       client.close();
     };
   });
@@ -656,7 +692,22 @@
     const request = ++notificationRequest;
     try {
       const next = await client.notifications();
-      if (request === notificationRequest) notifications = next;
+      if (request !== notificationRequest) return;
+      const fresh = nativeNotificationBaselineReady
+        ? next
+            .filter((notification) =>
+              notification.read_at === null && !seenNativeNotificationIds.has(notification.id)
+            )
+            .sort((left, right) => left.created_at - right.created_at || left.id - right.id)
+        : [];
+      for (const notification of next) seenNativeNotificationIds.add(notification.id);
+      nativeNotificationBaselineReady = true;
+      notifications = next;
+      if (fresh.length > 0) {
+        nativeDeliveryQueue = nativeDeliveryQueue.catch(() => undefined).then(async () => {
+          for (const notification of fresh) await deliverNativeNotification(notification);
+        });
+      }
     } catch (cause) {
       if (request === notificationRequest) reportError(cause);
     }
@@ -720,7 +771,10 @@
       appNavigation.navigate({
         type: 'item',
         selection: projectTreeSelection(
-          process?.kind ?? (notification.type === 'agent_done' ? 'agent' : 'command'),
+          process?.kind
+            ?? (notification.type === 'agent_done' || notification.type === 'needs_input'
+              ? 'agent'
+              : 'command'),
           notification.process_id,
           projectId,
           process?.name ?? notification.body
@@ -734,6 +788,15 @@
     } else if (projectId !== null) {
       appNavigation.navigate({ type: 'project', projectId }, 'api');
     }
+  }
+
+  async function openNativeNotification(notificationId: number): Promise<void> {
+    let notification = notifications.find((candidate) => candidate.id === notificationId) ?? null;
+    if (!notification) {
+      await refreshNotifications();
+      notification = notifications.find((candidate) => candidate.id === notificationId) ?? null;
+    }
+    if (notification) openNotification(notification);
   }
 
   async function markAgentRead(processId: number, projectId: number): Promise<void> {
@@ -783,13 +846,17 @@
       }
       if (notifiedUnreadProcessIds.has(process.id)) continue;
       notifiedUnreadProcessIds.add(process.id);
+      const kind: AgentDoneNotice['kind'] = process.agent_state.needs_input
+        ? 'needs_input'
+        : 'agent_done';
       agentDoneNotices = [
         ...agentDoneNotices,
         {
           id: `${process.id}:${++agentDoneNoticeSequence}`,
           processId: process.id,
           projectId: process.project_id,
-          name: process.name
+          name: process.name,
+          kind
         }
       ].slice(-4);
     }
