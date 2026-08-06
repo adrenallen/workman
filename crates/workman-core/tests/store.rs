@@ -79,6 +79,119 @@ fn fresh_database_migrates_to_current_schema() {
 }
 
 #[test]
+fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_tools() {
+    let store = Store::open_in_memory().expect("open store");
+    let expected = [
+        ("Claude", "claude --dangerously-skip-permissions"),
+        ("Codex", "codex --dangerously-bypass-approvals-and-sandbox"),
+        ("Gemini", "gemini --approval-mode=yolo"),
+        ("OpenCode", "opencode --auto"),
+        ("Kimi", "kimi --yolo"),
+        (
+            "DeepSeek v4 flash",
+            "opencode --auto --model deepseek/deepseek-v4-flash",
+        ),
+    ];
+    let fresh = store.list_agent_tools().expect("list fresh defaults");
+    assert_eq!(fresh.len(), expected.len());
+    for (name, command) in expected {
+        assert_eq!(
+            fresh
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| tool.command.as_str()),
+            Some(command),
+            "fresh {name} command"
+        );
+    }
+
+    store
+        .connection()
+        .execute_batch(
+            "UPDATE agent_tools SET command = 'claude', enabled = 0, source = 'config', sort_order = 42 WHERE name = 'Claude';
+             UPDATE agent_tools SET command = 'codex' WHERE name = 'Codex';
+             UPDATE agent_tools SET command = 'gemini --yolo' WHERE name = 'Gemini';
+             UPDATE agent_tools SET command = 'opencode' WHERE name = 'OpenCode';
+             UPDATE agent_tools SET command = 'kimi' WHERE name = 'Kimi';
+             UPDATE agent_tools SET command = 'opencode --model deepseek/deepseek-v4-flash' WHERE name = 'DeepSeek v4 flash';
+             INSERT INTO agent_tools (name, command, tool_type, enabled, source, sort_order)
+             VALUES ('Custom Codex', 'codex', 'codex', 0, 'local', 43),
+                    ('Claude custom', 'claude --safe', 'claude_code', 1, 'local', 44);",
+        )
+        .expect("arrange legacy defaults and custom tools");
+    store
+        .connection()
+        .execute_batch(include_str!(
+            "../migrations/0014_agent_tool_yolo_defaults.sql"
+        ))
+        .expect("reapply yolo repair migration");
+
+    let migrated = store.list_agent_tools().expect("list migrated defaults");
+    for (name, command) in expected {
+        assert_eq!(
+            migrated
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| tool.command.as_str()),
+            Some(command),
+            "migrated {name} command"
+        );
+    }
+    let claude = migrated.iter().find(|tool| tool.name == "Claude").unwrap();
+    assert!(!claude.enabled);
+    assert_eq!(claude.source, AgentToolSource::Config);
+    let claude_sort_order: i64 = store
+        .connection()
+        .query_row(
+            "SELECT sort_order FROM agent_tools WHERE name = 'Claude'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claude_sort_order, 42);
+    assert_eq!(
+        migrated
+            .iter()
+            .find(|tool| tool.name == "Custom Codex")
+            .unwrap()
+            .command,
+        "codex"
+    );
+    assert_eq!(
+        migrated
+            .iter()
+            .find(|tool| tool.name == "Claude custom")
+            .unwrap()
+            .command,
+        "claude --safe"
+    );
+
+    store
+        .connection()
+        .execute(
+            "UPDATE agent_tools SET command = 'claude --model private' WHERE name = 'Claude'",
+            [],
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute_batch(include_str!(
+            "../migrations/0014_agent_tool_yolo_defaults.sql"
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .list_agent_tools()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.name == "Claude")
+            .unwrap()
+            .command,
+        "claude --model private"
+    );
+}
+
+#[test]
 fn version_one_database_migrates_mcp_identity_schema() {
     let connection = rusqlite::Connection::open_in_memory().expect("open connection");
     connection

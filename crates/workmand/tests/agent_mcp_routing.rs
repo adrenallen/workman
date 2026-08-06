@@ -53,7 +53,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
         AgentTool {
             id: 101,
             name: "Real Gemini".into(),
-            command: "gemini".into(),
+            command: "gemini --approval-mode=yolo".into(),
             tool_type: "gemini".into(),
             enabled: true,
             source: AgentToolSource::Local,
@@ -61,7 +61,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
         AgentTool {
             id: 102,
             name: "Real OpenCode".into(),
-            command: "opencode".into(),
+            command: "opencode --auto".into(),
             tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,
@@ -93,7 +93,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
         AgentTool {
             id: 106,
             name: "Real DeepSeek v4 flash".into(),
-            command: "opencode --model deepseek/deepseek-v4-flash".into(),
+            command: "opencode --auto --model deepseek/deepseek-v4-flash".into(),
             tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,

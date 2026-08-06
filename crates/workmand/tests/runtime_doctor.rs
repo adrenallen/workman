@@ -96,11 +96,11 @@ fn write_user_config(path: &Path) -> Result<(), Box<dyn Error>> {
         path,
         "agent_tools:\n\
          \x20 - name: Gemini\n\
-         \x20   command: gemini\n\
+         \x20   command: gemini --approval-mode=yolo\n\
          \x20   tool_type: gemini\n\
          \x20   enabled: true\n\
          \x20 - name: OpenCode\n\
-         \x20   command: opencode\n\
+         \x20   command: opencode --auto\n\
          \x20   tool_type: opencode\n\
          \x20   enabled: true\n\
          \x20 - name: Kimi\n\
@@ -116,7 +116,7 @@ fn write_user_config(path: &Path) -> Result<(), Box<dyn Error>> {
          \x20   tool_type: codex\n\
          \x20   enabled: true\n\
          \x20 - name: DeepSeek v4 flash\n\
-         \x20   command: opencode --model deepseek/deepseek-v4-flash\n\
+         \x20   command: opencode --auto --model deepseek/deepseek-v4-flash\n\
          \x20   tool_type: opencode\n\
          \x20   enabled: true\n",
     )?;

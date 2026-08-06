@@ -73,10 +73,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent_tool_sort_order",
         include_str!("../migrations/0013_agent_tool_sort_order.sql"),
     ),
+    (
+        14,
+        "agent_tool_yolo_defaults",
+        include_str!("../migrations/0014_agent_tool_yolo_defaults.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 14;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

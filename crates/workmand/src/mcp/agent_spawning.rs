@@ -132,6 +132,12 @@ struct AgentLaunchPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentLaunchPurpose {
+    Normal,
+    DeepCheck,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum McpLaunchAdapter {
     Claude,
     Codex,
@@ -569,6 +575,30 @@ pub(crate) fn spawn_registered_agent(
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
 ) -> Result<SpawnResult, String> {
+    spawn_registered_agent_for(
+        registry,
+        project,
+        agent_tool_id,
+        name,
+        extra_args,
+        mcp_url,
+        auto_acknowledge_dialogs,
+        spawned_by_process_id,
+        AgentLaunchPurpose::Normal,
+    )
+}
+
+fn spawn_registered_agent_for(
+    registry: &mut ProcessRegistry,
+    project: &Project,
+    agent_tool_id: AgentToolId,
+    name: Option<String>,
+    extra_args: Vec<String>,
+    mcp_url: &str,
+    auto_acknowledge_dialogs: bool,
+    spawned_by_process_id: Option<ProcessId>,
+    purpose: AgentLaunchPurpose,
+) -> Result<SpawnResult, String> {
     let tool = load_agent_tool(registry, agent_tool_id)?;
     if !tool.enabled {
         return Err(format!(
@@ -582,7 +612,13 @@ pub(crate) fn spawn_registered_agent(
             tool.id, tool.name
         ));
     }
-    let launch = prepare_agent_launch(&tool.command, &tool.tool_type, mcp_url, &extra_args)?;
+    let launch = prepare_agent_launch(
+        &tool.command,
+        &tool.tool_type,
+        mcp_url,
+        &extra_args,
+        purpose,
+    )?;
     let name = process_name(registry, project.id, name, &tool.name)?;
     let tool_type = tool.tool_type;
     let result = spawn(
@@ -688,7 +724,7 @@ pub(crate) async fn deep_check_registered_agent(
     };
     let process_id = {
         let mut registry = registry.lock().await;
-        let spawned = spawn_registered_agent(
+        let spawned = spawn_registered_agent_for(
             &mut registry,
             &project,
             agent_tool_id,
@@ -697,6 +733,7 @@ pub(crate) async fn deep_check_registered_agent(
             mcp_url,
             true,
             spawned_by_process_id,
+            AgentLaunchPurpose::DeepCheck,
         )?;
         if submit_prompt {
             if let Err(error) = registry.submit_input(spawned.process_id, prompt.as_bytes()) {
@@ -948,12 +985,13 @@ fn prepare_agent_launch(
     tool_type: &str,
     mcp_url: &str,
     extra_args: &[String],
+    purpose: AgentLaunchPurpose,
 ) -> Result<AgentLaunchPlan, String> {
     let adapter = mcp_launch_adapter(tool_type);
     let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
     let command = match adapter {
         McpLaunchAdapter::Claude | McpLaunchAdapter::Codex => {
-            let mut launch_args = mcp_launch_args(adapter, mcp_url);
+            let mut launch_args = mcp_launch_args(adapter, mcp_url, purpose);
             launch_args.extend(extra_args.iter().cloned());
             command_with_args(command, &launch_args)?
         }
@@ -990,38 +1028,58 @@ fn mcp_launch_adapter(tool_type: &str) -> McpLaunchAdapter {
     }
 }
 
-fn mcp_launch_args(adapter: McpLaunchAdapter, mcp_url: &str) -> Vec<String> {
+fn mcp_launch_args(
+    adapter: McpLaunchAdapter,
+    mcp_url: &str,
+    purpose: AgentLaunchPurpose,
+) -> Vec<String> {
+    // Every launch gets the process-scoped connector. Authorization narrowing belongs only to
+    // the fixed whoami deep check; a normal launch must honor the registered command's policy.
     match adapter {
-        McpLaunchAdapter::Claude => vec![
-            "--mcp-config".to_owned(),
-            json!({
-                "mcpServers": {
-                    "workman": {
-                        "type": "http",
-                        "url": mcp_url,
-                        "headers": {
-                            "x-workman-mcp-token": "${WORKMAN_MCP_TOKEN}"
+        McpLaunchAdapter::Claude => {
+            let mut args = vec![
+                "--mcp-config".to_owned(),
+                json!({
+                    "mcpServers": {
+                        "workman": {
+                            "type": "http",
+                            "url": mcp_url,
+                            "headers": {
+                                "x-workman-mcp-token": "${WORKMAN_MCP_TOKEN}"
+                            }
                         }
                     }
-                }
-            })
-            .to_string(),
-            "--strict-mcp-config".to_owned(),
-            "--allowedTools".to_owned(),
-            "mcp__workman__whoami".to_owned(),
-        ],
-        McpLaunchAdapter::Codex => vec![
-            "-c".to_owned(),
-            format!(
-                "mcp_servers.workman.url={}",
-                serde_json::to_string(mcp_url).expect("MCP URL serializes as a TOML string")
-            ),
-            "-c".to_owned(),
-            "mcp_servers.workman.env_http_headers={\"x-workman-mcp-token\"=\"WORKMAN_MCP_TOKEN\"}"
-                .to_owned(),
-            "-c".to_owned(),
-            "mcp_servers.workman.tools.whoami.approval_mode=\"approve\"".to_owned(),
-        ],
+                })
+                .to_string(),
+                "--strict-mcp-config".to_owned(),
+            ];
+            if purpose == AgentLaunchPurpose::DeepCheck {
+                args.extend([
+                    "--allowedTools".to_owned(),
+                    "mcp__workman__whoami".to_owned(),
+                ]);
+            }
+            args
+        }
+        McpLaunchAdapter::Codex => {
+            let mut args = vec![
+                "-c".to_owned(),
+                format!(
+                    "mcp_servers.workman.url={}",
+                    serde_json::to_string(mcp_url).expect("MCP URL serializes as a TOML string")
+                ),
+                "-c".to_owned(),
+                "mcp_servers.workman.env_http_headers={\"x-workman-mcp-token\"=\"WORKMAN_MCP_TOKEN\"}"
+                    .to_owned(),
+            ];
+            if purpose == AgentLaunchPurpose::DeepCheck {
+                args.extend([
+                    "-c".to_owned(),
+                    "mcp_servers.workman.tools.whoami.approval_mode=\"approve\"".to_owned(),
+                ]);
+            }
+            args
+        }
         _ => Vec::new(),
     }
 }
@@ -1176,8 +1234,12 @@ mod tests {
             })
             .unwrap();
         let tools = load_agent_tools(&registry).unwrap();
-        assert_eq!(tools.len(), 5);
-        assert!(tools.iter().any(|tool| tool.command == "claude"));
+        assert_eq!(tools.len(), 7);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.command == "claude --dangerously-skip-permissions")
+        );
         assert!(tools.iter().any(|tool| tool.command == "/tmp/fake-agent"));
     }
 
@@ -1237,6 +1299,7 @@ mod tests {
             "claude_code",
             "http://127.0.0.1:43123/mcp",
             &["--model".into(), "opus".into()],
+            AgentLaunchPurpose::Normal,
         )
         .unwrap();
         let command = launch.command;
@@ -1245,8 +1308,22 @@ mod tests {
         assert!(command.contains("http://127.0.0.1:43123/mcp"));
         assert!(command.contains("x-workman-mcp-token"));
         assert!(command.contains("${WORKMAN_MCP_TOKEN}"));
-        assert!(command.contains("--allowedTools mcp__workman__whoami"));
+        assert!(!command.contains("--allowedTools"));
         assert!(command.ends_with("--model opus"));
+
+        let deep_check = prepare_agent_launch(
+            "claude --dangerously-skip-permissions",
+            "claude_code",
+            "http://127.0.0.1:43123/mcp",
+            &[],
+            AgentLaunchPurpose::DeepCheck,
+        )
+        .unwrap();
+        assert!(
+            deep_check
+                .command
+                .contains("--allowedTools mcp__workman__whoami")
+        );
     }
 
     #[test]
@@ -1256,6 +1333,7 @@ mod tests {
             "codex",
             "http://127.0.0.1:43124/mcp",
             &["--model".into(), "gpt-test".into()],
+            AgentLaunchPurpose::Normal,
         )
         .unwrap();
         let command = launch.command;
@@ -1263,17 +1341,32 @@ mod tests {
         assert!(command.contains("http://127.0.0.1:43124/mcp"));
         assert!(command.contains("mcp_servers.workman.env_http_headers="));
         assert!(command.contains("WORKMAN_MCP_TOKEN"));
-        assert!(command.contains("mcp_servers.workman.tools.whoami.approval_mode=\"approve\""));
+        assert!(!command.contains("approval_mode"));
         assert!(command.ends_with("--model gpt-test"));
+
+        let deep_check = prepare_agent_launch(
+            "codex --dangerously-bypass-approvals-and-sandbox",
+            "codex",
+            "http://127.0.0.1:43124/mcp",
+            &[],
+            AgentLaunchPurpose::DeepCheck,
+        )
+        .unwrap();
+        assert!(
+            deep_check
+                .command
+                .contains("mcp_servers.workman.tools.whoami.approval_mode=\"approve\"")
+        );
     }
 
     #[test]
     fn gemini_launch_uses_an_ephemeral_system_settings_file() {
         let launch = prepare_agent_launch(
-            "gemini --yolo",
+            "gemini --approval-mode=yolo",
             "gemini",
             "http://127.0.0.1:43125/mcp",
             &["--model".into(), "gemini-test".into()],
+            AgentLaunchPurpose::Normal,
         )
         .unwrap();
         assert!(launch.command.contains("GEMINI_CLI_SYSTEM_SETTINGS_PATH"));
@@ -1281,22 +1374,27 @@ mod tests {
         assert!(launch.command.contains("http://127.0.0.1:43125/mcp"));
         assert!(launch.command.contains("x-workman-mcp-token"));
         assert!(launch.command.contains("$WORKMAN_MCP_TOKEN"));
-        assert!(launch.command.contains("gemini --yolo --model gemini-test"));
+        assert!(
+            launch
+                .command
+                .contains("gemini --approval-mode=yolo --model gemini-test")
+        );
         assert!(!launch.command.contains(".gemini/settings.json"));
     }
 
     #[test]
     fn opencode_and_model_variants_use_inline_runtime_config() {
         let launch = prepare_agent_launch(
-            "opencode --model deepseek/deepseek-v4-flash",
+            "opencode --auto --model deepseek/deepseek-v4-flash",
             "opencode",
             "http://127.0.0.1:43126/mcp",
             &["run".into(), "call workman".into()],
+            AgentLaunchPurpose::Normal,
         )
         .unwrap();
         assert_eq!(
             launch.command,
-            "opencode --model deepseek/deepseek-v4-flash run 'call workman'"
+            "opencode --auto --model deepseek/deepseek-v4-flash run 'call workman'"
         );
         let config: serde_json::Value = serde_json::from_str(
             launch
@@ -1322,6 +1420,7 @@ mod tests {
             "kimi",
             "http://127.0.0.1:43127/mcp",
             &["--model".into(), "kimi-test".into()],
+            AgentLaunchPurpose::Normal,
         )
         .unwrap();
         assert_eq!(launch.command, "kimi --yolo --model kimi-test");

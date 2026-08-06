@@ -18,10 +18,10 @@ use workmand::{Discovery, discovery_path};
 
 const SIX_AGENTS: &str = r#"agent_tools:
   - name: Gemini
-    command: gemini
+    command: gemini --approval-mode=yolo
     tool_type: gemini
   - name: OpenCode
-    command: opencode
+    command: opencode --auto
     tool_type: opencode
   - name: Kimi
     command: kimi --yolo
@@ -33,7 +33,7 @@ const SIX_AGENTS: &str = r#"agent_tools:
     command: codex --dangerously-bypass-approvals-and-sandbox
     tool_type: codex
   - name: DeepSeek v4 flash
-    command: opencode --model deepseek/deepseek-v4-flash
+    command: opencode --auto --model deepseek/deepseek-v4-flash
     tool_type: opencode
 "#;
 
@@ -183,8 +183,8 @@ async fn settings_mutations_persist_to_config_and_survive_isolated_daemon_restar
         })
         .collect::<HashMap<_, _>>();
     for (name, command, tool_type) in [
-        ("Gemini", "gemini", "gemini"),
-        ("OpenCode", "opencode", "opencode"),
+        ("Gemini", "gemini --approval-mode=yolo", "gemini"),
+        ("OpenCode", "opencode --auto", "opencode"),
         ("Kimi", "kimi --yolo", "kimi"),
         ("Claude", "claude --dangerously-skip-permissions", "claude"),
         (
@@ -194,7 +194,7 @@ async fn settings_mutations_persist_to_config_and_survive_isolated_daemon_restar
         ),
         (
             "DeepSeek v4 flash",
-            "opencode --model deepseek/deepseek-v4-flash",
+            "opencode --auto --model deepseek/deepseek-v4-flash",
             "opencode",
         ),
     ] {

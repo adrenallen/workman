@@ -22,6 +22,52 @@ pub const WORKMAN_CONFIG_ENV: &str = "WORKMAN_CONFIG";
 /// Filename used beneath the platform-specific `workman` config directory.
 pub const USER_CONFIG_FILE: &str = "config.yml";
 
+struct KnownAgentDefault {
+    name: &'static str,
+    tool_types: &'static [&'static str],
+    legacy_commands: &'static [&'static str],
+    command: &'static str,
+}
+
+const KNOWN_AGENT_DEFAULTS: &[KnownAgentDefault] = &[
+    KnownAgentDefault {
+        name: "Claude",
+        tool_types: &["claude", "claude_code"],
+        legacy_commands: &["claude"],
+        command: "claude --dangerously-skip-permissions",
+    },
+    KnownAgentDefault {
+        name: "Codex",
+        tool_types: &["codex"],
+        legacy_commands: &["codex"],
+        command: "codex --dangerously-bypass-approvals-and-sandbox",
+    },
+    KnownAgentDefault {
+        name: "Gemini",
+        tool_types: &["gemini", "gemini_cli"],
+        legacy_commands: &["gemini", "gemini --yolo"],
+        command: "gemini --approval-mode=yolo",
+    },
+    KnownAgentDefault {
+        name: "OpenCode",
+        tool_types: &["opencode", "open_code"],
+        legacy_commands: &["opencode"],
+        command: "opencode --auto",
+    },
+    KnownAgentDefault {
+        name: "Kimi",
+        tool_types: &["kimi", "kimi_code"],
+        legacy_commands: &["kimi"],
+        command: "kimi --yolo",
+    },
+    KnownAgentDefault {
+        name: "DeepSeek v4 flash",
+        tool_types: &["opencode", "open_code"],
+        legacy_commands: &["opencode --model deepseek/deepseek-v4-flash"],
+        command: "opencode --auto --model deepseek/deepseek-v4-flash",
+    },
+];
+
 /// Top-level per-user workman configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UserConfig {
@@ -221,13 +267,69 @@ pub fn sync_user_config_file(
     store: &Store,
     path: impl AsRef<Path>,
 ) -> Result<AgentToolSyncReport, UserConfigError> {
-    let yaml = match fs::read_to_string(path) {
-        Ok(yaml) => yaml,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let config = parse_user_config(&yaml)?;
+    let path = path.as_ref();
+    let (source, mut root) = read_user_config_document(path)?;
+    let migrated = migrate_known_agent_defaults(&mut root)?;
+    let config = validated_document(&root)?;
+    if !migrated.is_empty() {
+        write_user_config_document(path, &source, &root)?;
+        for (name, old_command, new_command) in migrated {
+            eprintln!(
+                "workman daemon: migrated default agent {name:?} in {} from {old_command:?} to {new_command:?}",
+                path.display()
+            );
+        }
+    }
     sync_user_agent_tools(store, &config.agent_tools)
+}
+
+fn migrate_known_agent_defaults(
+    root: &mut serde_yaml::Mapping,
+) -> Result<Vec<(String, String, String)>, UserConfigError> {
+    let Some(entries) = root
+        .get_mut(serde_yaml::Value::String("agent_tools".to_owned()))
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut migrated = Vec::new();
+    for entry in entries {
+        let Some(entry) = entry.as_mapping_mut() else {
+            return Err(UserConfigError::Invalid(
+                "each agent_tools entry must be a mapping".to_owned(),
+            ));
+        };
+        let string_field = |key: &str| {
+            entry
+                .get(serde_yaml::Value::String(key.to_owned()))
+                .and_then(serde_yaml::Value::as_str)
+        };
+        let (Some(name), Some(tool_type), Some(command)) = (
+            string_field("name"),
+            string_field("tool_type"),
+            string_field("command"),
+        ) else {
+            continue;
+        };
+        let Some(known) = KNOWN_AGENT_DEFAULTS.iter().find(|known| {
+            name == known.name
+                && known.tool_types.contains(&tool_type)
+                && known.legacy_commands.contains(&command)
+        }) else {
+            continue;
+        };
+        let (name, old_command, new_command) = (
+            name.to_owned(),
+            command.to_owned(),
+            known.command.to_owned(),
+        );
+        entry.insert(
+            serde_yaml::Value::String("command".to_owned()),
+            serde_yaml::Value::String(new_command.clone()),
+        );
+        migrated.push((name, old_command, new_command));
+    }
+    Ok(migrated)
 }
 
 /// Add or update one registry row at its source-of-truth YAML file.
@@ -774,6 +876,7 @@ mod tests {
         UserAgentTool, delete_agent_tool_from_settings_at, parse_user_config,
         reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at,
         save_user_shell_from_settings_at, select_update_key, sync_user_agent_tools,
+        sync_user_config_file,
     };
 
     fn configured(name: &str, command: &str, tool_type: Option<&str>) -> UserAgentTool {
@@ -953,6 +1056,80 @@ mod tests {
         let yaml = std::fs::read_to_string(path).unwrap();
         assert!(!yaml.contains("Added agent"));
         assert!(yaml.contains("# keep this heading"));
+    }
+
+    #[test]
+    fn startup_migrates_only_exact_known_bare_defaults_and_preserves_other_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "# keep heading\nagent_tools:\n  - name: Claude\n    command: claude\n    tool_type: claude_code\n  - name: Codex\n    command: codex\n    tool_type: codex\n  - name: Gemini\n    command: gemini --yolo\n    tool_type: gemini\n  - name: OpenCode\n    command: opencode\n    tool_type: opencode\n  - name: Kimi\n    command: kimi\n    tool_type: kimi\n  - name: DeepSeek v4 flash\n    command: opencode --model deepseek/deepseek-v4-flash\n    tool_type: opencode\n  - name: Custom Codex\n    command: codex\n    tool_type: codex\n  - name: Custom OpenCode\n    command: opencode --model private\n    tool_type: opencode\n  - name: Claude custom runtime\n    command: claude\n    tool_type: company_claude\n# keep footer\ntelemetry: false # keep note\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+
+        sync_user_config_file(&store, &path).unwrap();
+
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(yaml.contains("# keep heading"));
+        assert!(yaml.contains("# keep footer\ntelemetry: false # keep note"));
+        let config = parse_user_config(&yaml).unwrap();
+        let commands = config
+            .agent_tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.command.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for (name, command) in [
+            ("Claude", "claude --dangerously-skip-permissions"),
+            ("Codex", "codex --dangerously-bypass-approvals-and-sandbox"),
+            ("Gemini", "gemini --approval-mode=yolo"),
+            ("OpenCode", "opencode --auto"),
+            ("Kimi", "kimi --yolo"),
+            (
+                "DeepSeek v4 flash",
+                "opencode --auto --model deepseek/deepseek-v4-flash",
+            ),
+        ] {
+            assert_eq!(commands[name], command);
+        }
+        assert_eq!(commands["Custom Codex"], "codex");
+        assert_eq!(commands["Custom OpenCode"], "opencode --model private");
+        assert_eq!(commands["Claude custom runtime"], "claude");
+    }
+
+    #[test]
+    fn startup_leaves_same_name_custom_agent_commands_byte_for_byte_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        let yaml = "# custom commands\nagent_tools:\n  - name: Claude\n    command: claude --model private\n    tool_type: claude_code\n  - name: Codex\n    command: /opt/company/codex --safe\n    tool_type: codex\n  - name: Gemini\n    command: env GEMINI_PROFILE=company gemini\n    tool_type: gemini\n";
+        std::fs::write(&path, yaml).unwrap();
+        let store = Store::open_in_memory().unwrap();
+
+        sync_user_config_file(&store, &path).unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), yaml);
+    }
+
+    #[test]
+    fn settings_promotion_and_reorder_preserve_flagged_seed_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        let store = Store::open_in_memory().unwrap();
+        let tools = store.list_agent_tools().unwrap();
+        let ids = tools.iter().map(|tool| tool.id).collect::<Vec<_>>();
+
+        reorder_agent_tools_from_settings_at(&store, &path, &ids).unwrap();
+
+        let config = parse_user_config(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let persisted = config
+            .agent_tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.command.as_str()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for tool in tools {
+            assert_eq!(persisted[tool.name.as_str()], tool.command);
+        }
     }
 
     #[test]
