@@ -1,4 +1,6 @@
-use std::{error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration};
+use std::{
+    env, error::Error, ffi::OsString, os::unix::fs::PermissionsExt, path::Path, time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
@@ -10,6 +12,30 @@ use tokio_tungstenite::{
 };
 use workman_core::Project;
 use workmand::{DaemonConfig, DaemonServer};
+
+struct ConfigGuard(Option<OsString>);
+
+impl ConfigGuard {
+    fn set(path: &Path) -> Self {
+        let previous = env::var_os("WORKMAN_CONFIG");
+        // SAFETY: this integration binary contains one test, and the variable is
+        // restored only after its in-process daemon has stopped.
+        unsafe { env::set_var("WORKMAN_CONFIG", path) };
+        Self(previous)
+    }
+}
+
+impl Drop for ConfigGuard {
+    fn drop(&mut self) {
+        // SAFETY: no sibling test in this integration process reads this value.
+        unsafe {
+            match self.0.take() {
+                Some(value) => env::set_var("WORKMAN_CONFIG", value),
+                None => env::remove_var("WORKMAN_CONFIG"),
+            }
+        }
+    }
+}
 
 async fn rpc(
     socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -47,6 +73,7 @@ fn write_fake_agent(path: &Path) -> Result<(), Box<dyn Error>> {
 #[tokio::test]
 async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
+    let _config = ConfigGuard::set(&temp.path().join("config.yml"));
     let project_dir = temp.path().join("workspace");
     std::fs::create_dir(&project_dir)?;
     let fake_agent = temp.path().join("fake-agent.sh");

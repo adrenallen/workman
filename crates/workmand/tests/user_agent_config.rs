@@ -124,7 +124,12 @@ async fn list_agent_tools(discovery: &Discovery) -> Result<Vec<Value>, Box<dyn E
     Ok(tools)
 }
 
-async fn save_local_tool(discovery: &Discovery) -> Result<(), Box<dyn Error>> {
+async fn control_call(
+    discovery: &Discovery,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Result<Value, Box<dyn Error>> {
     let mut request = format!("ws://127.0.0.1:{}/ws", discovery.port).into_client_request()?;
     request.headers_mut().insert(
         header::AUTHORIZATION,
@@ -134,16 +139,9 @@ async fn save_local_tool(discovery: &Discovery) -> Result<(), Box<dyn Error>> {
     socket
         .send(Message::Text(
             json!({
-                "id": 1,
-                "method": "agent_tools.save",
-                "params": {
-                    "tool": {
-                        "name": "UI custom",
-                        "command": "custom-agent --interactive",
-                        "tool_type": "future_unknown_type",
-                        "enabled": true
-                    }
-                }
+                "id": id,
+                "method": method,
+                "params": params,
             })
             .to_string()
             .into(),
@@ -154,14 +152,13 @@ async fn save_local_tool(discovery: &Discovery) -> Result<(), Box<dyn Error>> {
         return Err("control response was not JSON text".into());
     };
     let response: Value = serde_json::from_str(&response)?;
-    assert_eq!(response["ok"], true);
-    assert_eq!(response["result"]["source"], "local");
+    assert_eq!(response["ok"], true, "{response}");
     socket.close(None).await?;
-    Ok(())
+    Ok(response["result"].clone())
 }
 
 #[tokio::test]
-async fn isolated_daemon_syncs_six_tools_removes_file_entry_and_preserves_ui_custom_row()
+async fn settings_mutations_persist_to_config_and_survive_isolated_daemon_restart()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join("state");
@@ -210,28 +207,89 @@ async fn isolated_daemon_syncs_six_tools_removes_file_entry_and_preserves_ui_cus
             ))
         );
     }
-    save_local_tool(&discovery).await?;
+    let custom = control_call(
+        &discovery,
+        1,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "UI custom",
+                "command": "custom-agent --interactive",
+                "tool_type": "future_unknown_type",
+                "enabled": true
+            }
+        }),
+    )
+    .await?;
+    assert_eq!(custom["source"], "config");
+    let codex = tools.iter().find(|tool| tool["name"] == "Codex").unwrap();
+    let edited = control_call(
+        &discovery,
+        2,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "id": codex["id"],
+                "name": "Codex QA",
+                "command": "codex --model qa-persisted",
+                "tool_type": "codex",
+                "enabled": true
+            }
+        }),
+    )
+    .await?;
+    assert_eq!(edited["name"], "Codex QA");
+    let tools = list_agent_tools(&discovery).await?;
+    let reversed_ids = tools
+        .iter()
+        .rev()
+        .map(|tool| tool["id"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    let reordered = control_call(
+        &discovery,
+        3,
+        "agent_tools.reorder",
+        json!({ "agent_tool_ids": reversed_ids }),
+    )
+    .await?;
+    assert_eq!(reordered[0]["name"], "UI custom");
+    let kimi_id = tools.iter().find(|tool| tool["name"] == "Kimi").unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let deleted = control_call(
+        &discovery,
+        4,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": kimi_id }),
+    )
+    .await?;
+    assert_eq!(deleted["deleted"], true);
     stop_daemon(child, &data_dir).await?;
 
-    std::fs::write(
-        &config_path,
-        SIX_AGENTS.replace(
-            "  - name: Kimi\n    command: kimi --yolo\n    tool_type: kimi\n",
-            "",
-        ),
-    )?;
+    let persisted = std::fs::read_to_string(&config_path)?;
+    assert!(persisted.contains("name: UI custom"));
+    assert!(persisted.contains("name: Codex QA"));
+    assert!(persisted.contains("command: codex --model qa-persisted"));
+    assert!(!persisted.contains("name: Kimi"));
+
     let child = spawn_daemon(&data_dir, &config_path)?;
     let discovery = wait_for_discovery(&data_dir, child.id().unwrap()).await?;
     let tools = list_agent_tools(&discovery).await?;
     assert_eq!(tools.len(), 6);
     assert!(!tools.iter().any(|tool| tool["name"] == "Kimi"));
+    assert_eq!(tools[0]["name"], "UI custom");
     let custom = tools
         .iter()
         .find(|tool| tool["name"] == "UI custom")
         .unwrap();
     assert_eq!(custom["command"], "custom-agent --interactive");
     assert_eq!(custom["tool_type"], "future_unknown_type");
-    assert_eq!(custom["source"], "local");
+    assert_eq!(custom["source"], "config");
+    let codex = tools
+        .iter()
+        .find(|tool| tool["name"] == "Codex QA")
+        .unwrap();
+    assert_eq!(codex["command"], "codex --model qa-persisted");
     stop_daemon(child, &data_dir).await?;
     Ok(())
 }

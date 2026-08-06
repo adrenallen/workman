@@ -68,10 +68,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project_icon_color",
         include_str!("../migrations/0012_project_icon_color.sql"),
     ),
+    (
+        13,
+        "agent_tool_sort_order",
+        include_str!("../migrations/0013_agent_tool_sort_order.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -476,8 +481,11 @@ impl Store {
 
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
         self.connection.execute(
-            "INSERT INTO agent_tools (id, name, command, tool_type, enabled, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO agent_tools (id, name, command, tool_type, enabled, source, sort_order)
+             VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools), 0)
+             )
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 command = excluded.command,
@@ -521,7 +529,7 @@ impl Store {
     pub fn list_agent_tools(&self) -> StoreResult<Vec<AgentTool>> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, command, tool_type, enabled, source
-             FROM agent_tools ORDER BY id",
+             FROM agent_tools ORDER BY sort_order, id",
         )?;
         let tools = statement
             .query_map([], |row| {
@@ -536,6 +544,29 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(tools)
+    }
+
+    pub fn reorder_agent_tools(&self, ordered_ids: &[i64]) -> StoreResult<()> {
+        let existing = self
+            .list_agent_tools()?
+            .into_iter()
+            .map(|tool| tool.id)
+            .collect::<HashSet<_>>();
+        let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+        if requested.len() != ordered_ids.len() || requested != existing {
+            return Err(StoreError::InvalidReorder(
+                "agent tool order must contain every registered tool exactly once".to_owned(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for (position, id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE agent_tools SET sort_order = ?1 WHERE id = ?2",
+                params![position as i64, id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn next_agent_tool_id(&self) -> StoreResult<i64> {

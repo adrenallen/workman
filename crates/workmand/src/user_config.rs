@@ -130,19 +130,20 @@ pub fn sync_user_config_file(
     sync_user_agent_tools(store, &config.agent_tools)
 }
 
-/// Update one config-managed registry row at its source-of-truth YAML file.
+/// Add or update one registry row at its source-of-truth YAML file.
 ///
-/// This is only called for an explicit Settings edit/toggle. Unknown top-level
-/// YAML values are retained and local database tools remain untouched.
-pub(crate) fn update_config_managed_agent_tool(
+/// Settings mutations promote legacy local rows into config-managed rows. The
+/// agent_tools block is rewritten while unrelated YAML text and comments stay
+/// byte-for-byte intact.
+pub(crate) fn save_agent_tool_from_settings(
     store: &Store,
-    agent_tool_id: i64,
+    agent_tool_id: Option<i64>,
     name: String,
     command: String,
     tool_type: String,
     enabled: bool,
 ) -> Result<AgentTool, UserConfigError> {
-    update_config_managed_agent_tool_at(
+    save_agent_tool_from_settings_at(
         store,
         &user_config_path(),
         agent_tool_id,
@@ -153,83 +154,318 @@ pub(crate) fn update_config_managed_agent_tool(
     )
 }
 
-fn update_config_managed_agent_tool_at(
+fn save_agent_tool_from_settings_at(
     store: &Store,
     path: &Path,
-    agent_tool_id: i64,
+    agent_tool_id: Option<i64>,
     name: String,
     command: String,
     tool_type: String,
     enabled: bool,
 ) -> Result<AgentTool, UserConfigError> {
-    let existing = store.get_agent_tool(agent_tool_id)?.ok_or_else(|| {
-        UserConfigError::Invalid(format!("agent tool {agent_tool_id} was not found"))
-    })?;
-    if existing.source != AgentToolSource::Config {
-        return Err(UserConfigError::Invalid(format!(
-            "agent tool {agent_tool_id} is not managed by the per-user config file"
-        )));
-    }
+    let existing = agent_tool_id
+        .map(|id| {
+            store
+                .get_agent_tool(id)?
+                .ok_or_else(|| UserConfigError::Invalid(format!("agent tool {id} was not found")))
+        })
+        .transpose()?;
     if store
         .list_agent_tools()?
         .iter()
-        .any(|tool| tool.id != agent_tool_id && tool.name == name)
+        .any(|tool| Some(tool.id) != agent_tool_id && tool.name == name)
     {
         return Err(UserConfigError::Invalid(format!(
             "agent tool name {name:?} is already registered"
         )));
     }
-    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
-    let root = yaml.as_mapping_mut().ok_or_else(|| {
-        UserConfigError::Invalid("per-user config must contain a YAML mapping".to_owned())
-    })?;
-    let entries = root
-        .get_mut(serde_yaml::Value::String("agent_tools".to_owned()))
-        .and_then(serde_yaml::Value::as_sequence_mut)
-        .ok_or_else(|| {
-            UserConfigError::Invalid("per-user config has no agent_tools list".to_owned())
-        })?;
-    let entry = entries
-        .iter_mut()
-        .find(|entry| {
-            entry
-                .as_mapping()
-                .and_then(|entry| entry.get(serde_yaml::Value::String("name".to_owned())))
-                .and_then(serde_yaml::Value::as_str)
-                == Some(existing.name.as_str())
-        })
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .ok_or_else(|| {
-            UserConfigError::Invalid(format!(
+    let (source, mut root) = read_user_config_document(path)?;
+    let entries = agent_tool_entries_mut(&mut root)?;
+    let entry_index = existing.as_ref().and_then(|existing| {
+        entries
+            .iter()
+            .position(|entry| entry_name(entry) == Some(existing.name.as_str()))
+    });
+    let entry = match entry_index {
+        Some(index) => &mut entries[index],
+        None if agent_tool_id.is_none() => {
+            entries.push(serde_yaml::Value::Mapping(Default::default()));
+            entries.last_mut().expect("entry was just appended")
+        }
+        None => {
+            return Err(UserConfigError::Invalid(format!(
                 "agent tool {:?} was not found in {}",
-                existing.name,
+                existing.as_ref().map(|tool| tool.name.as_str()),
                 path.display()
-            ))
-        })?;
-    for (key, value) in [
-        ("name", serde_yaml::Value::String(name.clone())),
-        ("command", serde_yaml::Value::String(command.clone())),
-        ("tool_type", serde_yaml::Value::String(tool_type.clone())),
-        ("enabled", serde_yaml::Value::Bool(enabled)),
-    ] {
-        entry.insert(serde_yaml::Value::String(key.to_owned()), value);
-    }
+            )));
+        }
+    };
+    set_agent_tool_entry(entry, &name, &command, &tool_type, enabled)?;
 
-    let rendered = serde_yaml::to_string(&yaml)?;
-    let parsed = parse_user_config(&rendered)?;
-    validate_user_agent_tools(&parsed.agent_tools)?;
-    write_private_atomic(path, rendered.as_bytes())?;
-
-    let updated = AgentTool {
-        id: agent_tool_id,
-        name,
+    let config = validated_document(&root)?;
+    write_user_config_document(path, &source, &root)?;
+    let id = existing
+        .as_ref()
+        .map(|tool| tool.id)
+        .unwrap_or(store.next_agent_tool_id()?);
+    store.put_agent_tool(&AgentTool {
+        id,
+        name: name.clone(),
         command,
         tool_type,
         enabled,
         source: AgentToolSource::Config,
+    })?;
+    sync_user_agent_tools(store, &config.agent_tools)?;
+    reorder_store_from_config(store, &config.agent_tools)?;
+    store
+        .list_agent_tools()?
+        .into_iter()
+        .find(|tool| tool.name == name)
+        .ok_or_else(|| UserConfigError::Invalid("saved agent tool was not reloaded".to_owned()))
+}
+
+pub(crate) fn delete_agent_tool_from_settings(
+    store: &Store,
+    agent_tool_id: i64,
+) -> Result<bool, UserConfigError> {
+    delete_agent_tool_from_settings_at(store, &user_config_path(), agent_tool_id)
+}
+
+fn delete_agent_tool_from_settings_at(
+    store: &Store,
+    path: &Path,
+    agent_tool_id: i64,
+) -> Result<bool, UserConfigError> {
+    let Some(existing) = store.get_agent_tool(agent_tool_id)? else {
+        return Ok(false);
     };
-    store.put_agent_tool(&updated)?;
-    Ok(updated)
+    let (source, mut root) = read_user_config_document(path)?;
+    let entries = agent_tool_entries_mut(&mut root)?;
+    let before = entries.len();
+    entries.retain(|entry| entry_name(entry) != Some(existing.name.as_str()));
+    let removed_from_config = before != entries.len();
+    if existing.source == AgentToolSource::Config && !removed_from_config {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool {:?} was not found in {}",
+            existing.name,
+            path.display()
+        )));
+    }
+    let config = validated_document(&root)?;
+    if removed_from_config {
+        write_user_config_document(path, &source, &root)?;
+    }
+    let deleted = store.delete_agent_tool(agent_tool_id)?;
+    sync_user_agent_tools(store, &config.agent_tools)?;
+    reorder_store_from_config(store, &config.agent_tools)?;
+    Ok(deleted)
+}
+
+pub(crate) fn reorder_agent_tools_from_settings(
+    store: &Store,
+    ordered_ids: &[i64],
+) -> Result<Vec<AgentTool>, UserConfigError> {
+    reorder_agent_tools_from_settings_at(store, &user_config_path(), ordered_ids)
+}
+
+fn reorder_agent_tools_from_settings_at(
+    store: &Store,
+    path: &Path,
+    ordered_ids: &[i64],
+) -> Result<Vec<AgentTool>, UserConfigError> {
+    let tools = store.list_agent_tools()?;
+    let by_id = tools
+        .iter()
+        .map(|tool| (tool.id, tool))
+        .collect::<HashMap<_, _>>();
+    let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+    if requested.len() != ordered_ids.len()
+        || requested != by_id.keys().copied().collect::<HashSet<_>>()
+    {
+        return Err(UserConfigError::Invalid(
+            "agent tool order must contain every registered tool exactly once".to_owned(),
+        ));
+    }
+
+    let (source, mut root) = read_user_config_document(path)?;
+    let entries = agent_tool_entries_mut(&mut root)?;
+    let mut existing_entries = entries
+        .drain(..)
+        .filter_map(|entry| {
+            let name = entry_name(&entry)?.to_owned();
+            Some((name, entry))
+        })
+        .collect::<HashMap<_, _>>();
+    for id in ordered_ids {
+        let tool = by_id[id];
+        let mut entry = existing_entries
+            .remove(&tool.name)
+            .unwrap_or_else(|| serde_yaml::Value::Mapping(Default::default()));
+        set_agent_tool_entry(
+            &mut entry,
+            &tool.name,
+            &tool.command,
+            &tool.tool_type,
+            tool.enabled,
+        )?;
+        entries.push(entry);
+    }
+    if !existing_entries.is_empty() {
+        return Err(UserConfigError::Invalid(
+            "config.yml changed outside Workman; refresh before reordering".to_owned(),
+        ));
+    }
+
+    let config = validated_document(&root)?;
+    write_user_config_document(path, &source, &root)?;
+    for id in ordered_ids {
+        let mut tool = by_id[id].clone();
+        tool.source = AgentToolSource::Config;
+        store.put_agent_tool(&tool)?;
+    }
+    sync_user_agent_tools(store, &config.agent_tools)?;
+    store.reorder_agent_tools(ordered_ids)?;
+    store.list_agent_tools().map_err(Into::into)
+}
+
+fn read_user_config_document(
+    path: &Path,
+) -> Result<(String, serde_yaml::Mapping), UserConfigError> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let root = if source.trim().is_empty() {
+        serde_yaml::Mapping::new()
+    } else {
+        serde_yaml::from_str::<serde_yaml::Value>(&source)?
+            .as_mapping()
+            .cloned()
+            .ok_or_else(|| {
+                UserConfigError::Invalid("per-user config must contain a YAML mapping".to_owned())
+            })?
+    };
+    Ok((source, root))
+}
+
+fn agent_tool_entries_mut(
+    root: &mut serde_yaml::Mapping,
+) -> Result<&mut Vec<serde_yaml::Value>, UserConfigError> {
+    let value = root
+        .entry(serde_yaml::Value::String("agent_tools".to_owned()))
+        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+    value.as_sequence_mut().ok_or_else(|| {
+        UserConfigError::Invalid("per-user config agent_tools must be a list".to_owned())
+    })
+}
+
+fn entry_name(entry: &serde_yaml::Value) -> Option<&str> {
+    entry
+        .as_mapping()?
+        .get(serde_yaml::Value::String("name".to_owned()))?
+        .as_str()
+}
+
+fn set_agent_tool_entry(
+    entry: &mut serde_yaml::Value,
+    name: &str,
+    command: &str,
+    tool_type: &str,
+    enabled: bool,
+) -> Result<(), UserConfigError> {
+    let entry = entry.as_mapping_mut().ok_or_else(|| {
+        UserConfigError::Invalid("each agent_tools entry must be a mapping".to_owned())
+    })?;
+    for (key, value) in [
+        ("name", serde_yaml::Value::String(name.to_owned())),
+        ("command", serde_yaml::Value::String(command.to_owned())),
+        ("tool_type", serde_yaml::Value::String(tool_type.to_owned())),
+        ("enabled", serde_yaml::Value::Bool(enabled)),
+    ] {
+        entry.insert(serde_yaml::Value::String(key.to_owned()), value);
+    }
+    Ok(())
+}
+
+fn validated_document(root: &serde_yaml::Mapping) -> Result<UserConfig, UserConfigError> {
+    let config: UserConfig = serde_yaml::from_value(serde_yaml::Value::Mapping(root.clone()))?;
+    validate_user_agent_tools(&config.agent_tools)?;
+    Ok(config)
+}
+
+fn write_user_config_document(
+    path: &Path,
+    source: &str,
+    root: &serde_yaml::Mapping,
+) -> Result<(), UserConfigError> {
+    let entries = root
+        .get(serde_yaml::Value::String("agent_tools".to_owned()))
+        .cloned()
+        .unwrap_or_else(|| serde_yaml::Value::Sequence(Vec::new()));
+    let mut block = serde_yaml::Mapping::new();
+    block.insert(serde_yaml::Value::String("agent_tools".to_owned()), entries);
+    let rendered = serde_yaml::to_string(&serde_yaml::Value::Mapping(block))?;
+    let updated = replace_top_level_yaml_block(source, "agent_tools", &rendered);
+    write_private_atomic(path, updated.as_bytes())?;
+    Ok(())
+}
+
+fn replace_top_level_yaml_block(source: &str, key: &str, replacement: &str) -> String {
+    let mut offset = 0;
+    let mut start = None;
+    let mut end = source.len();
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let top_level = !trimmed.starts_with([' ', '\t']);
+        if start.is_none() && top_level && trimmed.starts_with(&format!("{key}:")) {
+            start = Some(offset);
+        } else if start.is_some()
+            && top_level
+            && !trimmed.is_empty()
+            && !trimmed.starts_with("- ")
+            && (trimmed.starts_with('#') || trimmed.contains(':'))
+        {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    match start {
+        Some(start) => format!("{}{}{}", &source[..start], replacement, &source[end..]),
+        None if source.trim().is_empty() => replacement.to_owned(),
+        None => format!(
+            "{}{}{}",
+            source,
+            if source.ends_with('\n') { "" } else { "\n" },
+            replacement
+        ),
+    }
+}
+
+fn reorder_store_from_config(
+    store: &Store,
+    configured: &[UserAgentTool],
+) -> Result<(), UserConfigError> {
+    let tools = store.list_agent_tools()?;
+    let by_name = tools
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool.id))
+        .collect::<HashMap<_, _>>();
+    let mut ordered = configured
+        .iter()
+        .filter_map(|entry| by_name.get(entry.name.trim()).copied())
+        .collect::<Vec<_>>();
+    let configured_ids = ordered.iter().copied().collect::<HashSet<_>>();
+    ordered.extend(
+        tools
+            .iter()
+            .filter(|tool| !configured_ids.contains(&tool.id))
+            .map(|tool| tool.id),
+    );
+    store.reorder_agent_tools(&ordered)?;
+    Ok(())
 }
 
 fn validate_user_agent_tools(configured: &[UserAgentTool]) -> Result<(), UserConfigError> {
@@ -376,8 +612,9 @@ mod tests {
     use workman_core::{AgentTool, AgentToolSource, Store};
 
     use super::{
-        UserAgentTool, parse_user_config, sync_user_agent_tools,
-        update_config_managed_agent_tool_at,
+        UserAgentTool, delete_agent_tool_from_settings_at, parse_user_config,
+        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at,
+        sync_user_agent_tools,
     };
 
     fn configured(name: &str, command: &str, tool_type: Option<&str>) -> UserAgentTool {
@@ -462,7 +699,7 @@ mod tests {
         let path = temp.path().join("config.yml");
         std::fs::write(
             &path,
-            "theme: night\nagent_tools:\n  - name: Fixture OpenCode\n    command: opencode\n    tool_type: opencode\n    enabled: true\n",
+            "# keep this heading\ntheme: night # keep this note\nagent_tools:\n  - name: Fixture OpenCode\n    command: opencode\n    tool_type: opencode\n    enabled: true\n    channel: nightly\n# keep this footer\ntelemetry: false\n",
         )
         .unwrap();
         let store = Store::open_in_memory().unwrap();
@@ -477,10 +714,10 @@ mod tests {
             })
             .unwrap();
 
-        let updated = update_config_managed_agent_tool_at(
+        let updated = save_agent_tool_from_settings_at(
             &store,
             &path,
-            17,
+            Some(17),
             "Fixture OpenCode nightly".to_owned(),
             "opencode --model nightly".to_owned(),
             "opencode".to_owned(),
@@ -489,8 +726,11 @@ mod tests {
         .unwrap();
         assert_eq!(updated.id, 17);
         assert!(!updated.enabled);
-        let yaml = std::fs::read_to_string(path).unwrap();
-        assert!(yaml.contains("theme: night"));
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        assert!(yaml.contains("# keep this heading"));
+        assert!(yaml.contains("theme: night # keep this note"));
+        assert!(yaml.contains("# keep this footer\ntelemetry: false"));
+        assert!(yaml.contains("channel: nightly"));
         let parsed = parse_user_config(&yaml).unwrap();
         assert_eq!(parsed.agent_tools[0].name, "Fixture OpenCode nightly");
         assert!(!parsed.agent_tools[0].enabled);
@@ -498,5 +738,33 @@ mod tests {
             store.get_agent_tool(17).unwrap().unwrap().command,
             "opencode --model nightly"
         );
+
+        let added = save_agent_tool_from_settings_at(
+            &store,
+            &path,
+            None,
+            "Added agent".to_owned(),
+            "added-agent --safe".to_owned(),
+            "custom".to_owned(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(added.source, AgentToolSource::Config);
+        let mut ids = store
+            .list_agent_tools()
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.id)
+            .collect::<Vec<_>>();
+        ids.reverse();
+        let reordered = reorder_agent_tools_from_settings_at(&store, &path, &ids).unwrap();
+        assert_eq!(
+            reordered.iter().map(|tool| tool.id).collect::<Vec<_>>(),
+            ids
+        );
+        assert!(delete_agent_tool_from_settings_at(&store, &path, added.id).unwrap());
+        let yaml = std::fs::read_to_string(path).unwrap();
+        assert!(!yaml.contains("Added agent"));
+        assert!(yaml.contains("# keep this heading"));
     }
 }

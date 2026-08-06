@@ -257,6 +257,11 @@ struct AgentToolIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentToolOrderParams {
+    agent_tool_ids: Vec<AgentToolId>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentToolConfigWriteParams {
     agent_tool_id: AgentToolId,
     confirm_write: bool,
@@ -717,9 +722,21 @@ async fn dispatch(
         }
         "agent_tools.delete" => {
             let params: AgentToolIdParams = params_as(params)?;
-            return crate::mcp::agent_spawning::delete_agent_tool(&registry, params.agent_tool_id)
-                .map(|deleted| json!({ "agent_tool_id": params.agent_tool_id, "deleted": deleted }))
-                .map_err(|error| ("agent_tool_error", error));
+            return crate::mcp::agent_spawning::delete_agent_tool_from_settings(
+                &registry,
+                params.agent_tool_id,
+            )
+            .map(|deleted| json!({ "agent_tool_id": params.agent_tool_id, "deleted": deleted }))
+            .map_err(|error| ("agent_tool_error", error));
+        }
+        "agent_tools.reorder" => {
+            let params: AgentToolOrderParams = params_as(params)?;
+            return crate::mcp::agent_spawning::reorder_agent_tools_from_settings(
+                &registry,
+                &params.agent_tool_ids,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_tool_error", error));
         }
         "agents.spawn" => {
             let params: SpawnAgentParams = params_as(params)?;

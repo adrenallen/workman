@@ -123,7 +123,7 @@ async fn check_agent_tools_in(
     let enabled_count = health.iter().filter(|tool| tool.enabled).count();
     let enabled_ready_count = health
         .iter()
-        .filter(|tool| tool.enabled && tool.found_on_path)
+        .filter(|tool| tool.enabled && tool.launch_ready)
         .count();
     let total_count = health.len();
     AgentToolsHealth {
@@ -133,7 +133,7 @@ async fn check_agent_tools_in(
         enabled_ready_count,
         enabled_count,
         all_enabled_ready: enabled_ready_count == enabled_count,
-        summary: format!("{ready_count} of {total_count} runtime targets can launch"),
+        summary: format!("{ready_count} of {total_count} agent tools are MCP-ready"),
         tools: health,
     }
 }
@@ -150,7 +150,7 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
     let target = config_target(&tool, &environment.home);
     let capability = crate::mcp::agent_spawning::mcp_launch_capability(&tool.tool_type);
     let found_on_path = resolved.is_some();
-    let launch_ready = tool.enabled && found_on_path;
+    let launch_ready = tool.enabled && found_on_path && capability.supported;
 
     AgentToolHealth {
         id: tool.id,
@@ -706,7 +706,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(health.summary, "1 of 3 runtime targets can launch");
+        assert_eq!(health.summary, "1 of 3 agent tools are MCP-ready");
         assert_eq!(health.enabled_ready_count, 1);
         assert_eq!(health.enabled_count, 2);
         assert!(!health.all_enabled_ready);

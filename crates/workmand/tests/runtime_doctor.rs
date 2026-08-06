@@ -197,7 +197,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     assert!(health["ok"].as_bool().unwrap());
     assert_eq!(
         health["result"]["summary"],
-        "6 of 7 runtime targets can launch"
+        "5 of 7 agent tools are MCP-ready"
     );
     assert_eq!(health["result"]["tools"].as_array().unwrap().len(), 7);
     let missing = health["result"]["tools"]
@@ -215,6 +215,15 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         .unwrap();
     assert_eq!(codex["version"], "codex 5.6.7-test");
     assert_eq!(codex["configuration_mode"], "per_launch");
+    let kimi = health["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "Kimi")
+        .unwrap();
+    assert_eq!(kimi["found_on_path"], true);
+    assert_eq!(kimi["mcp_launch_supported"], false);
+    assert_eq!(kimi["launch_ready"], false);
 
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let transport = StreamableHttpClientTransport::from_config(
@@ -223,7 +232,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     );
     let mcp = ClientInfo::default().serve(transport).await?;
     let mcp_health = mcp_call(&mcp, "agent_tools_health", json!({})).await;
-    assert_eq!(mcp_health["summary"], "6 of 7 runtime targets can launch");
+    assert_eq!(mcp_health["summary"], "5 of 7 agent tools are MCP-ready");
     assert!(mcp_health["tools"][0]["found_on_path"].is_boolean());
     assert!(mcp_health["tools"][0]["config_path"].is_string());
 
@@ -244,7 +253,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     let refreshed = rpc(&mut socket, 2, "agent_tools.health", json!({})).await;
     assert_eq!(
         refreshed["result"]["summary"],
-        "7 of 7 runtime targets can launch"
+        "5 of 7 agent tools are MCP-ready"
     );
 
     let opencode_id = health["result"]["tools"]
@@ -262,47 +271,13 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         json!({ "agent_tool_id": opencode_id }),
     )
     .await;
-    assert_eq!(preview["result"]["requires_consent"], true);
-    assert!(
-        preview["result"]["preview"]
-            .as_str()
-            .unwrap()
-            .contains("fixture-night")
+    assert_eq!(preview["result"]["automatic_wiring"], true);
+    assert_eq!(preview["result"]["requires_consent"], false);
+    assert_eq!(preview["result"]["preview"], Value::Null);
+    assert_eq!(
+        fs::read_to_string(home.join(".config/opencode/opencode.json"))?,
+        "{\"theme\":\"fixture-night\"}\n"
     );
-    assert!(
-        preview["result"]["preview"]
-            .as_str()
-            .unwrap()
-            .contains("{env:WORKMAN_MCP_TOKEN}")
-    );
-    let rejected = rpc(
-        &mut socket,
-        4,
-        "agent_tools.configure",
-        json!({
-            "agent_tool_id": opencode_id,
-            "confirm_write": false,
-            "expected_preview_sha256": preview["result"]["preview_sha256"]
-        }),
-    )
-    .await;
-    assert_eq!(rejected["error"]["code"], "agent_config_error");
-    let applied = rpc(
-        &mut socket,
-        5,
-        "agent_tools.configure",
-        json!({
-            "agent_tool_id": opencode_id,
-            "confirm_write": true,
-            "expected_preview_sha256": preview["result"]["preview_sha256"]
-        }),
-    )
-    .await;
-    assert_eq!(applied["result"]["written"], true);
-    let written = fs::read_to_string(home.join(".config/opencode/opencode.json"))?;
-    assert!(written.contains("fixture-night"));
-    assert!(written.contains(&endpoint));
-    assert!(written.contains("{env:WORKMAN_MCP_TOKEN}"));
 
     let toggled = rpc(
         &mut socket,

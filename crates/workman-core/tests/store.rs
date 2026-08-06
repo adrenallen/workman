@@ -250,6 +250,26 @@ fn domain_records_round_trip_through_store() {
         store.get_agent_tool(agent_tool.id).unwrap(),
         Some(agent_tool.clone())
     );
+    let mut reordered_ids = store
+        .list_agent_tools()
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.id)
+        .collect::<Vec<_>>();
+    reordered_ids.reverse();
+    store
+        .reorder_agent_tools(&reordered_ids)
+        .expect("reorder agent tools");
+    assert_eq!(
+        store
+            .list_agent_tools()
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.id)
+            .collect::<Vec<_>>(),
+        reordered_ids
+    );
+    assert!(store.reorder_agent_tools(&[agent_tool.id]).is_err());
 
     let process = Process {
         id: 3,
