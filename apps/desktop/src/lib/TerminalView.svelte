@@ -1,6 +1,5 @@
 <script lang="ts">
   import { FitAddon } from '@xterm/addon-fit';
-  import { SearchAddon } from '@xterm/addon-search';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { WebglAddon } from '@xterm/addon-webgl';
   import { Terminal } from '@xterm/xterm';
@@ -30,38 +29,17 @@
   } = $props();
 
   let host: HTMLDivElement;
-  let searchInput = $state<HTMLInputElement>();
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
-  let searchAddon: SearchAddon | null = null;
-  let renderer = $state<'webgl' | 'dom'>('dom');
-  let searchOpen = $state(false);
-  let searchTerm = $state('');
-  let searchResult = $state({ index: -1, count: 0 });
-  let streamGap = $state<number | null>(null);
   let hasOutput = $state(false);
-  let expectedOffset = 0;
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
   let inputProcessId: number | null = null;
   let inputBytes: number[] = [];
   let attachedProcessId: number | null = null;
   let attachedConnected = false;
-  let fallbackSearchTerm = '';
-  let fallbackSearchIndex = -1;
-  let fallbackSearchMatches: Array<{ row: number; col: number; size: number }> = [];
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
-
-  const searchOptions = {
-    incremental: true,
-    decorations: {
-      matchBackground: '#314945',
-      matchOverviewRuler: '#527f74',
-      activeMatchBackground: '#b98a4d',
-      activeMatchColorOverviewRuler: '#d5a55f'
-    }
-  };
 
   onMount(() => {
     const instance = new Terminal({
@@ -100,9 +78,7 @@
       }
     });
     fitAddon = new FitAddon();
-    searchAddon = new SearchAddon({ highlightLimit: 2_000 });
     instance.loadAddon(fitAddon);
-    instance.loadAddon(searchAddon);
     instance.loadAddon(
       new WebLinksAddon((_event, uri) => {
         if (/^https?:\/\//i.test(uri)) window.open(uri, '_blank', 'noopener,noreferrer');
@@ -114,12 +90,10 @@
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
-        renderer = 'dom';
       });
       instance.loadAddon(webgl);
-      renderer = 'webgl';
     } catch {
-      renderer = 'dom';
+      // xterm automatically keeps its DOM renderer when WebGL is unavailable.
     }
 
     instance.attachCustomKeyEventHandler((event) => {
@@ -128,10 +102,6 @@
         && event.key.toLowerCase() === 'u'
       ) {
         if (event.type === 'keydown') onUnfocus?.();
-        return false;
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
-        if (event.type === 'keydown') openSearch();
         return false;
       }
       return true;
@@ -196,8 +166,6 @@
     attachedConnected = isConnected;
 
     instance.reset();
-    expectedOffset = 0;
-    streamGap = null;
     hasOutput = false;
     if (!isConnected) return;
 
@@ -222,8 +190,6 @@
   function handleTerminalFrame(frame: TerminalFrame): void {
     if (frame.process_id !== process.id || !terminal) return;
     if (frame.data.length > 0) hasOutput = true;
-    if (frame.gap || frame.start_offset !== expectedOffset) streamGap = frame.start_offset;
-    expectedOffset = frame.start_offset + frame.data.length;
     terminal.write(Uint8Array.from(frame.data));
   }
 
@@ -268,147 +234,9 @@
     });
   }
 
-  function openSearch(): void {
-    searchOpen = true;
-    queueMicrotask(() => {
-      searchInput?.focus();
-      searchInput?.select();
-    });
-  }
-
-  function closeSearch(): void {
-    searchOpen = false;
-    searchAddon?.clearDecorations();
-    fallbackSearchTerm = '';
-    fallbackSearchIndex = -1;
-    fallbackSearchMatches = [];
-    searchResult = { index: -1, count: 0 };
-    terminal?.focus();
-  }
-
-  function findNext(term = searchTerm): void {
-    runSearch(term, 1);
-  }
-
-  function findPrevious(): void {
-    runSearch(searchInput?.value ?? searchTerm, -1);
-  }
-
-  function runSearch(term: string, direction: 1 | -1): void {
-    searchTerm = term;
-    if (!term) {
-      searchAddon?.clearDecorations();
-      fallbackSearchTerm = '';
-      fallbackSearchIndex = -1;
-      fallbackSearchMatches = [];
-      searchResult = { index: -1, count: 0 };
-      return;
-    }
-
-    let found = false;
-    try {
-      found =
-        direction === 1
-          ? (searchAddon?.findNext(term, searchOptions) ?? false)
-          : (searchAddon?.findPrevious(term, searchOptions) ?? false);
-    } catch {
-      // Some WebKit/WebGL combinations cannot create search decorations.
-      // The active-buffer fallback below still provides selection/navigation.
-    }
-    if (found) {
-      fallbackSearchTerm = '';
-      fallbackSearchIndex = -1;
-      fallbackSearchMatches = [];
-      if (searchResult.count === 0) searchResult = { index: 0, count: 1 };
-      return;
-    }
-
-    // WebKit can occasionally return no result from SearchAddon while its
-    // active xterm buffer is still being painted. Keep navigation useful by
-    // selecting the same buffer cells directly as a narrow fallback.
-    const instance = terminal;
-    if (!instance) return;
-    if (fallbackSearchTerm !== term) {
-      const needle = term.toLocaleLowerCase();
-      fallbackSearchMatches = [];
-      for (let row = 0; row < instance.buffer.active.length; row += 1) {
-        const line = instance.buffer.active.getLine(row);
-        if (!line) continue;
-        const text = line.translateToString(true).toLocaleLowerCase();
-        let col = text.indexOf(needle);
-        while (col !== -1) {
-          fallbackSearchMatches.push({ row, col, size: term.length });
-          col = text.indexOf(needle, col + Math.max(1, term.length));
-        }
-      }
-      fallbackSearchTerm = term;
-      fallbackSearchIndex = direction === 1 ? 0 : fallbackSearchMatches.length - 1;
-    } else if (fallbackSearchMatches.length > 0) {
-      fallbackSearchIndex =
-        (fallbackSearchIndex + direction + fallbackSearchMatches.length) %
-        fallbackSearchMatches.length;
-    }
-
-    const match = fallbackSearchMatches[fallbackSearchIndex];
-    if (!match) {
-      searchResult = { index: -1, count: 0 };
-      return;
-    }
-    instance.select(match.col, match.row, match.size);
-    instance.scrollToLine(match.row);
-    searchResult = { index: fallbackSearchIndex, count: fallbackSearchMatches.length };
-  }
 </script>
 
-<section class="terminal-frame" class:is-stopped={process.status !== 'running'} class:search-open={searchOpen}>
-  <header class="terminal-toolbar">
-    <div class="terminal-identity">
-      <span class="signal-light" class:is-live={process.status === 'running'}></span>
-      <strong>{process.name}</strong>
-      <span>{process.kind}</span>
-      {#if process.pid}<span>pid {process.pid}</span>{/if}
-    </div>
-    <div class="terminal-tools">
-      {#if streamGap !== null}<span class="stream-gap" title="The retained daemon buffer began after the requested byte">history clipped · {streamGap}</span>{/if}
-      <span class="renderer">{renderer}</span>
-      <button type="button" aria-label="Search terminal" title="Search terminal (⌘F)" onclick={openSearch}>⌕</button>
-    </div>
-  </header>
-
-  {#if searchOpen}
-    <form
-      class="terminal-search"
-      onsubmit={(event) => {
-        event.preventDefault();
-        findNext(searchInput?.value ?? searchTerm);
-      }}
-    >
-      <input
-        bind:this={searchInput}
-        bind:value={searchTerm}
-        aria-label="Search terminal output"
-        autocapitalize="none"
-        placeholder="Find in terminal"
-        spellcheck="false"
-        oninput={(event) => findNext(event.currentTarget.value)}
-        onkeydown={(event) => {
-          if (event.key === 'Escape') closeSearch();
-          else if (event.key === 'Enter') {
-            event.preventDefault();
-            findNext(event.currentTarget.value);
-          }
-        }}
-        onkeyup={(event) => {
-          if (event.key !== 'Escape' && event.key !== 'Enter') findNext(event.currentTarget.value);
-        }}
-      />
-      <span>{searchResult.count ? `${searchResult.index + 1}/${searchResult.count}` : '0/0'}</span>
-      <button type="button" aria-label="Previous match" onclick={() => findPrevious()}>↑</button>
-      <button type="submit" aria-label="Next match">↓</button>
-      <button type="button" aria-label="Close search" onclick={closeSearch}>×</button>
-    </form>
-  {/if}
-
+<section class="terminal-frame" class:is-stopped={process.status !== 'running'}>
   <div class="terminal-host" bind:this={host} aria-label={`${process.name} terminal`}></div>
   {#if process.status === 'running' && !hasOutput}
     <div class="terminal-starting" aria-live="polite">
@@ -425,7 +253,7 @@
   .terminal-frame {
     position: relative;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     min-height: 0;
     overflow: hidden;
     border: 1px solid var(--border);
@@ -433,13 +261,9 @@
     background: #101214;
   }
 
-  .terminal-frame.search-open {
-    grid-template-rows: auto auto minmax(0, 1fr);
-  }
-
   .terminal-starting {
     position: absolute;
-    top: 48px;
+    top: 12px;
     left: 12px;
     display: inline-flex;
     align-items: center;
@@ -459,112 +283,6 @@
   }
 
   @keyframes terminal-waiting-spin { to { transform: rotate(360deg); } }
-
-  .terminal-toolbar {
-    display: flex;
-    min-height: 36px;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 0 9px 0 11px;
-    border-bottom: 1px solid var(--border);
-    background: #1a1d20;
-  }
-
-  .terminal-identity,
-  .terminal-tools {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 9px;
-  }
-
-  .terminal-identity strong {
-    overflow: hidden;
-    color: var(--foreground);
-    font: 620 12px/1.2 var(--ui-font-family);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .terminal-identity > span:not(.signal-light),
-  .renderer,
-  .stream-gap {
-    color: #8e959e;
-    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .signal-light {
-    width: 7px;
-    height: 7px;
-    flex: 0 0 auto;
-    border-radius: 50%;
-    background: #66716f;
-  }
-
-  .signal-light.is-live {
-    background: var(--signal);
-  }
-
-  .stream-gap {
-    color: #c79656;
-  }
-
-  .terminal-tools button,
-  .terminal-search button {
-    display: grid;
-    width: 26px;
-    height: 26px;
-    place-items: center;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    color: #98aaa5;
-    background: transparent;
-    font: 600 14px/1 'JetBrains Mono Variable', monospace;
-    cursor: pointer;
-  }
-
-  .terminal-tools button:hover,
-  .terminal-search button:hover {
-    border-color: #50565e;
-    color: var(--foreground);
-    background: var(--accent);
-  }
-
-  .terminal-search {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 4px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
-    background: var(--card);
-  }
-
-  .terminal-search input {
-    width: min(280px, 45vw);
-    height: 28px;
-    border: 1px solid #464b52;
-    border-radius: 3px;
-    outline: none;
-    padding: 0 9px;
-    color: var(--foreground);
-    background: var(--background);
-    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
-  }
-
-  .terminal-search input:focus {
-    border-color: var(--muted-foreground);
-  }
-
-  .terminal-search > span {
-    min-width: 48px;
-    color: #7f918d;
-    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
-    text-align: center;
-  }
 
   .terminal-host {
     min-width: 0;
@@ -600,15 +318,4 @@
     pointer-events: none;
   }
 
-  @media (max-width: 720px) {
-    .terminal-toolbar {
-      min-height: 38px;
-    }
-
-    .terminal-identity > span:not(.signal-light),
-    .renderer,
-    .stream-gap {
-      display: none;
-    }
-  }
 </style>

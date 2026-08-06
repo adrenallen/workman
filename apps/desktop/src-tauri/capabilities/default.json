@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities used by the main workman desktop window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "core:window:allow-set-title", "dialog:allow-open"]
 }

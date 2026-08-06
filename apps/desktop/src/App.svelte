@@ -10,6 +10,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
   import { listen } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
@@ -275,6 +276,11 @@
           ? 'Todos'
           : (selection?.label ?? 'Project')
   );
+  let windowTitle = $derived(
+    selectedProject && selectedProcess
+      ? `${projectLabel(selectedProject)}: ${selectedProcess.name}`
+      : 'workman'
+  );
   let contextMenuDescriptor = $derived(
     contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
   );
@@ -283,6 +289,10 @@
   );
   let updateAvailable = $derived(startupUpdate?.check.available === true);
   let showVersionBanner = $derived(versionSkew || updateAvailable);
+
+  $effect(() => {
+    void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
+  });
 
   $effect(() => {
     for (const operation of $worktreeOperations) {
@@ -2149,7 +2159,7 @@
 <svelte:window onkeydown={handleShortcut} />
 
 <svelte:head>
-  <title>{selectedProject ? `${projectLabel(selectedProject)} - ${frameItemLabel}` : 'Workman'}</title>
+  <title>{windowTitle}</title>
 </svelte:head>
 
 {#if showVersionBanner}
@@ -2404,13 +2414,6 @@
     tabindex="-1"
   >
     {#if selectedProject}
-      <header class="document-title" data-tauri-drag-region>
-        <div class="title-side"><span>{activeWorktreeOperation ? 'worktree' : (selection?.kind ?? 'project')}</span></div>
-        <h1>{projectTitle(selectedProject)} - {frameItemLabel}</h1>
-        <div class="title-side right">
-          {#if settingsOpen}<Button variant="outline" size="sm" onclick={() => (settingsOpen = false)}>Done</Button>{/if}
-        </div>
-      </header>
       {#if error}
         <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
       {/if}
@@ -2673,13 +2676,9 @@
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
-  .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }
-  .main-frame.has-error { grid-template-rows: minmax(0, auto) minmax(0, auto) minmax(0, 1fr) minmax(0, auto); }
+  .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }
+  .main-frame.has-error { grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); }
   .main-frame.empty { display: flex; }
-  .document-title { display: grid; min-height: 38px; grid-template-columns: minmax(90px, 1fr) auto minmax(90px, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 8px; background: var(--card); }
-  .document-title h1 { overflow: hidden; margin: 0; color: var(--foreground); font-size: 12px; font-weight: 620; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
-  .title-side { min-width: 0; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
-  .title-side.right { display: flex; justify-content: flex-end; }
   .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; border-bottom: 1px solid rgb(220 107 107 / 38%); padding: 5px 8px; background: rgb(120 44 44 / 18%); color: #efa5a5; font-size: var(--font-size-sm); text-align: left; cursor: pointer; }
   .error-banner strong { font-size: var(--font-size-xs); }
   .item-viewer { width: 100%; height: 100%; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden; }
@@ -2709,7 +2708,6 @@
   .agent-choices p { margin: 0; padding: 13px; color: var(--text-soft); font-size: var(--font-size-sm); }
 
   @media (max-width: 760px) {
-    .document-title { grid-template-columns: 50px minmax(0, 1fr) 50px; }
     .project-copy small { display: none; }
   }
 </style>
