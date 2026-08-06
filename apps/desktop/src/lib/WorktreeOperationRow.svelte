@@ -18,7 +18,7 @@
   );
 </script>
 
-<article class="operation-row" data-status={operation.status}>
+<article class="operation-row" class:collapsed data-status={operation.status}>
   <button
     type="button"
     title={`${operation.label} · ${stateLabel}`}
@@ -50,6 +50,10 @@
   [data-status='failed'] .state-icon { color: var(--destructive); }
   [data-status='completed'] button { border-left-color: var(--success); background: color-mix(in srgb, var(--success) 5%, transparent); }
   [data-status='completed'] .state-icon { color: var(--success); }
+  .operation-row.collapsed { width: 100%; height: 36px; flex: none; }
+  .collapsed button { position: relative; height: 36px; min-height: 36px; grid-template-columns: 1fr; justify-items: center; border-left: 0; padding: 3px; }
+  .collapsed .state-icon { position: absolute; z-index: 1; right: 3px; bottom: 3px; width: 12px; height: 12px; align-items: center; justify-content: center; border: 1px solid var(--card); border-radius: 999px; background: var(--card); }
+  .collapsed .state-icon :global(svg) { width: 9px; height: 9px; }
   :global(.spinner) { animation: spin 800ms linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>

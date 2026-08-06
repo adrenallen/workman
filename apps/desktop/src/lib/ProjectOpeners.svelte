@@ -131,22 +131,7 @@
   }
 
   .collapsed {
-    position: absolute;
-    z-index: 5;
-    top: 50%;
-    right: 2px;
-    width: auto;
-    max-width: none;
-    gap: 1px;
-    padding: 3px 2px;
-    background: var(--popover);
-    transform: translateY(-50%);
-  }
-
-  :global(.project-row:hover) .collapsed,
-  :global(.project-row:focus-within) .collapsed {
-    width: auto;
-    max-width: none;
+    display: none;
   }
 
   @media (prefers-reduced-motion: reduce) {

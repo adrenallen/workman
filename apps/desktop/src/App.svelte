@@ -2317,46 +2317,49 @@
         <Button size="sm" type="submit">Save</Button>
       </form>
     {:else}
-      <button
-        class="project-select"
-        type="button"
-        title={fullTitle}
-        aria-current={project.selected ? 'page' : undefined}
-        aria-label={`${fullTitle} · ${projectKind} · ${project.status}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
-        use:reorderItem={{
-          id: project.id,
-          group: projectReorderGroup(project),
-          disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
-          label: fullTitle,
-          onDrop: handleProjectDrop,
-          onKeyboardMove: moveProjectFromKeyboard
-        }}
-        onclick={() => selectProject(project)}
-        oncontextmenu={(event) => showProjectPointerMenu(event, project)}
-        onkeydown={(event) => showProjectKeyboardMenu(event, project)}
-        data-context-kind="project"
-        data-context-id={project.id}
-      >
-        <StatusIndicator
-          class={projectRailCollapsed ? 'absolute right-1 bottom-1' : ''}
-          tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
-          label={`${fullTitle} · ${project.status}`}
-        />
-        <span class="project-kind-icon" aria-hidden="true">
-          {#if nested}<GitBranchIcon size={15} strokeWidth={1.8} />{:else if project.repository_id !== null}<FolderGit2Icon size={15} strokeWidth={1.8} />{:else}<FolderIcon size={15} strokeWidth={1.8} />{/if}
-        </span>
-        <span class="project-copy">
-          <strong>{rowLabel}</strong>
-          <small>{project.path}</small>
-        </span>
-        {#if unreadAgentCount > 0}
-          <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
-            <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-              <span aria-hidden="true"></span>{unreadAgentCount}
+      <TooltipLabel label={fullTitle} side={projectRailCollapsed ? 'right' : 'top'}>
+        <button
+          class="project-select"
+          type="button"
+          aria-current={project.selected ? 'page' : undefined}
+          aria-label={`${fullTitle} · ${projectKind} · ${project.status}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+          use:reorderItem={{
+            id: project.id,
+            group: projectReorderGroup(project),
+            disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
+            label: fullTitle,
+            onDrop: handleProjectDrop,
+            onKeyboardMove: moveProjectFromKeyboard
+          }}
+          onclick={() => selectProject(project)}
+          oncontextmenu={(event) => showProjectPointerMenu(event, project)}
+          onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+          data-context-kind="project"
+          data-context-id={project.id}
+        >
+          <StatusIndicator
+            class={projectRailCollapsed ? 'project-status-badge' : ''}
+            tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
+            label={`${fullTitle} · ${project.status}`}
+          />
+          <span class="project-icon-anchor">
+            <span class="project-kind-icon" aria-hidden="true">
+              {#if nested}<GitBranchIcon size={15} strokeWidth={1.8} />{:else if project.repository_id !== null}<FolderGit2Icon size={15} strokeWidth={1.8} />{:else}<FolderIcon size={15} strokeWidth={1.8} />{/if}
             </span>
-          </TooltipLabel>
-        {/if}
-      </button>
+          </span>
+          <span class="project-copy">
+            <strong>{rowLabel}</strong>
+            <small>{project.path}</small>
+          </span>
+          {#if unreadAgentCount > 0}
+            <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
+              <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                <span aria-hidden="true"></span>{unreadAgentCount}
+              </span>
+            </TooltipLabel>
+          {/if}
+        </button>
+      </TooltipLabel>
       {#if repository && !projectRailCollapsed}
         <WorktreeRowMeta
           entry={worktree}
@@ -2374,7 +2377,7 @@
         onError={reportError}
       />
       <IconButton
-        class="size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
+        class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
         label={`Actions for ${fullTitle}`}
         onclick={(event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
@@ -2746,7 +2749,8 @@
   .project-row { position: relative; display: flex; min-height: 40px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
-  .project-select { position: relative; display: flex; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
+  .project-select { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .repository-children { margin-left: 12px; border-left: 1px solid var(--border-token); padding-left: 3px; }
   .project-row.nested { min-height: 34px; }
@@ -2758,6 +2762,7 @@
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
+  .project-icon-anchor { display: inline-flex; flex: none; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
   .project-copy { min-width: 0; }
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2779,12 +2784,17 @@
   .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
   .project-rail.collapsed .brand-mark { display: none; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
-  .project-rail.collapsed .project-list { padding-inline: 4px; }
-  .project-rail.collapsed .repository-children { margin-left: 0; border-left: 0; padding-left: 0; }
-  .project-rail.collapsed .project-row { min-height: 38px; }
-  .project-rail.collapsed .project-select { position: relative; justify-content: center; padding: 4px; }
-  .project-rail.collapsed .project-kind-icon { width: 25px; height: 25px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
-  .project-rail.collapsed .project-unread-rollup { position: absolute; top: 1px; right: 1px; min-width: 13px; height: 13px; gap: 0; padding: 0 3px; font-size: 9px; }
+  .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
+  .project-rail.collapsed .repository-children { position: relative; display: flex; flex-direction: column; gap: 2px; margin: 0 0 2px; border-left: 0; padding: 2px 0; }
+  .project-rail.collapsed .repository-children::before { position: absolute; top: 2px; bottom: 2px; left: 1px; width: 1px; background: var(--border-token); content: ''; }
+  .project-rail.collapsed .project-row { width: 100%; height: 40px; min-height: 40px; flex: 0 0 40px; margin: 0; }
+  .project-rail.collapsed .project-row.nested { height: 36px; min-height: 36px; flex-basis: 36px; }
+  .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
+  .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
+  .project-rail.collapsed :global(.project-actions) { display: none; }
+  .project-rail.collapsed :global(.project-status-badge) { position: absolute; z-index: 2; right: 2px; bottom: 2px; width: 12px; height: 12px; border: 1px solid var(--card); border-radius: 999px; background: var(--card); }
+  .project-rail.collapsed :global(.project-status-badge > span) { width: 6px; height: 6px; }
+  .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--information); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 
