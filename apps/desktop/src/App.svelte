@@ -44,6 +44,8 @@
   import WorktreeProgressPanel from './lib/WorktreeProgressPanel.svelte';
   import WorktreeRemoveDialog from './lib/WorktreeRemoveDialog.svelte';
   import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
+  import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
+  import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import type { AgentTool } from './lib/agentTools';
   import type { ClaimedTodo } from './lib/claimedTodos';
   import type {
@@ -2639,18 +2641,29 @@
     tabindex="-1"
   >
     <header class="brand" data-tauri-drag-region>
-      <NotificationsCenter
-        {notifications}
-        busy={notificationBusy}
-        onRefresh={() => void refreshNotifications()}
-        onOpen={openNotification}
-        onMarkRead={(notification) => void markCenterNotificationRead(notification)}
-        onMarkAll={() => void markAllNotificationsRead()}
-      />
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="brand-mark" aria-hidden="true">
+        <img
+          src={workmanMark24}
+          srcset={`${workmanMark24} 1x, ${workmanMark48} 2x`}
+          width="24"
+          height="24"
+          alt=""
+          draggable="false"
+        />
+      </div>
+      <div class="notification-slot">
+        <NotificationsCenter
+          {notifications}
+          busy={notificationBusy}
+          onRefresh={() => void refreshNotifications()}
+          onOpen={openNotification}
+          onMarkRead={(notification) => void markCenterNotificationRead(notification)}
+          onMarkAll={() => void markAllNotificationsRead()}
+        />
+      </div>
       <div class="brand-copy"><strong>Workman</strong><span>local workspaces</span></div>
       <IconButton
-        class="size-7 shrink-0 rounded border border-border bg-card"
+        class="brand-collapse size-7 shrink-0 rounded border border-border bg-card"
         label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
         shortcut="⌘B"
         onclick={toggleProjectRail}
@@ -3001,9 +3014,9 @@
   .project-rail { display: flex; flex-direction: column; background: var(--card); }
 
   .brand { position: relative; display: flex; min-height: 46px; align-items: center; gap: 8px; padding: 7px 7px 7px 9px; user-select: none; }
-  .brand-mark { display: flex; width: 24px; height: 24px; align-items: flex-end; gap: 3px; padding: 4px; border: 1px solid #454a51; background: var(--popover); }
-  .brand-mark span { width: 3px; background: #9ca3ad; }
-  .brand-mark span:nth-child(1) { height: 6px; } .brand-mark span:nth-child(2) { height: 14px; } .brand-mark span:nth-child(3) { height: 10px; }
+  .brand-mark { display: grid; width: 24px; height: 24px; flex: none; place-items: center; pointer-events: none; }
+  .brand-mark img { display: block; width: 24px; height: 24px; }
+  .notification-slot { display: flex; flex: none; }
   .brand-copy { min-width: 0; flex: 1; }
   .brand-copy strong, .brand-copy span { display: block; }
   .brand-copy strong { color: #f3f4f6; font-size: 13px; font-weight: 680; }
@@ -3046,9 +3059,11 @@
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
-  .project-rail.collapsed .brand { min-height: 36px; gap: 0; padding-inline: 1px; }
+  .project-rail.collapsed .brand { display: grid; min-height: 54px; grid-template-columns: 28px 28px; grid-template-rows: 24px 28px; align-content: center; justify-content: center; gap: 0; padding: 1px; }
   .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
-  .project-rail.collapsed .brand-mark { display: none; }
+  .project-rail.collapsed .brand-mark { grid-row: 1; grid-column: 1 / -1; place-self: center; }
+  .project-rail.collapsed .notification-slot { grid-row: 2; grid-column: 1; place-self: center; }
+  .project-rail.collapsed :global(.brand-collapse) { grid-row: 2; grid-column: 2; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
   .project-rail.collapsed .repository-children { position: relative; display: flex; flex-direction: column; gap: 2px; margin: 0 0 2px; border-left: 0; padding: 2px 0; }
