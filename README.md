@@ -39,6 +39,21 @@ belong in `workman.yml`; `awm.yml` and then `gbuild.yml` remain readable with de
 
 Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
+## Side-by-side development build
+
+Keep the stable release open while testing the current checkout with the isolated development
+identity:
+
+```sh
+scripts/dev-install.sh
+wrk-dev app
+```
+
+This installs `wrk-dev`, `workmand-dev`, and the visibly badged `Workman Dev.app` without replacing
+`wrk`, `workmand`, or `Workman.app`. The dev stack uses its own data, config, daemon discovery, MCP
+registration, and bundle id. Re-run the script after source changes; `wrk-dev update` never installs
+over either identity. See [GETTING-STARTED-DEV.md](GETTING-STARTED-DEV.md) for paths and workflow.
+
 ## Release channels
 
 Releases are built locally on an Apple silicon Mac and published as prereleases first. This is

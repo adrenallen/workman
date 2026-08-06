@@ -51,3 +51,11 @@ wrk update --check
 
 Install an available command-line update with `wrk update`. The command will tell you when the
 desktop app also needs to be replaced from the new platform bundle.
+
+## Work on a development build beside this release
+
+From a Workman source checkout, `scripts/dev-install.sh` builds and installs `wrk-dev`,
+`workmand-dev`, and a visibly badged `Workman Dev.app`. The dev identity uses its own data/config,
+daemon discovery, MCP registration, and `com.workman.dev` bundle id, so this stable installation can
+remain open. Run `wrk-dev update` for the reminder to rebuild from the checkout; it never replaces
+the stable release. The full workflow is in `GETTING-STARTED-DEV.md` at the repository root.
