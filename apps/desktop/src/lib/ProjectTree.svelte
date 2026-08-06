@@ -6,6 +6,7 @@
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
+  import PlusIcon from '@lucide/svelte/icons/plus';
   import SearchIcon from '@lucide/svelte/icons/search';
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
@@ -191,6 +192,26 @@
       onBrowseScratchpads();
     } else {
       toggleGroup(group);
+    }
+  }
+
+  function createInGroup(group: ProjectTreeGroup): void {
+    switch (group) {
+      case 'todos': onCreateTodo(); break;
+      case 'agents': onAddAgent(); break;
+      case 'terminals': onAddTerminal(); break;
+      case 'commands': onAddCommand(); break;
+      case 'scratchpads': onAddScratchpad(); break;
+    }
+  }
+
+  function groupCreateLabel(group: ProjectTreeGroup): string {
+    switch (group) {
+      case 'todos': return 'New todo';
+      case 'agents': return 'Add agent';
+      case 'terminals': return 'New terminal';
+      case 'commands': return 'Add command';
+      case 'scratchpads': return 'New scratchpad';
     }
   }
 
@@ -497,6 +518,16 @@
               </TooltipLabel>
             {/if}
           </span>
+          {#if !collapsed}
+            <IconButton
+              class="group-create size-6 rounded-sm"
+              label={`${groupCreateLabel(group)} in ${project.name}`}
+              data-tree-row
+              onclick={() => createInGroup(group)}
+            >
+              {#snippet icon()}<PlusIcon size={13} strokeWidth={1.9} />{/snippet}
+            </IconButton>
+          {/if}
         </div>
 
         {#if openGroups[group] && !collapsed}
@@ -535,7 +566,9 @@
                   +{hiddenTodoCount} more
                 </button>
               {/if}
-              <button class="add-row" type="button" data-tree-row onclick={onCreateTodo}>+ Add todo</button>
+              {#if openTodos.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onCreateTodo}>+ Add todo</button>
+              {/if}
             {:else if group === 'agents'}
               {#each visibleAgentRows as row (row.process.id)}
                 {@const process = row.process}
@@ -593,7 +626,9 @@
               {:else}
                 <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
               {/each}
-              <button class="add-row" type="button" data-tree-row onclick={onAddAgent}>+ Add agent</button>
+              {#if agents.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onAddAgent}>+ Add agent</button>
+              {/if}
             {:else if group === 'terminals'}
               {#each visibleTerminals as process (process.id)}
                 {@const stats = runtimeStats(process)}
@@ -620,7 +655,9 @@
               {:else}
                 <p class="empty-row">{query ? 'No matching terminals' : 'No terminals'}</p>
               {/each}
-              <button class="add-row" type="button" data-tree-row onclick={onAddTerminal}>+ New terminal</button>
+              {#if terminals.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onAddTerminal}>+ New terminal</button>
+              {/if}
             {:else if group === 'commands'}
               {#each visibleCommands as process (process.id)}
                 {@const stats = runtimeStats(process)}
@@ -647,7 +684,9 @@
               {:else}
                 <p class="empty-row">{query ? 'No matching commands' : 'No commands in workman.yml'}</p>
               {/each}
-              <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
+              {#if commands.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
+              {/if}
             {:else}
               {#each visibleScratchpads as scratchpad (scratchpad.id)}
                 {#if renameTarget?.kind === 'scratchpad' && renameTarget.scratchpad.id === scratchpad.id}
@@ -672,7 +711,9 @@
               {:else}
                 <p class="empty-row">{query ? 'No matching scratchpads' : 'No scratchpads'}</p>
               {/each}
-              <button class="add-row" type="button" data-tree-row onclick={onAddScratchpad}>+ Add scratchpad</button>
+              {#if scratchpads.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onAddScratchpad}>+ Add scratchpad</button>
+              {/if}
             {/if}
           </div>
         {/if}
@@ -696,11 +737,12 @@
 
   .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .tree-group { border-bottom: 1px solid var(--border); }
-  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 19px minmax(0, 1fr) auto; align-items: center; gap: 0; padding: 3px 7px 3px 3px; color: var(--text-soft); }
+  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 19px minmax(0, 1fr) auto 28px; align-items: center; gap: 0; padding: 3px 3px; color: var(--text-soft); }
   .group-toggle, .group-title { min-width: 0; min-height: 22px; border: 0; border-radius: var(--radius); padding: 0; background: transparent; color: inherit; cursor: pointer; }
   .group-toggle { display: grid; place-items: center; }
   .group-title { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 4px; text-align: left; }
   .group-badges { display: flex; align-items: center; gap: 4px; }
+  .group-create { justify-self: center; }
   .group-header:hover { background: var(--popover); }
   .group-toggle:focus-visible, .group-title:focus-visible { position: relative; z-index: 1; }
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
