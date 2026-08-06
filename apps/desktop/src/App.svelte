@@ -72,6 +72,7 @@
     type ProcessKind,
     type ProcessView,
     type Project,
+    type ProjectIconImage,
     type TrustReview
   } from './lib/daemon';
   import {
@@ -1966,6 +1967,47 @@
     }
   }
 
+  async function chooseProjectIconImage(): Promise<Project | null> {
+    const project = projectSettingsProject;
+    if (!project || projectSettingsBusy) return null;
+    const sourcePath = await open({
+      directory: false,
+      multiple: false,
+      title: 'Choose a project image',
+      filters: [{
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'ico', 'svg']
+      }]
+    });
+    if (typeof sourcePath !== 'string') return null;
+    projectSettingsBusy = true;
+    try {
+      projects = await client.setProjectCustomIcon(project.id, sourcePath);
+      const updated = projects.find((candidate) => candidate.id === project.id) ?? null;
+      if (updated) projectSettingsProject = updated;
+      return updated;
+    } catch (cause) {
+      reportError(cause);
+      return null;
+    } finally {
+      projectSettingsBusy = false;
+    }
+  }
+
+  async function refreshProjectIcon(): Promise<ProjectIconImage | null> {
+    const project = projectSettingsProject;
+    if (!project || projectSettingsBusy) return null;
+    projectSettingsBusy = true;
+    try {
+      return await client.refreshProjectIcon(project.id);
+    } catch (cause) {
+      reportError(cause);
+      return null;
+    } finally {
+      projectSettingsBusy = false;
+    }
+  }
+
   function showContextMenu(request: ContextMenuRequest): void {
     treeRenameTarget = null;
     contextRequest = request;
@@ -2506,6 +2548,7 @@
               <ProjectIcon
                 icon={project.icon}
                 color={project.icon_color}
+                image={project.icon_image?.data_url}
                 fallback={nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
                 size={15}
               />
@@ -2729,12 +2772,14 @@
           {/key}
         {:else if todoBrowserOpen}
           <TodoBrowser
+            project={selectedProject}
             todos={coordination?.todos ?? []}
             onSelect={(todo) => void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title))}
             onCreate={() => (dialog = 'todo')}
           />
         {:else if scratchpadBrowserOpen}
           <ScratchpadBrowser
+            project={selectedProject}
             scratchpads={coordination?.scratchpads ?? []}
             archivedScratchpads={coordination?.archived_scratchpads ?? []}
             busyId={scratchpadBrowserBusyId}
@@ -2746,6 +2791,7 @@
           />
         {:else if processOverviewKind}
           <ProcessOverview
+            project={selectedProject}
             kind={processOverviewKind}
             {processes}
             onSelect={(process) => void selectTreeItem(projectTreeSelection(process.kind, process.id, process.project_id, processLabel(process)))}
@@ -2817,6 +2863,8 @@
     project={projectSettingsProject}
     busy={projectSettingsBusy}
     onSave={(settings) => void saveProjectSettings(settings)}
+    onChooseImage={chooseProjectIconImage}
+    onRefreshAutomatic={refreshProjectIcon}
     onClose={() => { if (!projectSettingsBusy) projectSettingsProject = null; }}
   />
 {/if}
