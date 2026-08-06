@@ -125,6 +125,11 @@ test("renders the public stable download page entirely from its channel manifest
   assert.match(html, /href="\/versions\/1\.2\.3\/SHA256SUMS"/);
   assert.match(html, /80 MB/);
   assert.match(html, /WORKMAN_KEY='your-password'/);
+  assert.match(html, /First launch on macOS/);
+  assert.match(html, /xattr -dr com\.apple\.quarantine \/Applications\/Workman\.app/);
+  assert.match(html, /System Settings &rarr; Privacy &amp; Security/);
+  assert.match(html, /Open Anyway/);
+  assert.match(html, /CLI installer path does not apply browser quarantine/);
   assert.doesNotMatch(html, /app-key|friend-key/);
 
   const head = await worker.fetch(request("/download", { method: "HEAD" }), env);

@@ -366,6 +366,12 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
             <p>Unzip <code>${macName}</code>, then drag <strong>Workman.app</strong> into Applications.</p>
           </section>
           <section>
+            <h3>First launch on macOS</h3>
+            <p>Browser-downloaded ZIPs are quarantined. If Gatekeeper blocks the unsigned app, run:</p>
+            <pre><code>xattr -dr com.apple.quarantine /Applications/Workman.app</code></pre>
+            <p>Or open <strong>System Settings &rarr; Privacy &amp; Security</strong> and choose <strong>Open Anyway</strong>. The CLI installer path does not apply browser quarantine.</p>
+          </section>
+          <section>
             <h3>CLI + daemon</h3>
             <p>Install or update <code>wrk</code> and <code>workmand</code> from the stable channel:</p>
             <pre><code>curl -fsSL https://workman.userdefined.io/install.sh | WORKMAN_KEY='your-password' sh</code></pre>

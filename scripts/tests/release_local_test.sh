@@ -31,5 +31,11 @@ grep -q 'run publish -- release' "$RELEASE_SCRIPT"
 test -x "$REPO_ROOT/scripts/release-assets/install.sh"
 grep -q 'never run `workmand` by hand' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
+grep -Fq 'xattr -dr com.apple.quarantine /Applications/Workman.app' \
+  "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
+grep -Fq 'System Settings → Privacy & Security' \
+  "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
+grep -Fq 'CLI installer path do not receive browser quarantine' \
+  "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
 grep -q 'never run `workmand` by hand' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-linux.md"
