@@ -1209,6 +1209,28 @@ mod tests {
         socket
             .send(Message::Text(
                 json!({
+                    "id": "settings-first",
+                    "method": "projects.update_settings",
+                    "params": {
+                        "project_id": first_id,
+                        "display_name": "Frontend studio",
+                        "icon": "code-2",
+                        "icon_color": "violet"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["display_name"], "Frontend studio");
+        assert_eq!(response["result"][0]["icon"], "code-2");
+        assert_eq!(response["result"][0]["icon_color"], "violet");
+
+        socket
+            .send(Message::Text(
+                json!({
                     "id": "register-second",
                     "method": "projects.register",
                     "params": { "path": second_path }

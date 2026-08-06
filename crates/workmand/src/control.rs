@@ -94,6 +94,16 @@ struct RenameProjectParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateProjectSettingsParams {
+    project_id: ProjectId,
+    display_name: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    icon_color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProjectReorderParams {
     ordered_ids: Vec<ProjectId>,
 }
@@ -170,6 +180,7 @@ struct ProcessReorderParams {
 struct ProjectSummary {
     #[serde(flatten)]
     project: Project,
+    icon_color: Option<String>,
     repository_id: Option<i64>,
     repository_root: Option<String>,
     parent_project_id: Option<ProjectId>,
@@ -549,6 +560,11 @@ async fn dispatch(
         "projects.rename" => {
             let params: RenameProjectParams = params_as(params)?;
             rename_project(registry.store(), params.project_id, &params.name)?;
+            return project_result(list_projects(registry.store()));
+        }
+        "projects.update_settings" => {
+            let params: UpdateProjectSettingsParams = params_as(params)?;
+            update_project_settings(registry.store(), params)?;
             return project_result(list_projects(registry.store()));
         }
         "project.reorder" => {
@@ -1005,12 +1021,74 @@ fn rename_project(
     Ok(())
 }
 
+fn update_project_settings(
+    store: &Store,
+    params: UpdateProjectSettingsParams,
+) -> Result<(), (&'static str, String)> {
+    const ICONS: &[&str] = &[
+        "bot", "boxes", "code-2", "database", "globe-2", "rocket", "terminal", "workflow",
+    ];
+    const COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
+
+    let display_name = params.display_name.trim();
+    if display_name.is_empty() {
+        return Err((
+            "invalid_project_name",
+            "project name cannot be empty".to_owned(),
+        ));
+    }
+    if params
+        .icon
+        .as_deref()
+        .is_some_and(|icon| !ICONS.contains(&icon))
+    {
+        return Err((
+            "invalid_project_icon",
+            "project icon is not one of the supported choices".to_owned(),
+        ));
+    }
+    if params
+        .icon_color
+        .as_deref()
+        .is_some_and(|color| !COLORS.contains(&color))
+    {
+        return Err((
+            "invalid_project_icon_color",
+            "project icon color is not one of the supported choices".to_owned(),
+        ));
+    }
+
+    let icon = params.icon.as_deref();
+    let icon_color = icon.and(params.icon_color.as_deref());
+    let changed = store
+        .connection()
+        .execute(
+            "UPDATE projects
+             SET display_name = ?1, icon = ?2, icon_color = ?3
+             WHERE id = ?4",
+            (display_name, icon, icon_color, params.project_id),
+        )
+        .map_err(project_store_error)?;
+    if changed == 0 {
+        return Err(("project_not_found", "project not found".to_owned()));
+    }
+    Ok(())
+}
+
 fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, String)> {
     let projects = store.list_projects().map_err(project_store_error)?;
 
     projects
         .into_iter()
         .map(|project| {
+            let icon_color = store
+                .connection()
+                .query_row(
+                    "SELECT icon_color FROM projects WHERE id = ?1",
+                    [project.id],
+                    |row| row.get(0),
+                )
+                .map_err(project_store_error)?;
             let processes = store
                 .list_processes(Some(project.id))
                 .map_err(|error| ("store_error", error.to_string()))?;
@@ -1033,6 +1111,7 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
                 crate::worktrees::project_envelope(store, project).map_err(worktree_error)?;
             Ok(ProjectSummary {
                 project: envelope.project,
+                icon_color,
                 repository_id: envelope.repository_id,
                 repository_root: envelope.repository_root,
                 parent_project_id: envelope.parent_project_id,

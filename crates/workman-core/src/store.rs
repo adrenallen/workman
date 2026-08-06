@@ -63,10 +63,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "notifications",
         include_str!("../migrations/0011_notifications.sql"),
     ),
+    (
+        12,
+        "project_icon_color",
+        include_str!("../migrations/0012_project_icon_color.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -214,7 +219,7 @@ impl Store {
                 path = excluded.path,
                 name = excluded.name,
                 display_name = excluded.display_name,
-                icon = excluded.icon,
+                icon = COALESCE(excluded.icon, projects.icon),
                 selected = excluded.selected,
                 sort_order = excluded.sort_order",
             params![
