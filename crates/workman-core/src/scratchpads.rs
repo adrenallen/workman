@@ -47,6 +47,7 @@ pub enum ScratchpadEditTarget {
 pub struct ScratchpadListQuery {
     pub query: Option<String>,
     pub tags: Vec<String>,
+    pub archived: bool,
     pub offset: usize,
     pub limit: Option<usize>,
 }
@@ -606,10 +607,12 @@ impl<'store> ScratchpadService<'store> {
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
         let mut statement = self.store.connection().prepare(
-            "SELECT id FROM scratchpads WHERE project_id = ?1 AND archived = 0 ORDER BY id DESC",
+            "SELECT id FROM scratchpads WHERE project_id = ?1 AND archived = ?2 ORDER BY id DESC",
         )?;
         let ids = statement
-            .query_map([project_id], |row| row.get::<_, ScratchpadId>(0))?
+            .query_map(params![project_id, query.archived], |row| {
+                row.get::<_, ScratchpadId>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut matches = Vec::new();
         for id in ids {

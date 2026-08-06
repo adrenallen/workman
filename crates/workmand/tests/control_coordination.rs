@@ -86,7 +86,8 @@ impl TestServer {
             todos
                 .lock(1, target.id, "codex-w2", 60_000_000, now)
                 .unwrap();
-            ScratchpadService::new(store)
+            let scratchpads = ScratchpadService::new(store);
+            scratchpads
                 .write(
                     1,
                     None,
@@ -94,6 +95,23 @@ impl TestServer {
                     "# Build plan\n\nFirst revision.".into(),
                     Some(vec!["shared".into()]),
                     None,
+                )
+                .unwrap();
+            let (archived_scratchpad, _) = scratchpads
+                .write(
+                    1,
+                    None,
+                    "Archived handoff".into(),
+                    "Older notes kept for reference.".into(),
+                    Some(vec!["archive".into()]),
+                    None,
+                )
+                .unwrap();
+            scratchpads
+                .archive(
+                    1,
+                    archived_scratchpad.id,
+                    Some(archived_scratchpad.revision),
                 )
                 .unwrap();
         }
@@ -191,6 +209,12 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     .await;
     assert_eq!(snapshot["todo_total_count"], 2);
     assert_eq!(snapshot["scratchpad_total_count"], 1);
+    assert_eq!(snapshot["archived_scratchpad_total_count"], 1);
+    assert_eq!(
+        snapshot["archived_scratchpads"][0]["name"],
+        "Archived handoff"
+    );
+    assert_eq!(snapshot["archived_scratchpads"][0]["archived"], true);
     let target = snapshot["todos"]
         .as_array()
         .unwrap()

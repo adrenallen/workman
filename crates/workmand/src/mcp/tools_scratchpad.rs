@@ -450,6 +450,7 @@ impl WorkmanMcp {
             ScratchpadListQuery {
                 query: args.query,
                 tags: args.tags.unwrap_or_default(),
+                archived: false,
                 offset: args.offset.unwrap_or(0),
                 limit: args.limit,
             },

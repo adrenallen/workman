@@ -129,6 +129,16 @@ fn snapshot(params: Value, store: &Store) -> ControlResult {
             },
         )
         .map_err(scratchpad_error)?;
+    let archived_scratchpads = ScratchpadService::new(store)
+        .list(
+            params.project_id,
+            ScratchpadListQuery {
+                archived: true,
+                limit: Some(200),
+                ..ScratchpadListQuery::default()
+            },
+        )
+        .map_err(scratchpad_error)?;
 
     Ok(json!({
         "project_id": params.project_id,
@@ -136,6 +146,8 @@ fn snapshot(params: Value, store: &Store) -> ControlResult {
         "todo_total_count": todos.total_count,
         "scratchpads": scratchpads.scratchpads,
         "scratchpad_total_count": scratchpads.total_count,
+        "archived_scratchpads": archived_scratchpads.scratchpads,
+        "archived_scratchpad_total_count": archived_scratchpads.total_count,
     }))
 }
 
