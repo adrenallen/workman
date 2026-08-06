@@ -24,6 +24,7 @@
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
+  import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectOpeners from './lib/ProjectOpeners.svelte';
@@ -65,6 +66,7 @@
     DaemonClient,
     isUnsupportedControlMethod,
     type ConnectionStatus,
+    type Notification,
     type ProcessView,
     type Project,
     type TrustReview
@@ -222,6 +224,10 @@
   let activeWorktreeOperationId = $state<string | null>(null);
   let agentDoneNotices = $state<AgentDoneNotice[]>([]);
   let agentDoneNoticeSequence = 0;
+  let notifications = $state<Notification[]>([]);
+  let notificationBusy = $state(false);
+  let notificationRequest = 0;
+  let notificationUnreadSignature: string | null = null;
   const reconciledWorktreeOperations = new Set<string>();
   const notifiedUnreadProcessIds = new Set<number>();
   const markReadPending = new Set<number>();
@@ -436,6 +442,7 @@
     if (reconnected) {
       void client.subscribeProcessStatuses().catch(reportError);
       void refreshProjects();
+      if (status.version_compatible) void refreshNotifications();
     }
   }
 
@@ -616,6 +623,97 @@
     navigationIndex = updated;
     notifiedUnreadProcessIds.delete(processId);
     agentDoneNotices = agentDoneNotices.filter((notice) => notice.processId !== processId);
+    const readAt = Date.now();
+    notifications = notifications.map((notification) =>
+      notification.process_id === processId && notification.read_at === null
+        ? { ...notification, read_at: readAt }
+        : notification
+    );
+  }
+
+  async function refreshNotifications(): Promise<void> {
+    if (connection.status !== 'connected' || !connection.version_compatible) return;
+    const request = ++notificationRequest;
+    try {
+      const next = await client.notifications();
+      if (request === notificationRequest) notifications = next;
+    } catch (cause) {
+      if (request === notificationRequest) reportError(cause);
+    }
+  }
+
+  async function markCenterNotificationRead(notification: Notification): Promise<void> {
+    if (notificationBusy || notification.read_at !== null) return;
+    const previous = notifications;
+    notificationBusy = true;
+    notifications = notifications.map((candidate) => candidate.id === notification.id
+      ? { ...candidate, read_at: Date.now() }
+      : candidate);
+    if (notification.process_id !== null) clearAgentUnreadLocally(notification.process_id);
+    try {
+      await client.markNotificationRead(notification.id);
+    } catch (cause) {
+      notifications = previous;
+      reportError(cause);
+      if (notification.project_id !== null) await refreshProcesses(notification.project_id);
+    } finally {
+      notificationBusy = false;
+    }
+  }
+
+  async function markAllNotificationsRead(): Promise<void> {
+    if (notificationBusy || notifications.every((notification) => notification.read_at !== null)) return;
+    const previous = notifications;
+    notificationBusy = true;
+    const readAt = Date.now();
+    const processIds = new Set(
+      notifications
+        .filter((notification) => notification.read_at === null && notification.process_id !== null)
+        .map((notification) => notification.process_id!)
+    );
+    notifications = notifications.map((notification) => notification.read_at === null
+      ? { ...notification, read_at: readAt }
+      : notification);
+    for (const processId of processIds) clearAgentUnreadLocally(processId);
+    try {
+      await client.markAllNotificationsRead();
+    } catch (cause) {
+      notifications = previous;
+      reportError(cause);
+      if (selectedProject) await refreshProcesses(selectedProject.id);
+    } finally {
+      notificationBusy = false;
+    }
+  }
+
+  function openNotification(notification: Notification): void {
+    void markCenterNotificationRead(notification);
+    const process = notification.process_id === null
+      ? null
+      : Object.values(navigationIndex)
+          .flatMap((snapshot) => snapshot.processes)
+          .find((candidate) => candidate.id === notification.process_id)
+        ?? processes.find((candidate) => candidate.id === notification.process_id)
+        ?? null;
+    const projectId = notification.project_id ?? process?.project_id ?? null;
+    if (notification.process_id !== null && projectId !== null) {
+      appNavigation.navigate({
+        type: 'item',
+        selection: projectTreeSelection(
+          process?.kind ?? (notification.type === 'agent_done' ? 'agent' : 'command'),
+          notification.process_id,
+          projectId,
+          process?.name ?? notification.body
+        )
+      }, 'api');
+    } else if (notification.todo_id !== null && projectId !== null) {
+      appNavigation.navigate({
+        type: 'item',
+        selection: projectTreeSelection('todo', notification.todo_id, projectId, notification.body)
+      }, 'api');
+    } else if (projectId !== null) {
+      appNavigation.navigate({ type: 'project', projectId }, 'api');
+    }
   }
 
   async function markAgentRead(processId: number, projectId: number): Promise<void> {
@@ -646,6 +744,12 @@
       if (!unreadIds.has(processId)) notifiedUnreadProcessIds.delete(processId);
     }
     agentDoneNotices = agentDoneNotices.filter((notice) => unreadIds.has(notice.processId));
+
+    const signature = [...unreadIds].sort((left, right) => left - right).join(',');
+    if (signature !== notificationUnreadSignature) {
+      notificationUnreadSignature = signature;
+      void refreshNotifications();
+    }
 
     for (const process of next) {
       if (process.kind !== 'agent' || !process.agent_state.unread) continue;
@@ -2302,6 +2406,14 @@
     tabindex="-1"
   >
     <header class="brand" data-tauri-drag-region>
+      <NotificationsCenter
+        {notifications}
+        busy={notificationBusy}
+        onRefresh={() => void refreshNotifications()}
+        onOpen={openNotification}
+        onMarkRead={(notification) => void markCenterNotificationRead(notification)}
+        onMarkAll={() => void markAllNotificationsRead()}
+      />
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="brand-copy"><strong>Workman</strong><span>local workspaces</span></div>
       <IconButton
@@ -2663,9 +2775,9 @@
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
-  .project-rail.collapsed .brand { padding-inline: 6px 4px; }
+  .project-rail.collapsed .brand { min-height: 36px; gap: 0; padding-inline: 1px; }
   .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
-  .project-rail.collapsed .brand-mark { width: 23px; height: 23px; }
+  .project-rail.collapsed .brand-mark { display: none; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { padding-inline: 4px; }
   .project-rail.collapsed .repository-children { margin-left: 0; border-left: 0; padding-left: 0; }
