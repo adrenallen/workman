@@ -105,8 +105,11 @@
   }
 
   .review {
+    display: grid;
     width: min(720px, 100%);
-    max-height: min(780px, calc(100vh - 48px));
+    min-height: 0;
+    max-height: min(780px, calc(100dvh - 48px));
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     overflow: hidden;
     border: 1px solid #7e633c;
     border-radius: 5px;
@@ -217,8 +220,9 @@
   }
 
   .changes {
-    max-height: min(430px, 50vh);
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 0 22px 5px;
     scrollbar-color: #3f4d4e transparent;
     scrollbar-width: thin;

@@ -237,13 +237,13 @@
   .empty { display: flex; min-height: 90px; align-items: center; justify-content: center; gap: 8px; border-top: 1px solid var(--border); color: var(--muted); font-size: var(--font-size-sm); }
 
   .overlay { position: absolute; z-index: 8; inset: 7px; display: grid; place-items: center; padding: 8px; background: rgb(4 12 16 / 82%); backdrop-filter: blur(3px); }
-  .preview-dialog { width: min(680px, 100%); overflow: hidden; border: 1px solid #4a7179; border-radius: 4px; background: #0b1c23; box-shadow: 0 18px 50px rgb(0 0 0 / 45%); }
+  .preview-dialog { display: grid; width: min(680px, 100%); min-height: 0; max-height: 100%; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #4a7179; border-radius: 4px; background: #0b1c23; box-shadow: 0 18px 50px rgb(0 0 0 / 45%); }
   .preview-dialog header { justify-content: space-between; border-bottom: 1px solid #29434c; padding: 11px 13px; }
   .preview-dialog h3 { margin: 3px 0 0; color: #dde6e8; font-size: 13px; }
   .preview-dialog header button { border: 0; background: transparent; color: #7d8d94; font-size: 18px; cursor: pointer; }
   .preview-dialog > p { margin: 0; padding: 10px 13px 0; color: #7f9199; font-size: var(--font-size-xs); line-height: 1.5; }
   .preview-dialog > p code { color: #a7bbc0; }
-  .preview-dialog pre { max-height: 260px; overflow: auto; margin: 10px 13px; border: 1px solid #253e47; padding: 10px; background: var(--background); color: #a9c4c8; font-size: var(--font-size-xs); line-height: 1.5; white-space: pre-wrap; }
+  .preview-dialog pre { min-height: 0; overflow: auto; overscroll-behavior: contain; margin: 10px 13px; border: 1px solid #253e47; padding: 10px; background: var(--background); color: #a9c4c8; font-size: var(--font-size-xs); line-height: 1.5; white-space: pre-wrap; }
   .preview-dialog footer { justify-content: space-between; gap: 10px; border-top: 1px solid #29434c; padding: 10px 13px; color: #6d8088; font-size: var(--font-size-xs); }
   .preview-dialog footer > div { gap: 6px; }
   .cancel, .approve { border: 1px solid #3b535c; border-radius: 2px; padding: 7px 9px; font-size: var(--font-size-xs); cursor: pointer; }

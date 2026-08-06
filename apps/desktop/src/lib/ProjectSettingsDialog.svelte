@@ -63,7 +63,7 @@
     showCloseButton={false}
     aria-describedby="project-settings-description"
   >
-    <form onsubmit={(event) => { event.preventDefault(); submit(); }}>
+    <form class="modal-form" onsubmit={(event) => { event.preventDefault(); submit(); }}>
       <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
         <span class="flex min-w-0 items-start gap-3">
           <span class="grid size-8 shrink-0 place-items-center rounded border border-border bg-card text-muted-foreground">
@@ -153,7 +153,8 @@
 </Dialog.Root>
 
 <style>
-  .settings-body { display: grid; gap: 14px; padding: 14px 16px 16px; }
+  .modal-form { display: grid; min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .settings-body { display: grid; min-height: 0; align-content: start; gap: 14px; overflow-y: auto; overscroll-behavior: contain; padding: 14px 16px 16px; }
   .name-field { display: grid; gap: 6px; }
   .name-field > span, legend, h3 { color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 700; letter-spacing: 0.045em; text-transform: uppercase; }
   fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }

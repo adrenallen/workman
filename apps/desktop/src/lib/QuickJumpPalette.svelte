@@ -423,6 +423,7 @@
               <ProjectIcon
                 icon={entryProject.icon}
                 color={entryProject.icon_color}
+                image={entryProject.icon_image?.data_url}
                 fallback={entryProject.parent_project_id !== null ? 'worktree' : entryProject.repository_id !== null ? 'repository' : 'project'}
                 size={14}
               />
@@ -454,7 +455,7 @@
 <style>
   .quick-jump {
     display: grid;
-    max-height: min(610px, calc(100vh - 110px));
+    max-height: min(610px, calc(100dvh - 2rem));
     grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     overflow: hidden;
     border: 1px solid var(--border);

@@ -24,7 +24,7 @@
 </script>
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busyPath) onClose(); }}>
-  <Dialog.Content class="w-[min(620px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0" showCloseButton={false}>
+  <Dialog.Content class="grid w-[min(620px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto_auto] gap-0 rounded-lg border border-border bg-popover p-0" showCloseButton={false}>
     <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
       <span class="flex items-start gap-3">
         <span class="grid size-8 place-items-center rounded border border-border bg-card text-muted-foreground"><FolderGit2Icon size={16} /></span>
@@ -33,7 +33,7 @@
       <IconButton label="Close import worktrees" disabled={busyPath !== null} onclick={onClose}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
     </Dialog.Header>
 
-    <ScrollArea class="max-h-[360px]">
+    <ScrollArea class="min-h-0 max-h-[360px]">
       <div class="grid gap-1 p-3">
         {#each entries as entry (entry.path)}
           <article class="grid min-h-14 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded border border-border bg-card px-3 py-2">
@@ -49,7 +49,7 @@
 
     {#if error}<p class="mx-3 mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
 
-    <Dialog.Footer class="flex-row justify-end border-t border-border px-4 py-3">
+    <Dialog.Footer class="flex-row justify-end border-t border-border bg-card px-4 py-2.5">
       <Button variant="ghost" disabled={busyPath !== null} onclick={onClose}>Later</Button>
       <Button disabled={busyPath !== null || entries.length === 0} onclick={onAdoptAll}>
         {#if busyPath === '*'}<LoaderCircleIcon class="spin" size={14} />{/if}Import all

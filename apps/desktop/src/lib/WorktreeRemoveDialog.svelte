@@ -26,7 +26,7 @@
 </script>
 
 <AlertDialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
-  <AlertDialog.Content class="w-[min(500px,calc(100vw-32px))] max-w-none rounded-lg border border-border bg-popover p-0">
+  <AlertDialog.Content class="w-[min(500px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 rounded-lg border border-border bg-popover p-0">
     <AlertDialog.Header class="gap-2 border-b border-border px-4 py-4 text-left">
       <span class="flex items-center gap-2 text-destructive"><Trash2Icon size={16} /><AlertDialog.Title>Remove {entry.branch}?</AlertDialog.Title></span>
       <AlertDialog.Description class="text-sm leading-relaxed">
@@ -34,7 +34,7 @@
       </AlertDialog.Description>
     </AlertDialog.Header>
 
-    <section class="grid gap-3 px-4 py-4">
+    <section class="grid min-h-0 content-start gap-3 overflow-y-auto overscroll-contain px-4 py-4">
       <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded border border-border bg-card px-3 py-2">
         <GitBranchIcon class="mt-0.5 text-muted-foreground" size={15} />
         <strong class="truncate font-mono text-sm">{entry.branch}</strong>

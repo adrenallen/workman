@@ -166,7 +166,7 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <Dialog.Content
-    class="command-dialog max-h-[calc(100vh-44px)] w-[min(560px,calc(100vw-44px))] max-w-none gap-0 overflow-auto rounded-lg border border-border bg-popover p-0 shadow-2xl"
+    class="command-dialog w-[min(560px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0 shadow-2xl"
     showCloseButton={false}
     aria-label="Add command"
     aria-describedby="command-dialog-description"
@@ -187,11 +187,12 @@
       </IconButton>
     </header>
 
-    <p id="command-dialog-description" class="description">
-      Add a repeatable process to <strong>{project.name}</strong>.
-    </p>
+    <div class="command-body">
+      <p id="command-dialog-description" class="description">
+        Add a repeatable process to <strong>{project.name}</strong>.
+      </p>
 
-    <div class="fields">
+      <div class="fields">
       <label>
         <span>Command name</span>
         <input
@@ -259,6 +260,7 @@
       </fieldset>
 
       {#if formError}<p class="form-error" role="alert">{formError}</p>{/if}
+      </div>
     </div>
 
       <footer>
@@ -270,7 +272,8 @@
 </Dialog.Root>
 
 <style>
-  form { display: contents; }
+  form { display: grid; min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .command-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 
   header {
     display: flex;

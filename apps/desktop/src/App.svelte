@@ -2873,9 +2873,11 @@
           <div><span>New todo</span><h2>Add work to the tree</h2></div>
           <IconButton label="Close new todo" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
         </header>
-        <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
-        <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context"></textarea></label>
-        <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
+        <div class="dialog-body">
+          <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
+          <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context"></textarea></label>
+          <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
+        </div>
         <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
       </form>
       </Dialog.Content>
@@ -3004,18 +3006,19 @@
   .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
   .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
-  .dialog-surface { width: 100%; color: var(--foreground); }
+  .dialog-surface { display: grid; width: 100%; min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; color: var(--foreground); }
   .dialog-surface > header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 11px 13px 9px; }
   .dialog-surface > header span, .dialog-surface label > span { color: var(--muted-foreground); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
   .dialog-surface h2 { margin: 3px 0 0; color: var(--foreground); font-size: 17px; }
-  .dialog-surface > label, .dialog-row { margin: 10px 13px 0; }
+  .dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 13px 12px; }
+  .dialog-body > label + label, .dialog-row { margin-top: 10px; }
   .dialog-surface label { display: grid; gap: 4px; }
   .dialog-surface label small { color: var(--muted-foreground); font: inherit; }
   .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .dialog-surface textarea { resize: vertical; line-height: 1.4; }
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
-  .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  .agent-choices { display: grid; max-height: 280px; overflow-y: auto; padding: 5px; }
+  .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
+  .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }
   .agent-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; border: 0; border-bottom: 1px solid var(--border); padding: 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .agent-choices > button:hover { background: var(--accent); }
   .agent-choices strong { font-size: var(--font-size-sm); } .agent-choices small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }

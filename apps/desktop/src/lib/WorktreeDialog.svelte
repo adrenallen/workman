@@ -6,6 +6,8 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import SearchIcon from '@lucide/svelte/icons/search';
   import CloudIcon from '@lucide/svelte/icons/cloud';
+  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
 
@@ -13,6 +15,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { Checkbox } from '$lib/components/ui/checkbox';
+  import * as Collapsible from '$lib/components/ui/collapsible';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
@@ -66,6 +69,7 @@
   let adoptPath = $state('');
   let envPolicy = $state<EnvironmentPolicy>('skip');
   let rememberEnvPolicy = $state(true);
+  let advancedOpen = $state(false);
   let branchInput = $state<HTMLInputElement | null>(null);
   let branchSearchInput = $state<HTMLInputElement | null>(null);
   let effectiveBranchOptions = $derived(branchOptions.length > 0
@@ -75,7 +79,7 @@
   let activeBranch = $derived(rankedBranches[branchOptionIndex] ?? null);
 
   let title = $derived(mode === 'create'
-    ? `New worktree in ${repository.name}`
+    ? 'New worktree'
     : mode === 'fork'
       ? `Fork ${sourceEntry?.branch ?? sourceProject.branch ?? sourceProject.name}`
       : `Adopt into ${repository.name}`);
@@ -89,6 +93,10 @@
         ? existingBranch.length > 0
         : branch.trim().length > 0
   ));
+  let environmentSummary = $derived(envPolicy === 'copy' ? 'Copy safe .env' : 'Skip .env');
+  let herdSummary = $derived(repository.herd.parked
+    ? `Herd · .${repository.herd.tld ?? 'test'}`
+    : repository.herd.available ? 'Herd available' : 'No Herd');
 
   $effect(() => {
     const input = mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
@@ -162,11 +170,11 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <Dialog.Content
-    class="w-[min(560px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0"
+    class="w-[min(520px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0"
     showCloseButton={false}
     aria-describedby="worktree-dialog-description"
   >
-    <form onsubmit={(event) => { event.preventDefault(); submit(); }}>
+    <form class="grid min-h-0 max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto]" onsubmit={(event) => { event.preventDefault(); submit(); }}>
       <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
         <span class="flex min-w-0 items-start gap-3">
           <span class="grid size-8 shrink-0 place-items-center rounded border border-border bg-card text-muted-foreground">
@@ -182,7 +190,7 @@
         <IconButton label="Close worktree dialog" disabled={busy} onclick={onClose}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
       </Dialog.Header>
 
-      <section class="grid gap-4 px-4 py-4">
+      <section class="grid min-h-0 content-start gap-3 overflow-y-auto overscroll-contain px-4 py-3">
         {#if mode === 'adopt'}
           <label class="grid gap-1.5">
             <span class="text-sm font-medium">Existing worktree folder</span>
@@ -233,7 +241,7 @@
                   <span>{branchQuery ? `${rankedBranches.length} matches` : 'Available branches'}</span>
                   <span>local + origin</span>
                 </div>
-                <ScrollArea id="worktree-branch-options" class="h-40" role="listbox" aria-label="Available branches">
+                <ScrollArea id="worktree-branch-options" class="h-36" role="listbox" aria-label="Available branches">
                   <div class="grid gap-0.5 p-1">
                     {#each rankedBranches as option, index (option.name)}
                       <button
@@ -266,32 +274,58 @@
               <span class="text-sm font-medium">Branch name</span>
               <Input bind:ref={branchInput} bind:value={branch} class="font-mono" placeholder={mode === 'fork' ? 'feature/follow-up' : 'feature/new-worktree'} autocomplete="off" spellcheck="false" />
             </label>
-            {#if mode === 'create'}
-              <label class="grid gap-1.5">
-                <span class="text-sm font-medium">Base ref</span>
-                <Input bind:value={baseRef} class="font-mono" placeholder="HEAD, main, origin/main, or SHA" autocomplete="off" spellcheck="false" />
-                <small class="text-xs text-muted-foreground">The new branch starts here. Existing branches are never reset.</small>
-              </label>
-            {/if}
           {/if}
 
-          <div class="grid gap-2 border-t border-border pt-3">
-            <span class="text-sm font-medium">Environment file</span>
-            <div class="grid grid-cols-2 gap-2">
-              <Button type="button" variant={envPolicy === 'skip' ? 'secondary' : 'outline'} onclick={() => (envPolicy = 'skip')}>Skip .env</Button>
-              <Button type="button" variant={envPolicy === 'copy' ? 'secondary' : 'outline'} onclick={() => (envPolicy = 'copy')}>Copy safe .env</Button>
-            </div>
-            <label class="flex items-center gap-2 text-sm text-muted-foreground">
-              <Checkbox bind:checked={rememberEnvPolicy} aria-label="Remember environment choice for this repository" />
-              Remember this choice for {repository.name}
-            </label>
-          </div>
+          <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-lg border border-border bg-card">
+            <Collapsible.Trigger class="flex min-h-10 w-full items-center gap-2 px-3 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+              <SlidersHorizontalIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />
+              <span class="min-w-0 flex-1">
+                <strong class="block text-sm font-medium">Advanced settings</strong>
+                <span class="block truncate text-xs text-muted-foreground">{environmentSummary} · {herdSummary}</span>
+              </span>
+              <ChevronDownIcon class={`shrink-0 text-muted-foreground motion-safe:transition-transform ${advancedOpen ? 'rotate-180' : ''}`} size={15} aria-hidden="true" />
+            </Collapsible.Trigger>
+            <Collapsible.Content>
+              <div class="grid gap-3 border-t border-border px-3 py-3">
+                <dl class="grid gap-1.5 text-xs">
+                  <div class="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
+                    <dt class="text-muted-foreground">Destination</dt>
+                    <dd class="truncate font-mono" title={repository.managed_root}>{repository.managed_root}</dd>
+                  </div>
+                  <div class="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
+                    <dt class="text-muted-foreground">Herd</dt>
+                    <dd>{repository.herd.parked ? `Parked on .${repository.herd.tld ?? 'test'}` : repository.herd.available ? 'Available after creation' : 'Not detected'}</dd>
+                  </div>
+                </dl>
+
+                {#if mode === 'create' && createKind === 'new'}
+                  <label class="grid gap-1.5 border-t border-border pt-3">
+                    <span class="text-sm font-medium">Base ref</span>
+                    <Input bind:value={baseRef} class="font-mono" placeholder="HEAD, main, origin/main, or SHA" autocomplete="off" spellcheck="false" />
+                    <small class="text-xs text-muted-foreground">The new branch starts here. Existing branches are never reset.</small>
+                  </label>
+                {/if}
+
+                <fieldset class="grid gap-2 border-t border-border pt-3">
+                  <legend class="text-sm font-medium">Environment file</legend>
+                  <div class="grid grid-cols-2 gap-2">
+                    <Button type="button" variant={envPolicy === 'skip' ? 'secondary' : 'outline'} onclick={() => (envPolicy = 'skip')}>Skip .env</Button>
+                    <Button type="button" variant={envPolicy === 'copy' ? 'secondary' : 'outline'} onclick={() => (envPolicy = 'copy')}>Copy safe .env</Button>
+                  </div>
+                  <label class="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Checkbox bind:checked={rememberEnvPolicy} aria-label="Remember environment choice for this repository" />
+                    Remember for {repository.name}
+                  </label>
+                </fieldset>
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
         {/if}
 
         {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
       </section>
 
-      <Dialog.Footer class="flex-row justify-end border-t border-border px-4 py-3">
+      <Dialog.Footer class="flex-row justify-end border-t border-border bg-card px-4 py-2.5">
         <Button type="button" variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
         <Button type="submit" disabled={!canSubmit}>
           {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{actionLabel}

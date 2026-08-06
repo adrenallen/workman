@@ -55,7 +55,7 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
   <Dialog.Content
-    class="grid max-h-[min(650px,calc(100vh-36px))] w-[min(760px,calc(100vw-36px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 text-foreground shadow-2xl"
+    class="grid max-h-[min(650px,calc(100dvh-36px))] w-[min(760px,calc(100vw-36px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 text-foreground shadow-2xl"
     showCloseButton={false}
     aria-labelledby="shortcuts-title"
     onkeydown={handleKeydown}
