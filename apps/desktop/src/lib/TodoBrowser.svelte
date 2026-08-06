@@ -6,6 +6,7 @@
 
   import TodoStatusIndicator from './components/ds/TodoStatusIndicator.svelte';
   import SectionOverview from './SectionOverview.svelte';
+  import type { Project } from './daemon';
   import type { TodoPriority, TodoStatus, TodoSummary } from './coordination';
   import {
     shortTodoActor,
@@ -17,6 +18,7 @@
     todos: TodoSummary[];
     onSelect: (todo: TodoSummary) => void;
     onCreate: () => void;
+    project?: Project | null;
   }
 
   type StatusFilter = 'active' | TodoStatus | 'all';
@@ -25,7 +27,7 @@
   type PriorityFilter = 'all' | TodoPriority;
   type SortMode = 'state' | 'priority' | 'newest' | 'title';
 
-  let { todos, onSelect, onCreate }: Props = $props();
+  let { todos, onSelect, onCreate, project = null }: Props = $props();
   let query = $state('');
   let status = $state<StatusFilter>('active');
   let claim = $state<ClaimFilter>('all');
@@ -107,6 +109,7 @@
   title="Todos"
   description="Browse every task, claim state, dependency, and handoff."
   summaryLayout="split"
+  {project}
 >
   {#snippet icon()}<CircleCheckIcon strokeWidth={1.8} />{/snippet}
   {#snippet action()}

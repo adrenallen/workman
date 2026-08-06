@@ -9,7 +9,7 @@
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import SectionOverview from './SectionOverview.svelte';
   import { agentStatusPresentation } from './agentStatus';
-  import type { ProcessKind, ProcessView } from './daemon';
+  import type { ProcessKind, ProcessView, Project } from './daemon';
 
   type OverviewKind = Extract<ProcessKind, 'agent' | 'terminal' | 'command'>;
 
@@ -18,9 +18,10 @@
     processes: ProcessView[];
     onSelect: (process: ProcessView) => void;
     onCreate: () => void;
+    project?: Project | null;
   }
 
-  let { kind, processes, onSelect, onCreate }: Props = $props();
+  let { kind, processes, onSelect, onCreate, project = null }: Props = $props();
 
   const copy = {
     agent: {
@@ -106,6 +107,7 @@
   eyebrow={section.eyebrow}
   title={section.title}
   description={section.description}
+  {project}
 >
   {#snippet icon()}
     {#if kind === 'agent'}

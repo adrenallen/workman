@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import type { Project } from './daemon';
+  import ProjectIcon from './ProjectIcon.svelte';
 
   interface Props {
     ariaLabel: string;
@@ -12,6 +14,7 @@
     action?: Snippet;
     controls?: Snippet;
     summaryLayout?: 'start' | 'split';
+    project?: Project | null;
   }
 
   let {
@@ -24,13 +27,27 @@
     children,
     action,
     controls,
-    summaryLayout = 'start'
+    summaryLayout = 'start',
+    project = null
   }: Props = $props();
 </script>
 
 <section class="section-overview" aria-label={ariaLabel}>
   <header class="overview-heading">
-    <span class="overview-icon" aria-hidden="true">{@render icon()}</span>
+    <span class="overview-icon" class:project-identity={project !== null} aria-hidden="true">
+      {#if project}
+        <ProjectIcon
+          icon={project.icon}
+          color={project.icon_color}
+          image={project.icon_image?.data_url}
+          fallback={project.parent_project_id !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+          size={22}
+        />
+        <span class="section-mark">{@render icon()}</span>
+      {:else}
+        {@render icon()}
+      {/if}
+    </span>
     <div class="overview-copy">
       <span class="eyebrow">{eyebrow}</span>
       <h2>{title}</h2>
@@ -82,6 +99,9 @@
   }
 
   .overview-icon :global(svg) { width: 18px; height: 18px; }
+  .overview-icon.project-identity { position: relative; }
+  .section-mark { position: absolute; right: -4px; bottom: -4px; display: grid; width: 15px; height: 15px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--muted-foreground); }
+  .section-mark :global(svg) { width: 9px; height: 9px; }
   .overview-copy { min-width: 0; }
   .overview-copy h2 { margin: 1px 0 0; font-size: var(--font-size-xl); font-weight: 650; letter-spacing: -0.025em; }
   .overview-copy p { margin: 3px 0 0; color: var(--muted-foreground); font-size: var(--font-size-sm); }

@@ -8,6 +8,7 @@
   import * as Tabs from '$lib/components/ui/tabs';
   import SectionOverview from './SectionOverview.svelte';
   import type { ScratchpadSummary } from './coordination';
+  import type { Project } from './daemon';
 
   interface Props {
     scratchpads: ScratchpadSummary[];
@@ -18,6 +19,7 @@
     onRename: (scratchpad: ScratchpadSummary, name: string) => void;
     onArchive: (scratchpad: ScratchpadSummary) => void;
     onDelete: (scratchpad: ScratchpadSummary) => void;
+    project?: Project | null;
   }
 
   let {
@@ -28,7 +30,8 @@
     onCreate,
     onRename,
     onArchive,
-    onDelete
+    onDelete,
+    project = null
   }: Props = $props();
 
   let view = $state<'open' | 'archived'>('open');
@@ -81,6 +84,7 @@
   title="Scratchpads"
   description="Open working notes or revisit archived handoffs."
   summaryLayout="split"
+  {project}
 >
   {#snippet icon()}<NotebookTextIcon strokeWidth={1.8} />{/snippet}
   {#snippet action()}

@@ -93,6 +93,7 @@ pub fn resolve(project: &Project) -> Option<ProjectIconImage> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&project.path)
         .filter(|entry| entry.marker == marker)
+        .filter(|entry| cache_entry_is_current(project, entry))
         .cloned()
     {
         return entry.image;
@@ -193,6 +194,16 @@ pub fn invalidate(project_path: &str) {
 
 fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_entry_is_current(project: &Project, entry: &CacheEntry) -> bool {
+    match &entry.image {
+        Some(image) => Path::new(&project.path).join(&image.path).is_file(),
+        None => !entry
+            .marker
+            .as_deref()
+            .is_some_and(|marker| marker.starts_with(CUSTOM_ICON_PREFIX)),
+    }
 }
 
 fn scan_auto(root: &Path) -> Option<ProjectIconImage> {
@@ -464,6 +475,10 @@ mod tests {
         assert_eq!(image.source, "custom");
         assert_eq!(image.path, ".workman/icon.png");
         assert!(image.data_url.starts_with("data:image/png;base64,"));
+
+        fs::remove_file(root.path().join(".workman/icon.png")).unwrap();
+        assert_eq!(resolve(&project), None);
+        fs::write(root.path().join(".workman/icon.png"), png(64, 64)).unwrap();
 
         let source_jpg = root.path().join("picked.jpg");
         fs::write(&source_jpg, b"jpeg-placeholder").unwrap();
