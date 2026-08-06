@@ -1,0 +1,23 @@
+{
+  "name": "@workman/update-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit && wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "manifest": "node scripts/generate-manifest.mjs",
+    "promote": "node scripts/publish-release.mjs promote",
+    "publish": "node scripts/publish-release.mjs",
+    "test": "node --test test/*.test.mjs",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@types/node": "24.2.0",
+    "typescript": "5.9.2",
+    "wrangler": "4.119.0"
+  },
+  "overrides": {
+    "undici": "7.29.0"
+  }
+}

@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/release.sh [--dry-run] <version>
 
 Build every Workman release artifact locally. --dry-run builds and verifies the complete artifact
-set but does not create a tag, push, or publish a GitHub Release.
+set but does not create a tag, push, or publish a GitHub Release or R2 update.
 EOF
 }
 
@@ -42,6 +42,7 @@ WORK_DIR="$OUTPUT_DIR/.work"
 LOG_DIR="$OUTPUT_DIR/logs"
 TIMINGS_FILE="$OUTPUT_DIR/build-timings.tsv"
 RELEASE_ASSETS_DIR="$REPO_ROOT/scripts/release-assets"
+UPDATE_HOST_DIR="$REPO_ROOT/infra/update-host"
 MACOS_TARGET=aarch64-apple-darwin
 ZIGBUILD_VERSION=0.23.0
 
@@ -97,6 +98,8 @@ preflight() {
   gh auth status >/dev/null
 
   if [[ "$DRY_RUN" == false ]]; then
+    npm --prefix "$UPDATE_HOST_DIR" ci --ignore-scripts
+    npm --prefix "$UPDATE_HOST_DIR" exec -- wrangler whoami >/dev/null
     git fetch --quiet origin main
     [[ "$(git rev-parse HEAD)" == "$(git rev-parse refs/remotes/origin/main)" ]] || {
       echo "main must be pushed and synchronized with origin/main before publishing" >&2
@@ -441,6 +444,15 @@ publish_release() {
       --latest=false \
       --verify-tag
   fi
+
+  local published_at
+  published_at="$(gh release view "$TAG" --json publishedAt --jq .publishedAt)"
+  npm --prefix "$UPDATE_HOST_DIR" run publish -- release \
+    --version "$VERSION" \
+    --artifacts-dir "$OUTPUT_DIR" \
+    --published-at "$published_at" \
+    --notes-url "https://github.com/adrenallen/workman/releases/tag/$TAG" \
+    --installer "$RELEASE_ASSETS_DIR/install.sh"
 }
 
 mkdir -p "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
