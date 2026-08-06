@@ -455,6 +455,14 @@ publish_release() {
     --installer "$UPDATE_HOST_DIR/install.sh"
 }
 
+prune_r2_releases() {
+  [[ "$DRY_RUN" == false ]] || return 0
+  log "R2 retention"
+  if ! npm --prefix "$UPDATE_HOST_DIR" run prune -- --yes; then
+    warn "R2 retention prune failed; release publication succeeded and will not be rolled back"
+  fi
+}
+
 mkdir -p "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
 : > "$TIMINGS_FILE"
 TOTAL_STARTED=$SECONDS
@@ -468,6 +476,7 @@ package_linux_bundles
 verify_bundle_layouts
 write_release_metadata
 publish_release
+prune_r2_releases
 record_stage total "$TOTAL_STARTED"
 
 log "Release artifacts"

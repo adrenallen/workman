@@ -20,4 +20,7 @@ fi
 "$NPM_BIN" --prefix "$UPDATE_HOST_DIR" exec -- wrangler whoami >/dev/null
 "$GH_BIN" release edit "$TAG" --prerelease=false --latest
 "$NPM_BIN" --prefix "$UPDATE_HOST_DIR" run promote -- --version "${TAG#v}"
+if ! "$NPM_BIN" --prefix "$UPDATE_HOST_DIR" run prune -- --yes; then
+  echo "warning: R2 retention prune failed; promotion succeeded and will not be rolled back" >&2
+fi
 echo "Promoted Workman $TAG to the stable channel and marked it latest."

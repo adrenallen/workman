@@ -96,6 +96,33 @@ npm run promote -- --version 0.1.1
 `scripts/generate-manifest.mjs` verifies every artifact against `SHA256SUMS` before any upload.
 Both publication commands are idempotent and use Wrangler's authenticated remote R2 operations.
 
+## Release retention
+
+R2 is a delivery cache; GitHub Releases remain the durable archive. Retention is channel-aware:
+
+- always keep every version referenced by `channels/stable.json` or `channels/latest.json`;
+- keep the greatest version below the current stable as the one rollback release;
+- delete every older `versions/<version>/*` object and its `_manifests/<version>.json`;
+- leave channel, installer, branding, and unrecognized namespaces untouched.
+
+Do not configure an age-based R2 lifecycle rule for release objects. Time alone cannot identify the
+stable/latest targets or the prior stable, so such a rule can delete a live download or its rollback.
+
+The prune command uses the dedicated `wrangler.prune.jsonc` remote binding. It recomputes the full
+policy immediately before deleting each version so a concurrent publish, promotion, or rollback
+fails closed. Dry-run is the default and itemizes every object and byte:
+
+```sh
+npm run prune
+npm run prune -- --dry-run
+npm run prune -- --yes  # permanent production deletion
+```
+
+Successful release publication and promotion invoke `--yes` automatically. Pruning is deliberately
+fail-safe there: a failure emits a loud warning but cannot fail or roll back the release operation.
+Cloudflare currently prices Standard R2 storage at $0.015/GB-month with an account-wide 10
+GB-month free tier; see https://developers.cloudflare.com/r2/pricing/ for current pricing.
+
 ## Friend flow
 
 To download in a browser, open a concrete artifact URL such as

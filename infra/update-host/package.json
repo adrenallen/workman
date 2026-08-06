@@ -7,6 +7,7 @@
     "check": "tsc --noEmit && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "manifest": "node scripts/generate-manifest.mjs",
+    "prune": "node scripts/prune-releases.mjs",
     "promote": "node scripts/publish-release.mjs promote",
     "publish": "node scripts/publish-release.mjs",
     "test": "node --test test/*.test.mjs",

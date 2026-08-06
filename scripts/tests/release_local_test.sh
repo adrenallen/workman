@@ -27,6 +27,8 @@ grep -q 'scripts/promote.sh' "$RELEASE_SCRIPT"
 grep -q 'infra/update-host' "$RELEASE_SCRIPT"
 grep -q 'wrangler whoami' "$RELEASE_SCRIPT"
 grep -q 'run publish -- release' "$RELEASE_SCRIPT"
+grep -q 'run prune -- --yes' "$RELEASE_SCRIPT"
+grep -q 'R2 retention prune failed; release publication succeeded' "$RELEASE_SCRIPT"
 
 test -x "$REPO_ROOT/scripts/release-assets/install.sh"
 grep -q 'never run `workmand` by hand' \

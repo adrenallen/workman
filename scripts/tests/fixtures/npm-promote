@@ -2,3 +2,6 @@
 set -euo pipefail
 
 printf '%s\n' "$*" >> "$WORKMAN_PROMOTE_NPM_LOG"
+if [[ "${WORKMAN_PROMOTE_PRUNE_FAIL:-}" == 1 && "$*" == *"run prune -- --yes"* ]]; then
+  exit 1
+fi
