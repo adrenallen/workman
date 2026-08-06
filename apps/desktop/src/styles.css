@@ -41,6 +41,12 @@
   --warning-foreground: #fff3cf;
   --information: #6f9fe8;
   --information-foreground: #e4efff;
+  --project-icon-slate: #bec3cb;
+  --project-icon-blue: #8aa8d8;
+  --project-icon-teal: #78ad9c;
+  --project-icon-amber: #c2a16b;
+  --project-icon-violet: #a796ca;
+  --project-icon-rose: #bd8795;
   --todo-state-open: var(--muted-foreground);
   --todo-state-claimed: var(--warning-token);
   --todo-state-blocked: var(--destructive);
@@ -118,6 +124,12 @@
   --warning-foreground: #3f2a08;
   --information: #3765ad;
   --information-foreground: #102c57;
+  --project-icon-slate: #59616b;
+  --project-icon-blue: #486b9f;
+  --project-icon-teal: #397765;
+  --project-icon-amber: #88672f;
+  --project-icon-violet: #6d5b91;
+  --project-icon-rose: #875564;
   --sidebar: #e9ebee;
   --sidebar-foreground: #2b3037;
   --sidebar-primary: #20242a;

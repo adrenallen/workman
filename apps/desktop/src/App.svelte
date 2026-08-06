@@ -2,9 +2,6 @@
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
-  import FolderGit2Icon from '@lucide/svelte/icons/folder-git-2';
-  import FolderIcon from '@lucide/svelte/icons/folder';
-  import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import XIcon from '@lucide/svelte/icons/x';
@@ -28,6 +25,8 @@
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectOpeners from './lib/ProjectOpeners.svelte';
+  import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
@@ -79,6 +78,7 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import type { ProjectSettingsInput } from './lib/projectAppearance';
   import {
     NATIVE_MENU_EVENT,
     requestNativeUpdateCheck,
@@ -178,6 +178,8 @@
   let error = $state<string | null>(null);
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
+  let projectSettingsProject = $state<Project | null>(null);
+  let projectSettingsBusy = $state(false);
   let settingsOpen = $state(false);
   let todoBrowserOpen = $state(false);
   let trustReview = $state<TrustReview | null>(null);
@@ -1837,6 +1839,29 @@
     }
   }
 
+  function openProjectSettings(project: Project): void {
+    projectSettingsProject = project;
+  }
+
+  async function saveProjectSettings(settings: ProjectSettingsInput): Promise<void> {
+    const project = projectSettingsProject;
+    if (!project || projectSettingsBusy) return;
+    projectSettingsBusy = true;
+    try {
+      projects = await client.updateProjectSettings(
+        project.id,
+        settings.displayName,
+        settings.icon,
+        settings.iconColor
+      );
+      projectSettingsProject = null;
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      projectSettingsBusy = false;
+    }
+  }
+
   function showContextMenu(request: ContextMenuRequest): void {
     treeRenameTarget = null;
     contextRequest = request;
@@ -1923,6 +1948,9 @@
     switch (action) {
       case 'select':
         appNavigation.navigate({ type: 'project', projectId: project.id }, 'context-menu');
+        return;
+      case 'project-settings':
+        openProjectSettings(project);
         return;
       case 'rename':
         beginRename(project);
@@ -2371,7 +2399,12 @@
           />
           <span class="project-icon-anchor">
             <span class="project-kind-icon" aria-hidden="true">
-              {#if nested}<GitBranchIcon size={15} strokeWidth={1.8} />{:else if project.repository_id !== null}<FolderGit2Icon size={15} strokeWidth={1.8} />{:else}<FolderIcon size={15} strokeWidth={1.8} />{/if}
+              <ProjectIcon
+                icon={project.icon}
+                color={project.icon_color}
+                fallback={nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                size={15}
+              />
             </span>
           </span>
           <span class="project-copy">
@@ -2652,6 +2685,15 @@
     loading={quickJumpLoading}
     onChoose={chooseQuickJumpTarget}
     onClose={closeQuickJump}
+  />
+{/if}
+
+{#if projectSettingsProject}
+  <ProjectSettingsDialog
+    project={projectSettingsProject}
+    busy={projectSettingsBusy}
+    onSave={(settings) => void saveProjectSettings(settings)}
+    onClose={() => { if (!projectSettingsBusy) projectSettingsProject = null; }}
   />
 {/if}
 

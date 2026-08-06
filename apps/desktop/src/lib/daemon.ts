@@ -76,6 +76,7 @@ export interface Project {
   name: string;
   display_name: string | null;
   icon: string | null;
+  icon_color: string | null;
   selected: boolean;
   sort_order: number;
   status: ProjectStatus;
@@ -286,6 +287,20 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   rename(projectId: number, name: string): Promise<Project[]> {
     return this.request('projects.rename', { project_id: projectId, name });
+  }
+
+  updateProjectSettings(
+    projectId: number,
+    displayName: string,
+    icon: string | null,
+    iconColor: string | null
+  ): Promise<Project[]> {
+    return this.request('projects.update_settings', {
+      project_id: projectId,
+      display_name: displayName,
+      icon,
+      icon_color: iconColor
+    });
   }
 
   reorderProjects(orderedIds: number[]): Promise<Project[]> {

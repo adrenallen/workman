@@ -12,6 +12,7 @@ import type { WorktreeEntry, WorktreeRepository } from './worktrees';
 
 export type ContextActionId =
   | 'select'
+  | 'project-settings'
   | 'start'
   | 'stop'
   | 'restart'
@@ -258,7 +259,7 @@ function projectItems(
 
   return [
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
-    { id: 'rename', label: 'Rename' },
+    { id: 'project-settings', label: 'Project settings…' },
     { id: 'new-agent', label: 'New agent…', separatorBefore: true },
     { id: 'new-terminal', label: 'New terminal' },
     { id: 'add-command', label: 'Add command…' },

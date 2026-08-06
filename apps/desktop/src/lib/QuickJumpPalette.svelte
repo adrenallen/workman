@@ -1,7 +1,6 @@
 <script lang="ts">
   import BotIcon from '@lucide/svelte/icons/bot';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
-  import FolderIcon from '@lucide/svelte/icons/folder';
   import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
@@ -10,6 +9,7 @@
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import type { AgentTool } from './agentTools';
   import type { Project } from './daemon';
+  import ProjectIcon from './ProjectIcon.svelte';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
@@ -324,13 +324,19 @@
       return SettingsIcon;
     }
     switch (entry.kind) {
-      case 'project': return FolderIcon;
+      case 'project': return SettingsIcon;
       case 'todo': return CircleCheckIcon;
       case 'agent': return BotIcon;
       case 'terminal': return SquareTerminalIcon;
       case 'command': return PlayIcon;
       case 'scratchpad': return NotebookTextIcon;
     }
+  }
+
+  function projectForEntry(entry: PaletteEntry): Project | null {
+    const target = entry.target;
+    if (entry.kind !== 'project' || target.type !== 'project') return null;
+    return projects.find((project) => project.id === target.projectId) ?? null;
   }
 
   function choose(entry: PaletteEntry | null): void {
@@ -401,6 +407,7 @@
     <ScrollArea id="quick-jump-results" class="results" role="listbox" aria-label="Quick jump results">
       {#each rankedEntries as entry, index (entry.key)}
         {@const Icon = entryIcon(entry)}
+        {@const entryProject = projectForEntry(entry)}
         <button
           id={`quick-jump-option-${index}`}
           class="result-row"
@@ -411,7 +418,18 @@
           onmouseenter={() => (selectedIndex = index)}
           onclick={() => choose(entry)}
         >
-          <span class={`kind-glyph ${entry.kind}`} aria-hidden="true"><Icon size={14} strokeWidth={1.8} /></span>
+          <span class={`kind-glyph ${entry.kind}`} aria-hidden="true">
+            {#if entryProject}
+              <ProjectIcon
+                icon={entryProject.icon}
+                color={entryProject.icon_color}
+                fallback={entryProject.parent_project_id !== null ? 'worktree' : entryProject.repository_id !== null ? 'repository' : 'project'}
+                size={14}
+              />
+            {:else}
+              <Icon size={14} strokeWidth={1.8} />
+            {/if}
+          </span>
           <span class="result-copy"><strong>{entry.label}</strong><small>{entry.detail}</small></span>
           <span class="result-path">
             {#if entry.recentRank !== null}<i>recent</i>{/if}
