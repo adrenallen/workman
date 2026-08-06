@@ -1094,7 +1094,7 @@ async fn mcp_setup(
 }
 
 async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
-    let executable = desktop_executable().ok_or_else(|| {
+    let target = desktop_launch_target().ok_or_else(|| {
         cli_error("could not find workman-desktop; run the installer again or set WORKMAN_DESKTOP")
     })?;
     let client = Client::connect(data_dir, daemon).await?;
@@ -1106,32 +1106,58 @@ async fn launch_app(data_dir: &Path, daemon: &Path) -> Result<()> {
         None => println!("workman daemon legacy · no version handshake"),
     }
     drop(client);
-    let child = ProcessCommand::new(&executable)
-        .env("WORKMAN_DATA_DIR", data_dir)
-        .env("WORKMAN_DAEMON_BIN", daemon)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            cli_error(format!(
-                "could not launch {}: {error}",
+    match target {
+        DesktopLaunchTarget::Bundle(bundle) => launch_macos_bundle(&bundle, data_dir, daemon)?,
+        DesktopLaunchTarget::Executable(executable) => {
+            #[cfg(target_os = "macos")]
+            eprintln!(
+                "note: Workman.app was not found; launching {} directly as a development fallback (Dock branding is unavailable)",
                 executable.display()
-            ))
-        })?;
-    println!("✓ Opened workman (pid {})", child.id());
+            );
+            let child = ProcessCommand::new(&executable)
+                .env("WORKMAN_DATA_DIR", data_dir)
+                .env("WORKMAN_DAEMON_BIN", daemon)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| {
+                    cli_error(format!(
+                        "could not launch {}: {error}",
+                        executable.display()
+                    ))
+                })?;
+            println!("✓ Opened workman (pid {})", child.id());
+        }
+    }
     Ok(())
 }
 
-fn desktop_executable() -> Option<PathBuf> {
+#[derive(Debug, Eq, PartialEq)]
+enum DesktopLaunchTarget {
+    Bundle(PathBuf),
+    Executable(PathBuf),
+}
+
+fn desktop_launch_target() -> Option<DesktopLaunchTarget> {
     if let Some(explicit) = env::var_os("WORKMAN_DESKTOP") {
         let path = PathBuf::from(explicit);
         if path.is_file() {
-            return Some(path);
+            return Some(DesktopLaunchTarget::Executable(path));
         }
     }
     let current = env::current_exe().ok()?;
     let directory = current.parent()?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = macos_app_bundle_from(
+        &current,
+        env::var_os("HOME").as_deref().map(Path::new),
+        Path::new("/Applications"),
+    ) {
+        return Some(DesktopLaunchTarget::Bundle(bundle));
+    }
+
     [
         directory.join("workman-desktop"),
         directory.join("bundle/macos/Workman.app/Contents/MacOS/workman-desktop"),
@@ -1139,6 +1165,99 @@ fn desktop_executable() -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|path| path.is_file())
+    .map(DesktopLaunchTarget::Executable)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_app_bundle_from(
+    current: &Path,
+    home: Option<&Path>,
+    system_applications: &Path,
+) -> Option<PathBuf> {
+    let directory = current.parent()?;
+    let mut candidates = vec![directory.join("bundle/macos/Workman.app")];
+    if let Some(package_root) = directory.parent() {
+        candidates.push(package_root.join("Workman.app"));
+    }
+    candidates.push(directory.join("Workman.app"));
+    if let Some(home) = home {
+        candidates.push(home.join("Applications/Workman.app"));
+    }
+    candidates.push(system_applications.join("Workman.app"));
+    candidates
+        .into_iter()
+        .find(|bundle| bundle.is_dir() && bundle.join("Contents/MacOS/workman-desktop").is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_macos_bundle(bundle: &Path, data_dir: &Path, daemon: &Path) -> Result<()> {
+    let open = Path::new("/usr/bin/open");
+    let supports_env = ProcessCommand::new(open)
+        .arg("-h")
+        .output()
+        .is_ok_and(|output| {
+            open_help_supports_env(&output.stdout) || open_help_supports_env(&output.stderr)
+        });
+    let status = ProcessCommand::new(open)
+        .args(macos_open_args(bundle, data_dir, daemon, supports_env))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| cli_error(format!("could not open {}: {error}", bundle.display())))?;
+    if !status.success() {
+        return Err(cli_error(format!(
+            "could not open {} through LaunchServices: {status}",
+            bundle.display()
+        )));
+    }
+    println!("✓ Opened Workman.app through LaunchServices");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_macos_bundle(_bundle: &Path, _data_dir: &Path, _daemon: &Path) -> Result<()> {
+    unreachable!("bundle launch targets are only resolved on macOS")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_open_args(
+    bundle: &Path,
+    data_dir: &Path,
+    daemon: &Path,
+    supports_env: bool,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-a"), bundle.as_os_str().to_owned()];
+    if supports_env {
+        args.extend([
+            OsString::from("--env"),
+            environment_assignment("WORKMAN_DATA_DIR", data_dir),
+            OsString::from("--env"),
+            environment_assignment("WORKMAN_DAEMON_BIN", daemon),
+        ]);
+    } else {
+        args.extend([
+            OsString::from("--args"),
+            OsString::from("--workman-data-dir"),
+            data_dir.as_os_str().to_owned(),
+            OsString::from("--workman-daemon-bin"),
+            daemon.as_os_str().to_owned(),
+        ]);
+    }
+    args
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn environment_assignment(name: &str, value: &Path) -> OsString {
+    let mut assignment = OsString::from(name);
+    assignment.push("=");
+    assignment.push(value);
+    assignment
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn open_help_supports_env(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).contains("--env")
 }
 
 fn daemon_executable(explicit: Option<PathBuf>) -> PathBuf {
@@ -1461,6 +1580,12 @@ fn terminal_size(fd: RawFd) -> io::Result<TerminalSize> {
 mod tests {
     use super::*;
 
+    fn create_test_app_bundle(bundle: &Path) {
+        let executable = bundle.join("Contents/MacOS/workman-desktop");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(executable, b"fixture").unwrap();
+    }
+
     #[test]
     fn command_arguments_are_shell_safe() {
         assert_eq!(
@@ -1472,6 +1597,76 @@ mod tests {
             shell_command(&["printf hi | sed s/hi/ok/".into()]),
             "printf hi | sed s/hi/ok/"
         );
+    }
+
+    #[test]
+    fn macos_bundle_resolution_covers_build_and_installed_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let wrk = root.path().join("bin/wrk");
+        let bundled = root.path().join("bin/bundle/macos/Workman.app");
+        let installed = root.path().join("Workman.app");
+        create_test_app_bundle(&installed);
+        create_test_app_bundle(&bundled);
+
+        assert_eq!(
+            macos_app_bundle_from(&wrk, None, &root.path().join("Applications")),
+            Some(bundled)
+        );
+    }
+
+    #[test]
+    fn macos_bundle_resolution_falls_back_to_standard_applications() {
+        let root = tempfile::tempdir().unwrap();
+        let wrk = root.path().join("bin/wrk");
+        let home = root.path().join("home");
+        let system_applications = root.path().join("Applications");
+        let user_bundle = home.join("Applications/Workman.app");
+        let system_bundle = system_applications.join("Workman.app");
+        create_test_app_bundle(&system_bundle);
+        create_test_app_bundle(&user_bundle);
+
+        assert_eq!(
+            macos_app_bundle_from(&wrk, Some(&home), &system_applications),
+            Some(user_bundle)
+        );
+    }
+
+    #[test]
+    fn macos_open_uses_launchservices_env_without_requesting_a_new_instance() {
+        let bundle = Path::new("/tmp/Workman.app");
+        let args = macos_open_args(
+            bundle,
+            Path::new("/tmp/workman data"),
+            Path::new("/tmp/workmand"),
+            true,
+        );
+        assert_eq!(
+            args,
+            [
+                OsString::from("-a"),
+                bundle.as_os_str().to_owned(),
+                OsString::from("--env"),
+                OsString::from("WORKMAN_DATA_DIR=/tmp/workman data"),
+                OsString::from("--env"),
+                OsString::from("WORKMAN_DAEMON_BIN=/tmp/workmand"),
+            ]
+        );
+        assert!(!args.contains(&OsString::from("-n")));
+    }
+
+    #[test]
+    fn macos_open_falls_back_to_private_launch_arguments() {
+        let args = macos_open_args(
+            Path::new("/tmp/Workman.app"),
+            Path::new("/tmp/data"),
+            Path::new("/tmp/workmand"),
+            false,
+        );
+        assert!(args.contains(&OsString::from("--args")));
+        assert!(args.contains(&OsString::from("--workman-data-dir")));
+        assert!(args.contains(&OsString::from("--workman-daemon-bin")));
+        assert!(open_help_supports_env(b"open options: --env VAR"));
+        assert!(!open_help_supports_env(b"open options: --args"));
     }
 
     #[test]
