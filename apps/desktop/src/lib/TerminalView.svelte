@@ -9,7 +9,8 @@
   import {
     appearance,
     currentAppearance,
-    terminalFontCss
+    terminalFontCss,
+    terminalXtermTheme
   } from './appearance';
   import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
@@ -43,6 +44,7 @@
   let replayState: TerminalReplayState | null = null;
   let kittyKeyboardFlags = 0;
   let modifyOtherKeys = 0;
+  let appliedThemeSignature = '';
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
 
@@ -59,6 +61,8 @@
   }
 
   onMount(() => {
+    const initialPalette = initialAppearance.terminalTheme.palette;
+    appliedThemeSignature = Object.values(initialPalette).join('|');
     const instance = new Terminal({
       allowTransparency: false,
       convertEol: false,
@@ -70,29 +74,7 @@
       lineHeight: 1.18,
       scrollback: 10_000,
       smoothScrollDuration: 80,
-      theme: {
-        background: 'var(--background)',
-        foreground: '#d7e2dc',
-        cursor: '#7bd1b5',
-        cursorAccent: 'var(--background)',
-        selectionBackground: '#355c55aa',
-        black: '#11191b',
-        red: '#dc7d76',
-        green: '#79c69f',
-        yellow: '#d7ad65',
-        blue: '#78aecd',
-        magenta: '#bca0cf',
-        cyan: '#72c8c2',
-        white: '#d7e2dc',
-        brightBlack: '#62706d',
-        brightRed: '#ef958e',
-        brightGreen: '#99dab8',
-        brightYellow: '#e8c37f',
-        brightBlue: '#98c7df',
-        brightMagenta: '#d0b7dd',
-        brightCyan: '#94dcd6',
-        brightWhite: '#f2f6f3'
-      }
+      theme: terminalXtermTheme(initialPalette)
     });
     fitAddon = new FitAddon();
     instance.loadAddon(fitAddon);
@@ -174,9 +156,19 @@
     const family = terminalFontCss(settings.terminalFont);
     const typographyChanged = instance.options.fontFamily !== family
       || instance.options.fontSize !== settings.terminalFontSize;
+    const themeSignature = Object.values(settings.terminalTheme.palette).join('|');
+    const themeChanged = themeSignature !== appliedThemeSignature;
     if (typographyChanged) {
       instance.options.fontFamily = family;
       instance.options.fontSize = settings.terminalFontSize;
+    }
+    if (themeChanged) {
+      appliedThemeSignature = themeSignature;
+      instance.options.theme = terminalXtermTheme(settings.terminalTheme.palette);
+    }
+    if (typographyChanged || themeChanged) {
+      // Refresh the currently rendered buffer. Offscreen scrollback picks up the same xterm
+      // theme when it is next rendered, so old and new output never diverge.
       instance.refresh(0, Math.max(0, instance.rows - 1));
     }
     // UI zoom changes layout dimensions; terminal changes alter cell geometry.
@@ -397,7 +389,7 @@
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: #101214;
+    background: var(--terminal-background);
   }
 
   .terminal-starting {
@@ -407,7 +399,7 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    color: #8e959e;
+    color: color-mix(in srgb, var(--terminal-foreground) 68%, var(--terminal-background));
     font: 500 var(--font-size-sm)/1 var(--terminal-font-family);
     pointer-events: none;
   }
@@ -415,7 +407,7 @@
   .terminal-starting span {
     width: 10px;
     height: 10px;
-    border: 1px solid #56605f;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 34%, var(--terminal-background));
     border-top-color: var(--signal);
     border-radius: 50%;
     animation: terminal-waiting-spin 800ms linear infinite;
@@ -434,7 +426,7 @@
   }
 
   .terminal-host :global(.xterm-viewport) {
-    scrollbar-color: #344746 transparent;
+    scrollbar-color: color-mix(in srgb, var(--terminal-foreground) 24%, var(--terminal-background)) transparent;
     scrollbar-width: thin;
   }
 
@@ -446,11 +438,11 @@
     position: absolute;
     right: 14px;
     bottom: 12px;
-    border: 1px solid #394547;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 28%, var(--terminal-background));
     border-radius: 3px;
     padding: 5px 7px;
-    color: #83918f;
-    background: rgb(16 24 26 / 86%);
+    color: color-mix(in srgb, var(--terminal-foreground) 68%, var(--terminal-background));
+    background: color-mix(in srgb, var(--terminal-background) 88%, transparent);
     font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.06em;
     text-transform: uppercase;

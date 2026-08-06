@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod project_icons;
+mod terminal_theme;
 
 #[derive(Debug, Deserialize)]
 struct ControlRequest {
@@ -526,6 +527,9 @@ async fn dispatch(
             .await
             .map(json_value)
             .map_err(|error| ("deep_check_failed", error));
+        }
+        "settings.terminal_theme_import" => {
+            return Ok(json_value(terminal_theme::import_terminal_theme()));
         }
         _ => {}
     }

@@ -9,6 +9,44 @@ export type UiFontId =
   | 'avenir-next'
   | 'helvetica-neue';
 export type TerminalFontId = 'jetbrains-mono' | 'sf-mono' | 'menlo';
+export type TerminalThemeId = 'graphite' | 'paper' | 'classic' | 'custom' | 'imported';
+
+export interface TerminalPalette {
+  background: string;
+  foreground: string;
+  cursor: string;
+  selection: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+}
+
+export interface TerminalThemeSetting {
+  id: TerminalThemeId;
+  name: string;
+  source: string | null;
+  palette: TerminalPalette;
+}
+
+export interface TerminalThemePreset {
+  id: Exclude<TerminalThemeId, 'custom' | 'imported'>;
+  name: string;
+  description: string;
+  palette: TerminalPalette;
+}
 
 export interface AppearanceSettings {
   theme: ThemePreference;
@@ -17,6 +55,7 @@ export interface AppearanceSettings {
   uiScale: number;
   terminalFont: TerminalFontId;
   terminalFontSize: number;
+  terminalTheme: TerminalThemeSetting;
 }
 
 export interface FontChoice<T extends string> {
@@ -29,13 +68,64 @@ export interface FontChoice<T extends string> {
 
 export const APPEARANCE_STORAGE_KEY = 'workman.appearance.v2';
 
+export const TERMINAL_COLOR_KEYS = [
+  'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+  'brightBlack', 'brightRed', 'brightGreen', 'brightYellow',
+  'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'
+] as const satisfies readonly (keyof TerminalPalette)[];
+
+export const TERMINAL_THEME_PRESETS: readonly TerminalThemePreset[] = [
+  {
+    id: 'graphite',
+    name: 'Graphite',
+    description: 'Soft charcoal with a restrained, readable spectrum.',
+    palette: {
+      background: '#202326', foreground: '#D7D9D5', cursor: '#A7C7B7', selection: '#3A4B52',
+      black: '#353A3E', red: '#D8877E', green: '#8FBF8F', yellow: '#D6B56E',
+      blue: '#82AFC5', magenta: '#B69AC8', cyan: '#7EB7B3', white: '#C9CCC7',
+      brightBlack: '#687078', brightRed: '#E79A90', brightGreen: '#A4D4A4',
+      brightYellow: '#E6C985', brightBlue: '#9CC5D8', brightMagenta: '#CCB2DA',
+      brightCyan: '#98CFCC', brightWhite: '#F2F2EE'
+    }
+  },
+  {
+    id: 'paper',
+    name: 'Paper',
+    description: 'Warm light canvas with ink-forward ANSI colors.',
+    palette: {
+      background: '#F1EFE8', foreground: '#333638', cursor: '#3E7064', selection: '#CEDDD7',
+      black: '#3B3D3F', red: '#A84A44', green: '#4E7651', yellow: '#986F2D',
+      blue: '#456D85', magenta: '#765B85', cyan: '#3F7774', white: '#D4D1C9',
+      brightBlack: '#707578', brightRed: '#C05B53', brightGreen: '#618C64',
+      brightYellow: '#AD843D', brightBlue: '#5A8298', brightMagenta: '#8C709A',
+      brightCyan: '#528D89', brightWhite: '#FFFFFF'
+    }
+  },
+  {
+    id: 'classic',
+    name: 'Classic',
+    description: 'True black and crisp colors for maximum separation.',
+    palette: {
+      background: '#000000', foreground: '#D7E2DC', cursor: '#7BD1B5', selection: '#355C55',
+      black: '#11191B', red: '#DC7D76', green: '#79C69F', yellow: '#D7AD65',
+      blue: '#78AECD', magenta: '#BCA0CF', cyan: '#72C8C2', white: '#D7E2DC',
+      brightBlack: '#62706D', brightRed: '#EF958E', brightGreen: '#99DAB8',
+      brightYellow: '#E8C37F', brightBlue: '#98C7DF', brightMagenta: '#D0B7DD',
+      brightCyan: '#94DCD6', brightWhite: '#F2F6F3'
+    }
+  }
+] as const;
+
+const DEFAULT_TERMINAL_THEME: TerminalThemeSetting = settingFromPreset(TERMINAL_THEME_PRESETS[0]);
+
 export const DEFAULT_APPEARANCE: Readonly<AppearanceSettings> = {
   theme: 'system',
   uiFont: 'system',
   uiFontScale: 1,
   uiScale: 1,
   terminalFont: 'jetbrains-mono',
-  terminalFontSize: 13
+  terminalFontSize: 13,
+  terminalTheme: DEFAULT_TERMINAL_THEME
 };
 
 export const UI_FONT_CHOICES: readonly FontChoice<UiFontId>[] = [
@@ -132,6 +222,46 @@ export function terminalFontCss(id: TerminalFontId): string {
     ?? TERMINAL_FONT_CHOICES[0].css;
 }
 
+export function terminalThemeFromPreset(id: TerminalThemePreset['id']): TerminalThemeSetting {
+  return settingFromPreset(
+    TERMINAL_THEME_PRESETS.find((preset) => preset.id === id) ?? TERMINAL_THEME_PRESETS[0]
+  );
+}
+
+export function terminalContrastRatio(palette: TerminalPalette): number {
+  const foreground = relativeLuminance(palette.foreground);
+  const background = relativeLuminance(palette.background);
+  const lighter = Math.max(foreground, background);
+  const darker = Math.min(foreground, background);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+export function terminalXtermTheme(palette: TerminalPalette): Record<string, string> {
+  return {
+    background: palette.background,
+    foreground: palette.foreground,
+    cursor: palette.cursor,
+    cursorAccent: palette.background,
+    selectionBackground: palette.selection,
+    black: palette.black,
+    red: palette.red,
+    green: palette.green,
+    yellow: palette.yellow,
+    blue: palette.blue,
+    magenta: palette.magenta,
+    cyan: palette.cyan,
+    white: palette.white,
+    brightBlack: palette.brightBlack,
+    brightRed: palette.brightRed,
+    brightGreen: palette.brightGreen,
+    brightYellow: palette.brightYellow,
+    brightBlue: palette.brightBlue,
+    brightMagenta: palette.brightMagenta,
+    brightCyan: palette.brightCyan,
+    brightWhite: palette.brightWhite
+  };
+}
+
 export function installedUiFonts(): FontChoice<UiFontId>[] {
   return UI_FONT_CHOICES.filter((choice) => isFontAvailable(choice));
 }
@@ -180,7 +310,8 @@ function sanitizeAppearance(value: Partial<AppearanceSettings>): AppearanceSetti
     terminalFont: TERMINAL_FONT_CHOICES.some((choice) => choice.id === value.terminalFont)
       ? value.terminalFont as TerminalFontId
       : DEFAULT_APPEARANCE.terminalFont,
-    terminalFontSize: clampInteger(value.terminalFontSize, 10, 20, DEFAULT_APPEARANCE.terminalFontSize)
+    terminalFontSize: clampInteger(value.terminalFontSize, 10, 20, DEFAULT_APPEARANCE.terminalFontSize),
+    terminalTheme: sanitizeTerminalTheme(value.terminalTheme)
   };
 }
 
@@ -199,6 +330,10 @@ function applyAppearance(settings: AppearanceSettings): void {
   root.style.setProperty('--ui-scale-inverse', String(1 / settings.uiScale));
   root.style.setProperty('--terminal-font-family', terminalFontCss(settings.terminalFont));
   root.style.setProperty('--terminal-font-size', `${settings.terminalFontSize}px`);
+  root.style.setProperty('--terminal-background', settings.terminalTheme.palette.background);
+  root.style.setProperty('--terminal-foreground', settings.terminalTheme.palette.foreground);
+  root.style.setProperty('--terminal-cursor', settings.terminalTheme.palette.cursor);
+  root.style.setProperty('--terminal-selection', settings.terminalTheme.palette.selection);
 }
 
 function applySystemTheme(): void {
@@ -224,4 +359,60 @@ function nearest(
 function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function settingFromPreset(preset: TerminalThemePreset): TerminalThemeSetting {
+  return {
+    id: preset.id,
+    name: preset.name,
+    source: null,
+    palette: { ...preset.palette }
+  };
+}
+
+function sanitizeTerminalTheme(value: unknown): TerminalThemeSetting {
+  if (!value || typeof value !== 'object') return cloneTerminalTheme(DEFAULT_TERMINAL_THEME);
+  const candidate = value as Partial<TerminalThemeSetting>;
+  const id = includes(
+    ['graphite', 'paper', 'classic', 'custom', 'imported'] as const,
+    candidate.id
+  ) ? candidate.id : 'graphite';
+  const fallback = id === 'custom' || id === 'imported'
+    ? DEFAULT_TERMINAL_THEME
+    : terminalThemeFromPreset(id);
+  const paletteValue = candidate.palette && typeof candidate.palette === 'object'
+    ? candidate.palette as Partial<TerminalPalette>
+    : {};
+  const palette = Object.fromEntries(
+    (['background', 'foreground', 'cursor', 'selection', ...TERMINAL_COLOR_KEYS] as const)
+      .map((key) => [key, sanitizeHex(paletteValue[key], fallback.palette[key])])
+  ) as unknown as TerminalPalette;
+  return {
+    id,
+    name: typeof candidate.name === 'string' && candidate.name.trim()
+      ? candidate.name.trim().slice(0, 80)
+      : fallback.name,
+    source: typeof candidate.source === 'string' && candidate.source.trim()
+      ? candidate.source.trim().slice(0, 160)
+      : null,
+    palette
+  };
+}
+
+function cloneTerminalTheme(theme: TerminalThemeSetting): TerminalThemeSetting {
+  return { ...theme, palette: { ...theme.palette } };
+}
+
+function sanitizeHex(value: unknown, fallback: string): string {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
+    ? value.toUpperCase()
+    : fallback;
+}
+
+function relativeLuminance(hex: string): number {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255);
+  const [red, green, blue] = channels.map((channel) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  );
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }

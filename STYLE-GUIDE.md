@@ -34,6 +34,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Library primitives own focus trapping, Escape, outside-click dismissal, roving tab focus, and ARIA. Do not recreate those behaviors with document listeners.
 - Preserve global keyboard paths: Cmd+K quick jump/create, Cmd+, Settings, Cmd+/ shortcuts, Cmd+B and Cmd+Shift+B panel collapse, Cmd+arrows navigation, Option+arrows reorder, and Cmd+U terminal unfocus.
 - Terminal input is sovereign: application shortcuts must not intercept terminal keystrokes except the documented unfocus path.
+- Terminal canvas colors are a user-controlled subsystem, independent of the app's light/dark preference. Graphite (`#202326`) is the migration-free default: soft enough to avoid a stark black well, with warm off-white text and restrained ANSI hues. Palette hex values belong in the appearance model or imported profile data; terminal chrome outside the canvas still uses interface tokens.
 - Keep project-rail and tree collapse/resize values persisted. Visual refactors must not change their storage keys.
 - Empty states teach one next action using a primary `Button`; do not leave blank panels or decorative placeholder copy.
 

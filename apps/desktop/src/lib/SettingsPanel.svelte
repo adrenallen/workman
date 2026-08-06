@@ -219,6 +219,7 @@
         <AppearanceCard />
       {:else if $settingsSection === 'terminal'}
         <TerminalAppearanceCard
+          {client}
           environment={info?.user_environment ?? null}
           connected={connection.status === 'connected'}
           onShellChange={saveUserShell}

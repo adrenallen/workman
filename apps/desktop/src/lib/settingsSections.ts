@@ -24,7 +24,7 @@ export interface SettingsSectionDefinition {
 
 export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'appearance', label: 'Appearance', icon: 'Aa', description: 'Theme and interface type', local: true },
-  { id: 'terminal', label: 'Terminal', icon: '>_', description: 'Terminal typography', local: true },
+  { id: 'terminal', label: 'Terminal', icon: '>_', description: 'Shell, type, and color', local: true },
   { id: 'sidebar', label: 'Sidebar', icon: '▥', description: 'Rails and project tree', local: true },
   { id: 'hotkeys', label: 'Hotkeys', icon: '⌘', description: 'Keyboard reference', local: true },
   { id: 'notifications', label: 'Notifications', icon: '○', description: 'OS banners and attention', local: true },

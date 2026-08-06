@@ -6,18 +6,22 @@
     appearance,
     installedTerminalFonts,
     terminalFontCss,
+    terminalThemeFromPreset,
     updateAppearance,
     type TerminalFontId
   } from '../appearance';
+  import type { DaemonClient } from '../daemon';
   import type { UserEnvironmentInfo } from '../settings';
+  import TerminalThemeControls from './TerminalThemeControls.svelte';
 
   interface Props {
+    client: DaemonClient;
     environment: UserEnvironmentInfo | null;
     connected: boolean;
     onShellChange: (shell: string | null) => Promise<void>;
   }
 
-  let { environment, connected, onShellChange }: Props = $props();
+  let { client, environment, connected, onShellChange }: Props = $props();
 
   let fontChoices = $state(installedTerminalFonts());
   let shellMode = $state<'auto' | 'custom'>('auto');
@@ -63,7 +67,7 @@
     <div>
       <span class="eyebrow">Terminal</span>
       <h2 id="terminal-appearance-title">Terminal environment</h2>
-      <p>Shell and typography shared by terminals, agents, and commands.</p>
+      <p>Shell, typography, and color shared by terminals and agents.</p>
     </div>
     <span class="geometry">{$appearance.terminalFontSize}px</span>
   </header>
@@ -158,21 +162,27 @@
     </div>
   </div>
 
-  <div class="terminal-preview" style={`font-family: ${terminalFontCss($appearance.terminalFont)}; font-size: ${$appearance.terminalFontSize}px`}>
+  <TerminalThemeControls {client} {connected} />
+
+  <div
+    class="terminal-preview"
+    style={`font-family: ${terminalFontCss($appearance.terminalFont)}; font-size: ${$appearance.terminalFontSize}px; background: ${$appearance.terminalTheme.palette.background}; color: ${$appearance.terminalTheme.palette.foreground}`}
+  >
     <div class="terminal-bar"><i></i><span>preview</span><small>80 × 24</small></div>
-    <p><span>wrk</span> › cargo test</p>
-    <p class="output">test result: <strong>ok</strong>. 42 passed; 0 failed</p>
-    <p><span>wrk</span> › <i class="cursor"></i></p>
+    <p><span style={`color: ${$appearance.terminalTheme.palette.cyan}`}>wrk</span> › cargo test</p>
+    <p class="output" style={`color: ${$appearance.terminalTheme.palette.brightBlack}`}>test result: <strong style={`color: ${$appearance.terminalTheme.palette.green}`}>ok</strong>. 42 passed; 0 failed</p>
+    <p><span style={`color: ${$appearance.terminalTheme.palette.cyan}`}>wrk</span> › <i class="cursor" style={`background: ${$appearance.terminalTheme.palette.cursor}`}></i></p>
   </div>
 
   <footer>
     <span>xterm canvas and PTY geometry update together.</span>
     <button
       type="button"
-      disabled={$appearance.terminalFont === DEFAULT_APPEARANCE.terminalFont && $appearance.terminalFontSize === DEFAULT_APPEARANCE.terminalFontSize}
+      disabled={$appearance.terminalFont === DEFAULT_APPEARANCE.terminalFont && $appearance.terminalFontSize === DEFAULT_APPEARANCE.terminalFontSize && $appearance.terminalTheme.id === 'graphite'}
       onclick={() => updateAppearance({
         terminalFont: DEFAULT_APPEARANCE.terminalFont,
-        terminalFontSize: DEFAULT_APPEARANCE.terminalFontSize
+        terminalFontSize: DEFAULT_APPEARANCE.terminalFontSize,
+        terminalTheme: terminalThemeFromPreset('graphite')
       })}
     >Reset terminal</button>
   </footer>

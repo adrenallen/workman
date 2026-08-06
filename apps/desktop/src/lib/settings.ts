@@ -1,4 +1,5 @@
 import type { DaemonClient } from './daemon';
+import type { TerminalPalette } from './appearance';
 
 export type McpClientId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'generic';
 export type McpSetupFormat = 'shell' | 'toml' | 'json' | 'text';
@@ -78,6 +79,14 @@ export interface DaemonRestartResult {
   restarting: boolean;
 }
 
+export interface TerminalThemeImportReport {
+  imported: boolean;
+  source: string | null;
+  profile: string | null;
+  palette: TerminalPalette | null;
+  message: string;
+}
+
 export function loadDaemonSettings(client: DaemonClient): Promise<DaemonSettingsInfo> {
   return client.control<DaemonSettingsInfo>('daemon.info');
 }
@@ -91,6 +100,10 @@ export function setUserShell(
   shell: string | null
 ): Promise<UserEnvironmentInfo> {
   return client.control<UserEnvironmentInfo>('settings.user_shell', { shell });
+}
+
+export function importTerminalTheme(client: DaemonClient): Promise<TerminalThemeImportReport> {
+  return client.control<TerminalThemeImportReport>('settings.terminal_theme_import');
 }
 
 export function checkForUpdates(client: DaemonClient, force = true): Promise<UpdateStatus> {
