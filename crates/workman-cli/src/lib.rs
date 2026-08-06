@@ -1666,15 +1666,15 @@ fn macos_app_bundle_from(
     system_applications: &Path,
 ) -> Option<PathBuf> {
     let directory = current.parent()?;
-    let mut candidates = vec![directory.join("bundle/macos/Workman.app")];
+    let mut candidates = vec![system_applications.join("Workman.app")];
+    if let Some(home) = home {
+        candidates.push(home.join("Applications/Workman.app"));
+    }
+    candidates.push(directory.join("bundle/macos/Workman.app"));
     if let Some(package_root) = directory.parent() {
         candidates.push(package_root.join("Workman.app"));
     }
     candidates.push(directory.join("Workman.app"));
-    if let Some(home) = home {
-        candidates.push(home.join("Applications/Workman.app"));
-    }
-    candidates.push(system_applications.join("Workman.app"));
     candidates
         .into_iter()
         .find(|bundle| bundle.is_dir() && bundle.join("Contents/MacOS/workman-desktop").is_file())
@@ -2106,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_bundle_resolution_falls_back_to_standard_applications() {
+    fn macos_bundle_resolution_prefers_system_applications() {
         let root = tempfile::tempdir().unwrap();
         let wrk = root.path().join("bin/wrk");
         let home = root.path().join("home");
@@ -2118,7 +2118,7 @@ mod tests {
 
         assert_eq!(
             macos_app_bundle_from(&wrk, Some(&home), &system_applications),
-            Some(user_bundle)
+            Some(system_bundle)
         );
     }
 

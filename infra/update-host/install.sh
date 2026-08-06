@@ -544,6 +544,7 @@ def replace_launcher(path, target):
 
 def apply(inventory):
     failures = []
+    needs_privilege = []
     for record in inventory["launchers"]:
         target = inventory[f"new_{PROGRAM_TARGET[record['program']]}"]
         if not exists(record["path"]):
@@ -553,12 +554,18 @@ def apply(inventory):
             if backup:
                 print(f"Replaced {record['path']} -> {target}")
                 print(f"  Backup: {backup}")
+        except PermissionError as error:
+            needs_privilege.append(str(error))
         except OSError as error:
             failures.append(str(error))
     if failures:
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
         raise SystemExit(1)
+    if needs_privilege:
+        for failure in needs_privilege:
+            print(f"Administrator permission required: {failure}", file=sys.stderr)
+        raise SystemExit(77)
 
 
 def process_alive(pid):
@@ -821,7 +828,18 @@ if [ ! -f "$install_dir/install.sh" ]; then
 fi
 
 bash "$install_dir/install.sh" </dev/null
-python3 "$reconciler_path" apply "$inventory_path"
+apply_status=0
+python3 "$reconciler_path" apply "$inventory_path" || apply_status="$?"
+if [ "$apply_status" -eq 77 ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "administrator permission is required to replace a protected launcher, but sudo is unavailable" >&2
+    exit 1
+  fi
+  echo "Administrator permission is needed to replace protected Workman launchers."
+  sudo python3 "$reconciler_path" apply "$inventory_path"
+elif [ "$apply_status" -ne 0 ]; then
+  exit "$apply_status"
+fi
 if [ "$restart_daemons" -eq 1 ]; then
   python3 "$reconciler_path" restart "$inventory_path"
 elif [ "$daemon_actions" -gt 0 ]; then

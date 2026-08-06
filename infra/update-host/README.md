@@ -141,4 +141,5 @@ On macOS, the bootstrap also offers to copy the bundled `Workman.app` to `/Appli
 app is available through Launchpad and Spotlight. Updates refresh that copy. An existing app is
 replaced only when its `CFBundleIdentifier` is `com.workman.desktop`; a different bundle is left
 untouched and the install fails with an explanation. `--yes` and non-interactive installs accept
-the app-copy step as well.
+the app-copy step as well. When present, the `/Applications` copy is also the first bundle chosen
+by `wrk app`.
