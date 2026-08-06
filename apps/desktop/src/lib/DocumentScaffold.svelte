@@ -41,7 +41,16 @@
   }: Props = $props();
 
   let expanded = $state(false);
+
+  function handleKeydown(event: KeyboardEvent): void {
+    if (!expanded || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    expanded = false;
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <section class="document-shell" class:expanded aria-label={ariaLabel}>
   <header class="document-bar">
