@@ -4,7 +4,8 @@
 //! GitHub reads are cached/optional, and `.env` handling never shells out.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
     process::Output,
@@ -80,8 +81,9 @@ static PR_CACHE: OnceLock<Mutex<HashMap<PathBuf, PrCacheEntry>>> = OnceLock::new
 pub(crate) async fn herd_for_root(
     managed_root: &Path,
     park_when_needed: bool,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> Result<HerdView, IntegrationError> {
-    if executable_on_path("herd").is_none() {
+    if executable_on_path("herd", environment).is_none() {
         return Ok(HerdView {
             available: false,
             parked: false,
@@ -89,7 +91,7 @@ pub(crate) async fn herd_for_root(
             error: None,
         });
     }
-    let tld = run_text("herd", ["tld"])
+    let tld = run_text("herd", ["tld"], environment)
         .await
         .map_err(|message| IntegrationError {
             code: "herd_error",
@@ -101,7 +103,7 @@ pub(crate) async fn herd_for_root(
             message: "Laravel Herd returned an empty site TLD".into(),
         });
     }
-    let mut parked = herd_paths()
+    let mut parked = herd_paths(environment)
         .await
         .map_err(|message| IntegrationError {
             code: "herd_error",
@@ -111,7 +113,7 @@ pub(crate) async fn herd_for_root(
         .any(|path| same_path(path, managed_root));
     if park_when_needed && !parked {
         let root = managed_root.to_string_lossy().into_owned();
-        run_text("herd", ["park", root.as_str()])
+        run_text("herd", ["park", root.as_str()], environment)
             .await
             .map_err(|message| IntegrationError {
                 code: "herd_error",
@@ -141,8 +143,17 @@ pub(crate) fn site_url(site_name: &str, herd: &HerdView) -> Option<String> {
 pub(crate) async fn pull_requests(
     repository: &Path,
     refresh: bool,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
-    let now = unix_time();
+    pull_requests_at(repository, refresh, environment, unix_time()).await
+}
+
+async fn pull_requests_at(
+    repository: &Path,
+    refresh: bool,
+    environment: &BTreeMap<OsString, OsString>,
+    now: i64,
+) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if !refresh {
         if let Some(hit) = cache.lock().await.get(repository).cloned() {
@@ -151,7 +162,7 @@ pub(crate) async fn pull_requests(
             }
         }
     }
-    let entry = match fetch_pull_requests(repository).await {
+    let entry = match fetch_pull_requests(repository, environment).await {
         Ok(branches) => PrCacheEntry {
             checked_at: now,
             branches,
@@ -182,20 +193,23 @@ fn cache_result(entry: PrCacheEntry) -> (HashMap<String, PullRequestView>, PullR
 
 async fn fetch_pull_requests(
     repository: &Path,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> Result<HashMap<String, PullRequestView>, String> {
-    if executable_on_path("gh").is_none() {
-        return Err("GitHub CLI is not installed; PR status is unavailable".into());
-    }
-    let output = command_output(Command::new("gh").current_dir(repository).args([
-        "pr",
-        "list",
-        "--state",
-        "all",
-        "--limit",
-        "200",
-        "--json",
-        "number,state,isDraft,headRefName,url,mergeable,statusCheckRollup",
-    ]))
+    let gh = executable_on_path("gh", environment)
+        .ok_or_else(|| "GitHub CLI was not found in the resolved user PATH".to_owned())?;
+    let output = command_output(
+        Command::new(gh).current_dir(repository).args([
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "200",
+            "--json",
+            "number,state,isDraft,headRefName,url,mergeable,statusCheckRollup",
+        ]),
+        environment,
+    )
     .await
     .map_err(|error| format!("could not run gh: {error}"))?;
     if !output.status.success() {
@@ -291,7 +305,10 @@ fn pr_rank(state: &str) -> u8 {
     }
 }
 
-pub(crate) async fn health(managed_roots: Vec<PathBuf>) -> WorktreeHealth {
+pub(crate) async fn health(
+    managed_roots: Vec<PathBuf>,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeHealth {
     let roots = if managed_roots.is_empty() {
         vec![super::worktrees::default_worktree_root()]
     } else {
@@ -304,6 +321,7 @@ pub(crate) async fn health(managed_roots: Vec<PathBuf>) -> WorktreeHealth {
             true,
             &["--version"],
             "Install Git with Xcode Command Line Tools (`xcode-select --install`) or Homebrew.",
+            environment,
         )
         .await,
     ];
@@ -314,10 +332,11 @@ pub(crate) async fn health(managed_roots: Vec<PathBuf>) -> WorktreeHealth {
         false,
         &["--version"],
         "Install with `brew install gh`, then authenticate with `gh auth login`.",
+        environment,
     )
     .await;
     if gh.status == "ready" {
-        match run_text("gh", ["auth", "status"]).await {
+        match run_text("gh", ["auth", "status"], environment).await {
             Ok(_) => gh.detail = "Installed and authenticated; PR status is available.".into(),
             Err(error) => {
                 gh.status = "attention";
@@ -334,10 +353,14 @@ pub(crate) async fn health(managed_roots: Vec<PathBuf>) -> WorktreeHealth {
         false,
         &["--version"],
         "Install Laravel Herd to serve managed worktrees at http://<name>.test.",
+        environment,
     )
     .await;
     if herd.status == "ready" {
-        match (herd_paths().await, run_text("herd", ["tld"]).await) {
+        match (
+            herd_paths(environment).await,
+            run_text("herd", ["tld"], environment).await,
+        ) {
             (Ok(paths), Ok(tld)) => {
                 let unparked = roots
                     .iter()
@@ -400,8 +423,9 @@ async fn command_health(
     required: bool,
     version_args: &[&str],
     hint: &str,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeHealthCheck {
-    if executable_on_path(command).is_none() {
+    if executable_on_path(command, environment).is_none() {
         return WorktreeHealthCheck {
             id: command,
             label,
@@ -419,7 +443,7 @@ async fn command_health(
             fix_hint: Some(hint.into()),
         };
     }
-    match run_text(command, version_args.iter().copied()).await {
+    match run_text(command, version_args.iter().copied(), environment).await {
         Ok(version) => WorktreeHealthCheck {
             id: command,
             label,
@@ -472,19 +496,25 @@ fn root_health_error(root: &Path) -> Option<String> {
     }
 }
 
-async fn herd_paths() -> Result<Vec<PathBuf>, String> {
-    let text = run_text("herd", ["paths"]).await?;
+async fn herd_paths(environment: &BTreeMap<OsString, OsString>) -> Result<Vec<PathBuf>, String> {
+    let text = run_text("herd", ["paths"], environment).await?;
     serde_json::from_str::<Vec<String>>(&text)
         .map(|paths| paths.into_iter().map(PathBuf::from).collect())
         .map_err(|error| format!("invalid JSON from `herd paths`: {error}"))
 }
 
-async fn run_text<I, S>(command: &str, args: I) -> Result<String, String>
+async fn run_text<I, S>(
+    command: &str,
+    args: I,
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = command_output(Command::new(command).args(args))
+    let executable = executable_on_path(command, environment)
+        .ok_or_else(|| format!("{command} was not found in the resolved user PATH"))?;
+    let output = command_output(Command::new(executable).args(args), environment)
         .await
         .map_err(|error| error.to_string())?;
     if output.status.success() {
@@ -494,7 +524,11 @@ where
     }
 }
 
-async fn command_output(command: &mut Command) -> io::Result<Output> {
+async fn command_output(
+    command: &mut Command,
+    environment: &BTreeMap<OsString, OsString>,
+) -> io::Result<Output> {
+    command.env_clear().envs(environment).kill_on_drop(true);
     timeout(COMMAND_TIMEOUT, command.output())
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "command timed out"))?
@@ -512,9 +546,12 @@ fn clean_command_error(output: &Output) -> String {
     }
 }
 
-fn executable_on_path(command: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
+fn executable_on_path(
+    command: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> Option<PathBuf> {
+    environment.get(OsStr::new("PATH")).and_then(|path| {
+        std::env::split_paths(path)
             .map(|directory| directory.join(command))
             .find(|candidate| candidate.is_file())
     })
@@ -539,6 +576,9 @@ fn unix_time() -> i64 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt};
+
     #[test]
     fn parses_pr_priority_checks_and_mergeability() {
         let parsed = parse_pull_requests(br#"[
@@ -551,5 +591,83 @@ mod tests {
         assert_eq!(parsed["feature"].checks, "pending");
         assert_eq!(parsed["ready"].checks, "failing");
         assert_eq!(parsed["ready"].mergeable, "conflicting");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pr_cache_retries_on_expiry_and_manual_refresh_recovers_errors() {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("plain-repository");
+        let bin = fixture.path().join("profile-bin");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&bin).unwrap();
+        let environment = BTreeMap::from([
+            (
+                OsString::from("HOME"),
+                fixture.path().as_os_str().to_owned(),
+            ),
+            (OsString::from("PATH"), bin.as_os_str().to_owned()),
+        ]);
+
+        let (_, missing) = pull_requests_at(&repository, false, &environment, 100).await;
+        assert!(!missing.available);
+        assert!(
+            missing
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("resolved user PATH"))
+        );
+
+        let gh = bin.join("gh");
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"number\":41,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/41\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+        );
+        let (_, still_cached) = pull_requests_at(
+            &repository,
+            false,
+            &environment,
+            100 + PR_CACHE_TTL_SECONDS - 1,
+        )
+        .await;
+        assert!(
+            !still_cached.available,
+            "cache must remain stable before expiry"
+        );
+
+        let (expired_branches, expired) =
+            pull_requests_at(&repository, false, &environment, 100 + PR_CACHE_TTL_SECONDS).await;
+        assert!(expired.available, "expiry must trigger a fresh lookup");
+        assert_eq!(expired_branches["main"].number, 41);
+
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf 'fixture auth expired\\n' >&2\nexit 1\n",
+        );
+        let (_, failed_refresh) = pull_requests_at(&repository, true, &environment, 450).await;
+        assert!(!failed_refresh.available);
+        assert_eq!(
+            failed_refresh.error.as_deref(),
+            Some("fixture auth expired")
+        );
+
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"number\":42,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/42\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+        );
+        let (recovered_branches, recovered) =
+            pull_requests_at(&repository, true, &environment, 451).await;
+        assert!(
+            recovered.available,
+            "manual refresh must replace cached errors"
+        );
+        assert_eq!(recovered.error, None);
+        assert_eq!(recovered_branches["main"].number, 42);
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

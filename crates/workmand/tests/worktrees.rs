@@ -3,6 +3,8 @@
 use std::{
     collections::BTreeMap,
     error::Error,
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -12,7 +14,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use workman_core::{Project, Store};
 use workmand::{
-    ProcessRegistry, SharedProcessRegistry,
+    ProcessRegistry, SharedProcessRegistry, UserEnvironmentResolver,
     worktrees::{self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, RemoveWorktree},
 };
 
@@ -464,6 +466,141 @@ async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<()
     assert_eq!(tracked.code(), "unsafe_env_file");
     assert!(tracked.to_string().contains("tracks"));
     Ok(())
+}
+
+#[tokio::test]
+async fn pr_lookup_uses_login_path_for_plain_and_managed_worktrees_and_refreshes_errors()
+-> Result<(), Box<dyn Error>> {
+    let fixture = tempfile::tempdir()?;
+    let origin = fixture.path().join("origin.git");
+    let main = fixture.path().join("plain-repo");
+    let managed = fixture.path().join("managed-feature");
+    git(
+        fixture.path(),
+        &["init", "--bare", origin.to_str().unwrap()],
+    )?;
+    git(
+        fixture.path(),
+        &["init", "-b", "main", main.to_str().unwrap()],
+    )?;
+    git(&main, &["config", "user.email", "fixture@example.test"])?;
+    git(&main, &["config", "user.name", "Fixture"])?;
+    fs::write(main.join("README.md"), "fixture\n")?;
+    git(&main, &["add", "README.md"])?;
+    git(&main, &["commit", "-m", "initial"])?;
+    git(
+        &main,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    )?;
+    git(&main, &["push", "-u", "origin", "main"])?;
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/managed",
+            managed.to_str().unwrap(),
+            "main",
+        ],
+    )?;
+    assert_eq!(
+        git(&main, &["rev-parse", "--abbrev-ref", "@{upstream}"])?.trim(),
+        "origin/main"
+    );
+
+    let store = Store::open(fixture.path().join("state.sqlite3"))?;
+    for (id, path, name, selected) in [
+        (1, &main, "plain-repo", true),
+        (2, &managed, "plain-repo: feature/managed", false),
+    ] {
+        store.put_project(&Project {
+            id,
+            path: fs::canonicalize(path)?.to_string_lossy().into_owned(),
+            name: name.into(),
+            display_name: None,
+            icon: None,
+            selected,
+            sort_order: id,
+        })?;
+    }
+    worktrees::reconcile_existing_projects(&store)?;
+    let mut managed_link = store
+        .get_project_worktree(2)?
+        .expect("linked worktree metadata");
+    managed_link.parent_project_id = Some(1);
+    managed_link.managed = true;
+    store.put_project_worktree(&managed_link)?;
+
+    let profile_bin = fixture.path().join("profile-bin");
+    fs::create_dir(&profile_bin)?;
+    let git_executable = executable_on_test_path("git").ok_or("test git executable missing")?;
+    symlink(git_executable, profile_bin.join("git"))?;
+    let shell = fixture.path().join("fixture-shell");
+    fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nexport PATH='{}'\nshift\nexec /bin/sh \"$@\"\n",
+            profile_bin.display()
+        ),
+    )?;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+    let config = fixture.path().join("config.yml");
+    fs::write(
+        &config,
+        format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
+    )?;
+    let registry = Arc::new(Mutex::new(ProcessRegistry::with_user_environment(
+        store,
+        UserEnvironmentResolver::new(config),
+    )?));
+
+    let unavailable = worktrees::list_for_project_refresh(&registry, 1, true).await?;
+    assert!(!unavailable.pull_requests.available);
+    assert!(
+        unavailable
+            .pull_requests
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("resolved user PATH"))
+    );
+
+    let gh = profile_bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\nprintf '%s\\n' '[{\"number\":51,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/51\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]},{\"number\":52,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feature/managed\",\"url\":\"https://example.test/pr/52\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+    )?;
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+
+    let cached = worktrees::list_for_project(&registry, 1).await?;
+    assert!(
+        !cached.pull_requests.available,
+        "ordinary reads retain the cache"
+    );
+    let recovered = worktrees::list_for_project_refresh(&registry, 1, true).await?;
+    assert!(recovered.pull_requests.available);
+    assert_eq!(recovered.pull_requests.error, None);
+    let plain = recovered
+        .worktrees
+        .iter()
+        .find(|entry| entry.kind == "main")
+        .expect("plain repository row");
+    assert_eq!(plain.pull_request.as_ref().map(|pr| pr.number), Some(51));
+    let managed = recovered
+        .worktrees
+        .iter()
+        .find(|entry| entry.kind == "managed")
+        .expect("managed worktree row");
+    assert_eq!(managed.pull_request.as_ref().map(|pr| pr.number), Some(52));
+    Ok(())
+}
+
+fn executable_on_test_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn git(directory: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {

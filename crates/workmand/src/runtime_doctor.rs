@@ -104,11 +104,7 @@ pub async fn check_agent_tools_with_user_environment(
     tools: Vec<AgentTool>,
     resolved: &crate::user_environment::ResolvedUserEnvironment,
 ) -> AgentToolsHealth {
-    let variables = resolved.login_environment().unwrap_or_else(|_| {
-        let mut variables = env::vars_os().collect::<BTreeMap<_, _>>();
-        variables.extend(resolved.pty_environment().clone());
-        variables
-    });
+    let variables = resolved.command_environment();
     let home = variables
         .get(OsStr::new("HOME"))
         .map(PathBuf::from)

@@ -184,16 +184,19 @@ impl DaemonServer {
         let store = workman_core::Store::open(database_path(&config.data_dir))
             .map_err(registry_io_error)?;
         let user_config_path = user_config_path();
+        let user_environment = UserEnvironmentResolver::new(&user_config_path);
         sync_user_config_file(&store, &user_config_path).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{}: {error}", user_config_path.display()),
             )
         })?;
-        if let Err(error) = worktrees::reconcile_existing_projects(&store) {
+        let command_environment = user_environment.resolve().command_environment();
+        if let Err(error) =
+            worktrees::reconcile_existing_projects_with_environment(&store, &command_environment)
+        {
             eprintln!("workman daemon: worktree metadata reconciliation skipped: {error}");
         }
-        let user_environment = UserEnvironmentResolver::new(user_config_path);
         let registry = Arc::new(Mutex::new(
             ProcessRegistry::with_output_persistence_and_environment(
                 store,

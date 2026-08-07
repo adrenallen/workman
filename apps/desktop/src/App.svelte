@@ -1179,7 +1179,10 @@
     );
     for (const root of roots) {
       const repositoryId = root.repository_id!;
-      if (!force && worktreeLists[repositoryId]) continue;
+      const current = worktreeLists[repositoryId];
+      const cacheExpiresAt = current?.pull_requests.expires_at ?? null;
+      const cacheIsFresh = cacheExpiresAt !== null && cacheExpiresAt > Math.floor(Date.now() / 1000);
+      if (!force && current && cacheIsFresh) continue;
       worktreeRefreshingRepositoryId = repositoryId;
       try {
         const list = await client.worktrees(root.id, refreshPullRequests);
@@ -2897,6 +2900,7 @@
       {#if repository && !projectRailCollapsed}
         <WorktreeRowMeta
           entry={worktree}
+          pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
           repositoryName={repository.name}
           refreshing={worktreeRefreshingRepositoryId === repository.id}
           showRefresh={!nested}

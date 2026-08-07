@@ -7,7 +7,9 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    env, fmt, fs,
+    env,
+    ffi::OsString,
+    fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Output},
@@ -23,6 +25,8 @@ use workman_core::{
 
 use crate::{
     RegistryError, SharedProcessRegistry,
+    user_config::user_config_path,
+    user_environment::UserEnvironmentResolver,
     worktree_integrations::{
         self, HerdView, PullRequestCacheView, PullRequestView, WorktreeHealth,
     },
@@ -368,12 +372,22 @@ pub fn project_envelopes(
 
 /// Populate metadata for pre-existing SWM/workman projects without touching Git or project rows.
 pub fn reconcile_existing_projects(store: &Store) -> WorktreeResult<()> {
+    let environment = UserEnvironmentResolver::new(user_config_path())
+        .resolve()
+        .command_environment();
+    reconcile_existing_projects_with_environment(store, &environment)
+}
+
+pub(crate) fn reconcile_existing_projects_with_environment(
+    store: &Store,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<()> {
     let projects = store.list_projects()?;
     for project in &projects {
         if store.get_project_worktree(project.id)?.is_some() {
             continue;
         }
-        let Ok(snapshot) = snapshot_sync(Path::new(&project.path)) else {
+        let Ok(snapshot) = snapshot_sync(Path::new(&project.path), environment) else {
             continue;
         };
         let Some(record) = matching_record(&snapshot, Path::new(&project.path)) else {
@@ -431,13 +445,14 @@ pub async fn list_for_project_refresh(
     project_id: ProjectId,
     refresh_pull_requests: bool,
 ) -> WorktreeResult<WorktreeList> {
+    let environment = command_environment(registry).await;
     let (project, repository, registered, links) = {
         let registry = registry.lock().await;
         let project = registry.store().get_project(project_id)?.ok_or_else(|| {
             WorktreeError::InvalidProject(format!("project {project_id} was not found"))
         })?;
         if registry.store().get_project_worktree(project_id)?.is_none() {
-            reconcile_existing_projects(registry.store())?;
+            reconcile_existing_projects_with_environment(registry.store(), &environment)?;
         }
         let link = registry
             .store()
@@ -456,7 +471,7 @@ pub async fn list_for_project_refresh(
         (project, repository, registered, links)
     };
 
-    let snapshot = snapshot_async(Path::new(&project.path)).await?;
+    let snapshot = snapshot_async(Path::new(&project.path), &environment).await?;
     list_from_snapshot(
         registry,
         repository,
@@ -464,6 +479,7 @@ pub async fn list_for_project_refresh(
         registered,
         links,
         refresh_pull_requests,
+        &environment,
     )
     .await
 }
@@ -475,13 +491,14 @@ pub async fn origin_branches_for_project(
     registry: &SharedProcessRegistry,
     project_id: ProjectId,
 ) -> WorktreeResult<OriginBranchList> {
+    let environment = command_environment(registry).await;
     let (project, repository_id) = {
         let registry = registry.lock().await;
         let project = registry.store().get_project(project_id)?.ok_or_else(|| {
             WorktreeError::InvalidProject(format!("project {project_id} was not found"))
         })?;
         if registry.store().get_project_worktree(project_id)?.is_none() {
-            reconcile_existing_projects(registry.store())?;
+            reconcile_existing_projects_with_environment(registry.store(), &environment)?;
         }
         let link = registry
             .store()
@@ -492,7 +509,7 @@ pub async fn origin_branches_for_project(
         (project, link.repository_id)
     };
 
-    let snapshot = snapshot_async(Path::new(&project.path)).await?;
+    let snapshot = snapshot_async(Path::new(&project.path), &environment).await?;
     let checked_out = snapshot
         .worktrees
         .iter()
@@ -502,6 +519,7 @@ pub async fn origin_branches_for_project(
         &snapshot.root_path,
         ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"],
         "list local branches",
+        &environment,
     )
     .await?;
     let mut local = local_output
@@ -513,11 +531,18 @@ pub async fn origin_branches_for_project(
     local.sort();
     local.dedup();
 
-    let mut origin = if git_success(&snapshot.root_path, ["remote", "get-url", "origin"]).await? {
+    let mut origin = if git_success(
+        &snapshot.root_path,
+        ["remote", "get-url", "origin"],
+        &environment,
+    )
+    .await?
+    {
         let output = git_required(
             &snapshot.root_path,
             ["ls-remote", "--heads", "origin"],
             "list origin branches",
+            &environment,
         )
         .await?;
         parse_origin_branches(&output)
@@ -565,13 +590,14 @@ pub(crate) async fn create_with_progress(
     request: CreateWorktree,
     progress: Option<&WorktreeOperationReporter>,
 ) -> WorktreeResult<WorktreeMutation> {
+    let command_environment = command_environment(registry).await;
     if let Some(progress) = progress {
         progress.running(
             WorktreeStepId::Branch,
             Some(format!("Checking {}", request.branch)),
         );
     }
-    validate_branch(&request.branch).await?;
+    validate_branch(&request.branch, &command_environment).await?;
     for key in request.preferences.keys() {
         validate_preference_key(key)?;
     }
@@ -587,7 +613,7 @@ pub(crate) async fn create_with_progress(
                 ))
             })?
     };
-    let snapshot = snapshot_async(Path::new(&source_project.path)).await?;
+    let snapshot = snapshot_async(Path::new(&source_project.path), &command_environment).await?;
 
     let mut repository = {
         let registry = registry.lock().await;
@@ -606,6 +632,7 @@ pub(crate) async fn create_with_progress(
         Path::new(&source_project.path),
         requested_env_policy.or(remembered_env_policy),
         request.remember_env_policy || remembered_env_policy.is_some(),
+        &command_environment,
     )
     .await?;
 
@@ -633,7 +660,7 @@ pub(crate) async fn create_with_progress(
         )));
     }
 
-    let branch_state = branch_state(&snapshot, &request.branch).await?;
+    let branch_state = branch_state(&snapshot, &request.branch, &command_environment).await?;
     if branch_state != BranchState::Missing && request.from_ref.is_some() {
         return Err(WorktreeError::Conflict(format!(
             "branch {:?} already exists and cannot also be created from another ref",
@@ -671,7 +698,8 @@ pub(crate) async fn create_with_progress(
         .or_else(|| remembered_preferences.get("herd_enabled"))
         .is_none_or(|value| !matches!(value.as_str(), "no" | "false" | "off"));
     let herd = if herd_enabled {
-        match worktree_integrations::herd_for_root(&managed_root, true).await {
+        match worktree_integrations::herd_for_root(&managed_root, true, &command_environment).await
+        {
             Ok(herd) => herd,
             Err(error) => {
                 if let Some(progress) = progress {
@@ -711,6 +739,7 @@ pub(crate) async fn create_with_progress(
                     &request.branch,
                 ],
                 "check out existing local branch",
+                &command_environment,
             )
             .await?;
         }
@@ -721,6 +750,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     ["fetch", "--quiet", "origin", refspec.as_str()],
                     "fetch remote branch",
+                    &command_environment,
                 )
                 .await?;
             } else {
@@ -729,6 +759,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     ["fetch", "--quiet", "origin", refspec.as_str()],
                     GIT_NETWORK_TIMEOUT,
+                    &command_environment,
                 )
                 .await;
             }
@@ -745,12 +776,17 @@ pub(crate) async fn create_with_progress(
                     remote.as_str(),
                 ],
                 "check out remote branch",
+                &command_environment,
             )
             .await?;
         }
         BranchState::Missing => {
-            let start =
-                resolve_start_point(&snapshot.root_path, request.from_ref.as_deref()).await?;
+            let start = resolve_start_point(
+                &snapshot.root_path,
+                request.from_ref.as_deref(),
+                &command_environment,
+            )
+            .await?;
             git_required(
                 &snapshot.root_path,
                 [
@@ -762,6 +798,7 @@ pub(crate) async fn create_with_progress(
                     start.as_str(),
                 ],
                 "create worktree branch",
+                &command_environment,
             )
             .await?;
         }
@@ -776,7 +813,13 @@ pub(crate) async fn create_with_progress(
     }
 
     if env_plan.policy == Some(EnvPortPolicy::Copy) && env_plan.source.is_some() {
-        match git_success(&destination, ["check-ignore", "-q", "--", ".env"]).await {
+        match git_success(
+            &destination,
+            ["check-ignore", "-q", "--", ".env"],
+            &command_environment,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 rollback_created_worktree(
@@ -784,6 +827,7 @@ pub(crate) async fn create_with_progress(
                     &destination,
                     &request.branch,
                     branch_state == BranchState::Missing,
+                    &command_environment,
                 )
                 .await;
                 return Err(WorktreeError::UnsafeEnvironment(
@@ -796,6 +840,7 @@ pub(crate) async fn create_with_progress(
                     &destination,
                     &request.branch,
                     branch_state == BranchState::Missing,
+                    &command_environment,
                 )
                 .await;
                 return Err(error);
@@ -817,6 +862,7 @@ pub(crate) async fn create_with_progress(
                 &destination,
                 &request.branch,
                 branch_state == BranchState::Missing,
+                &command_environment,
             )
             .await;
             return Err(error);
@@ -904,6 +950,7 @@ pub(crate) async fn fork_with_progress(
     request: ForkWorktree,
     progress: Option<&WorktreeOperationReporter>,
 ) -> WorktreeResult<WorktreeMutation> {
+    let command_environment = command_environment(registry).await;
     let source = {
         let registry = registry.lock().await;
         registry
@@ -916,7 +963,7 @@ pub(crate) async fn fork_with_progress(
                 ))
             })?
     };
-    let snapshot = snapshot_async(Path::new(&source.path)).await?;
+    let snapshot = snapshot_async(Path::new(&source.path), &command_environment).await?;
     let record = matching_record(&snapshot, Path::new(&source.path)).ok_or_else(|| {
         WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", source.path))
     })?;
@@ -948,6 +995,7 @@ pub(crate) async fn adopt_with_progress(
     request: AdoptWorktree,
     progress: Option<&WorktreeOperationReporter>,
 ) -> WorktreeResult<WorktreeMutation> {
+    let command_environment = command_environment(registry).await;
     if let Some(progress) = progress {
         progress.running(
             WorktreeStepId::Branch,
@@ -964,10 +1012,11 @@ pub(crate) async fn adopt_with_progress(
         &canonical_input,
         ["rev-parse", "--show-toplevel"],
         "resolve worktree root",
+        &command_environment,
     )
     .await?;
     let top = std::fs::canonicalize(top.trim())?;
-    let snapshot = snapshot_async(&top).await?;
+    let snapshot = snapshot_async(&top, &command_environment).await?;
     let record = matching_record(&snapshot, &top).ok_or_else(|| {
         WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", top.display()))
     })?;
@@ -1023,6 +1072,7 @@ pub async fn remove(
     registry: &SharedProcessRegistry,
     request: RemoveWorktree,
 ) -> WorktreeResult<WorktreeRemoval> {
+    let command_environment = command_environment(registry).await;
     if !request.confirm_remove {
         return Err(WorktreeError::Confirmation(
             "set confirm_remove=true to remove the worktree and unregister its project".into(),
@@ -1074,8 +1124,13 @@ pub async fn remove(
             link.branch
         )));
     }
-    let actual_top =
-        git_required(&path, ["rev-parse", "--show-toplevel"], "verify worktree").await?;
+    let actual_top = git_required(
+        &path,
+        ["rev-parse", "--show-toplevel"],
+        "verify worktree",
+        &command_environment,
+    )
+    .await?;
     let actual_top = std::fs::canonicalize(actual_top.trim())?;
     if actual_top != path {
         return Err(WorktreeError::Foreign(format!(
@@ -1088,6 +1143,7 @@ pub async fn remove(
         &path,
         ["status", "--porcelain", "--untracked-files=all"],
         "inspect worktree",
+        &command_environment,
     )
     .await?
     .is_empty();
@@ -1127,6 +1183,7 @@ pub async fn remove(
             path.to_str().unwrap_or_default(),
         ],
         "remove managed worktree",
+        &command_environment,
     )
     .await?;
     let branch_kept = git_success(
@@ -1137,6 +1194,7 @@ pub async fn remove(
             "--quiet",
             format!("refs/heads/{}", link.branch).as_str(),
         ],
+        &command_environment,
     )
     .await?;
     if !branch_kept {
@@ -1169,10 +1227,11 @@ pub async fn forget_env_preference(
     registry: &SharedProcessRegistry,
     project_id: ProjectId,
 ) -> WorktreeResult<WorktreePreferenceMutation> {
+    let command_environment = command_environment(registry).await;
     let repository_id = {
         let registry = registry.lock().await;
         if registry.store().get_project_worktree(project_id)?.is_none() {
-            reconcile_existing_projects(registry.store())?;
+            reconcile_existing_projects_with_environment(registry.store(), &command_environment)?;
         }
         registry
             .store()
@@ -1194,9 +1253,9 @@ pub async fn forget_env_preference(
 }
 
 pub async fn health(registry: &SharedProcessRegistry) -> WorktreeHealth {
-    let roots = {
+    let (roots, command_environment) = {
         let registry = registry.lock().await;
-        registry
+        let roots = registry
             .store()
             .list_worktree_repositories()
             .unwrap_or_default()
@@ -1204,15 +1263,18 @@ pub async fn health(registry: &SharedProcessRegistry) -> WorktreeHealth {
             .map(|repository| PathBuf::from(repository.managed_root))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .collect()
+            .collect();
+        (roots, registry.resolved_user_environment())
     };
-    worktree_integrations::health(roots).await
+    let command_environment = command_environment.command_environment();
+    worktree_integrations::health(roots, &command_environment).await
 }
 
 async fn prepare_environment(
     source_worktree: &Path,
     policy: Option<EnvPortPolicy>,
     remembered: bool,
+    command_environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<EnvironmentPlan> {
     let source = source_worktree.join(".env");
     let metadata = match fs::symlink_metadata(&source) {
@@ -1252,6 +1314,7 @@ async fn prepare_environment(
     if git_success(
         source_worktree,
         ["ls-files", "--error-unmatch", "--", ".env"],
+        command_environment,
     )
     .await?
     {
@@ -1259,7 +1322,13 @@ async fn prepare_environment(
             "refusing to copy .env because Git tracks it".into(),
         ));
     }
-    if !git_success(source_worktree, ["check-ignore", "-q", "--", ".env"]).await? {
+    if !git_success(
+        source_worktree,
+        ["check-ignore", "-q", "--", ".env"],
+        command_environment,
+    )
+    .await?
+    {
         return Err(WorktreeError::UnsafeEnvironment(
             "refusing to copy .env because Git does not ignore it".into(),
         ));
@@ -1396,16 +1465,24 @@ async fn rollback_created_worktree(
     destination: &Path,
     branch: &str,
     branch_was_created: bool,
+    environment: &BTreeMap<OsString, OsString>,
 ) {
     let destination = destination.to_string_lossy().into_owned();
     let _ = git_output(
         repository,
         ["worktree", "remove", "--force", destination.as_str()],
         GIT_NETWORK_TIMEOUT,
+        environment,
     )
     .await;
     if branch_was_created {
-        let _ = git_output(repository, ["branch", "-D", branch], GIT_NETWORK_TIMEOUT).await;
+        let _ = git_output(
+            repository,
+            ["branch", "-D", branch],
+            GIT_NETWORK_TIMEOUT,
+            environment,
+        )
+        .await;
     }
 }
 
@@ -1459,17 +1536,26 @@ async fn list_from_snapshot(
     projects: Vec<Project>,
     links: Vec<ProjectWorktree>,
     refresh_pull_requests: bool,
+    command_environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<WorktreeList> {
-    let herd = worktree_integrations::herd_for_root(Path::new(&repository.managed_root), false)
-        .await
-        .unwrap_or_else(|error| HerdView {
-            available: true,
-            parked: false,
-            tld: None,
-            error: Some(error.message),
-        });
-    let (pull_requests, pull_request_cache) =
-        worktree_integrations::pull_requests(&snapshot.root_path, refresh_pull_requests).await;
+    let herd = worktree_integrations::herd_for_root(
+        Path::new(&repository.managed_root),
+        false,
+        command_environment,
+    )
+    .await
+    .unwrap_or_else(|error| HerdView {
+        available: true,
+        parked: false,
+        tld: None,
+        error: Some(error.message),
+    });
+    let (pull_requests, pull_request_cache) = worktree_integrations::pull_requests(
+        &snapshot.root_path,
+        refresh_pull_requests,
+        command_environment,
+    )
+    .await;
     let project_by_path = projects
         .iter()
         .map(|project| (canonical_display(Path::new(&project.path)), project))
@@ -1511,7 +1597,7 @@ async fn list_from_snapshot(
         } else {
             "external"
         };
-        let status = worktree_status(&record).await?;
+        let status = worktree_status(&record, command_environment).await?;
         entries.push(WorktreeEntry {
             project_id: project.map(|project| project.id),
             parent_project_id: link
@@ -1647,7 +1733,11 @@ enum BranchState {
     RemoteUnfetched,
 }
 
-async fn branch_state(snapshot: &RepositorySnapshot, branch: &str) -> WorktreeResult<BranchState> {
+async fn branch_state(
+    snapshot: &RepositorySnapshot,
+    branch: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<BranchState> {
     if git_success(
         &snapshot.root_path,
         [
@@ -1656,6 +1746,7 @@ async fn branch_state(snapshot: &RepositorySnapshot, branch: &str) -> WorktreeRe
             "--quiet",
             format!("refs/heads/{branch}").as_str(),
         ],
+        environment,
     )
     .await?
     {
@@ -1669,12 +1760,19 @@ async fn branch_state(snapshot: &RepositorySnapshot, branch: &str) -> WorktreeRe
             "--quiet",
             format!("refs/remotes/origin/{branch}").as_str(),
         ],
+        environment,
     )
     .await?
     {
         return Ok(BranchState::Remote);
     }
-    if !git_success(&snapshot.root_path, ["remote", "get-url", "origin"]).await? {
+    if !git_success(
+        &snapshot.root_path,
+        ["remote", "get-url", "origin"],
+        environment,
+    )
+    .await?
+    {
         return Ok(BranchState::Missing);
     }
     let output = git_output(
@@ -1687,6 +1785,7 @@ async fn branch_state(snapshot: &RepositorySnapshot, branch: &str) -> WorktreeRe
             format!("refs/heads/{branch}").as_str(),
         ],
         GIT_NETWORK_TIMEOUT,
+        environment,
     )
     .await?;
     Ok(if output.status.success() {
@@ -1696,7 +1795,11 @@ async fn branch_state(snapshot: &RepositorySnapshot, branch: &str) -> WorktreeRe
     })
 }
 
-async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> WorktreeResult<String> {
+async fn resolve_start_point(
+    repository: &Path,
+    requested: Option<&str>,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<String> {
     let from_ref = if let Some(requested) = requested.filter(|value| !value.trim().is_empty()) {
         requested.trim().to_owned()
     } else {
@@ -1709,6 +1812,7 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
                 "refs/remotes/origin/HEAD",
             ],
             Duration::from_secs(5),
+            environment,
         )
         .await?;
         if remote_head.status.success() {
@@ -1727,11 +1831,14 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
             .chars()
             .all(|character| character.is_ascii_hexdigit());
     let simple_branch = !from_ref.contains('/') && !looks_like_commit;
-    if simple_branch && git_success(repository, ["remote", "get-url", "origin"]).await? {
+    if simple_branch
+        && git_success(repository, ["remote", "get-url", "origin"], environment).await?
+    {
         let _ = git_output(
             repository,
             ["fetch", "--quiet", "origin", from_ref.as_str()],
             GIT_NETWORK_TIMEOUT,
+            environment,
         )
         .await;
     }
@@ -1745,6 +1852,7 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
                 "--quiet",
                 format!("refs/remotes/{remote}").as_str(),
             ],
+            environment,
         )
         .await?
     {
@@ -1758,6 +1866,7 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
             "--quiet",
             format!("{from_ref}^{{commit}}").as_str(),
         ],
+        environment,
     )
     .await?
     {
@@ -1771,6 +1880,7 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
             "--quiet",
             format!("{remote}^{{commit}}").as_str(),
         ],
+        environment,
     )
     .await?
     {
@@ -1781,15 +1891,19 @@ async fn resolve_start_point(repository: &Path, requested: Option<&str>) -> Work
     )))
 }
 
-async fn validate_branch(branch: &str) -> WorktreeResult<()> {
+async fn validate_branch(
+    branch: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<()> {
     if branch.trim() != branch || branch.is_empty() {
         return Err(WorktreeError::InvalidBranch(
             "worktree branch must not be empty or padded with whitespace".into(),
         ));
     }
     let output = command_output(
-        Command::new("git").args(["check-ref-format", "--branch", branch]),
+        Command::new(git_executable(environment)?).args(["check-ref-format", "--branch", branch]),
         Duration::from_secs(5),
+        environment,
     )
     .await?;
     if output.status.success() {
@@ -1801,22 +1915,40 @@ async fn validate_branch(branch: &str) -> WorktreeResult<()> {
     }
 }
 
-async fn snapshot_async(path: &Path) -> WorktreeResult<RepositorySnapshot> {
-    let top = git_required(path, ["rev-parse", "--show-toplevel"], "resolve repository").await?;
+async fn snapshot_async(
+    path: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<RepositorySnapshot> {
+    let top = git_required(
+        path,
+        ["rev-parse", "--show-toplevel"],
+        "resolve repository",
+        environment,
+    )
+    .await?;
     let top = std::fs::canonicalize(top.trim())?;
     let porcelain = git_required_bytes(
         &top,
         ["worktree", "list", "--porcelain", "-z"],
         "list worktrees",
+        environment,
     )
     .await?;
     snapshot_from_porcelain(top, &porcelain)
 }
 
-fn snapshot_sync(path: &Path) -> WorktreeResult<RepositorySnapshot> {
-    let top = std_git_required(path, ["rev-parse", "--show-toplevel"], "resolve repository")?;
+fn snapshot_sync(
+    path: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<RepositorySnapshot> {
+    let top = std_git_required(
+        path,
+        ["rev-parse", "--show-toplevel"],
+        "resolve repository",
+        environment,
+    )?;
     let top = std::fs::canonicalize(top.trim())?;
-    let porcelain = std_git_output(&top, ["worktree", "list", "--porcelain", "-z"])?;
+    let porcelain = std_git_output(&top, ["worktree", "list", "--porcelain", "-z"], environment)?;
     if !porcelain.status.success() {
         return Err(git_failure("list worktrees", &porcelain));
     }
@@ -1892,7 +2024,10 @@ fn parse_porcelain(bytes: &[u8]) -> WorktreeResult<Vec<GitWorktree>> {
     Ok(result)
 }
 
-async fn worktree_status(record: &GitWorktree) -> WorktreeResult<&'static str> {
+async fn worktree_status(
+    record: &GitWorktree,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<&'static str> {
     if record.bare {
         return Ok("bare");
     }
@@ -1903,6 +2038,7 @@ async fn worktree_status(record: &GitWorktree) -> WorktreeResult<&'static str> {
         &record.path,
         ["status", "--porcelain", "--untracked-files=all"],
         "inspect worktree status",
+        environment,
     )
     .await?;
     Ok(if status.is_empty() { "clean" } else { "dirty" })
@@ -1962,23 +2098,34 @@ fn absolute_path(path: PathBuf) -> PathBuf {
     }
 }
 
-async fn git_success<I, S>(directory: &Path, args: I) -> WorktreeResult<bool>
+async fn git_success<I, S>(
+    directory: &Path,
+    args: I,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<bool>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Ok(git_output(directory, args, Duration::from_secs(10))
-        .await?
-        .status
-        .success())
+    Ok(
+        git_output(directory, args, Duration::from_secs(10), environment)
+            .await?
+            .status
+            .success(),
+    )
 }
 
-async fn git_required<I, S>(directory: &Path, args: I, operation: &str) -> WorktreeResult<String>
+async fn git_required<I, S>(
+    directory: &Path,
+    args: I,
+    operation: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = git_output(directory, args, GIT_NETWORK_TIMEOUT).await?;
+    let output = git_output(directory, args, GIT_NETWORK_TIMEOUT, environment).await?;
     if !output.status.success() {
         return Err(git_failure(operation, &output));
     }
@@ -1989,34 +2136,49 @@ async fn git_required_bytes<I, S>(
     directory: &Path,
     args: I,
     operation: &str,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<Vec<u8>>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = git_output(directory, args, GIT_NETWORK_TIMEOUT).await?;
+    let output = git_output(directory, args, GIT_NETWORK_TIMEOUT, environment).await?;
     if !output.status.success() {
         return Err(git_failure(operation, &output));
     }
     Ok(output.stdout)
 }
 
-async fn git_output<I, S>(directory: &Path, args: I, deadline: Duration) -> WorktreeResult<Output>
+async fn git_output<I, S>(
+    directory: &Path,
+    args: I,
+    deadline: Duration,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let mut command = Command::new("git");
+    let mut command = Command::new(git_executable(environment)?);
     command
         .arg("-C")
         .arg(directory)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .kill_on_drop(true);
-    command_output(&mut command, deadline).await
+    command_output(&mut command, deadline, environment).await
 }
 
-async fn command_output(command: &mut Command, deadline: Duration) -> WorktreeResult<Output> {
+async fn command_output(
+    command: &mut Command,
+    deadline: Duration,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Output> {
+    command
+        .env_clear()
+        .envs(environment)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .kill_on_drop(true);
     timeout(deadline, command.output())
         .await
         .map_err(|_| WorktreeError::Git {
@@ -2026,29 +2188,64 @@ async fn command_output(command: &mut Command, deadline: Duration) -> WorktreeRe
         .map_err(WorktreeError::Io)
 }
 
-fn std_git_required<I, S>(directory: &Path, args: I, operation: &str) -> WorktreeResult<String>
+fn std_git_required<I, S>(
+    directory: &Path,
+    args: I,
+    operation: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = std_git_output(directory, args)?;
+    let output = std_git_output(directory, args, environment)?;
     if !output.status.success() {
         return Err(git_failure(operation, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn std_git_output<I, S>(directory: &Path, args: I) -> WorktreeResult<Output>
+fn std_git_output<I, S>(
+    directory: &Path,
+    args: I,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Ok(StdCommand::new("git")
+    Ok(StdCommand::new(git_executable(environment)?)
         .arg("-C")
         .arg(directory)
         .args(args)
+        .env_clear()
+        .envs(environment)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()?)
+}
+
+fn git_executable(environment: &BTreeMap<OsString, OsString>) -> WorktreeResult<PathBuf> {
+    let path = environment
+        .get(std::ffi::OsStr::new("PATH"))
+        .ok_or_else(|| WorktreeError::Git {
+            operation: "resolve Git executable".into(),
+            message: "resolved user environment has no PATH".into(),
+        })?;
+    env::split_paths(path)
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| WorktreeError::Git {
+            operation: "resolve Git executable".into(),
+            message: "git was not found in the resolved user PATH".into(),
+        })
+}
+
+async fn command_environment(registry: &SharedProcessRegistry) -> BTreeMap<OsString, OsString> {
+    let resolved = {
+        let registry = registry.lock().await;
+        registry.resolved_user_environment()
+    };
+    resolved.command_environment()
 }
 
 fn git_failure(operation: &str, output: &Output) -> WorktreeError {

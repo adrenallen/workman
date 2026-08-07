@@ -74,6 +74,17 @@ impl ResolvedUserEnvironment {
         }
         parse_environment_capture(&output.stdout)
     }
+
+    /// Resolve the complete environment for non-PTY subprocesses such as Git, GitHub CLI,
+    /// Herd, and desktop openers. If a profile cannot be inspected, preserve the daemon's
+    /// inherited variables while still applying Workman's terminal-safe shell baseline.
+    pub fn command_environment(&self) -> BTreeMap<OsString, OsString> {
+        self.login_environment().unwrap_or_else(|_| {
+            let mut environment = env::vars_os().collect::<BTreeMap<_, _>>();
+            environment.extend(self.pty_environment.clone());
+            environment
+        })
+    }
 }
 
 /// Resolves the shell from user settings and operating-system account metadata.

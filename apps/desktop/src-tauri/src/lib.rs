@@ -26,7 +26,8 @@ use tokio_tungstenite::{
 };
 use workmand::{
     BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonConfig, DaemonServer, DaemonVersion,
-    Discovery, default_data_dir, discover_or_spawn, probe,
+    Discovery, UserEnvironmentResolver, default_data_dir, discover_or_spawn, probe,
+    user_config_path,
 };
 
 mod native_notifications;
@@ -1024,7 +1025,12 @@ fn open_in_file_manager(path: &Path, reveal: bool) -> Result<(), String> {
 }
 
 fn spawn_detached(command: &mut Command, label: &str) -> Result<(), String> {
+    let environment = UserEnvironmentResolver::new(user_config_path())
+        .resolve()
+        .command_environment();
     command
+        .env_clear()
+        .envs(environment)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

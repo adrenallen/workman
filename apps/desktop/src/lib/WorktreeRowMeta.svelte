@@ -1,5 +1,6 @@
 <script lang="ts">
   import GitMergeIcon from '@lucide/svelte/icons/git-merge';
+  import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import GitPullRequestIcon from '@lucide/svelte/icons/git-pull-request';
   import GitPullRequestClosedIcon from '@lucide/svelte/icons/git-pull-request-closed';
   import GitPullRequestDraftIcon from '@lucide/svelte/icons/git-pull-request-draft';
@@ -8,11 +9,12 @@
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import { openBrowserUrl } from './openers';
-  import type { WorktreeEntry } from './worktrees';
+  import type { PullRequestCache, WorktreeEntry } from './worktrees';
   import { pullRequestLabel, pullRequestTone } from './worktrees';
 
   interface Props {
     entry: WorktreeEntry | null;
+    pullRequestCache: PullRequestCache | null;
     repositoryName: string;
     refreshing?: boolean;
     showRefresh?: boolean;
@@ -21,6 +23,7 @@
 
   let {
     entry,
+    pullRequestCache,
     repositoryName,
     refreshing = false,
     showRefresh = false,
@@ -28,6 +31,10 @@
   }: Props = $props();
 
   let pullRequest = $derived(entry?.pull_request ?? null);
+  let pullRequestUnavailable = $derived(entry !== null && pullRequestCache?.available === false);
+  let pullRequestUnavailableLabel = $derived(
+    `PR status unavailable — ${pullRequestCache?.error?.trim() || 'lookup failed without a reason'}`
+  );
   let openingPullRequest = $state(false);
   let pullRequestToneName = $derived(pullRequest ? pullRequestTone(pullRequest) : 'neutral');
   let pullRequestClass = $derived(
@@ -73,7 +80,16 @@
         {/if}
       {/snippet}
     </IconButton>
-  {:else if entry}
+  {:else if pullRequestUnavailable}
+    <IconButton
+      class="size-6 text-warning"
+      label={pullRequestUnavailableLabel}
+      disabled={refreshing}
+      onclick={(event) => { event.stopPropagation(); onRefresh(); }}
+    >
+      {#snippet icon()}<CircleAlertIcon size={13} strokeWidth={1.9} />{/snippet}
+    </IconButton>
+  {:else if entry && pullRequestCache?.available === true}
     {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
     <TooltipLabel label={noPullRequestLabel}>
       <span class="no-pull-request" aria-label={noPullRequestLabel}>
@@ -81,7 +97,7 @@
       </span>
     </TooltipLabel>
   {/if}
-  {#if showRefresh}
+  {#if showRefresh && !pullRequestUnavailable}
     <IconButton
       class="size-6 opacity-0 group-hover/repository:opacity-100 focus-visible:opacity-100"
       label={`Refresh pull request status for ${repositoryName}`}
