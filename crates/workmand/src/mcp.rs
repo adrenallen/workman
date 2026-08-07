@@ -177,6 +177,15 @@ struct ProjectRenameArgs {
     name: String,
 }
 
+fn apply_explicit_project_name(project: &mut Project, name: &str) -> Result<(), &'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("project name must not be empty");
+    }
+    project.display_name = Some(name.to_owned());
+    Ok(())
+}
+
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ProjectDeleteArgs {
     #[serde(default)]
@@ -510,7 +519,9 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        project.name = args.name;
+        if let Err(error) = apply_explicit_project_name(&mut project, &args.name) {
+            return failure("invalid_project_name", error);
+        }
         match registry.store().put_project(&project) {
             Ok(()) => match crate::worktrees::project_envelope(registry.store(), project) {
                 Ok(project) => success(project),
@@ -566,6 +577,30 @@ impl WorkmanMcp {
             ),
             Err(error) => failure("project_delete_failed", error.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod project_name_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_rename_sets_display_name_without_rewriting_canonical_name() {
+        let mut project = Project {
+            id: 7,
+            path: "/tmp/repo-feature".into(),
+            name: "repo: feature".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+
+        apply_explicit_project_name(&mut project, "  Checkout polish  ").unwrap();
+
+        assert_eq!(project.name, "repo: feature");
+        assert_eq!(project.display_name.as_deref(), Some("Checkout polish"));
+        assert!(apply_explicit_project_name(&mut project, "  ").is_err());
     }
 }
 

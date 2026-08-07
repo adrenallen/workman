@@ -272,7 +272,8 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         json!({ "project_id": created_id, "name": "renamed" }),
     )
     .await;
-    assert_eq!(renamed["name"], "renamed");
+    assert_eq!(renamed["name"], "three");
+    assert_eq!(renamed["display_name"], "renamed");
 
     let unconfirmed = process_client
         .call_tool(
