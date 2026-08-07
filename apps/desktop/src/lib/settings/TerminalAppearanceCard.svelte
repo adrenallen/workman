@@ -101,6 +101,9 @@
             placeholder="/bin/zsh"
             bind:value={customShell}
             disabled={!connected || savingShell}
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             onkeydown={(event) => {
               if (event.key === 'Enter') void saveShell();
             }}

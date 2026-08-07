@@ -195,7 +195,7 @@
           <label class="grid gap-1.5">
             <span class="text-sm font-medium">Existing worktree folder</span>
             <span class="flex gap-2">
-              <Input bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" />
+              <Input bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
               <Button type="button" variant="outline" onclick={() => void chooseDirectory()}><FolderOpenIcon size={14} />Choose…</Button>
             </span>
             <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not Workman-managed.</small>
@@ -226,7 +226,9 @@
                     aria-controls="worktree-branch-options"
                     aria-activedescendant={activeBranch ? `worktree-branch-option-${branchOptionIndex}` : undefined}
                     autocomplete="off"
-                    spellcheck="false"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck={false}
                     placeholder={branchesLoading ? 'Fetching branches…' : 'Type to fuzzy-filter branches'}
                     oninput={() => { existingBranch = ''; branchOptionIndex = 0; }}
                     onkeydown={handleBranchKeydown}
@@ -272,7 +274,7 @@
           {:else}
             <label class="grid gap-1.5">
               <span class="text-sm font-medium">Branch name</span>
-              <Input bind:ref={branchInput} bind:value={branch} class="font-mono" placeholder={mode === 'fork' ? 'feature/follow-up' : 'feature/new-worktree'} autocomplete="off" spellcheck="false" />
+              <Input bind:ref={branchInput} bind:value={branch} class="font-mono" placeholder={mode === 'fork' ? 'feature/follow-up' : 'feature/new-worktree'} autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
             </label>
           {/if}
 
@@ -301,7 +303,7 @@
                 {#if mode === 'create' && createKind === 'new'}
                   <label class="grid gap-1.5 border-t border-border pt-3">
                     <span class="text-sm font-medium">Base ref</span>
-                    <Input bind:value={baseRef} class="font-mono" placeholder="HEAD, main, origin/main, or SHA" autocomplete="off" spellcheck="false" />
+                    <Input bind:value={baseRef} class="font-mono" placeholder="HEAD, main, origin/main, or SHA" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
                     <small class="text-xs text-muted-foreground">The new branch starts here. Existing branches are never reset.</small>
                   </label>
                 {/if}

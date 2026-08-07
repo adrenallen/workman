@@ -7,8 +7,10 @@
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import SearchIcon from '@lucide/svelte/icons/search';
   import SettingsIcon from '@lucide/svelte/icons/settings';
+  import SquareIcon from '@lucide/svelte/icons/square';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import XIcon from '@lucide/svelte/icons/x';
   import { onMount } from 'svelte';
@@ -68,6 +70,10 @@
     onAddTerminal: () => void;
     onAddCommand: () => void;
     onAddScratchpad: () => void;
+    commandBusyId: number | null;
+    onStartCommand: (process: ProcessView) => void;
+    onStopCommand: (process: ProcessView) => void;
+    onRestartCommand: (process: ProcessView) => void;
     onOpenSettings: () => void;
     onToggleCollapse: () => void;
     reordering: boolean;
@@ -94,6 +100,10 @@
     onAddTerminal,
     onAddCommand,
     onAddScratchpad,
+    commandBusyId,
+    onStartCommand,
+    onStopCommand,
+    onRestartCommand,
     onOpenSettings,
     onToggleCollapse,
     reordering,
@@ -678,22 +688,41 @@
                 {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
                   <InlineTreeRename value={process.name} label="Command name" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
                 {:else}
-                  <button
-                    type="button"
-                    class="tree-row command-row"
+                  <div
+                    class="command-row-shell"
                     class:selected={selection?.key === `command:${process.id}`}
-                    data-tree-row
-                    data-context-kind="command"
-                    data-context-id={process.id}
-                    use:reorderItem={reorderOptions(process)}
-                    onclick={() => selectProcess(process)}
-                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
-                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    aria-busy={commandBusyId === process.id}
                   >
-                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
-                    <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
-                    <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}{#if !isRunning(process)}<span class="run-hint">Run</span>{/if}</span>
-                  </button>
+                    <button
+                      type="button"
+                      class="tree-row command-row"
+                      data-tree-row
+                      data-context-kind="command"
+                      data-context-id={process.id}
+                      use:reorderItem={reorderOptions(process)}
+                      onclick={() => selectProcess(process)}
+                      oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                      onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    >
+                      <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
+                      <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
+                      <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}</span>
+                    </button>
+                    <div class="command-actions" aria-label={`${process.name} actions`}>
+                      {#if isRunning(process)}
+                        <IconButton class="size-6 rounded-sm" label={`Restart ${process.name}`} disabled={commandBusyId !== null} onclick={() => onRestartCommand(process)}>
+                          {#snippet icon()}<RefreshCwIcon size={13} strokeWidth={1.8} />{/snippet}
+                        </IconButton>
+                        <IconButton class="size-6 rounded-sm hover:text-destructive" label={`Stop ${process.name}`} disabled={commandBusyId !== null} onclick={() => onStopCommand(process)}>
+                          {#snippet icon()}<SquareIcon size={12} strokeWidth={1.8} />{/snippet}
+                        </IconButton>
+                      {:else}
+                        <IconButton class="size-6 rounded-sm text-success hover:text-success" label={`Start ${process.name}`} disabled={commandBusyId !== null} onclick={() => onStartCommand(process)}>
+                          {#snippet icon()}<PlayIcon size={13} strokeWidth={1.8} />{/snippet}
+                        </IconButton>
+                      {/if}
+                    </div>
+                  </div>
                 {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching commands' : 'No commands in workman.yml'}</p>
@@ -762,7 +791,7 @@
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
   .caret { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; }
   .group-icon { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; text-align: center; }
-  .row-meta, .run-hint { flex: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 1px 4px; color: var(--text-soft); background: var(--popover); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .row-meta { flex: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 1px 4px; color: var(--text-soft); background: var(--popover); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .group-rows { padding: 0 4px 4px 13px; }
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
@@ -782,6 +811,12 @@
   .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
   .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .command-row-shell { display: grid; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; border-radius: 3px; }
+  .command-row-shell:hover { background: var(--popover); }
+  .command-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .command-row-shell .command-row:hover { background: transparent; }
+  .command-actions { display: flex; width: 52px; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 2px; opacity: 0; transition: opacity 120ms ease; }
+  .command-row-shell:hover .command-actions, .command-row-shell:focus-within .command-actions { opacity: 1; }
   .row-copy { min-width: 0; }
   .row-copy strong, .row-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row-copy strong { font-size: var(--font-size-sm); font-weight: 590; }
@@ -802,9 +837,9 @@
   .add-row, .show-all { grid-template-columns: 1fr; padding: 3px 5px 3px 22px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .add-row { color: var(--text-soft); }
   .empty-row { margin: 0; padding: 5px 5px 5px 22px; color: #686f78; font-size: var(--font-size-sm); }
-  .run-hint { border-color: #44504a; color: #aab8b0; }
-
   .tree-footer { display: flex; min-height: 38px; align-items: center; justify-content: flex-end; padding: 5px 6px; border-top: 1px solid var(--border); }
+
+  @media (prefers-reduced-motion: reduce) { .command-actions { transition: none; } }
 
   .project-tree.collapsed .tree-toolbar { justify-content: center; padding-inline: 0; }
   .project-tree.collapsed .tree-groups { padding-inline: 4px; }

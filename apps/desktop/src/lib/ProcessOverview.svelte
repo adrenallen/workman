@@ -2,10 +2,13 @@
   import BotIcon from '@lucide/svelte/icons/bot';
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import SquareIcon from '@lucide/svelte/icons/square';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
 
   import { Button } from '$lib/components/ui/button';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
+  import IconButton from './components/ds/IconButton.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import SectionOverview from './SectionOverview.svelte';
   import { agentStatusPresentation } from './agentStatus';
@@ -19,9 +22,13 @@
     onSelect: (process: ProcessView) => void;
     onCreate: () => void;
     project?: Project | null;
+    busyId: number | null;
+    onStart: (process: ProcessView) => void;
+    onStop: (process: ProcessView) => void;
+    onRestart: (process: ProcessView) => void;
   }
 
-  let { kind, processes, onSelect, onCreate, project = null }: Props = $props();
+  let { kind, processes, onSelect, onCreate, project = null, busyId, onStart, onStop, onRestart }: Props = $props();
 
   const copy = {
     agent: {
@@ -140,24 +147,46 @@
 
   <div class="process-ledger" aria-live="polite">
     {#each matchingProcesses as process (process.id)}
-      <button
-        type="button"
+      <article
         class="process-row"
-        title={`Open ${process.name}`}
-        onclick={() => onSelect(process)}
+        class:with-actions={kind === 'command'}
+        aria-busy={busyId === process.id}
       >
-        {#if process.kind === 'agent'}
-          <AgentStatusIndicator {process} />
-        {:else}
-          <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
+        <button
+          type="button"
+          class="process-primary"
+          title={`Open ${process.name}`}
+          onclick={() => onSelect(process)}
+        >
+          {#if process.kind === 'agent'}
+            <AgentStatusIndicator {process} />
+          {:else}
+            <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
+          {/if}
+          <span class="process-ref">#{process.id}</span>
+          <span class="process-copy">
+            <strong>{process.name}</strong>
+            <small>{secondaryCopy(process)}</small>
+          </span>
+          <span class:attention={process.kind === 'agent' && process.agent_state.needs_input} class="process-state">{stateLabel(process)}</span>
+        </button>
+        {#if kind === 'command'}
+          <div class="process-actions" aria-label={`${process.name} actions`}>
+            {#if isRunning(process)}
+              <IconButton class="size-7 rounded-sm" label={`Restart ${process.name}`} disabled={busyId !== null} onclick={() => onRestart(process)}>
+                {#snippet icon()}<RefreshCwIcon size={14} strokeWidth={1.8} />{/snippet}
+              </IconButton>
+              <IconButton class="size-7 rounded-sm hover:text-destructive" label={`Stop ${process.name}`} disabled={busyId !== null} onclick={() => onStop(process)}>
+                {#snippet icon()}<SquareIcon size={13} strokeWidth={1.8} />{/snippet}
+              </IconButton>
+            {:else}
+              <IconButton class="size-7 rounded-sm text-success hover:text-success" label={`Start ${process.name}`} disabled={busyId !== null} onclick={() => onStart(process)}>
+                {#snippet icon()}<PlayIcon size={14} strokeWidth={1.8} />{/snippet}
+              </IconButton>
+            {/if}
+          </div>
         {/if}
-        <span class="process-ref">#{process.id}</span>
-        <span class="process-copy">
-          <strong>{process.name}</strong>
-          <small>{secondaryCopy(process)}</small>
-        </span>
-        <span class:attention={process.kind === 'agent' && process.agent_state.needs_input} class="process-state">{stateLabel(process)}</span>
-      </button>
+      </article>
     {:else}
       <div class="empty-results">
         <strong>{section.empty}</strong>
@@ -173,8 +202,12 @@
   .active { color: var(--success); }
   .attention { color: var(--warning-token); }
   .process-ledger { height: 100%; min-height: 0; overflow-y: auto; padding: 4px 7px 10px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .process-row { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 42px minmax(160px, 1fr) minmax(88px, auto); align-items: center; gap: var(--space-2); border: 0; border-bottom: 1px solid var(--border); padding: 4px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .process-row { display: grid; width: 100%; min-height: 42px; grid-template-columns: minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--border); background: transparent; color: var(--foreground); }
+  .process-row.with-actions { grid-template-columns: minmax(0, 1fr) 64px; }
   .process-row:hover { background: var(--popover); }
+  .process-primary { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 42px minmax(160px, 1fr) minmax(88px, auto); align-items: center; gap: var(--space-2); border: 0; padding: 4px 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .process-actions { display: flex; width: 64px; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 7px; opacity: 0; transition: opacity 120ms ease; }
+  .process-row:hover .process-actions, .process-row:focus-within .process-actions { opacity: 1; }
   .process-ref, .process-copy small, .process-state { font-family: var(--terminal-font-family); font-size: var(--font-size-xs); }
   .process-ref { color: var(--muted-foreground); }
   .process-copy { min-width: 0; }
@@ -187,7 +220,9 @@
   .empty-results p { max-width: 380px; margin: 5px 0 10px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
 
   @container (max-width: 640px) {
-    .process-row { grid-template-columns: 16px 38px minmax(0, 1fr); }
+    .process-primary { grid-template-columns: 16px 38px minmax(0, 1fr); }
     .process-state { display: none; }
   }
+
+  @media (prefers-reduced-motion: reduce) { .process-actions { transition: none; } }
 </style>

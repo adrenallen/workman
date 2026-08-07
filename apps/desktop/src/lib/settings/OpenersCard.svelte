@@ -123,7 +123,9 @@
               class:invalid={editorError !== null}
               value={$openerSettings.config.editor.customTemplate}
               placeholder={'code {path}'}
-              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck={false}
               oninput={(event) => change((config) => { config.editor.customTemplate = value(event); })}
             />
             <small class:error={editorError !== null}>{editorError ?? 'Arguments are parsed directly; no shell is used.'}</small>
@@ -170,7 +172,9 @@
               class:invalid={terminalError !== null}
               value={$openerSettings.config.terminal.customTemplate}
               placeholder={'open -a iTerm {path}'}
-              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck={false}
               oninput={(event) => change((config) => { config.terminal.customTemplate = value(event); })}
             />
             <small class:error={terminalError !== null}>{terminalError ?? 'Use {path} for the project directory.'}</small>
@@ -217,7 +221,9 @@
               class:invalid={browserError !== null}
               value={$openerSettings.config.browser.customTemplate}
               placeholder={'open -a Safari {path}'}
-              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck={false}
               oninput={(event) => change((config) => { config.browser.customTemplate = value(event); })}
             />
             <small class:error={browserError !== null}>{browserError ?? 'Use {path} for the URL or local path.'}</small>
@@ -276,7 +282,9 @@
         value={$openerSettings.config.sidebar.customTemplate}
         disabled={!$openerSettings.config.sidebar.customEnabled}
         placeholder={'my-app --project {path}'}
-        spellcheck="false"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck={false}
         oninput={(event) => change((config) => { config.sidebar.customTemplate = value(event); })}
       />
       {#if $openerSettings.config.sidebar.customEnabled}

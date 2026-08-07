@@ -214,6 +214,9 @@
           bind:value={command}
           disabled={busy}
           placeholder="e.g. npm run dev"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck={false}
         />
         {#if attempted && !command.trim()}<small id="command-value-error" class="error">Command is required.</small>{/if}
       </label>
@@ -227,6 +230,9 @@
             bind:value={workingDir}
             disabled={busy}
             placeholder={project.path}
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
             oninput={() => (workingDirError = null)}
           />
           <Button variant="outline" size="sm" disabled={busy} onclick={() => void browse()}>

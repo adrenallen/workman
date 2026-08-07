@@ -1396,9 +1396,44 @@
   }
 
   async function startProcess(process: ProcessView): Promise<void> {
+    if (processBusyId !== null) return;
     processBusyId = process.id;
     try {
       await client.startProcess(process.id);
+      await refreshProcesses(process.project_id);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      processBusyId = null;
+    }
+  }
+
+  async function startOrReviewProcess(process: ProcessView): Promise<void> {
+    if (process.source === 'yml' && process.trust_hash === null) {
+      await openTrustReview(process);
+    } else {
+      await startProcess(process);
+    }
+  }
+
+  async function stopProcess(process: ProcessView): Promise<void> {
+    if (processBusyId !== null) return;
+    processBusyId = process.id;
+    try {
+      await client.stopProcess(process.id);
+      await refreshProcesses(process.project_id);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      processBusyId = null;
+    }
+  }
+
+  async function restartProcess(process: ProcessView): Promise<void> {
+    if (processBusyId !== null) return;
+    processBusyId = process.id;
+    try {
+      await client.restartProcess(process.id);
       await refreshProcesses(process.project_id);
     } catch (cause) {
       reportError(cause);
@@ -2546,19 +2581,13 @@
     const process = target.process;
     switch (action) {
       case 'start':
-        if (process.source === 'yml' && process.trust_hash === null) {
-          await openTrustReview(process);
-        } else {
-          await startProcess(process);
-        }
+        await startOrReviewProcess(process);
         return;
       case 'stop':
-        await client.stopProcess(process.id);
-        await refreshProcesses(process.project_id);
+        await stopProcess(process);
         return;
       case 'restart':
-        await client.restartProcess(process.id);
-        await refreshProcesses(process.project_id);
+        await restartProcess(process);
         return;
       case 'kill':
         if (!window.confirm(`Kill ${process.name} immediately? Unsaved terminal state may be lost.`)) return;
@@ -3066,6 +3095,10 @@
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
         onAddScratchpad={() => void createScratchpad()}
+        commandBusyId={processBusyId}
+        onStartCommand={(process) => void startOrReviewProcess(process)}
+        onStopCommand={(process) => void stopProcess(process)}
+        onRestartCommand={(process) => void restartProcess(process)}
         onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy}
@@ -3159,8 +3192,12 @@
             project={selectedProject}
             kind={processOverviewKind}
             {processes}
+            busyId={processBusyId}
             onSelect={(process) => void selectTreeItem(projectTreeSelection(process.kind, process.id, process.project_id, processLabel(process)))}
             onCreate={() => createFromProcessOverview(processOverviewKind!)}
+            onStart={(process) => void startOrReviewProcess(process)}
+            onStop={(process) => void stopProcess(process)}
+            onRestart={(process) => void restartProcess(process)}
           />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView

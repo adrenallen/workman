@@ -354,12 +354,12 @@
       </label>
       <label>
         <span>Command</span>
-        <input bind:value={editingTool.command} required autocapitalize="none" spellcheck="false" placeholder="aider --model sonnet" />
+        <input bind:value={editingTool.command} required autocapitalize="off" autocorrect="off" spellcheck={false} placeholder="aider --model sonnet" />
         <small>Include default flags here. Per-launch arguments are appended safely.</small>
       </label>
       <label>
         <span>Tool type</span>
-        <input bind:value={editingTool.tool_type} required autocapitalize="none" spellcheck="false" placeholder="custom" />
+        <input bind:value={editingTool.tool_type} required autocapitalize="off" autocorrect="off" spellcheck={false} placeholder="custom" />
       </label>
       <label class="enabled-field">
         <input type="checkbox" bind:checked={editingTool.enabled} />
@@ -394,7 +394,7 @@
       </label>
       <label>
         <span>Extra arguments <i>optional</i></span>
-        <input bind:value={launchArgs} autocapitalize="none" spellcheck="false" placeholder='--model "gpt-5"' />
+        <input bind:value={launchArgs} autocapitalize="off" autocorrect="off" spellcheck={false} placeholder='--model "gpt-5"' />
         <small>Quotes group one argument. Workman passes each value without shell reinterpretation.</small>
       </label>
       <footer>

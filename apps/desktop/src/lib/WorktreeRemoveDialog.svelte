@@ -52,7 +52,7 @@
           </label>
           <label class="grid gap-1">
             <span class="text-xs text-muted-foreground">Type <code>{entry.branch}</code> to confirm</span>
-            <Input bind:value={confirmBranch} class="font-mono" disabled={!forceDirty} autocomplete="off" spellcheck="false" />
+            <Input bind:value={confirmBranch} class="font-mono" disabled={!forceDirty} autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
           </label>
         </div>
       {/if}
