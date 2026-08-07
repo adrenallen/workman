@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 
-import { pointIsInsideRect, shellEscapePaths } from './terminalInput';
+import { localPathsFromUriList, pointIsInsideRect, shellEscapePaths } from './terminalInput';
 
 interface TerminalTransferOptions {
   element: HTMLElement;
@@ -90,9 +90,12 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
     event.preventDefault();
     event.stopPropagation();
     options.setDropActive(false);
-    const paths = Array.from(event.dataTransfer?.files ?? [])
+    let paths = Array.from(event.dataTransfer?.files ?? [])
       .map((file) => (file as PathFile).path)
       .filter((path): path is string => Boolean(path));
+    if (paths.length === 0) {
+      paths = localPathsFromUriList(event.dataTransfer?.getData('text/uri-list') ?? '');
+    }
     if (paths.length === 0) {
       options.reportError('The dropped files did not expose local paths.');
       return;

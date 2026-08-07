@@ -16,6 +16,23 @@ export function shellEscapePaths(paths: string[]): string {
   return paths.map(shellEscapePath).join(' ');
 }
 
+export function localPathsFromUriList(value: string): string[] {
+  const paths: string[] = [];
+  for (const line of value.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (!candidate || candidate.startsWith('#')) continue;
+    try {
+      const url = new URL(candidate);
+      if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) continue;
+      const path = decodeURIComponent(url.pathname);
+      if (path.startsWith('/')) paths.push(path);
+    } catch {
+      // Ignore malformed or non-local URI-list entries.
+    }
+  }
+  return paths;
+}
+
 export function pointIsInsideRect(
   point: { x: number; y: number },
   rect: { left: number; top: number; right: number; bottom: number },

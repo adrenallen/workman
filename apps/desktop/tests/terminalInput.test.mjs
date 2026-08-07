@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { pointIsInsideRect, shellEscapePath, shellEscapePaths } from '../src/lib/terminalInput.ts';
+import {
+  localPathsFromUriList,
+  pointIsInsideRect,
+  shellEscapePath,
+  shellEscapePaths
+} from '../src/lib/terminalInput.ts';
+
+test('accepts only local file URLs from a URI list', () => {
+  assert.deepEqual(
+    localPathsFromUriList([
+      '# Finder drag payload',
+      'file:///tmp/drop%20image%20one.png',
+      'file://localhost/tmp/quote%27s%20%E9%9B%AA.png',
+      'file://remote.example/tmp/refused.png',
+      'https://example.com/refused.png',
+      'not a URL'
+    ].join('\r\n')),
+    ['/tmp/drop image one.png', "/tmp/quote's 雪.png"]
+  );
+});
 
 test('shell-escapes spaces, quotes, metacharacters, backslashes, and unicode', () => {
   assert.equal(shellEscapePath('/tmp/plain.png'), '/tmp/plain.png');
