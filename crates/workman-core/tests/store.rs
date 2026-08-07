@@ -60,6 +60,7 @@ fn fresh_database_migrates_to_current_schema() {
             "scratchpads",
             "timer_runtime",
             "timers",
+            "todo_activity",
             "todo_blockers",
             "todo_comments",
             "todo_tags",
