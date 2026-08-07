@@ -18,6 +18,10 @@ fn main() {
                 std::env::set_var("WORKMAN_DAEMON_BIN", daemon_bin);
             }
         }
+        if let Err(error) = workman_desktop::enforce_native_visual_qa_isolation() {
+            eprintln!("FATAL: {error}");
+            std::process::exit(78);
+        }
         workman_desktop::run();
     }
 }

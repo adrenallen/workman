@@ -422,6 +422,142 @@ pub fn launch_environment(
     (data_dir, config, daemon_bin)
 }
 
+const NATIVE_VISUAL_QA_BUNDLE_PREFIX: &str = "com.workman.todo";
+
+/// Fail closed before Tauri starts whenever a per-todo visual-QA bundle has lost its
+/// isolated launch environment. Computer-use clients may transparently reopen a closed
+/// macOS bundle through LaunchServices, so shell-only environment overrides are not enough.
+pub fn enforce_native_visual_qa_isolation() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().map_err(|error| {
+            format!("native visual QA isolation guard could not resolve the executable: {error}")
+        })?;
+        let Some(identifier) = macos_bundle_identifier_from_executable(&executable)? else {
+            return Ok(());
+        };
+        validate_native_visual_qa_environment(
+            &identifier,
+            std::env::var_os("WORKMAN_DATA_DIR").as_deref(),
+            std::env::var_os("WORKMAN_CONFIG").as_deref(),
+            std::env::var_os("WORKMAN_DAEMON_BIN").as_deref(),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bundle_identifier_from_executable(executable: &Path) -> Result<Option<String>, String> {
+    let Some(contents) = executable.parent().and_then(Path::parent) else {
+        return Ok(None);
+    };
+    if contents.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return Ok(None);
+    }
+    let info_plist = contents.join("Info.plist");
+    if !info_plist.is_file() {
+        return Ok(None);
+    }
+    let value = plist::Value::from_file(&info_plist).map_err(|error| {
+        format!(
+            "native visual QA isolation guard could not read {}: {error}",
+            info_plist.display()
+        )
+    })?;
+    Ok(value
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
+        .and_then(plist::Value::as_string)
+        .map(str::to_owned))
+}
+
+fn native_visual_qa_todo_id(identifier: &str) -> Option<&str> {
+    let todo_id = identifier.strip_prefix(NATIVE_VISUAL_QA_BUNDLE_PREFIX)?;
+    (!todo_id.is_empty() && todo_id.bytes().all(|byte| byte.is_ascii_digit())).then_some(todo_id)
+}
+
+fn validate_native_visual_qa_environment(
+    identifier: &str,
+    data_dir: Option<&std::ffi::OsStr>,
+    config: Option<&std::ffi::OsStr>,
+    daemon_bin: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    if !identifier.starts_with(NATIVE_VISUAL_QA_BUNDLE_PREFIX) {
+        return Ok(());
+    }
+    let todo_id = native_visual_qa_todo_id(identifier).ok_or_else(|| {
+        native_visual_qa_error(
+            identifier,
+            "bundle identifier must end with a numeric todo ID",
+        )
+    })?;
+    let token = format!("workman-todo{todo_id}");
+    let data_dir =
+        required_native_visual_qa_path(identifier, "WORKMAN_DATA_DIR", data_dir, &token)?;
+    let config = required_native_visual_qa_path(identifier, "WORKMAN_CONFIG", config, &token)?;
+    if data_dir == config {
+        return Err(native_visual_qa_error(
+            identifier,
+            "WORKMAN_DATA_DIR and WORKMAN_CONFIG resolve to the same path",
+        ));
+    }
+    if let Some(daemon_bin) = daemon_bin {
+        let daemon_bin = Path::new(daemon_bin);
+        if !daemon_bin.is_absolute() {
+            return Err(native_visual_qa_error(
+                identifier,
+                "WORKMAN_DAEMON_BIN must be an absolute path when set",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn required_native_visual_qa_path<'a>(
+    identifier: &str,
+    name: &str,
+    value: Option<&'a std::ffi::OsStr>,
+    token: &str,
+) -> Result<PathBuf, String> {
+    let value =
+        value.ok_or_else(|| native_visual_qa_error(identifier, &format!("{name} is missing")))?;
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err(native_visual_qa_error(
+            identifier,
+            &format!(
+                "{name} must be an absolute per-todo path under /tmp containing {token}; got {}",
+                path.display()
+            ),
+        ));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        native_visual_qa_error(
+            identifier,
+            &format!("{name} must already exist and resolve safely: {error}"),
+        )
+    })?;
+    let under_tmp = canonical.starts_with("/tmp") || canonical.starts_with("/private/tmp");
+    if !under_tmp || !canonical.to_string_lossy().contains(token) {
+        return Err(native_visual_qa_error(
+            identifier,
+            &format!(
+                "{name} must resolve to a per-todo path under /tmp containing {token}; got {}",
+                canonical.display()
+            ),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn native_visual_qa_error(identifier: &str, reason: &str) -> String {
+    format!(
+        "native visual QA isolation guard refused {identifier}: {reason}. Relaunch with scripts/native-visual-qa.sh so LaunchServices preserves the isolated contract"
+    )
+}
+
 /// Run the loopback daemon from the desktop executable as a headless child-process fallback.
 pub fn run_embedded_daemon(data_dir: PathBuf) -> Result<(), Box<dyn Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1023,6 +1159,101 @@ mod tests {
             daemon.clone(),
         ]);
         assert_eq!(environment, (Some(data_dir), Some(config), Some(daemon)));
+    }
+
+    #[test]
+    fn native_visual_qa_bundle_requires_per_todo_tmp_paths() {
+        let identifier = "com.workman.todo307";
+        let root = tempfile::Builder::new()
+            .prefix("workman-todo307-qa.")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data_path = root.path().join("data");
+        let config_path = root.path().join("config.yml");
+        std::fs::create_dir(&data_path).unwrap();
+        std::fs::write(&config_path, b"agent_tools: []\n").unwrap();
+        let data_dir = data_path.into_os_string();
+        let config = config_path.into_os_string();
+        let daemon = OsString::from("/tmp/workman-build/workmand");
+        assert_eq!(
+            validate_native_visual_qa_environment(
+                identifier,
+                Some(&data_dir),
+                Some(&config),
+                Some(&daemon)
+            ),
+            Ok(())
+        );
+
+        for (data, config, expected) in [
+            (
+                None,
+                Some(config.as_os_str()),
+                "WORKMAN_DATA_DIR is missing",
+            ),
+            (
+                Some(data_dir.as_os_str()),
+                None,
+                "WORKMAN_CONFIG is missing",
+            ),
+            (
+                Some(std::ffi::OsStr::new(
+                    "/Users/g/Library/Application Support/workman",
+                )),
+                Some(config.as_os_str()),
+                "must resolve to a per-todo path under /tmp",
+            ),
+            (
+                Some(std::ffi::OsStr::new("/tmp/other-qa/data")),
+                Some(config.as_os_str()),
+                "must already exist and resolve safely",
+            ),
+        ] {
+            let error = validate_native_visual_qa_environment(identifier, data, config, None)
+                .expect_err("unsafe QA environment must fail closed");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn native_visual_qa_guard_does_not_restrict_stable_or_dev_bundles() {
+        for identifier in ["com.workman.desktop", "com.workman.dev"] {
+            assert_eq!(
+                validate_native_visual_qa_environment(identifier, None, None, None),
+                Ok(())
+            );
+        }
+        let error = validate_native_visual_qa_environment(
+            "com.workman.todo-not-a-number",
+            None,
+            None,
+            None,
+        )
+        .expect_err("malformed QA identities must fail closed");
+        assert!(error.contains("must end with a numeric todo ID"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_visual_qa_guard_reads_the_bundle_identifier_from_info_plist() {
+        let bundle = tempfile::tempdir().unwrap();
+        let contents = bundle.path().join("Workman Todo 307.app/Contents");
+        let executable = contents.join("MacOS/workman-desktop");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"").unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.workman.todo307</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            macos_bundle_identifier_from_executable(&executable).unwrap(),
+            Some("com.workman.todo307".to_owned())
+        );
     }
 
     #[test]

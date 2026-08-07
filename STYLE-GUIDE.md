@@ -59,4 +59,4 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Narrow, normal, collapsed, and resized panel states do not clip or overflow.
 - Dark and light themes use the same semantic tokens.
 - Every indicator and icon-only action exposes its meaning on hover and to assistive technology.
-- Installed-app visual QA uses an isolated `WORKMAN_DATA_DIR`; no test daemon or app remains running.
+- Installed-app visual QA launches through `scripts/native-visual-qa.sh` with a per-todo bundle ID. The staged bundle persists its fresh `/tmp` `WORKMAN_DATA_DIR`, `WORKMAN_CONFIG`, and explicit-daemon guard in `LSEnvironment`, so a Computer Use or LaunchServices reopen stays isolated; per-todo bundles fail closed if that contract is absent. No test daemon or app remains running.

@@ -6202,6 +6202,7 @@ dependencies = [
  "futures-util",
  "mac-usernotifications",
  "notify-rust",
+ "plist",
  "serde",
  "serde_json",
  "tauri",
