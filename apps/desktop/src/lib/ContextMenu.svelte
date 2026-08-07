@@ -1,6 +1,8 @@
 <script lang="ts">
   import ArchiveIcon from '@lucide/svelte/icons/archive';
+  import BotIcon from '@lucide/svelte/icons/bot';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import ClipboardIcon from '@lucide/svelte/icons/clipboard';
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
@@ -10,15 +12,24 @@
   import GitForkIcon from '@lucide/svelte/icons/git-fork';
   import ImportIcon from '@lucide/svelte/icons/import';
   import MessageSquareIcon from '@lucide/svelte/icons/message-square';
+  import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import PlayIcon from '@lucide/svelte/icons/play';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import SettingsIcon from '@lucide/svelte/icons/settings';
   import SquareIcon from '@lucide/svelte/icons/square';
+  import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
+  import type { Component } from 'svelte';
 
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 
-  import type { ContextActionId, ContextMenuItem } from './contextMenu';
+  import {
+    contextActionIcon,
+    type ContextActionIcon,
+    type ContextActionId,
+    type ContextMenuItem
+  } from './contextMenu';
 
   interface Props {
     x: number;
@@ -37,24 +48,29 @@
     onSelect(item.id);
   }
 
-  function actionIcon(id: ContextActionId) {
-    if (id.startsWith('copy-')) return ClipboardIcon;
-    if (id === 'start' || id === 'start-all-commands' || id === 'reopen-todo') return PlayIcon;
-    if (id === 'stop' || id === 'stop-all-commands') return SquareIcon;
-    if (id === 'restart' || id === 'refresh-worktrees' || id === 'refresh-pull-request') return RefreshCwIcon;
-    if (id === 'new-worktree') return GitBranchPlusIcon;
-    if (id === 'adopt-worktree' || id === 'import-worktrees') return ImportIcon;
-    if (id === 'fork-worktree') return GitForkIcon;
-    if (id === 'rename') return PencilIcon;
-    if (id === 'complete-todo' || id === 'select' || id === 'mark-read') return CheckIcon;
-    if (id === 'send-prompt') return MessageSquareIcon;
-    if (id === 'view-parent') return GitBranchIcon;
-    if (id === 'reveal-config') return FileCodeIcon;
-    if (id === 'open-in-editor' || id === 'open-custom' || id === 'open-pull-request' || id === 'open-herd-site') return ExternalLinkIcon;
-    if (id === 'open-in-finder') return FolderIcon;
-    if (id === 'archive-scratchpad') return ArchiveIcon;
-    return Trash2Icon;
-  }
+  const ICONS: Record<ContextActionIcon, Component> = {
+    archive: ArchiveIcon,
+    bot: BotIcon,
+    check: CheckIcon,
+    'circle-check': CircleCheckIcon,
+    clipboard: ClipboardIcon,
+    'external-link': ExternalLinkIcon,
+    'file-code': FileCodeIcon,
+    folder: FolderIcon,
+    'git-branch': GitBranchIcon,
+    'git-branch-plus': GitBranchPlusIcon,
+    'git-fork': GitForkIcon,
+    import: ImportIcon,
+    'message-square': MessageSquareIcon,
+    'notebook-text': NotebookTextIcon,
+    pencil: PencilIcon,
+    play: PlayIcon,
+    'refresh-cw': RefreshCwIcon,
+    settings: SettingsIcon,
+    square: SquareIcon,
+    'square-terminal': SquareTerminalIcon,
+    'trash-2': Trash2Icon
+  };
 </script>
 
 <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -77,7 +93,7 @@
     <DropdownMenu.Separator />
     {#each items as item (item.id)}
       {#if item.separatorBefore}<DropdownMenu.Separator />{/if}
-      {@const Icon = actionIcon(item.id)}
+      {@const Icon = ICONS[contextActionIcon(item.id)]}
       <DropdownMenu.Item
         variant={item.destructive ? 'destructive' : 'default'}
         disabled={item.disabled}

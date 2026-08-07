@@ -9,48 +9,14 @@ import {
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
 import type { WorktreeEntry, WorktreeRepository } from './worktrees';
+import type { ContextActionId } from './contextMenuIcons';
 
-export type ContextActionId =
-  | 'select'
-  | 'project-settings'
-  | 'start'
-  | 'stop'
-  | 'restart'
-  | 'kill'
-  | 'close'
-  | 'rename'
-  | 'copy-name'
-  | 'copy-id'
-  | 'send-prompt'
-  | 'view-parent'
-  | 'mark-read'
-  | 'reveal-config'
-  | 'complete-todo'
-  | 'reopen-todo'
-  | 'copy-title'
-  | 'archive-scratchpad'
-  | 'delete-scratchpad'
-  | 'new-agent'
-  | 'new-terminal'
-  | 'add-command'
-  | 'new-todo'
-  | 'new-scratchpad'
-  | 'start-all-commands'
-  | 'stop-all-commands'
-  | 'remove-project'
-  | 'open-in-editor'
-  | 'open-in-finder'
-  | 'open-custom'
-  | 'copy-path'
-  | 'new-worktree'
-  | 'adopt-worktree'
-  | 'import-worktrees'
-  | 'fork-worktree'
-  | 'remove-worktree'
-  | 'refresh-worktrees'
-  | 'refresh-pull-request'
-  | 'open-pull-request'
-  | 'open-herd-site';
+export {
+  CONTEXT_ACTION_IDS,
+  DESTRUCTIVE_CONTEXT_ACTION_IDS,
+  contextActionIcon
+} from './contextMenuIcons';
+export type { ContextActionIcon, ContextActionId } from './contextMenuIcons';
 
 export interface ContextMenuItem {
   id: ContextActionId;
