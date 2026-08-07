@@ -16,6 +16,7 @@
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { encodeTerminalKey } from './terminalKeys';
+  import { installTerminalTransfers } from './terminalTransfers';
 
   let {
     client,
@@ -32,10 +33,13 @@
   } = $props();
 
   let host: HTMLDivElement;
+  let frame: HTMLElement;
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
   let hasOutput = $state(false);
   let linkHintVisible = $state(false);
+  let transferDropActive = $state(false);
+  let imagePasteSaving = $state(false);
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
   let inputProcessId: number | null = null;
@@ -101,6 +105,18 @@
       })
     );
     instance.open(host);
+    const removeTerminalTransfers = installTerminalTransfers({
+      element: frame,
+      canInsert: () => inputEnabled && process.status === 'running',
+      insert: (text) => {
+        queueInput(encoder.encode(text));
+        flushInput();
+      },
+      focus: () => instance.focus(),
+      reportError: onError,
+      setDropActive: (active) => { transferDropActive = active; },
+      setPasteSaving: (saving) => { imagePasteSaving = saving; }
+    });
 
     try {
       const webgl = new WebglAddon();
@@ -159,6 +175,7 @@
       dataDisposable.dispose();
       binaryDisposable.dispose();
       window.removeEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
+      removeTerminalTransfers();
       void client.detachTerminal().catch(() => undefined);
       instance.dispose();
       terminal = null;
@@ -367,7 +384,12 @@
 
 </script>
 
-<section class="terminal-frame" class:is-stopped={process.status !== 'running'}>
+<section
+  bind:this={frame}
+  class="terminal-frame"
+  class:is-stopped={process.status !== 'running'}
+  class:is-drop-target={transferDropActive}
+>
   <div class="terminal-host" bind:this={host} aria-label={`${process.name} terminal`}></div>
   {#if process.status === 'running' && !hasOutput}
     <div class="terminal-starting" aria-live="polite">
@@ -381,6 +403,11 @@
   {#if linkHintVisible}
     <div class="terminal-link-hint" role="tooltip">{EXTERNAL_LINK_TOOLTIP}</div>
   {/if}
+  {#if transferDropActive || imagePasteSaving}
+    <div class="terminal-transfer-hint" aria-live="polite">
+      {transferDropActive ? 'Drop to insert file path' : 'Saving pasted image…'}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -393,6 +420,10 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--terminal-background);
+  }
+
+  .terminal-frame.is-drop-target {
+    border-color: var(--ring);
   }
 
   .terminal-starting {
@@ -460,6 +491,19 @@
     border-radius: 3px;
     padding: 4px 6px;
     color: color-mix(in srgb, var(--terminal-foreground) 80%, var(--terminal-background));
+    background: color-mix(in srgb, var(--terminal-background) 94%, transparent);
+    font: 500 11px/1.2 var(--terminal-font-family);
+    pointer-events: none;
+  }
+
+  .terminal-transfer-hint {
+    position: absolute;
+    left: 10px;
+    bottom: 9px;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 28%, var(--terminal-background));
+    border-radius: 3px;
+    padding: 4px 6px;
+    color: color-mix(in srgb, var(--terminal-foreground) 84%, var(--terminal-background));
     background: color-mix(in srgb, var(--terminal-background) 94%, transparent);
     font: 500 11px/1.2 var(--terminal-font-family);
     pointer-events: none;
