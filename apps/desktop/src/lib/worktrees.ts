@@ -180,6 +180,37 @@ export function buildProjectRailGroups(projects: Project[]): ProjectRailGroup[] 
   return groups;
 }
 
+/**
+ * Seed the flat rail from the former nested presentation without deriving its order again later.
+ * Root order and each root's child order stay stable; orphaned worktrees remain visible at the end.
+ */
+export function initialFlatProjectOrder(projects: Project[]): number[] {
+  const projectIds = new Set(projects.map((project) => project.id));
+  const childrenByParent = new Map<number, Project[]>();
+  for (const project of projects) {
+    if (project.parent_project_id === null || !projectIds.has(project.parent_project_id)) continue;
+    const children = childrenByParent.get(project.parent_project_id) ?? [];
+    children.push(project);
+    childrenByParent.set(project.parent_project_id, children);
+  }
+
+  const orderedIds: number[] = [];
+  const added = new Set<number>();
+  for (const project of projects) {
+    if (project.parent_project_id !== null && projectIds.has(project.parent_project_id)) continue;
+    orderedIds.push(project.id);
+    added.add(project.id);
+    for (const child of childrenByParent.get(project.id) ?? []) {
+      orderedIds.push(child.id);
+      added.add(child.id);
+    }
+  }
+  for (const project of projects) {
+    if (!added.has(project.id)) orderedIds.push(project.id);
+  }
+  return orderedIds;
+}
+
 export function projectBranchLabel(project: Project): string {
   return projectDisplayName(project, project.branch?.trim() || project.name);
 }
