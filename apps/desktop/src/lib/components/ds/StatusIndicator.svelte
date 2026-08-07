@@ -2,7 +2,7 @@
   import * as Tooltip from '$lib/components/ui/tooltip';
   import { cn } from '$lib/utils';
 
-  type StatusTone = 'success' | 'danger' | 'warning' | 'neutral';
+  type StatusTone = 'success' | 'danger' | 'warning' | 'needs-input' | 'waiting' | 'neutral';
 
   interface Props {
     label: string;
@@ -36,4 +36,6 @@
   .status-indicator[data-tone='success'] > span { background: var(--success); }
   .status-indicator[data-tone='danger'] > span { background: var(--destructive); }
   .status-indicator[data-tone='warning'] > span { background: var(--warning-token); }
+  .status-indicator[data-tone='needs-input'] > span { background: var(--agent-state-needs-input); }
+  .status-indicator[data-tone='waiting'] > span { background: var(--agent-state-waiting); }
 </style>

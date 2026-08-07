@@ -2,7 +2,7 @@
   export interface CountBadgeProps {
     value: string | number;
     prefix?: string;
-    tone?: 'neutral' | 'running' | 'attention';
+    tone?: 'neutral' | 'running' | 'working' | 'attention' | 'needs-input' | 'waiting' | 'error';
     title?: string;
   }
 </script>
@@ -42,6 +42,8 @@
     white-space: nowrap;
   }
 
-  .running { border-color: color-mix(in srgb, var(--signal, #55b989) 42%, var(--border, var(--border))); color: var(--signal, #55b989); }
-  .attention { border-color: color-mix(in srgb, var(--warning, #d6a24f) 42%, var(--border, var(--border))); color: var(--warning, #d6a24f); }
+  .running, .working { border-color: color-mix(in srgb, var(--agent-state-working) 42%, var(--border)); color: var(--agent-state-working); }
+  .attention, .needs-input { border-color: color-mix(in srgb, var(--agent-state-needs-input) 42%, var(--border)); color: var(--agent-state-needs-input); }
+  .waiting { border-color: color-mix(in srgb, var(--agent-state-waiting) 42%, var(--border)); color: var(--agent-state-waiting); }
+  .error { border-color: color-mix(in srgb, var(--agent-state-exited) 42%, var(--border)); color: var(--agent-state-exited); }
 </style>

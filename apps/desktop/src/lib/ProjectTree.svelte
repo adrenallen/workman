@@ -43,6 +43,7 @@
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
+  import { processActivity, processActivityTone } from './processActivity';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
   import { projectDisplayName } from './worktrees';
   import {
@@ -301,30 +302,15 @@
     return process.status === 'running' || process.status === 'starting';
   }
 
-  function processAttention(process: ProcessView): 'working' | 'idle' | 'attention' | 'done' | 'error' {
-    if (process.status === 'crashed') return 'error';
-    if (process.status === 'exited' || process.status === 'stopped') return 'done';
-    if (process.kind === 'agent' && process.agent_state.needs_input) return 'attention';
-    if (process.kind === 'agent' && process.agent_state.working) return 'working';
-    return isRunning(process) ? 'idle' : 'done';
+  function processStatusTone(
+    process: ProcessView,
+    stats?: ProcessRuntimeStats
+  ): ReturnType<typeof processActivityTone> {
+    return processActivityTone(processActivity(process, stats).state);
   }
 
-  function processStatusTone(process: ProcessView): 'success' | 'warning' | 'danger' | 'neutral' {
-    const state = processAttention(process);
-    if (state === 'attention') return 'warning';
-    if (state === 'error') return 'danger';
-    if (state === 'working' || state === 'idle') return 'success';
-    return 'neutral';
-  }
-
-  function processStatusLabel(process: ProcessView): string {
-    switch (processAttention(process)) {
-      case 'working': return `${process.name} · working`;
-      case 'attention': return `${process.name} · needs input`;
-      case 'error': return `${process.name} · crashed`;
-      case 'idle': return `${process.name} · running and idle`;
-      default: return `${process.name} · ${process.status}`;
-    }
+  function processStatusLabel(process: ProcessView, stats?: ProcessRuntimeStats): string {
+    return processActivity(process, stats).label;
   }
 
   function lineageTone(rollup: AgentAttentionRollup): 'attention' | 'working' | 'waiting' | 'error' | 'idle' {
@@ -360,10 +346,17 @@
     }
   }
 
-  function groupTone(group: ProjectTreeGroup): 'neutral' | 'running' | 'attention' {
+  function groupTone(
+    group: ProjectTreeGroup
+  ): 'neutral' | 'working' | 'needs-input' | 'waiting' | 'error' | 'attention' {
     if (group === 'todos' && openTodos.some((todo) => todo.is_blocked)) return 'attention';
-    if (group === 'agents' && agents.some((process) => process.agent_state.needs_input)) return 'attention';
-    if (group !== 'todos' && group !== 'scratchpads' && processesForGroup(group).some(isRunning)) return 'running';
+    if (group === 'todos' || group === 'scratchpads') return 'neutral';
+    const states = processesForGroup(group)
+      .map((process) => processActivity(process, runtimeStats(process)).state);
+    if (states.includes('needs_input')) return 'needs-input';
+    if (states.includes('crashed')) return 'error';
+    if (states.includes('working')) return 'working';
+    if (states.includes('waiting')) return 'waiting';
     return 'neutral';
   }
 
@@ -374,7 +367,14 @@
     const unread = group === 'agents'
       ? agents.filter((process) => process.agent_state.unread).length
       : 0;
-    return `${running} running of ${total} ${group}${unread > 0 ? ` · ${unread} unread` : ''}`;
+    const groupProcesses = processesForGroup(group);
+    const active = groupProcesses
+      .filter((process) => processActivity(process, runtimeStats(process)).state === 'working')
+      .length;
+    const waiting = groupProcesses
+      .filter((process) => processActivity(process, runtimeStats(process)).state === 'waiting')
+      .length;
+    return `${running} running of ${total} ${group} · ${active} actively working${waiting > 0 ? ` · ${waiting} waiting` : ''}${unread > 0 ? ` · ${unread} unread` : ''}`;
   }
 
   function processesForGroup(group: ProjectTreeGroup): ProcessView[] {
@@ -801,7 +801,7 @@
                       oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
-                      <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
+                      <StatusIndicator tone={processStatusTone(process, stats)} label={processStatusLabel(process, stats)} />
                       <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
                       {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
                     </button>
@@ -847,7 +847,7 @@
                       oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
-                      <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
+                      <StatusIndicator tone={processStatusTone(process, stats)} label={processStatusLabel(process, stats)} />
                       <span class="row-copy"><strong>{process.name}</strong><small>{process.command ?? 'Command'}</small></span>
                       <span class="row-badges">{#if stats}{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} />{/if}</span>
                     </button>

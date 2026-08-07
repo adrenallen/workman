@@ -13,6 +13,8 @@
   import SectionOverview from './SectionOverview.svelte';
   import { agentStatusPresentation } from './agentStatus';
   import type { ProcessKind, ProcessView, Project } from './daemon';
+  import { liveStats } from './liveStats';
+  import { processActivity, processActivityTone } from './processActivity';
 
   type OverviewKind = Extract<ProcessKind, 'agent' | 'terminal' | 'command'>;
 
@@ -59,11 +61,10 @@
 
   let section = $derived(copy[kind]);
   let matchingProcesses = $derived(processes.filter((process) => process.kind === kind));
-  let runningCount = $derived(matchingProcesses.filter(isRunning).length);
   let workingCount = $derived(
-    kind === 'agent'
-      ? matchingProcesses.filter((process) => agentStatusPresentation(process).state === 'working').length
-      : runningCount
+    matchingProcesses
+      .filter((process) => processActivity(process, $liveStats.processes[process.id]).state === 'working')
+      .length
   );
   let waitingCount = $derived(
     kind === 'agent'
@@ -81,22 +82,14 @@
   }
 
   function stateLabel(process: ProcessView): string {
-    if (process.kind === 'agent') {
-      const state = agentStatusPresentation(process).shortLabel;
-      return process.agent_state.unread ? `${state} · unread` : state;
-    }
-    if (process.status === 'starting') return 'Starting';
-    if (process.status === 'running') return 'Running';
-    if (process.status === 'crashed') return 'Crashed';
-    if (process.status === 'stopped') return 'Stopped';
-    return 'Exited';
+    const state = processActivity(process, $liveStats.processes[process.id]).shortLabel;
+    return process.kind === 'agent' && process.agent_state.unread ? `${state} · unread` : state;
   }
 
-  function stateTone(process: ProcessView): 'success' | 'warning' | 'danger' | 'neutral' {
-    if (process.status === 'crashed') return 'danger';
-    if (process.status === 'starting') return 'warning';
-    if (process.status === 'running') return 'success';
-    return 'neutral';
+  function stateTone(process: ProcessView): ReturnType<typeof processActivityTone> {
+    return processActivityTone(
+      processActivity(process, $liveStats.processes[process.id]).state
+    );
   }
 
   function secondaryCopy(process: ProcessView): string {
@@ -141,12 +134,13 @@
       <span class:needs-input-state={attentionCount > 0}>{attentionCount} need input</span>
     {:else}
       <span class="summary-divider" aria-hidden="true">·</span>
-      <span class="active">{runningCount} running</span>
+      <span class:active={workingCount > 0}>{workingCount} actively working</span>
     {/if}
   {/snippet}
 
   <div class="process-ledger" aria-live="polite">
     {#each matchingProcesses as process (process.id)}
+      {@const activity = processActivity(process, $liveStats.processes[process.id])}
       <article
         class="process-row"
         class:with-actions={kind === 'command'}
@@ -161,7 +155,7 @@
           {#if process.kind === 'agent'}
             <AgentStatusIndicator {process} />
           {:else}
-            <StatusIndicator tone={stateTone(process)} label={`${process.name} · ${stateLabel(process)}`} />
+            <StatusIndicator tone={stateTone(process)} label={activity.label} />
           {/if}
           <span class="process-ref">#{process.id}</span>
           <span class="process-copy">
@@ -169,8 +163,10 @@
             <small>{secondaryCopy(process)}</small>
           </span>
           <span
-            class:needs-input-state={process.kind === 'agent' && process.agent_state.needs_input}
-            class:waiting-state={process.kind === 'agent' && agentStatusPresentation(process).state === 'waiting'}
+            class:working-state={activity.state === 'working'}
+            class:needs-input-state={activity.state === 'needs_input'}
+            class:waiting-state={activity.state === 'waiting'}
+            class:error-state={activity.state === 'crashed'}
             class="process-state"
           >{stateLabel(process)}</span>
         </button>
@@ -204,8 +200,10 @@
 <style>
   .summary-divider { color: var(--muted-foreground); }
   .active { color: var(--success); }
+  .working-state { color: var(--agent-state-working); }
   .needs-input-state { color: var(--agent-state-needs-input); }
   .waiting-state { color: var(--agent-state-waiting); }
+  .error-state { color: var(--agent-state-exited); }
   .process-ledger { height: 100%; min-height: 0; overflow-y: auto; padding: 4px 7px 10px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .process-row { display: grid; width: 100%; min-height: 42px; grid-template-columns: minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--border); background: transparent; color: var(--foreground); }
   .process-row.with-actions { grid-template-columns: minmax(0, 1fr) 64px; }

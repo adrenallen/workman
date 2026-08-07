@@ -94,6 +94,7 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import { liveStats } from './lib/liveStats';
   import {
     deliverNativeNotification,
     listenForNativeNotificationActions,
@@ -144,6 +145,11 @@
     failOptimisticProcess,
     type OptimisticProcess
   } from './lib/optimisticProcesses';
+  import {
+    processActivityTone,
+    projectActivityRollup,
+    type ProjectActivityRollup
+  } from './lib/processActivity';
   import {
     initialFlatProjectOrder,
     projectDisplayName,
@@ -943,6 +949,26 @@
     return (navigationIndex[projectId]?.processes ?? [])
       .filter((process) => process.kind === 'agent' && process.agent_state.unread)
       .length;
+  }
+
+  function projectRailActivity(project: Project): ProjectActivityRollup {
+    const projectProcesses = navigationIndex[project.id]?.processes
+      ?? (selectedProject?.id === project.id ? processes : []);
+    const rollup = projectActivityRollup(projectProcesses, $liveStats.processes);
+    if (projectProcesses.length === 0 && project.status === 'error') {
+      return { ...rollup, state: 'crashed', crashed: 1 };
+    }
+    return rollup;
+  }
+
+  function projectRailActivityLabel(project: Project, rollup: ProjectActivityRollup): string {
+    const title = projectTitle(project);
+    const active = rollup.active > 0 ? ` · ${rollup.active} actively working` : '';
+    if (rollup.state === 'needs_input') return `${title} · needs input${active}`;
+    if (rollup.state === 'crashed') return `${title} · process error${active}`;
+    if (rollup.state === 'working') return `${title}${active}`;
+    if (rollup.state === 'waiting') return `${title} · waiting`;
+    return `${title} · no active work`;
   }
 
   function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
@@ -2991,6 +3017,8 @@
   {@const parentLabel = worktreeParentLabel(project, projects, repository?.name)}
   {@const projectKind = parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
+  {@const activity = projectRailActivity(project)}
+  {@const activityLabel = projectRailActivityLabel(project, activity)}
   <article
     class:active={project.selected}
     class="project-row group/project group/repository"
@@ -3006,7 +3034,7 @@
           class="project-select"
           type="button"
           aria-current={project.selected ? 'page' : undefined}
-          aria-label={`${fullTitle} · ${projectKind} · ${project.status}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+          aria-label={`${activityLabel} · ${projectKind}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
           use:reorderItem={{
             id: project.id,
             group: 'projects',
@@ -3023,8 +3051,8 @@
         >
           <StatusIndicator
             class={projectRailCollapsed ? 'project-status-badge' : ''}
-            tone={project.status === 'error' ? 'danger' : project.status === 'running' ? 'success' : 'neutral'}
-            label={`${fullTitle} · ${project.status}`}
+            tone={processActivityTone(activity.state)}
+            label={activityLabel}
           />
           <span class="project-icon-anchor">
             <span class="project-kind-icon" aria-hidden="true">

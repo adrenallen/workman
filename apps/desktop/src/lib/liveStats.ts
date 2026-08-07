@@ -12,6 +12,8 @@ export interface DescendantProcessStats {
 export interface ProcessRuntimeStats {
   process_id: number;
   pid: number | null;
+  foreground_process_group: number | null;
+  foreground_active: boolean;
   cpu_percent: number;
   memory_bytes: number;
   uptime_seconds: number;

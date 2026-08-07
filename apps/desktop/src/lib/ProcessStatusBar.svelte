@@ -29,6 +29,7 @@
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import * as Popover from './components/ui/popover';
   import { liveStats, type DescendantProcessStats } from './liveStats';
+  import { processActivity } from './processActivity';
   import { killSubprocess, listSubprocesses } from './subprocesses';
   import TimerCountdown from './TimerCountdown.svelte';
   import { projectDisplayName } from './worktrees';
@@ -56,6 +57,7 @@
   let statusWidth = $state(1_200);
 
   const stats = $derived($liveStats.processes[process.id] ?? null);
+  const activity = $derived(processActivity(process, stats ?? undefined));
   const childCount = $derived(popoverOpen ? freshChildren.length : (stats?.descendant_count ?? 0));
   const siblingIndex = $derived(processes.findIndex((candidate) => candidate.id === process.id));
   const timerDensity = $derived(statusWidth <= 680 ? 'hidden' : statusWidth <= 1_040 ? 'compact' : 'full');
@@ -338,12 +340,12 @@
       <span class="agent-attention"><AgentStatusIndicator {process} showLabel={statusWidth > 1_040} /></span>
     {:else}
       <span
-        class:active-run={process.status === 'running'}
-        class:fault={process.status === 'crashed'}
+        class:active-run={activity.state === 'working'}
+        class:fault={activity.state === 'crashed'}
         class="run-state"
-        title={`Process status: ${process.status}`}
+        title={activity.label}
       >
-        <i aria-hidden="true"></i><span class="state-word">{process.status}</span>
+        <i aria-hidden="true"></i><span class="state-word">{activity.shortLabel}</span>
       </span>
     {/if}
 
