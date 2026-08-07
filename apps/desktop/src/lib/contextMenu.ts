@@ -8,6 +8,7 @@ import {
   type OpenersState
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
+import { projectFrequentActions } from './projectMenu';
 import type { WorktreeEntry, WorktreeRepository } from './worktrees';
 import { projectRepositoryTitle } from './worktrees';
 import type { ContextActionId } from './contextMenuIcons';
@@ -166,21 +167,16 @@ function projectItems(
   openers: OpenersState | null
 ): ContextMenuItem[] {
   const { project, repository, worktree } = target;
-  const openerItems: ContextMenuItem[] = openers ? [
-    ...(openers.config.sidebar.editorEnabled
-      ? [{ id: 'open-in-editor' as const, label: editorActionLabel(openers.config, openers.editors) }]
-      : []),
-    ...(openers.config.sidebar.finderEnabled
-      ? [{ id: 'open-in-finder' as const, label: 'Show in Finder' }]
-      : []),
-    ...(openers.config.sidebar.customEnabled
-      ? [{ id: 'open-custom' as const, label: customActionLabel(openers.config) }]
-      : [])
-  ] : [
-    { id: 'open-in-editor', label: 'Open in editor' },
-    { id: 'open-in-finder', label: 'Show in Finder' }
-  ];
-  if (openerItems[0]) openerItems[0].separatorBefore = true;
+  const frequentItems: ContextMenuItem[] = projectFrequentActions({
+    editorLabel: openers
+      ? editorActionLabel(openers.config, openers.editors)
+      : 'Open in editor',
+    pullRequest: worktree?.pull_request,
+    siteUrl: worktree?.site_url
+  });
+  const customOpenerItem: ContextMenuItem[] = openers?.config.sidebar.customEnabled
+    ? [{ id: 'open-custom', label: customActionLabel(openers.config), separatorBefore: true }]
+    : [];
 
   const worktreeItems: ContextMenuItem[] = [];
   if (repository && worktree?.kind === 'main') {
@@ -203,16 +199,6 @@ function projectItems(
       label: 'Fork again…',
       detail: `Start at exact HEAD ${worktree.head.slice(0, 10)}`
     });
-    if (worktree.site_url) {
-      worktreeItems.push({ id: 'open-herd-site', label: 'Open Herd site', detail: worktree.site_url });
-    }
-    if (worktree.pull_request) {
-      worktreeItems.push({
-        id: 'open-pull-request',
-        label: `Open pull request #${worktree.pull_request.number}`,
-        detail: `${worktree.pull_request.state} · checks ${worktree.pull_request.checks}`
-      });
-    }
     worktreeItems.push({ id: 'refresh-pull-request', label: 'Refresh pull request status' });
   }
 
@@ -233,7 +219,8 @@ function projectItems(
       };
 
   return [
-    { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
+    ...frequentItems,
+    { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected, separatorBefore: true },
     { id: 'project-settings', label: 'Project settings…' },
     { id: 'rename', label: 'Rename' },
     { id: 'new-agent', label: 'New agent…', separatorBefore: true },
@@ -244,8 +231,8 @@ function projectItems(
     ...worktreeItems.map((item, index) => ({ ...item, separatorBefore: index === 0 })),
     { id: 'start-all-commands', label: 'Start all commands', separatorBefore: true },
     { id: 'stop-all-commands', label: 'Stop all commands' },
-    ...openerItems,
-    { id: 'copy-path', label: 'Copy path', separatorBefore: openerItems.length === 0 },
+    ...customOpenerItem,
+    { id: 'copy-path', label: 'Copy path', separatorBefore: customOpenerItem.length === 0 },
     removal
   ];
 }

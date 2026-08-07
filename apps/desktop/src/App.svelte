@@ -25,7 +25,6 @@
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
-  import ProjectOpeners from './lib/ProjectOpeners.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
   import ProjectOverview from './lib/ProjectOverview.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
@@ -3022,17 +3021,9 @@
           pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
           repositoryName={repository.name}
           refreshing={worktreeRefreshingRepositoryId === repository.id}
-          showRefresh={!nested}
           onRefresh={() => void refreshWorktreeRepository(project, true)}
         />
       {/if}
-      <ProjectOpeners
-        path={project.path}
-        projectName={fullTitle}
-        collapsed={projectRailCollapsed}
-        siteUrl={worktree?.site_url ?? null}
-        onError={reportError}
-      />
       <IconButton
         class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
         label={`Actions for ${fullTitle}`}
