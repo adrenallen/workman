@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::{ProcessId, Store, StoreResult, attention::AttentionState};
+use crate::{ProcessId, Store, StoreResult, TimerId, attention::AttentionState};
 
 /// Backstop against repeated completion notifications for one process when an
 /// adapter or client oscillates despite attention hysteresis.
@@ -56,6 +56,24 @@ impl ObservedState {
 }
 
 impl Store {
+    /// Remember that an idle watcher was consumed by this process's current
+    /// completion transition. The marker bridges the gap between timer
+    /// delivery and the debounced notification decision.
+    pub fn record_consumed_idle_watch(
+        &self,
+        process_id: ProcessId,
+        timer_id: TimerId,
+        fired_at: i64,
+    ) -> StoreResult<()> {
+        self.connection().execute(
+            "INSERT INTO consumed_idle_watches (process_id, timer_id, fired_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(process_id, timer_id) DO UPDATE SET fired_at = excluded.fired_at",
+            params![process_id, timer_id, fired_at],
+        )?;
+        Ok(())
+    }
+
     /// Observe the latest attention state and persist an unread completion edge.
     ///
     /// A newly discovered process establishes a baseline rather than notifying.
@@ -68,6 +86,28 @@ impl Store {
         state: AttentionState,
         watched: bool,
         turn_started: bool,
+        now_ms: i64,
+    ) -> StoreResult<AgentNotificationState> {
+        self.observe_agent_attention_with_activity(
+            process_id,
+            state,
+            watched,
+            turn_started,
+            None,
+            now_ms,
+        )
+    }
+
+    /// Observe attention while carrying the timestamp of the newest real PTY
+    /// output/input. A consumed watch remains valid through debounce polls and
+    /// is reset only by activity newer than the watch fire.
+    pub fn observe_agent_attention_with_activity(
+        &self,
+        process_id: ProcessId,
+        state: AttentionState,
+        watched: bool,
+        turn_started: bool,
+        last_agent_activity_at: Option<i64>,
         now_ms: i64,
     ) -> StoreResult<AgentNotificationState> {
         let current = ObservedState::from_attention(state);
@@ -106,6 +146,13 @@ impl Store {
             });
         };
         let previous = ObservedState::parse(&previous_state).unwrap_or(current);
+        if let Some(activity_at) = last_agent_activity_at {
+            self.connection().execute(
+                "DELETE FROM consumed_idle_watches
+                 WHERE process_id = ?1 AND fired_at < ?2",
+                params![process_id, activity_at],
+            )?;
+        }
 
         if current == ObservedState::Working {
             if unread {
@@ -126,8 +173,11 @@ impl Store {
             let viewed_since_notification = last_viewed_at
                 .zip(last_notified_at)
                 .is_some_and(|(viewed_at, notified_at)| viewed_at >= notified_at);
+            let consumed_watch =
+                (completed_turn || exited) && self.has_consumed_idle_watch(process_id)?;
             if (completed_turn || exited)
                 && !watched
+                && !consumed_watch
                 && (cooldown_elapsed || viewed_since_notification)
             {
                 unread = true;
@@ -142,6 +192,11 @@ impl Store {
                 // completion cooldown. A fresh completion after the user
                 // responds is still eligible for its own notification.
                 self.create_agent_needs_input_notification(process_id, now_ms)?;
+            }
+            if completed_turn || exited {
+                // A marker is transition-scoped. Once the matching completion
+                // decision sees it, it cannot suppress another edge.
+                self.clear_consumed_idle_watches(process_id)?;
             }
         }
 
@@ -159,6 +214,26 @@ impl Store {
             ],
         )?;
         Ok(AgentNotificationState { unread, unread_at })
+    }
+
+    fn has_consumed_idle_watch(&self, process_id: ProcessId) -> StoreResult<bool> {
+        self.connection()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM consumed_idle_watches WHERE process_id = ?1
+                 )",
+                [process_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn clear_consumed_idle_watches(&self, process_id: ProcessId) -> StoreResult<()> {
+        self.connection().execute(
+            "DELETE FROM consumed_idle_watches WHERE process_id = ?1",
+            [process_id],
+        )?;
+        Ok(())
     }
 
     /// Clear a process's durable unread completion marker.

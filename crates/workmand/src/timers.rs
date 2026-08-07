@@ -438,6 +438,7 @@ impl<'a> TimerService<'a> {
             }
             let mut runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
             let mut reason = None;
+            let mut transitioned_process_ids = Vec::new();
 
             match timer.kind {
                 TimerKind::Delay => {
@@ -446,13 +447,14 @@ impl<'a> TimerService<'a> {
                     }
                 }
                 TimerKind::IdleAny | TimerKind::IdleAll => {
-                    let changed = self.advance_idle_state(&timer, &mut runtime)?;
+                    let advanced = self.advance_idle_state(&timer, &mut runtime)?;
+                    transitioned_process_ids = advanced.transitioned_process_ids;
                     if idle_condition_satisfied(&timer, &runtime) {
                         reason = Some(TimerFireReason::IdleTransition);
                     } else if now_ms >= runtime.due_at {
                         reason = Some(TimerFireReason::MaxWait);
                     }
-                    if changed && reason.is_none() {
+                    if advanced.changed && reason.is_none() {
                         self.put_runtime(timer.id, &runtime)?;
                     }
                 }
@@ -467,6 +469,18 @@ impl<'a> TimerService<'a> {
                 // Delivery is at-least-once. Keep the timer pending and retry after
                 // the target process is started again.
                 continue;
+            }
+
+            // Pending timers suppress directly. Once an idle-transition timer
+            // is consumed, preserve that transition's watch state across the
+            // debounced done-check. Max-wait expiry is only a wake about a
+            // still-busy process and deliberately records no marker.
+            if reason == TimerFireReason::IdleTransition {
+                for process_id in transitioned_process_ids {
+                    self.registry
+                        .store()
+                        .record_consumed_idle_watch(process_id, timer.id, now_ms)?;
+                }
             }
 
             timer.fired_at = Some(now_ms);
@@ -661,8 +675,9 @@ impl<'a> TimerService<'a> {
         &mut self,
         timer: &Timer,
         runtime: &mut TimerRuntime,
-    ) -> TimerResult<bool> {
+    ) -> TimerResult<IdleAdvance> {
         let mut changed = false;
+        let mut transitioned_process_ids = Vec::new();
         for process_id in &timer.watch_process_ids {
             let idle = self.process_is_idle(*process_id)?;
             let progress = runtime
@@ -675,9 +690,20 @@ impl<'a> TimerService<'a> {
             let before = progress.clone();
             advance_watch_progress(progress, idle);
             changed |= *progress != before;
+            if !before.satisfied && progress.satisfied {
+                transitioned_process_ids.push(*process_id);
+            }
         }
-        Ok(changed)
+        Ok(IdleAdvance {
+            changed,
+            transitioned_process_ids,
+        })
     }
+}
+
+struct IdleAdvance {
+    changed: bool,
+    transitioned_process_ids: Vec<ProcessId>,
 }
 
 pub(crate) fn advance_watch_progress(progress: &mut WatchProgress, idle: bool) {
@@ -1421,6 +1447,17 @@ mod tests {
         assert!(fired.iter().any(|fire| {
             fire.timer_id == any_timer_id && fire.reason == TimerFireReason::IdleTransition
         }));
+        let consumed: i64 = registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM consumed_idle_watches
+                 WHERE process_id = ?1 AND timer_id = ?2",
+                (WORKER_ID, any_timer_id),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(consumed, 1, "idle-transition fire records suppression");
         wait_for_output(&mut registry, DELIVERY_ID, "received:[fresh idle wake]");
 
         registry
@@ -1451,6 +1488,19 @@ mod tests {
         assert!(fired.iter().any(|fire| {
             fire.timer_id == timeout_timer_id && fire.reason == TimerFireReason::MaxWait
         }));
+        let consumed: i64 = registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM consumed_idle_watches WHERE timer_id = ?1",
+                [timeout_timer_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            consumed, 0,
+            "max-wait wake must not suppress the watched process's later completion"
+        );
         wait_for_output(&mut registry, DELIVERY_ID, "received:[timeout wake]");
     }
 

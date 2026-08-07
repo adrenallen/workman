@@ -453,11 +453,13 @@ impl ProcessRegistry {
             let waiting_on = self.waiting_reasons(process.id)?;
             let watched = self.process_is_watched(process.id)?;
             agent_state.refine_waiting(waiting_on);
-            let notification = self.store.observe_agent_attention(
+            let last_agent_activity_at = agent_state.last_output_at.max(agent_state.last_input_at);
+            let notification = self.store.observe_agent_attention_with_activity(
                 process.id,
                 agent_state.state,
                 watched,
                 agent_state.last_input_at.is_some(),
+                last_agent_activity_at,
                 now_millis(),
             )?;
             agent_state.refine_notifications(watched, notification.unread);
@@ -713,12 +715,14 @@ impl ProcessRegistry {
         );
         self.running.insert(process_id, hosted);
         if process.kind == ProcessKind::Agent {
-            self.store.observe_agent_attention(
+            let started_at = now_millis();
+            self.store.observe_agent_attention_with_activity(
                 process_id,
                 AttentionState::Working,
                 false,
                 false,
-                now_millis(),
+                Some(started_at),
+                started_at,
             )?;
         }
         self.refresh_exits()?;

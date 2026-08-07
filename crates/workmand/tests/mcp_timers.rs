@@ -166,12 +166,14 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
             "while IFS= read -r line; do printf 'received:[%s]\\n' \"$line\"; done",
             None,
         ))?;
-        registry.create(process(
+        let mut worker = process(
             WORKER_ID,
             "worker",
             "printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = go ]; then printf 'thinking...\\nesc to interrupt\\n'; sleep 0.7; printf '❯\\n'; fi; done",
             Some(90),
-        ))?;
+        );
+        worker.spawned_by_process_id = Some(DELIVERY_ID);
+        registry.create(worker)?;
         registry.create(process(STALLED_ID, "stalled", "sleep 30", None))?;
         registry.start(DELIVERY_ID)?;
         registry.start(WORKER_ID)?;
@@ -252,13 +254,14 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         "timer_fire_when_idle_any",
         json!({
             "processes": [{ "process_name": "worker" }],
-            "max_wait_ms": 3_000,
+            "max_wait_ms": 15_000,
             "body": "fresh idle wake",
         }),
     )
     .await;
     assert_eq!(any["already_satisfied"], false);
     assert_eq!(any["delivered_immediately"], false);
+    let any_timer_id = any["timer"]["id"].as_i64().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!output_contains(&registry, DELIVERY_ID, "fresh idle wake").await?);
     call(
@@ -270,6 +273,32 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     wait_for_state(&registry, WORKER_ID, AttentionState::Working).await?;
     wait_for_state(&registry, WORKER_ID, AttentionState::Idle).await?;
     wait_for_output(&registry, DELIVERY_ID, "received:[fresh idle wake]").await?;
+    {
+        let registry = registry.lock().await;
+        let timer = registry.store().get_timer(any_timer_id)?.unwrap();
+        let child_notifications = registry
+            .store()
+            .list_notifications(None, 100)?
+            .into_iter()
+            .filter(|notification| notification.process_id == Some(WORKER_ID))
+            .count();
+        let consumed_markers: i64 = registry.store().connection().query_row(
+            "SELECT COUNT(*) FROM consumed_idle_watches
+             WHERE process_id = ?1 AND timer_id = ?2",
+            (WORKER_ID, any_timer_id),
+            |row| row.get(0),
+        )?;
+        eprintln!(
+            "todo451_event_log parent={DELIVERY_ID} child={WORKER_ID} timer={any_timer_id} fired={} delivered_output=true consumed_markers={consumed_markers} child_notifications={child_notifications}",
+            timer.fired
+        );
+        assert!(timer.fired, "the parent's child watch must fire normally");
+        assert_eq!(consumed_markers, 1);
+        assert_eq!(
+            child_notifications, 0,
+            "watched child completion must not reach the shared notification source"
+        );
+    }
 
     call(
         &owner,

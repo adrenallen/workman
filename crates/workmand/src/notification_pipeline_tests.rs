@@ -123,15 +123,39 @@ impl ScriptedPipeline {
         self.tracker.suppress_ui_activity_at(now_ms);
     }
 
+    fn consume_idle_watch_at(&self, timer_id: i64, fired_at: i64) {
+        self.store
+            .put_timer(&Timer {
+                id: timer_id,
+                owner_actor: "notification-harness".into(),
+                delivery_process_id: PROCESS_ID,
+                body: "consumed watch delivery".into(),
+                kind: TimerKind::IdleAny,
+                watch_process_ids: vec![PROCESS_ID],
+                interval_ms: None,
+                repeating: false,
+                max_wait_deadline: Some(60_000),
+                paused: false,
+                fired: true,
+                fired_at: Some(fired_at),
+                created_at: 1_200,
+            })
+            .expect("put consumed watch timer");
+        self.store
+            .record_consumed_idle_watch(PROCESS_ID, timer_id, fired_at)
+            .expect("record consumed idle watch");
+    }
+
     fn observe_at(&mut self, now_ms: i64) -> AgentState {
         let mut state = self.tracker.snapshot_at(now_ms);
         let notification = self
             .store
-            .observe_agent_attention(
+            .observe_agent_attention_with_activity(
                 PROCESS_ID,
                 state.state,
                 self.watched,
                 self.turn_started,
+                state.last_output_at.max(state.last_input_at),
                 now_ms,
             )
             .expect("persist attention edge");
@@ -308,6 +332,45 @@ fn watched_completion_is_suppressed_for_row_dot_badge_and_os_delivery() {
     );
     assert!(pipeline.notifications().is_empty());
     assert!(pipeline.native_emissions.is_empty(), "no OS emission point");
+}
+
+#[test]
+fn watcher_fires_and_is_consumed_before_debounced_done_check_emits_zero_notifications() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    start_recorded_turn(&mut pipeline, CLAUDE_WORKING);
+
+    pipeline.frame_at(2_000, CLAUDE_RESTING);
+    pipeline.consume_idle_watch_at(451, 7_000);
+    pipeline.watched = false;
+
+    assert_eq!(pipeline.observe_at(6_999).state, AttentionState::Working);
+    let done = pipeline.observe_at(7_000);
+    assert_eq!(done.state, AttentionState::Idle);
+    assert!(!done.watched, "the consumed timer is no longer pending");
+    assert!(!done.unread, "no process-tree unread dot");
+    assert!(pipeline.notifications().is_empty(), "no center row/badge");
+    assert!(pipeline.native_emissions.is_empty(), "no OS emission point");
+}
+
+#[test]
+fn consumed_watch_then_activity_then_later_unwatched_completion_emits_one_notification() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    start_recorded_turn(&mut pipeline, CLAUDE_WORKING);
+
+    pipeline.frame_at(2_000, CLAUDE_RESTING);
+    pipeline.consume_idle_watch_at(451, 7_000);
+    assert_eq!(pipeline.observe_at(7_000).state, AttentionState::Idle);
+    assert!(pipeline.notifications().is_empty());
+
+    pipeline.frame_at(8_000, CLAUDE_WORKING);
+    assert_eq!(pipeline.observe_at(8_000).state, AttentionState::Working);
+    pipeline.frame_at(9_000, CLAUDE_RESTING);
+    let later_done = pipeline.observe_at(14_000);
+
+    assert_eq!(later_done.state, AttentionState::Idle);
+    assert!(later_done.unread);
+    assert_eq!(pipeline.notifications().len(), 1);
+    assert_eq!(pipeline.native_emissions.len(), 1);
 }
 
 #[test]
