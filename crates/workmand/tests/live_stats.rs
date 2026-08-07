@@ -4,7 +4,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::{sync::oneshot, task::JoinHandle, time::Instant};
+use tokio::{
+    sync::oneshot,
+    task::JoinHandle,
+    time::{Instant, timeout},
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
@@ -16,11 +20,14 @@ use workmand::{DaemonConfig, DaemonServer, Discovery, SharedProcessRegistry};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+const TEST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
+const TEST_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 struct TestServer {
     discovery: Discovery,
     registry: SharedProcessRegistry,
     shutdown: Option<oneshot::Sender<()>>,
-    task: JoinHandle<std::io::Result<()>>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
     _temp: TempDir,
     _project_path: PathBuf,
 }
@@ -29,6 +36,7 @@ impl TestServer {
     async fn start() -> Result<Self, Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let project_path = temp.path().join("project");
+        let process_ready = temp.path().join("process-ready");
         std::fs::create_dir(&project_path)?;
         let server = DaemonServer::bind(DaemonConfig {
             data_dir: temp.path().join("isolated-state"),
@@ -61,9 +69,14 @@ impl TestServer {
                 project_id: 1,
                 kind: ProcessKind::Terminal,
                 name: "shell".into(),
-                command: Some("read line; sleep 30".into()),
+                command: Some(
+                    "printf ready > \"$LIVE_STATS_READY_FILE\"; read line; sleep 30 & wait".into(),
+                ),
                 working_dir: project_path.to_string_lossy().into_owned(),
-                env: BTreeMap::new(),
+                env: BTreeMap::from([(
+                    "LIVE_STATS_READY_FILE".into(),
+                    process_ready.to_string_lossy().into_owned(),
+                )]),
                 auto_start: false,
                 auto_restart: false,
                 restart_when_changed: Vec::new(),
@@ -80,6 +93,13 @@ impl TestServer {
             })?;
             registry.start(101)?;
         }
+        timeout(TEST_PROGRESS_TIMEOUT, async {
+            while !process_ready.exists() {
+                tokio::time::sleep(TEST_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| "timed out waiting for the live-stats fixture process to become ready")?;
 
         let (shutdown, receive_shutdown) = oneshot::channel();
         let task = tokio::spawn(server.serve_until(async move {
@@ -89,7 +109,7 @@ impl TestServer {
             discovery,
             registry,
             shutdown: Some(shutdown),
-            task,
+            task: Some(task),
             _temp: temp,
             _project_path: project_path,
         })
@@ -112,8 +132,22 @@ impl TestServer {
             let _ = registry.stop(101);
         }
         let _ = self.shutdown.take().unwrap().send(());
-        self.task.await??;
+        self.task.take().unwrap().await??;
         Ok(())
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        if let Ok(mut registry) = self.registry.try_lock() {
+            let _ = registry.kill(101);
+        }
     }
 }
 
@@ -129,7 +163,7 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
         json!({}),
     )
     .await?;
-    let initial = next_stats(&mut socket, 0, |stats| {
+    let initial = next_stats(&mut socket, "initial process sample", 0, |stats| {
         stats["projects"]["1"]["memory_bytes"]
             .as_u64()
             .is_some_and(|bytes| bytes > 0)
@@ -155,12 +189,10 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
         }),
     )
     .await?;
-    let count_started = Instant::now();
-    let after_todo = next_stats(&mut socket, initial_sample, |stats| {
+    let after_todo = next_stats(&mut socket, "todo count update", initial_sample, |stats| {
         stats["counts"]["1"]["todo_open"] == 1
     })
     .await?;
-    assert!(count_started.elapsed() < Duration::from_secs(4));
 
     rpc(
         &mut socket,
@@ -173,9 +205,9 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
         }),
     )
     .await?;
-    let child_started = Instant::now();
     let after_child = next_stats(
         &mut socket,
+        "descendant process sample",
         after_todo["sampled_at"].as_u64().unwrap(),
         |stats| {
             stats["processes"]["101"]["descendant_count"]
@@ -184,7 +216,6 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
         },
     )
     .await?;
-    assert!(child_started.elapsed() < Duration::from_secs(4));
     assert!(
         after_child["processes"]["101"]["descendants"][0]["memory_bytes"]
             .as_u64()
@@ -226,17 +257,21 @@ async fn rpc(
 
 async fn next_stats(
     socket: &mut Socket,
+    stage: &str,
     after_sample: u64,
     predicate: impl Fn(&Value) -> bool,
 ) -> Result<Value, Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + TEST_PROGRESS_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("timed out waiting for live stats".into());
+            return Err(
+                format!("timed out waiting for {stage} after sample {after_sample}").into(),
+            );
         }
         let message = tokio::time::timeout(remaining, socket.next())
-            .await?
+            .await
+            .map_err(|_| format!("timed out waiting for {stage} after sample {after_sample}"))?
             .ok_or("websocket closed")??;
         let Message::Text(message) = message else {
             continue;

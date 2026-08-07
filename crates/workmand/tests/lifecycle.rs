@@ -8,12 +8,19 @@ use std::{
 };
 
 use tempfile::TempDir;
-use tokio::sync::{Mutex, watch};
+use tokio::{
+    sync::{Mutex, watch},
+    task::JoinHandle,
+    time::timeout,
+};
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store};
 use workmand::{
     LifecycleOptions, ProcessRegistry, SharedProcessRegistry,
     spawn_lifecycle_supervisor_with_options,
 };
+
+const TEST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
+const TEST_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn test_options() -> LifecycleOptions {
     LifecycleOptions {
@@ -71,53 +78,85 @@ fn process(root: &TempDir, id: i64, command: &str) -> Process {
     }
 }
 
-async fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !predicate() {
-        assert!(
-            Instant::now() < deadline,
-            "condition was not met before timeout"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+async fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) -> Result<(), String> {
+    timeout(TEST_PROGRESS_TIMEOUT, async {
+        while !predicate() {
+            tokio::time::sleep(TEST_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("timed out waiting for {description}"))
 }
 
 fn attempt_count(path: &std::path::Path) -> usize {
     fs::read(path).unwrap_or_default().len()
 }
 
-async fn wait_for_attempt_count(path: &std::path::Path, minimum: usize) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let count = attempt_count(path);
-        if count >= minimum {
-            return count;
+async fn wait_for_attempt_count(path: &std::path::Path, minimum: usize) -> Result<usize, String> {
+    wait_until(&format!("restart attempt {minimum}"), || {
+        attempt_count(path) >= minimum
+    })
+    .await?;
+    Ok(attempt_count(path))
+}
+
+fn acknowledge_attempt(directory: &std::path::Path, attempt: usize) -> Result<(), String> {
+    fs::write(directory.join(attempt.to_string()), b"ok")
+        .map_err(|error| format!("could not acknowledge attempt {attempt}: {error}"))
+}
+
+struct SupervisorGuard {
+    shutdown_tx: Option<watch::Sender<bool>>,
+    task: Option<JoinHandle<()>>,
+    registry: SharedProcessRegistry,
+}
+
+impl SupervisorGuard {
+    fn spawn(registry: SharedProcessRegistry, options: LifecycleOptions) -> Self {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, options)
+            .unwrap();
+        Self {
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
+            registry,
         }
-        assert!(
-            Instant::now() < deadline,
-            "expected at least {minimum} restart attempts before timeout, got {count}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    async fn stop(mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.await.unwrap();
+        }
+        stop_all(&self.registry).await;
     }
 }
 
-fn minimum_elapsed_for_attempts(options: &LifecycleOptions, attempt_count: usize) -> Duration {
-    let mut elapsed = Duration::ZERO;
-    let mut delay = options.restart_backoff_initial;
-    for _ in 1..attempt_count {
-        elapsed = elapsed.saturating_add(delay);
-        delay = delay.saturating_mul(2).min(options.restart_backoff_max);
+impl Drop for SupervisorGuard {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        if let Ok(mut registry) = self.registry.try_lock() {
+            let process_ids = registry
+                .list(None)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|process| process.id)
+                .collect::<Vec<_>>();
+            for process_id in process_ids {
+                let _ = registry.kill(process_id);
+            }
+        }
     }
-    elapsed
 }
 
-async fn stop_supervisor(
-    shutdown_tx: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
-    registry: &SharedProcessRegistry,
-) {
-    let _ = shutdown_tx.send(true);
-    task.await.unwrap();
+async fn stop_all(registry: &SharedProcessRegistry) {
     let process_ids = registry
         .lock()
         .await
@@ -157,59 +196,91 @@ async fn watched_file_restart_uses_project_relative_globs_and_configured_env() {
     registry.create(command).unwrap();
 
     let registry = Arc::new(Mutex::new(registry));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let task =
-        spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, test_options())
-            .unwrap();
-
-    wait_until(|| {
-        fs::read_to_string(&launches).is_ok_and(|contents| contents.lines().count() == 1)
-    })
+    let supervisor = SupervisorGuard::spawn(registry.clone(), test_options());
+    let outcome = async {
+        wait_until("initial watched command launch", || {
+            fs::read_to_string(&launches).is_ok_and(|contents| contents.lines().count() == 1)
+        })
+        .await?;
+        fs::write(&watched, "after")
+            .map_err(|error| format!("could not update watched fixture: {error}"))?;
+        wait_until("debounced watched command restart", || {
+            fs::read_to_string(&launches).is_ok_and(|contents| contents.lines().count() >= 2)
+        })
+        .await?;
+        fs::read_to_string(&launches)
+            .map_err(|error| format!("could not read launch records: {error}"))
+    }
     .await;
-    fs::write(&watched, "after").unwrap();
-    wait_until(|| {
-        fs::read_to_string(&launches).is_ok_and(|contents| contents.lines().count() >= 2)
-    })
-    .await;
+    supervisor.stop().await;
 
-    let contents = fs::read_to_string(&launches).unwrap();
+    let contents = outcome.expect("watched command lifecycle did not make progress");
     let launches = contents.lines().collect::<Vec<_>>();
     assert_eq!(launches.len(), 2, "one file write should be debounced");
     assert!(launches.iter().all(|line| line.ends_with(":injected")));
     assert_ne!(launches[0], launches[1]);
-
-    stop_supervisor(shutdown_tx, task, &registry).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_loop_restarts_with_backoff_instead_of_hot_spinning() {
     let (root, mut registry) = fixture();
     let attempts = root.path().join("attempts.txt");
-    let mut command = process(&root, 1, "printf x >> \"$ATTEMPTS_FILE\"; exit 7");
-    command.env = BTreeMap::from([(
-        "ATTEMPTS_FILE".into(),
-        attempts.to_string_lossy().into_owned(),
-    )]);
+    let acknowledgements = root.path().join("attempt-acknowledgements");
+    fs::create_dir(&acknowledgements).unwrap();
+    let mut command = process(
+        &root,
+        1,
+        "printf x >> \"$ATTEMPTS_FILE\"; attempt=$(( $(/usr/bin/wc -c < \"$ATTEMPTS_FILE\") )); while [ ! -f \"$ATTEMPTS_ACK_DIR/$attempt\" ]; do /bin/sleep 0.01; done; exit 7",
+    );
+    command.env = BTreeMap::from([
+        (
+            "ATTEMPTS_FILE".into(),
+            attempts.to_string_lossy().into_owned(),
+        ),
+        (
+            "ATTEMPTS_ACK_DIR".into(),
+            acknowledgements.to_string_lossy().into_owned(),
+        ),
+    ]);
     command.auto_restart = true;
     registry.create(command).unwrap();
 
     let registry = Arc::new(Mutex::new(registry));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let options = test_options();
-    let started_at = Instant::now();
-    let task =
-        spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, options.clone())
-            .unwrap();
+    let supervisor = SupervisorGuard::spawn(registry.clone(), options.clone());
+    let outcome = async {
+        let first = wait_for_attempt_count(&attempts, 1).await?;
+        acknowledge_attempt(&acknowledgements, first)?;
+        let first_acknowledged_at = Instant::now();
 
-    let count = wait_for_attempt_count(&attempts, 3).await;
-    let elapsed = started_at.elapsed();
-    let minimum_elapsed = minimum_elapsed_for_attempts(&options, count);
-    assert!(
-        elapsed >= minimum_elapsed,
-        "{count} launches occurred in {elapsed:?}, faster than the configured cumulative backoff of {minimum_elapsed:?}"
+        let second = wait_for_attempt_count(&attempts, 2).await?;
+        let first_restart_elapsed = first_acknowledged_at.elapsed();
+        acknowledge_attempt(&acknowledgements, second)?;
+        let second_acknowledged_at = Instant::now();
+
+        let third = wait_for_attempt_count(&attempts, 3).await?;
+        let second_restart_elapsed = second_acknowledged_at.elapsed();
+        Ok::<_, String>((third, first_restart_elapsed, second_restart_elapsed))
+    }
+    .await;
+    supervisor.stop().await;
+
+    let (count, first_restart_elapsed, second_restart_elapsed) =
+        outcome.expect("crash-loop lifecycle did not make progress");
+    assert_eq!(
+        count, 3,
+        "the acknowledgement handshake serializes attempts"
     );
-
-    stop_supervisor(shutdown_tx, task, &registry).await;
+    assert!(
+        first_restart_elapsed >= options.restart_backoff_initial,
+        "first restart arrived after {first_restart_elapsed:?}, before {:?}",
+        options.restart_backoff_initial
+    );
+    assert!(
+        second_restart_elapsed >= options.restart_backoff_initial.saturating_mul(2),
+        "second restart arrived after {second_restart_elapsed:?}, before {:?}",
+        options.restart_backoff_initial.saturating_mul(2)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -225,17 +296,13 @@ async fn untrusted_yml_process_never_auto_starts_or_auto_restarts() {
     registry.store().put_process(&command).unwrap();
 
     let registry = Arc::new(Mutex::new(registry));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let task =
-        spawn_lifecycle_supervisor_with_options(registry.clone(), shutdown_rx, test_options())
-            .unwrap();
+    let supervisor = SupervisorGuard::spawn(registry.clone(), test_options());
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!marker.exists());
-    assert_eq!(
-        registry.lock().await.get(1).unwrap().status,
-        ProcessStatus::Crashed
-    );
+    let marker_exists = marker.exists();
+    let status = registry.lock().await.get(1).unwrap().status;
+    supervisor.stop().await;
 
-    stop_supervisor(shutdown_tx, task, &registry).await;
+    assert!(!marker_exists);
+    assert_eq!(status, ProcessStatus::Crashed);
 }
