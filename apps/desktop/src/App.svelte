@@ -1,7 +1,7 @@
 <script lang="ts">
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
-  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+  import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import XIcon from '@lucide/svelte/icons/x';
@@ -133,9 +133,8 @@
     type ProjectTreeSelection
   } from './lib/projectTree';
   import {
-    moveTreeOrderBlock,
+    moveOrderedId,
     reorderItem,
-    siblingTarget,
     type ReorderDirection,
     type ReorderDrop
   } from './lib/reorder';
@@ -146,11 +145,10 @@
     type OptimisticProcess
   } from './lib/optimisticProcesses';
   import {
-    buildProjectRailGroups,
-    projectBranchLabel,
+    initialFlatProjectOrder,
     projectDisplayName,
     projectRepositoryTitle,
-    type ProjectRailGroup,
+    worktreeParentLabel,
     type WorktreeBranchOption,
     type WorktreeDialogSubmission,
     type WorktreeEntry,
@@ -170,7 +168,7 @@
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
   const collapsedTreeRailWidth = 54;
-  const worktreeCollapseStorageKey = 'workman.worktree.repository-collapse.v1';
+  const flatProjectOrderStorageKey = 'workman.project-rail.flat-order.v1';
 
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
@@ -238,6 +236,7 @@
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
+  let flatProjectOrderChecked = false;
   let processReorderBusy = $state(false);
   let agentCascadeRequest = $state<AgentCascadeRequest | null>(null);
   let agentCascadeBusy = $state(false);
@@ -246,7 +245,6 @@
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
-  let collapsedRepositories = $state<Record<number, boolean>>({});
   let worktreeDialog = $state<{
     mode: 'create' | 'fork' | 'adopt';
     sourceProject: Project;
@@ -283,7 +281,6 @@
   let importError = $state<string | null>(null);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
-  let projectRailGroups = $derived(buildProjectRailGroups(projects));
   let visibleProcesses = $derived([
     ...processes,
     ...optimisticProcesses.map((optimistic) => optimistic.process)
@@ -413,13 +410,17 @@
     }
   });
 
+  $effect(() => {
+    if (
+      connection.status !== 'connected'
+      || projects.length === 0
+      || flatProjectOrderChecked
+    ) return;
+    flatProjectOrderChecked = true;
+    void seedFlatProjectOrder();
+  });
+
   onMount(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(worktreeCollapseStorageKey) ?? '{}');
-      if (saved && typeof saved === 'object') collapsedRepositories = saved;
-    } catch {
-      collapsedRepositories = {};
-    }
     const projectPreference = loadPanelPreference(
       'project-rail',
       { collapsed: false, width: projectRailWidth },
@@ -2148,8 +2149,6 @@
       branch: submission.mode === 'adopt' ? null : submission.branch,
       path: submission.mode === 'adopt' ? submission.path : null
     });
-    collapsedRepositories = { ...collapsedRepositories, [state.repository.id]: false };
-    persistRepositoryCollapse();
     worktreeDialog = null;
     branchOptions = [];
     showWorktreeOperation(operation);
@@ -2264,8 +2263,6 @@
       repositoryId,
       path
     });
-    collapsedRepositories = { ...collapsedRepositories, [repositoryId]: false };
-    persistRepositoryCollapse();
     if (navigate) showWorktreeOperation(operation);
     await tick();
     try {
@@ -2291,11 +2288,8 @@
   }
 
   function handleProjectDrop(drop: ReorderDrop): void {
-    const orderedIds = moveTreeOrderBlock(
-      projects.map((project) => ({
-        id: project.id,
-        parentId: project.parent_project_id ?? null
-      })),
+    const orderedIds = moveOrderedId(
+      projects.map((project) => project.id),
       drop.sourceId,
       drop.targetId,
       drop.placement
@@ -2304,12 +2298,10 @@
   }
 
   function moveProjectFromKeyboard(projectId: number, direction: ReorderDirection): void {
-    const order = projects.map((project) => ({
-      id: project.id,
-      parentId: project.parent_project_id ?? null
-    }));
-    const targetId = siblingTarget(order, projectId, direction);
-    if (targetId === null) return;
+    const currentIndex = projects.findIndex((project) => project.id === projectId);
+    if (currentIndex < 0) return;
+    const targetId = projects[currentIndex + direction]?.id;
+    if (targetId === undefined) return;
     handleProjectDrop({
       sourceId: projectId,
       targetId,
@@ -2317,18 +2309,40 @@
     });
   }
 
-  async function persistProjectOrder(orderedIds: number[]): Promise<void> {
+  async function seedFlatProjectOrder(): Promise<void> {
+    try {
+      if (localStorage.getItem(flatProjectOrderStorageKey) === '1') return;
+    } catch {
+      // Continue with the one-time backend order when webview storage is unavailable.
+    }
+
+    const seeded = await persistProjectOrder(initialFlatProjectOrder(projects));
+    if (!seeded) {
+      flatProjectOrderChecked = false;
+      return;
+    }
+    try {
+      localStorage.setItem(flatProjectOrderStorageKey, '1');
+    } catch {
+      // The backend order is still valid for this session.
+    }
+  }
+
+  async function persistProjectOrder(orderedIds: number[]): Promise<boolean> {
     const currentIds = projects.map((project) => project.id);
-    if (projectReorderBusy || orderedIds.join(',') === currentIds.join(',')) return;
+    if (projectReorderBusy) return false;
+    if (orderedIds.join(',') === currentIds.join(',')) return true;
     const previous = projects;
     const byId = new Map(previous.map((project) => [project.id, project]));
     projects = orderedIds.map((id, sortOrder) => ({ ...byId.get(id)!, sort_order: sortOrder }));
     projectReorderBusy = true;
     try {
       projects = await client.reorderProjects(orderedIds);
+      return true;
     } catch (cause) {
       projects = previous;
       reportError(cause);
+      return false;
     } finally {
       projectReorderBusy = false;
     }
@@ -2812,38 +2826,8 @@
     return projectDisplayName(project);
   }
 
-  function projectRailLabel(project: Project, nested = false): string {
-    return nested ? projectBranchLabel(project) : projectLabel(project);
-  }
-
   function projectTitle(project: Project): string {
     return projectRepositoryTitle(project, worktreeRepositoryFor(project));
-  }
-
-  function projectReorderGroup(project: Project): string {
-    return project.parent_project_id === null
-      ? 'project-roots'
-      : `project-children:${project.parent_project_id}`;
-  }
-
-  function repositoryCollapsed(repositoryId: number | null): boolean {
-    return repositoryId !== null && collapsedRepositories[repositoryId] === true;
-  }
-
-  function toggleRepository(repositoryId: number): void {
-    collapsedRepositories = {
-      ...collapsedRepositories,
-      [repositoryId]: !collapsedRepositories[repositoryId]
-    };
-    persistRepositoryCollapse();
-  }
-
-  function persistRepositoryCollapse(): void {
-    try {
-      localStorage.setItem(worktreeCollapseStorageKey, JSON.stringify(collapsedRepositories));
-    } catch {
-      // Collapsing stays functional when webview storage is unavailable.
-    }
   }
 
   function persistProjectRail(): void {
@@ -2935,32 +2919,18 @@
   onDismiss={(id) => (agentDoneNotices = agentDoneNotices.filter((notice) => notice.id !== id))}
 />
 
-{#snippet projectRailRow(project: Project, nested: boolean, group: ProjectRailGroup)}
+{#snippet projectRailRow(project: Project)}
   {@const repository = worktreeRepositoryFor(project)}
   {@const worktree = worktreeEntryFor(project)}
-  {@const rowLabel = projectRailLabel(project, nested)}
+  {@const rowLabel = projectLabel(project)}
   {@const fullTitle = projectTitle(project)}
-  {@const projectKind = nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-  {@const hasRepositoryChildren = group.grouped || worktreeOperationsFor(group.repositoryId).length > 0}
+  {@const parentLabel = worktreeParentLabel(project, projects, repository?.name)}
+  {@const projectKind = parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
   <article
     class:active={project.selected}
-    class:nested
-    class:repository-root={!nested && project.repository_id !== null}
     class="project-row group/project group/repository"
   >
-    {#if !nested && hasRepositoryChildren && group.repositoryId !== null && !projectRailCollapsed}
-      <IconButton
-        class="ml-0.5 size-7 shrink-0 rounded-none border-r border-border"
-        label={`${repositoryCollapsed(group.repositoryId) ? 'Expand' : 'Collapse'} worktrees under ${repository?.name ?? rowLabel}`}
-        aria-expanded={!repositoryCollapsed(group.repositoryId)}
-        onclick={() => toggleRepository(group.repositoryId!)}
-      >
-        {#snippet icon()}
-          {#if repositoryCollapsed(group.repositoryId)}<ChevronRightIcon size={13} />{:else}<ChevronDownIcon size={13} />{/if}
-        {/snippet}
-      </IconButton>
-    {/if}
     {#if renameId === project.id}
       <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
         <input aria-label="Project name" bind:value={renameValue} use:focusRename onkeydown={(event) => { if (event.key === 'Escape') cancelRename(); }} />
@@ -2975,7 +2945,7 @@
           aria-label={`${fullTitle} · ${projectKind} · ${project.status}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
           use:reorderItem={{
             id: project.id,
-            group: projectReorderGroup(project),
+            group: 'projects',
             disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
             label: fullTitle,
             onDrop: handleProjectDrop,
@@ -2998,14 +2968,25 @@
                 icon={project.icon}
                 color={project.icon_color}
                 image={project.icon_image?.data_url}
-                fallback={nested ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
                 size={15}
               />
             </span>
           </span>
           <span class="project-copy">
             <strong>{rowLabel}</strong>
-            <small>{project.path}</small>
+            {#if parentLabel !== null}
+              <small
+                class="worktree-parent"
+                title={`Worktree of ${parentLabel}`}
+                aria-label={`Worktree of ${parentLabel}`}
+              >
+                <GitBranchIcon size={11} strokeWidth={1.8} aria-hidden="true" />
+                <span>Worktree of {parentLabel}</span>
+              </small>
+            {:else}
+              <small>{project.path}</small>
+            {/if}
           </span>
           {#if unreadAgentCount > 0}
             <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
@@ -3101,22 +3082,16 @@
       {#if projects.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button></div>
       {/if}
-      {#each projectRailGroups as group (group.key)}
-        {@const pendingWorktrees = worktreeOperationsFor(group.repositoryId)}
-        {@render projectRailRow(group.root, false, group)}
-        {#if (group.grouped || pendingWorktrees.length > 0) && (projectRailCollapsed || !repositoryCollapsed(group.repositoryId))}
-          <div class="repository-children" aria-label={`${worktreeRepositoryFor(group.root)?.name ?? projectLabel(group.root)} worktrees`}>
-            {#each group.children as child (child.id)}
-              {@render projectRailRow(child, true, group)}
-            {/each}
-            {#each pendingWorktrees as operation (operation.id)}
-              <WorktreeOperationRow
-                {operation}
-                collapsed={projectRailCollapsed}
-                onSelect={() => showWorktreeOperation(operation)}
-              />
-            {/each}
-          </div>
+      {#each projects as project (project.id)}
+        {@render projectRailRow(project)}
+        {#if project.parent_project_id === null}
+          {#each worktreeOperationsFor(project.repository_id) as operation (operation.id)}
+            <WorktreeOperationRow
+              {operation}
+              collapsed={projectRailCollapsed}
+              onSelect={() => showWorktreeOperation(operation)}
+            />
+          {/each}
         {/if}
       {/each}
     </div>
@@ -3531,10 +3506,6 @@
   .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
   .project-select { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
-  .repository-children { margin-left: 12px; border-left: 1px solid var(--border-token); padding-left: 3px; }
-  .project-row.nested { min-height: 34px; }
-  .project-row.nested .project-select { padding-block: 3px; }
-  .project-row.nested .project-copy small { color: var(--muted-foreground); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
@@ -3547,6 +3518,9 @@
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .project-copy .worktree-parent { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
+  .worktree-parent :global(svg) { flex: none; }
+  .worktree-parent span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
@@ -3566,10 +3540,7 @@
   .project-rail.collapsed :global(.brand-collapse) { grid-row: 3; width: 24px; height: 24px; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
-  .project-rail.collapsed .repository-children { position: relative; display: flex; flex-direction: column; gap: 2px; margin: 0 0 2px; border-left: 0; padding: 2px 0; }
-  .project-rail.collapsed .repository-children::before { position: absolute; top: 2px; bottom: 2px; left: 1px; width: 1px; background: var(--border-token); content: ''; }
   .project-rail.collapsed .project-row { width: 100%; height: 40px; min-height: 40px; flex: 0 0 40px; margin: 0; }
-  .project-rail.collapsed .project-row.nested { height: 36px; min-height: 36px; flex-basis: 36px; }
   .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }

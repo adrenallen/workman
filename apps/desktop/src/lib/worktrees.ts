@@ -134,55 +134,9 @@ export type WorktreeDialogSubmission =
     }
   | { mode: 'adopt'; path: string };
 
-export interface ProjectRailGroup {
-  key: string;
-  repositoryId: number | null;
-  root: Project;
-  children: Project[];
-  grouped: boolean;
-}
-
-export function buildProjectRailGroups(projects: Project[]): ProjectRailGroup[] {
-  const byId = new Map(projects.map((project) => [project.id, project]));
-  const groupedChildren = new Map<number, Project[]>();
-  for (const project of projects) {
-    if (project.parent_project_id === null) continue;
-    const children = groupedChildren.get(project.parent_project_id) ?? [];
-    children.push(project);
-    groupedChildren.set(project.parent_project_id, children);
-  }
-
-  const groups: ProjectRailGroup[] = [];
-  for (const project of projects) {
-    if (project.parent_project_id !== null) continue;
-    const children = groupedChildren.get(project.id) ?? [];
-    const grouped = project.repository_id !== null && children.length > 0;
-    groups.push({
-      key: grouped ? `repository:${project.repository_id}` : `project:${project.id}`,
-      repositoryId: project.repository_id,
-      root: project,
-      children,
-      grouped
-    });
-  }
-
-  // Keep orphaned links visible if their root project was removed or has not yet reconciled.
-  for (const project of projects) {
-    if (project.parent_project_id === null || byId.has(project.parent_project_id)) continue;
-    groups.push({
-      key: `project:${project.id}`,
-      repositoryId: project.repository_id,
-      root: project,
-      children: [],
-      grouped: false
-    });
-  }
-  return groups;
-}
-
 /**
  * Seed the flat rail from the former nested presentation without deriving its order again later.
- * Root order and each root's child order stay stable; orphaned worktrees remain visible at the end.
+ * Root order and each root's child order stay stable; orphaned worktrees remain visible in place.
  */
 export function initialFlatProjectOrder(projects: Project[]): number[] {
   const projectIds = new Set(projects.map((project) => project.id));
@@ -209,6 +163,18 @@ export function initialFlatProjectOrder(projects: Project[]): number[] {
     if (!added.has(project.id)) orderedIds.push(project.id);
   }
   return orderedIds;
+}
+
+/** Resolve the quiet parent label used by a flat worktree row, including orphan fallbacks. */
+export function worktreeParentLabel(
+  project: Project,
+  projects: Project[],
+  repositoryName?: string | null
+): string | null {
+  if (project.parent_project_id === null) return null;
+  const parent = projects.find((candidate) => candidate.id === project.parent_project_id);
+  if (parent) return projectDisplayName(parent);
+  return repositoryName?.trim() || repositoryNameFromProject(project);
 }
 
 export function projectBranchLabel(project: Project): string {
