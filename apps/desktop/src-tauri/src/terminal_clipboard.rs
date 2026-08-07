@@ -2,7 +2,10 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,14 +17,25 @@ const MAX_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RETAINED_FILES: usize = 64;
 const MAX_RETAINED_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 static PASTE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 #[tauri::command]
-pub fn terminal_save_clipboard_image(bytes: Vec<u8>, mime_type: String) -> Result<String, String> {
-    let directory = default_data_dir().join(CLIPBOARD_DIRECTORY);
-    let path = save_image_in(&directory, &bytes, &mime_type, SystemTime::now())?;
-    path.into_os_string()
-        .into_string()
-        .map_err(|_| "clipboard image path is not valid UTF-8".to_owned())
+pub async fn terminal_save_clipboard_image(
+    bytes: Vec<u8>,
+    mime_type: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CLIPBOARD_LOCK
+            .lock()
+            .map_err(|_| "clipboard image retention lock is poisoned".to_owned())?;
+        let directory = default_data_dir().join(CLIPBOARD_DIRECTORY);
+        let path = save_image_in(&directory, &bytes, &mime_type, SystemTime::now())?;
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| "clipboard image path is not valid UTF-8".to_owned())
+    })
+    .await
+    .map_err(|error| format!("clipboard image task failed: {error}"))?
 }
 
 fn save_image_in(

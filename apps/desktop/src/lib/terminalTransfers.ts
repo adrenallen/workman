@@ -53,6 +53,8 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
     if (inside) insertPaths(payload.paths);
   };
 
+  // Tauri's default native file-drop handler consumes OS drops before the DOM sees them.
+  // Keep it enabled for native paths and bridge its physical coordinates into this terminal.
   if (isTauri()) {
     void getCurrentWebview()
       .onDragDropEvent((event) => nativeDrop(event.payload))
