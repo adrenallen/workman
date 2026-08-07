@@ -326,6 +326,47 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     assert_eq!(created["blocker_ids"], json!([todo_id]));
     assert_eq!(created["is_blocked"], true);
 
+    let todo_reorder = rpc(
+        &mut socket,
+        "todo-reorder",
+        "coordination.todo_reorder",
+        json!({
+            "project_id": 1,
+            "ordered_ids": [created_id, todo_id, fixture_id]
+        }),
+    )
+    .await;
+    let todo_sort = todo_reorder["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|todo| {
+            (
+                todo["id"].as_i64().unwrap(),
+                todo["sort_order"].as_i64().unwrap(),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(todo_sort[&created_id], 0);
+    assert_eq!(todo_sort[&todo_id], 1);
+    assert_eq!(todo_sort[&fixture_id], 2);
+
+    let scratchpad_reorder = rpc(
+        &mut socket,
+        "scratchpad-reorder",
+        "coordination.scratchpad_reorder",
+        json!({
+            "project_id": 1,
+            "ordered_ids": [created_scratchpad["id"], scratchpad_id]
+        }),
+    )
+    .await;
+    assert_eq!(
+        scratchpad_reorder["scratchpads"][0]["id"],
+        created_scratchpad["id"]
+    );
+    assert_eq!(scratchpad_reorder["scratchpads"][0]["sort_order"], 0);
+
     let added_blocker = rpc(
         &mut socket,
         "todo-add-blocker",

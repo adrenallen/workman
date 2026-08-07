@@ -18,6 +18,12 @@ struct ProjectParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReorderParams {
+    project_id: ProjectId,
+    ordered_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TodoParams {
     project_id: ProjectId,
     todo_id: TodoId,
@@ -145,6 +151,7 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.todo_unlock" => Some(todo_unlock(params, store)),
         "coordination.todo_delete" => Some(todo_delete(params, store)),
         "coordination.todo_transfer" => Some(todo_transfer(params, store)),
+        "coordination.todo_reorder" => Some(todo_reorder(params, store)),
         "coordination.todo_set_blockers" => Some(todo_set_blockers(params, store)),
         "coordination.todo_add_blocker" => Some(todo_add_blocker(params, store)),
         "coordination.todo_remove_blocker" => Some(todo_remove_blocker(params, store)),
@@ -155,6 +162,7 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.scratchpad_set_tags" => Some(scratchpad_set_tags(params, store)),
         "coordination.scratchpad_archive" => Some(scratchpad_archive(params, store)),
         "coordination.scratchpad_delete" => Some(scratchpad_delete(params, store)),
+        "coordination.scratchpad_reorder" => Some(scratchpad_reorder(params, store)),
         _ => None,
     }
 }
@@ -359,6 +367,14 @@ fn todo_transfer(params: Value, store: &Store) -> ControlResult {
     }))
 }
 
+fn todo_reorder(params: Value, store: &Store) -> ControlResult {
+    let params: ReorderParams = params_as(params)?;
+    TodoService::new(store)
+        .reorder(params.project_id, &params.ordered_ids, now_millis())
+        .map_err(todo_error)?;
+    snapshot(json!({ "project_id": params.project_id }), store)
+}
+
 fn todo_set_blockers(params: Value, store: &Store) -> ControlResult {
     let params: SetTodoBlockersParams = params_as(params)?;
     TodoService::new(store)
@@ -429,6 +445,14 @@ fn scratchpad_create(params: Value, store: &Store) -> ControlResult {
         )
         .map(|(scratchpad, _)| json_value(scratchpad))
         .map_err(scratchpad_error)
+}
+
+fn scratchpad_reorder(params: Value, store: &Store) -> ControlResult {
+    let params: ReorderParams = params_as(params)?;
+    ScratchpadService::new(store)
+        .reorder(params.project_id, &params.ordered_ids)
+        .map_err(scratchpad_error)?;
+    snapshot(json!({ "project_id": params.project_id }), store)
 }
 
 fn scratchpad_update(params: Value, store: &Store) -> ControlResult {

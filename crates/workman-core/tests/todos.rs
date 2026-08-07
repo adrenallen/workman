@@ -380,3 +380,39 @@ fn todo_locks_are_leased_owned_and_completion_releases_only_callers_lock() {
         Some("actor-b")
     );
 }
+
+#[test]
+fn todo_sidebar_order_appends_and_preserves_completed_slots() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_project(&project(1, "one")).unwrap();
+    let service = TodoService::new(&store);
+    let first = create_todo(&service, 1, "First");
+    let second = create_todo(&service, 1, "Second");
+    let third = create_todo(&service, 1, "Third");
+
+    let reordered = service.reorder(1, &[third, first, second], NOW).unwrap();
+    assert_eq!(
+        reordered.iter().map(|todo| todo.id).collect::<Vec<_>>(),
+        [third, first, second]
+    );
+
+    service
+        .complete(1, first, "test", true, false, NOW + 1)
+        .unwrap();
+    service.reorder(1, &[second, third], NOW + 2).unwrap();
+    service
+        .complete(1, first, "test", false, false, NOW + 3)
+        .unwrap();
+    let fourth = create_todo(&service, 1, "Fourth");
+
+    let mut statement = store
+        .connection()
+        .prepare("SELECT id, sort_order FROM todos WHERE project_id = 1 ORDER BY sort_order, id")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows, [(second, 0), (first, 1), (third, 2), (fourth, 3)]);
+}

@@ -62,3 +62,54 @@ fn leading_h1_is_name_metadata_across_section_appends() -> Result<(), Box<dyn Er
     );
     Ok(())
 }
+
+#[test]
+fn scratchpad_sidebar_order_appends_and_preserves_archived_slots() -> Result<(), Box<dyn Error>> {
+    let store = Store::open_in_memory()?;
+    store.put_project(&Project {
+        id: 1,
+        path: "/tmp/workman-scratchpad-order-test".into(),
+        name: "scratchpad-order".into(),
+        display_name: None,
+        icon: None,
+        selected: true,
+        sort_order: 0,
+    })?;
+    let service = ScratchpadService::new(&store);
+    let first = service
+        .write(1, None, "First".into(), String::new(), None, None)?
+        .0;
+    let second = service
+        .write(1, None, "Second".into(), String::new(), None, None)?
+        .0;
+    let third = service
+        .write(1, None, "Third".into(), String::new(), None, None)?
+        .0;
+
+    let reordered = service.reorder(1, &[third.id, first.id, second.id])?;
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|scratchpad| scratchpad.id)
+            .collect::<Vec<_>>(),
+        [third.id, first.id, second.id]
+    );
+
+    service.archive(1, first.id, Some(first.revision))?;
+    service.reorder(1, &[second.id, third.id])?;
+    let fourth = service
+        .write(1, None, "Fourth".into(), String::new(), None, None)?
+        .0;
+
+    let mut statement = store.connection().prepare(
+        "SELECT id, sort_order FROM scratchpads WHERE project_id = 1 ORDER BY sort_order, id",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(
+        rows,
+        [(second.id, 0), (first.id, 1), (third.id, 2), (fourth.id, 3)]
+    );
+    Ok(())
+}

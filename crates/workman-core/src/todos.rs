@@ -25,6 +25,7 @@ pub struct TodoView {
     pub priority: TodoPriority,
     pub status: TodoStatus,
     pub completed: bool,
+    pub sort_order: i64,
     pub assignee: Option<String>,
     pub locked_by: Option<String>,
     pub lock_expiry: Option<i64>,
@@ -45,6 +46,7 @@ pub struct TodoSummary {
     pub priority: TodoPriority,
     pub status: TodoStatus,
     pub completed: bool,
+    pub sort_order: i64,
     pub assignee: Option<String>,
     pub locked_by: Option<String>,
     pub comment_count: usize,
@@ -64,6 +66,7 @@ impl From<TodoView> for TodoSummary {
             priority: todo.priority,
             status: todo.status,
             completed: todo.completed,
+            sort_order: todo.sort_order,
             assignee: todo.assignee,
             locked_by: todo.locked_by,
             comment_count: todo.comment_count,
@@ -268,8 +271,12 @@ impl<'store> TodoService<'store> {
         let tags = normalize_tags(todo.tags)?;
         let transaction = self.store.connection().unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO todos (project_id, title, body, status, priority, completed)
-             VALUES (?1, ?2, ?3, 'open', ?4, 0)",
+            "INSERT INTO todos (
+                project_id, title, body, status, priority, completed, sort_order
+             ) VALUES (
+                ?1, ?2, ?3, 'open', ?4, 0,
+                (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM todos WHERE project_id = ?1)
+             )",
             params![project_id, todo.title, todo.body, todo.priority],
         )?;
         let todo_id = transaction.last_insert_rowid();
@@ -490,6 +497,50 @@ impl<'store> TodoService<'store> {
             has_more,
             next_offset: has_more.then_some(end),
         })
+    }
+
+    /// Replace the manual order of open todos while preserving completed-row slots.
+    pub fn reorder(
+        &self,
+        project_id: ProjectId,
+        ordered_ids: &[TodoId],
+        now_ms: i64,
+    ) -> TodoServiceResult<Vec<TodoSummary>> {
+        self.require_project(project_id)?;
+        let mut statement = self.store.connection().prepare(
+            "SELECT id, sort_order FROM todos
+             WHERE project_id = ?1 AND completed = 0
+             ORDER BY sort_order, id",
+        )?;
+        let current = statement
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, TodoId>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        validate_reorder_ids(
+            "todo",
+            &current.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            ordered_ids,
+        )?;
+
+        let transaction = self.store.connection().unchecked_transaction()?;
+        for ((_, sort_order), todo_id) in current.iter().zip(ordered_ids) {
+            transaction.execute(
+                "UPDATE todos SET sort_order = ?1
+                 WHERE id = ?2 AND project_id = ?3 AND completed = 0",
+                params![sort_order, todo_id, project_id],
+            )?;
+        }
+        transaction.commit()?;
+
+        ordered_ids
+            .iter()
+            .map(|id| {
+                self.require_todo(project_id, *id, now_ms)
+                    .map(TodoSummary::from)
+            })
+            .collect()
     }
 
     pub fn tags_list(&self, project_id: ProjectId) -> TodoServiceResult<Vec<String>> {
@@ -857,7 +908,10 @@ impl<'store> TodoService<'store> {
         )?;
         transaction.execute(
             "UPDATE todos SET project_id = ?1, lock_actor = NULL, lock_expiry = NULL,
-                 lock_acquired_at = NULL WHERE id = ?2",
+                 lock_acquired_at = NULL,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1
+                               FROM todos WHERE project_id = ?1)
+             WHERE id = ?2",
             params![target_project_id, todo_id],
         )?;
         transaction.commit()?;
@@ -974,10 +1028,10 @@ impl<'store> TodoService<'store> {
             [todo.id],
             |row| row.get::<_, usize>(0),
         )?;
-        let assignee = self.store.connection().query_row(
-            "SELECT assignee FROM todos WHERE id = ?1",
+        let (assignee, sort_order) = self.store.connection().query_row(
+            "SELECT assignee, sort_order FROM todos WHERE id = ?1",
             [todo.id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
         )?;
         Ok(TodoView {
             id: todo.id,
@@ -987,6 +1041,7 @@ impl<'store> TodoService<'store> {
             priority: todo.priority,
             status: todo.status,
             completed: todo.completed,
+            sort_order,
             assignee,
             locked_by: todo.lock_actor,
             lock_expiry: todo.lock_expiry,
@@ -1118,6 +1173,25 @@ fn normalize_tags(tags: Vec<String>) -> TodoServiceResult<Vec<String>> {
 fn deduplicate_ids(ids: Vec<TodoId>) -> Vec<TodoId> {
     let mut seen = HashSet::new();
     ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
+fn validate_reorder_ids(
+    label: &str,
+    current_ids: &[i64],
+    ordered_ids: &[i64],
+) -> TodoServiceResult<()> {
+    let unique = ordered_ids.iter().copied().collect::<HashSet<_>>();
+    let current = current_ids.iter().copied().collect::<HashSet<_>>();
+    if ordered_ids.len() != current_ids.len()
+        || unique.len() != ordered_ids.len()
+        || unique != current
+    {
+        return Err(StoreError::InvalidReorder(format!(
+            "{label} reorder must contain every scoped ID exactly once"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn replace_tags(connection: &Connection, todo_id: TodoId, tags: &[String]) -> rusqlite::Result<()> {

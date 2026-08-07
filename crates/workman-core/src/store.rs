@@ -103,10 +103,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "human_assignment_mentions",
         include_str!("../migrations/0019_human_assignment_mentions.sql"),
     ),
+    (
+        20,
+        "sidebar_sort_order",
+        include_str!("../migrations/0020_sidebar_sort_order.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 19;
+pub const LATEST_SCHEMA_VERSION: i64 = 20;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

@@ -68,6 +68,7 @@ pub struct ScratchpadSummary {
     pub name: String,
     pub revision: i64,
     pub archived: bool,
+    pub sort_order: i64,
     pub tags: Vec<String>,
     pub matched_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,8 +276,13 @@ impl<'store> ScratchpadService<'store> {
                 self.ensure_name_available(project_id, &name, None)?;
                 let transaction = self.store.connection().unchecked_transaction()?;
                 transaction.execute(
-                    "INSERT INTO scratchpads (project_id, name, content, revision, archived)
-                     VALUES (?1, ?2, ?3, 1, 0)",
+                    "INSERT INTO scratchpads (
+                        project_id, name, content, revision, archived, sort_order
+                     ) VALUES (
+                        ?1, ?2, ?3, 1, 0,
+                        (SELECT COALESCE(MAX(sort_order), -1) + 1
+                         FROM scratchpads WHERE project_id = ?1)
+                     )",
                     params![project_id, name, content],
                 )?;
                 let id = transaction.last_insert_rowid();
@@ -607,15 +613,16 @@ impl<'store> ScratchpadService<'store> {
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
         let mut statement = self.store.connection().prepare(
-            "SELECT id FROM scratchpads WHERE project_id = ?1 AND archived = ?2 ORDER BY id DESC",
+            "SELECT id, sort_order FROM scratchpads
+             WHERE project_id = ?1 AND archived = ?2 ORDER BY sort_order, id",
         )?;
-        let ids = statement
+        let rows = statement
             .query_map(params![project_id, query.archived], |row| {
-                row.get::<_, ScratchpadId>(0)
+                Ok((row.get::<_, ScratchpadId>(0)?, row.get::<_, i64>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut matches = Vec::new();
-        for id in ids {
+        for (id, sort_order) in rows {
             let scratchpad = self.require_scratchpad(project_id, id)?;
             if !tags.is_empty()
                 && !scratchpad
@@ -645,6 +652,7 @@ impl<'store> ScratchpadService<'store> {
                 name: scratchpad.name,
                 revision: scratchpad.revision,
                 archived: scratchpad.archived,
+                sort_order,
                 tags: scratchpad.tags,
                 matched_fields,
                 match_snippet,
@@ -671,6 +679,50 @@ impl<'store> ScratchpadService<'store> {
             has_more,
             next_offset: has_more.then_some(end),
         })
+    }
+
+    /// Replace the manual order of active scratchpads while preserving archived-row slots.
+    pub fn reorder(
+        &self,
+        project_id: ProjectId,
+        ordered_ids: &[ScratchpadId],
+    ) -> ScratchpadServiceResult<Vec<ScratchpadSummary>> {
+        self.require_project(project_id)?;
+        let mut statement = self.store.connection().prepare(
+            "SELECT id, sort_order FROM scratchpads
+             WHERE project_id = ?1 AND archived = 0
+             ORDER BY sort_order, id",
+        )?;
+        let current = statement
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, ScratchpadId>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        validate_reorder_ids(
+            "scratchpad",
+            &current.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            ordered_ids,
+        )?;
+
+        let transaction = self.store.connection().unchecked_transaction()?;
+        for ((_, sort_order), scratchpad_id) in current.iter().zip(ordered_ids) {
+            transaction.execute(
+                "UPDATE scratchpads SET sort_order = ?1
+                 WHERE id = ?2 AND project_id = ?3 AND archived = 0",
+                params![sort_order, scratchpad_id, project_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(self
+            .list(
+                project_id,
+                ScratchpadListQuery {
+                    limit: Some(MAX_PAGE_SIZE),
+                    ..ScratchpadListQuery::default()
+                },
+            )?
+            .scratchpads)
     }
 
     pub fn rename(
@@ -800,7 +852,9 @@ impl<'store> ScratchpadService<'store> {
             self.require_revision(project_id, scratchpad_id, Some(expected_revision))?;
         self.ensure_name_available(target_project_id, &scratchpad.name, None)?;
         let changed = self.store.connection().execute(
-            "UPDATE scratchpads SET project_id = ?1, revision = revision + 1
+            "UPDATE scratchpads SET project_id = ?1, revision = revision + 1,
+                 sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1
+                               FROM scratchpads WHERE project_id = ?1)
              WHERE id = ?2 AND project_id = ?3 AND revision = ?4",
             params![
                 target_project_id,
@@ -1201,6 +1255,25 @@ fn content_snippet(content: &str, needle: &str) -> String {
         snippet.push('…');
     }
     snippet
+}
+
+fn validate_reorder_ids(
+    label: &str,
+    current_ids: &[i64],
+    ordered_ids: &[i64],
+) -> ScratchpadServiceResult<()> {
+    let unique = ordered_ids.iter().copied().collect::<HashSet<_>>();
+    let current = current_ids.iter().copied().collect::<HashSet<_>>();
+    if ordered_ids.len() != current_ids.len()
+        || unique.len() != ordered_ids.len()
+        || unique != current
+    {
+        return Err(StoreError::InvalidReorder(format!(
+            "{label} reorder must contain every scoped ID exactly once"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn resolve_project_file(
