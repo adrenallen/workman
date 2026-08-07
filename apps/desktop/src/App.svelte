@@ -48,6 +48,7 @@
   import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
+  import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import type { AgentTool } from './lib/agentTools';
   import {
     liveAgentDescendants,
@@ -3057,27 +3058,22 @@
     tabindex="-1"
   >
     <header class="brand" data-tauri-drag-region>
-      <div class="brand-mark" aria-hidden="true">
-        <img
-          src={workmanMark24}
-          srcset={`${workmanMark24} 1x, ${workmanMark48} 2x`}
-          width="24"
-          height="24"
-          alt=""
-          draggable="false"
-        />
-      </div>
-      <div class="notification-slot">
-        <NotificationsCenter
-          {notifications}
-          busy={notificationBusy}
-          onRefresh={() => void refreshNotifications()}
-          onOpen={openNotification}
-          onMarkRead={(notification) => void markCenterNotificationRead(notification)}
-          onMarkAll={() => void markAllNotificationsRead()}
-        />
-      </div>
-      <div class="brand-copy"><strong>Workman</strong><span>local workspaces</span></div>
+      {#if projectRailCollapsed}
+        <div class="brand-mark">
+          <img
+            src={workmanMark24}
+            srcset={`${workmanMark24} 1x, ${workmanMark48} 2x`}
+            width="24"
+            height="24"
+            alt="Workman"
+            draggable="false"
+          />
+        </div>
+      {:else}
+        <div class="brand-logo">
+          <img src={workmanLogoWide} width="108" height="54" alt="Workman" draggable="false" />
+        </div>
+      {/if}
       <IconButton
         class="brand-collapse size-7 shrink-0 rounded border border-border bg-card"
         label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
@@ -3088,6 +3084,16 @@
           {#if projectRailCollapsed}<ChevronRightIcon size={15} />{:else}<ChevronLeftIcon size={15} />{/if}
         {/snippet}
       </IconButton>
+      <div class="notification-slot">
+        <NotificationsCenter
+          {notifications}
+          busy={notificationBusy}
+          onRefresh={() => void refreshNotifications()}
+          onOpen={openNotification}
+          onMarkRead={(notification) => void markCenterNotificationRead(notification)}
+          onMarkAll={() => void markAllNotificationsRead()}
+        />
+      </div>
     </header>
 
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
@@ -3509,14 +3515,12 @@
   .project-rail, .tree-rail { position: relative; border-right: 1px solid var(--border); }
   .project-rail { display: flex; flex-direction: column; background: var(--card); }
 
-  .brand { position: relative; display: flex; min-height: 46px; align-items: center; gap: 8px; padding: 7px 7px 7px 9px; user-select: none; }
+  .brand { position: relative; display: flex; min-height: 48px; align-items: center; gap: 5px; padding: 7px 7px 7px 9px; user-select: none; }
+  .brand-logo { display: flex; min-width: 0; height: 30px; flex: 1; align-items: center; overflow: hidden; pointer-events: none; }
+  .brand-logo img { display: block; width: 108px; max-width: 100%; height: auto; flex: none; }
   .brand-mark { display: grid; width: 24px; height: 24px; flex: none; place-items: center; pointer-events: none; }
   .brand-mark img { display: block; width: 24px; height: 24px; }
   .notification-slot { display: flex; flex: none; }
-  .brand-copy { min-width: 0; flex: 1; }
-  .brand-copy strong, .brand-copy span { display: block; }
-  .brand-copy strong { color: #f3f4f6; font-size: 13px; font-weight: 680; }
-  .brand-copy span { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
 
   .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
@@ -3555,11 +3559,11 @@
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
-  .project-rail.collapsed .brand { display: grid; min-height: 54px; grid-template-columns: 28px 28px; grid-template-rows: 24px 28px; align-content: center; justify-content: center; gap: 0; padding: 1px; }
-  .project-rail.collapsed .brand-copy, .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
-  .project-rail.collapsed .brand-mark { grid-row: 1; grid-column: 1 / -1; place-self: center; }
-  .project-rail.collapsed .notification-slot { grid-row: 2; grid-column: 1; place-self: center; }
-  .project-rail.collapsed :global(.brand-collapse) { grid-row: 2; grid-column: 2; place-self: center; }
+  .project-rail.collapsed .brand { display: grid; min-height: 84px; grid-template-rows: 28px 28px 24px; align-content: center; justify-content: center; gap: 0; padding: 2px; }
+  .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
+  .project-rail.collapsed .brand-mark { grid-row: 1; place-self: center; }
+  .project-rail.collapsed .notification-slot { grid-row: 2; place-self: center; }
+  .project-rail.collapsed :global(.brand-collapse) { grid-row: 3; width: 24px; height: 24px; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
   .project-rail.collapsed .repository-children { position: relative; display: flex; flex-direction: column; gap: 2px; margin: 0 0 2px; border-left: 0; padding: 2px 0; }
