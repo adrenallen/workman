@@ -2,6 +2,7 @@
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import GitBranchIcon from '@lucide/svelte/icons/git-branch';
+  import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import XIcon from '@lucide/svelte/icons/x';
@@ -99,6 +100,14 @@
     beginOptimisticNavigation,
     selectProjectOptimistically
   } from './lib/optimisticNavigation';
+  import {
+    loadProjectPaneMemory,
+    projectPaneSelectionExists,
+    sameProjectPane,
+    saveProjectPaneMemory,
+    type ProjectPane,
+    type ProjectPaneMemory
+  } from './lib/projectPaneMemory';
   import {
     deliverNativeNotification,
     listenForNativeNotificationActions,
@@ -247,6 +256,7 @@
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
+  let projectPaneMemory = $state<ProjectPaneMemory>(loadProjectPaneMemory());
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
   let flatProjectOrderChecked = false;
@@ -408,20 +418,22 @@
       return;
     }
     if (loadedProjectId !== projectId) {
-      loadedProjectId = projectId;
-      processes = [];
-      optimisticProcesses = [];
-      coordination = null;
-      selection = null;
-      todoDetail = null;
-      scratchpadRead = null;
-      settingsOpen = false;
-      todoBrowserOpen = false;
-      scratchpadBrowserOpen = false;
-      processOverviewKind = null;
-      activeWorktreeOperationId = null;
-      void loadProject(projectId);
+      applyProjectActivationState(projectId);
+      void loadAndReconcileProject(projectId);
     }
+  });
+
+  $effect(() => {
+    const projectId = selectedProject?.id ?? null;
+    if (
+      connection.status !== 'connected'
+      || projectId === null
+      || loadedProjectId !== projectId
+    ) return;
+    const pane = currentProjectPane();
+    if (!pane || sameProjectPane(projectPaneMemory[projectId], pane)) return;
+    projectPaneMemory = { ...projectPaneMemory, [projectId]: pane };
+    saveProjectPaneMemory(projectPaneMemory);
   });
 
   $effect(() => {
@@ -1035,6 +1047,7 @@
     try {
       const target = request.target;
       const projectId = navigationProjectId(target);
+      const switchingProjects = projectId !== null && selectedProject?.id !== projectId;
       if (projectId !== null && !activateProject(projectId)) return;
 
       recordRecentNavigation(target);
@@ -1043,8 +1056,10 @@
 
       switch (target.type) {
         case 'project':
-          settingsOpen = false;
-          clearSelection();
+          if (!switchingProjects) {
+            settingsOpen = false;
+            clearSelection();
+          }
           if (selectedProject) void refreshWorktreeRepository(selectedProject, false);
           return;
         case 'item':
@@ -1123,24 +1138,20 @@
   }
 
   function applyOptimisticProjectActivation(projectId: number): void {
+    projects = selectProjectOptimistically(projects, projectId);
+    applyProjectActivationState(projectId);
+  }
+
+  function applyProjectActivationState(projectId: number): void {
     const cached = navigationIndex[projectId];
     loadedProjectId = projectId;
     processRequest += 1;
     coordinationRequest += 1;
     detailRequest += 1;
-    projects = selectProjectOptimistically(projects, projectId);
     processes = cached?.processes ?? [];
     optimisticProcesses = [];
     coordination = cached?.coordination ?? null;
-    selection = null;
-    todoDetail = null;
-    scratchpadRead = null;
-    detailLoading = false;
-    settingsOpen = false;
-    todoBrowserOpen = false;
-    scratchpadBrowserOpen = false;
-    processOverviewKind = null;
-    activeWorktreeOperationId = null;
+    applyRememberedProjectPane(projectId);
   }
 
   async function hydrateProjectActivation(
@@ -1149,12 +1160,39 @@
     projectSnapshot: Project[]
   ): Promise<void> {
     const selectionRequest = client.select(projectId);
-    void loadProject(projectId);
+    void loadAndReconcileProject(projectId);
     void refreshWorktreeMetadata(projectSnapshot);
     const selectedProjects = await selectionRequest;
     if (request !== projectActivationRequest || selectedProject?.id !== projectId) return;
     pendingProjectSelectionId = null;
     projects = selectProjectOptimistically(selectedProjects, projectId);
+  }
+
+  async function loadAndReconcileProject(projectId: number): Promise<void> {
+    await loadProject(projectId);
+    if (selectedProject?.id !== projectId || loadedProjectId !== projectId) return;
+    const pane = projectPaneMemory[projectId] ?? { type: 'overview' };
+    if (pane.type !== 'selection') return;
+
+    const snapshot = navigationIndex[projectId];
+    const exists = projectPaneSelectionExists(pane, {
+      processIds: new Set((snapshot?.processes ?? []).map((process) => process.id)),
+      todoIds: new Set((snapshot?.coordination?.todos ?? []).map((todo) => todo.id)),
+      scratchpadIds: new Set([
+        ...(snapshot?.coordination?.scratchpads ?? []),
+        ...(snapshot?.coordination?.archived_scratchpads ?? [])
+      ].map((scratchpad) => scratchpad.id))
+    });
+    if (!exists) {
+      if (selection?.projectId === projectId && selection.key === pane.selection.key) {
+        settingsOpen = false;
+        clearSelection();
+      }
+      return;
+    }
+    if (selection?.projectId !== projectId || selection.key !== pane.selection.key) return;
+    if (selection.kind === 'todo') await loadTodo(selection.id);
+    else if (selection.kind === 'scratchpad') await loadScratchpad(selection.id);
   }
 
   async function loadProject(projectId: number): Promise<void> {
@@ -1932,6 +1970,53 @@
     todoPriority = 'medium';
     todoTags = '';
     todoBlockerIds = [];
+  }
+
+  function currentProjectPane(): ProjectPane | null {
+    if (activeWorktreeOperation) return null;
+    if (settingsOpen) return { type: 'settings' };
+    if (todoBrowserOpen) return { type: 'todos' };
+    if (scratchpadBrowserOpen) return { type: 'scratchpads' };
+    if (processOverviewKind) return { type: 'processes', kind: processOverviewKind };
+    if (selection) {
+      if (selection.id <= 0) return null;
+      return { type: 'selection', selection: { ...selection } };
+    }
+    return { type: 'overview' };
+  }
+
+  function applyRememberedProjectPane(projectId: number): void {
+    const pane = projectPaneMemory[projectId] ?? { type: 'overview' };
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+    detailLoading = false;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
+    processOverviewKind = null;
+    activeWorktreeOperationId = null;
+
+    switch (pane.type) {
+      case 'selection':
+        selection = { ...pane.selection, projectId };
+        detailLoading = selection.kind === 'todo' || selection.kind === 'scratchpad';
+        return;
+      case 'todos':
+        todoBrowserOpen = true;
+        return;
+      case 'scratchpads':
+        scratchpadBrowserOpen = true;
+        return;
+      case 'processes':
+        processOverviewKind = pane.kind;
+        return;
+      case 'settings':
+        settingsOpen = true;
+        return;
+      case 'overview':
+        return;
+    }
   }
 
   function clearSelection(): void {
@@ -3362,6 +3447,14 @@
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
             </div>
           {/key}
+        {:else if selection && isProcessSelection(selection)}
+          <section class="pane-restoring" aria-live="polite" aria-busy="true">
+            <LoaderCircleIcon size={17} strokeWidth={1.8} aria-hidden="true" />
+            <div>
+              <strong>{selection.label}</strong>
+              <small>Restoring {selection.kind}…</small>
+            </div>
+          </section>
         {:else if todoBrowserOpen}
           <TodoBrowser
             project={selectedProject}
@@ -3713,6 +3806,12 @@
   .item-viewer { width: 100%; height: 100%; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden; }
   .terminal-view { position: relative; width: 100%; height: 100%; min-height: 0; max-height: 100%; overflow: hidden; padding: 5px; }
   .terminal-view > :global(.terminal-frame) { width: 100%; height: 100%; }
+  .pane-restoring { display: flex; height: 100%; align-items: center; justify-content: center; gap: 10px; color: var(--muted-foreground); }
+  .pane-restoring > :global(svg) { color: var(--agent-state-working); animation: pane-restoring-spin 800ms linear infinite; }
+  .pane-restoring strong, .pane-restoring small { display: block; font-family: var(--terminal-font-family); }
+  .pane-restoring strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 600; }
+  .pane-restoring small { margin-top: 3px; font-size: var(--font-size-xs); }
+  @keyframes pane-restoring-spin { to { transform: rotate(360deg); } }
   .onboarding { display: grid; width: min(440px, calc(100% - 36px)); place-items: start; align-content: center; margin: auto; }
   .onboarding > span { color: var(--muted); font-size: var(--font-size-sm); text-transform: uppercase; }
   .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
