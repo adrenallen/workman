@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration,
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    time::Duration,
 };
 
 use axum::http::{HeaderName, HeaderValue};
@@ -11,7 +15,9 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{AgentTool, AgentToolSource, Project};
+use workman_core::{
+    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -116,6 +122,28 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             enabled: true,
             source: AgentToolSource::Local,
         })?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 7,
+            kind: ProcessKind::Agent,
+            name: "parent-agent".into(),
+            command: Some("true".into()),
+            working_dir: project_dir.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        })?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -128,6 +156,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .auth_header(discovery.token.clone()),
     );
     let parent = ClientInfo::default().serve(parent_transport).await?;
+    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {

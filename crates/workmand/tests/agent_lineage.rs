@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap, error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration,
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    time::Duration,
 };
 
 use axum::http::{HeaderName, HeaderValue};
@@ -11,7 +15,10 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{Actor, AgentTool, AgentToolSource, Project, Timer, TimerKind};
+use workman_core::{
+    Actor, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    Timer, TimerKind,
+};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -94,6 +101,28 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
             enabled: true,
             source: AgentToolSource::Local,
         })?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 7,
+            kind: ProcessKind::Agent,
+            name: "root-agent".into(),
+            command: Some("true".into()),
+            working_dir: project_dir.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        })?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -106,6 +135,7 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
             .auth_header(discovery.token.clone()),
     );
     let root = ClientInfo::default().serve(root_transport).await?;
+    call(&root, "identify_session", json!({ "process_id": 1 })).await;
 
     let parent_context = temp.path().join("parent-context.txt");
     let parent_spawn = call(
@@ -261,7 +291,7 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
         .iter()
         .find(|view| view["id"] == terminal_id)
         .unwrap();
-    assert_eq!(parent_view["spawned_by_process_id"], Value::Null);
+    assert_eq!(parent_view["spawned_by_process_id"], 1);
     assert_eq!(first_child_view["spawned_by_process_id"], parent_id);
     assert_eq!(second_child_view["spawned_by_process_id"], parent_id);
     assert_eq!(grandchild_view["spawned_by_process_id"], first_child_id);
@@ -403,14 +433,21 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
     );
     let after_close = call(&root, "list_processes", json!({ "project_id": 7 })).await;
     let after_close = after_close["processes"].as_array().unwrap();
-    assert_eq!(after_close.len(), 2);
-    for process_id in [terminal_id, observer_id] {
+    assert_eq!(after_close.len(), 3);
+    for process_id in [1, terminal_id] {
         let survivor = after_close
             .iter()
             .find(|view| view["id"] == process_id)
             .unwrap();
         assert_eq!(survivor["spawned_by_process_id"], Value::Null);
     }
+    assert_eq!(
+        after_close
+            .iter()
+            .find(|view| view["id"] == observer_id)
+            .unwrap()["spawned_by_process_id"],
+        1
+    );
 
     let closed = call(
         &root,
@@ -423,6 +460,18 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
         &root,
         "close_process",
         json!({ "project_id": 7, "process_id": observer_id, "cascade": false }),
+    )
+    .await;
+    assert_eq!(closed["closed"], true);
+    let closed = call(
+        &root,
+        "close_process",
+        json!({
+            "project_id": 7,
+            "process_id": 1,
+            "cascade": false,
+            "confirm_self_close": true
+        }),
     )
     .await;
     assert_eq!(closed["closed"], true);

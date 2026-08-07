@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     error::Error,
     os::unix::fs::PermissionsExt,
     path::Path,
@@ -20,7 +20,10 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
-use workman_core::{AgentTool, AgentToolSource, Project, attention::AttentionState};
+use workman_core::{
+    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    attention::AttentionState,
+};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -61,6 +64,31 @@ impl Drop for HostLoad {
 
 fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().expect("arguments are an object").clone()
+}
+
+fn root_process(project_id: i64, working_dir: &Path) -> Process {
+    Process {
+        id: 1,
+        project_id,
+        kind: ProcessKind::Agent,
+        name: "test-orchestrator".into(),
+        command: Some("true".into()),
+        working_dir: working_dir.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        auto_start: false,
+        auto_restart: false,
+        restart_when_changed: Vec::new(),
+        source: ProcessSource::Local,
+        trust_hash: None,
+        status: ProcessStatus::Stopped,
+        pid: None,
+        exit_code: None,
+        exit_signal: None,
+        exited_at: None,
+        agent_tool_id: None,
+        spawned_by_process_id: None,
+        sort_order: 0,
+    }
 }
 
 async fn call_result(client: &Client, name: &'static str, args: Value) -> CallToolResult {
@@ -221,6 +249,9 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             enabled: true,
             source: AgentToolSource::Local,
         })?;
+        registry
+            .store()
+            .put_process(&root_process(7, &project_dir))?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -235,6 +266,7 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
         .auth_header(discovery.token),
     );
     let client = ClientInfo::default().serve(transport).await?;
+    call(&client, "identify_session", json!({ "process_id": 1 })).await;
 
     let spawned = call(
         &client,
@@ -390,6 +422,9 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
             enabled: true,
             source: AgentToolSource::Local,
         })?;
+        registry
+            .store()
+            .put_process(&root_process(8, &project_dir))?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -404,6 +439,7 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
         .auth_header(discovery.token),
     );
     let client = ClientInfo::default().serve(transport).await?;
+    call(&client, "identify_session", json!({ "process_id": 1 })).await;
     let spawned = call(
         &client,
         "spawn_agent",

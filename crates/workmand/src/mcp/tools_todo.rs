@@ -756,17 +756,23 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Move a todo to another project while preserving comments and completion")]
+    #[tool(
+        description = "Move a todo to another project while preserving comments and completion (cross-project transfer is unavailable to agent identities)"
+    )]
     async fn todo_transfer(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<TodoTransferArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
+        if let Err(error) = super::enforce_project_access(&registry, &actor, args.target_project_id)
+        {
+            return failure("project_scope_error", error);
+        }
         match TodoService::new(registry.store()).transfer(
             project.id,
             args.todo_id,

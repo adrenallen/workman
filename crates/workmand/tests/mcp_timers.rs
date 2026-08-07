@@ -320,6 +320,12 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
             .auth_header(discovery.token.clone()),
     );
     let other = ClientInfo::default().serve(other_transport).await?;
+    call(
+        &other,
+        "identify_session",
+        json!({ "process_id": STALLED_ID }),
+    )
+    .await;
     let other_timers = call(
         &other,
         "timer_list",

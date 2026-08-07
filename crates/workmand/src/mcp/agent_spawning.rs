@@ -21,8 +21,8 @@ use workman_core::{
 };
 
 use super::{
-    SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp, failure, scoped_project,
-    success,
+    SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp, ensure_actor, failure,
+    process_project_id, scoped_project, success,
 };
 use crate::ProcessRegistry;
 
@@ -43,7 +43,7 @@ enum SpawnKind {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpawnProcessArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
     /// Only interactive terminals and managed agents may be launched through this tool.
@@ -64,7 +64,7 @@ struct SpawnProcessArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpawnAgentArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
     agent_tool_id: AgentToolId,
@@ -95,7 +95,7 @@ struct AgentToolConfigWriteArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AgentToolDeepCheckArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
     agent_tool_id: AgentToolId,
@@ -218,14 +218,31 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Preview the complete consent-gated workman MCP config for one agent runtime"
+        description = "Preview the complete consent-gated workman MCP config for one agent runtime (global configuration is unavailable to agent identities)"
     )]
     async fn agent_tool_configure_preview(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<AgentToolConfigArgs>,
     ) -> CallToolResult {
         let tool = {
-            let registry = self.registry.lock().await;
+            let mut registry = self.registry.lock().await;
+            let (actor, _) = match ensure_actor(&mut registry, &parts) {
+                Ok(identity) => identity,
+                Err(error) => return failure("identity_error", error),
+            };
+            match process_project_id(&registry, &actor) {
+                Ok(Some(project_id)) => {
+                    return failure(
+                        "project_scope_error",
+                        format!(
+                            "agent identities are scoped to project {project_id}; inspecting global agent configuration is outside that scope"
+                        ),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => return failure("project_scope_error", error),
+            }
             match load_agent_tool(&registry, args.agent_tool_id) {
                 Ok(tool) => tool,
                 Err(error) => return failure("agent_tool_error", error),
@@ -238,14 +255,31 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Write a previously previewed agent MCP config after explicit confirmation"
+        description = "Write a previously previewed agent MCP config after explicit confirmation (global configuration is unavailable to agent identities)"
     )]
     async fn agent_tool_configure(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<AgentToolConfigWriteArgs>,
     ) -> CallToolResult {
         let tool = {
-            let registry = self.registry.lock().await;
+            let mut registry = self.registry.lock().await;
+            let (actor, _) = match ensure_actor(&mut registry, &parts) {
+                Ok(identity) => identity,
+                Err(error) => return failure("identity_error", error),
+            };
+            match process_project_id(&registry, &actor) {
+                Ok(Some(project_id)) => {
+                    return failure(
+                        "project_scope_error",
+                        format!(
+                            "agent identities are scoped to project {project_id}; changing global agent configuration is outside that scope"
+                        ),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => return failure("project_scope_error", error),
+            }
             match load_agent_tool(&registry, args.agent_tool_id) {
                 Ok(tool) => tool,
                 Err(error) => return failure("agent_tool_error", error),

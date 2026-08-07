@@ -35,6 +35,11 @@ pub(crate) enum TimerError {
     InvalidDelay,
     InvalidRepeatInterval,
     InvalidMaxWait,
+    CrossProjectTarget {
+        owner_project_id: ProjectId,
+        target_process_id: ProcessId,
+        target_project_id: ProjectId,
+    },
 }
 
 impl TimerError {
@@ -48,6 +53,7 @@ impl TimerError {
             Self::InvalidDelay => "invalid_delay",
             Self::InvalidRepeatInterval => "invalid_repeat_interval",
             Self::InvalidMaxWait => "invalid_max_wait",
+            Self::CrossProjectTarget { .. } => "timer_cross_project_target",
         }
     }
 }
@@ -68,6 +74,14 @@ impl fmt::Display for TimerError {
             Self::InvalidMaxWait => {
                 formatter.write_str("max_wait_ms must fit in a signed 64-bit value")
             }
+            Self::CrossProjectTarget {
+                owner_project_id,
+                target_process_id,
+                target_project_id,
+            } => write!(
+                formatter,
+                "agent identities are scoped to project {owner_project_id}; timer target process {target_process_id} belongs to project {target_project_id}"
+            ),
         }
     }
 }
@@ -188,6 +202,7 @@ impl<'a> TimerService<'a> {
         if repeat_every_ms.is_some_and(|interval| interval <= 0) {
             return Err(TimerError::InvalidRepeatInterval);
         }
+        self.validate_agent_targets(&owner_actor, delivery_process_id, &[])?;
         let repeating = loop_timer || repeat_every_ms.is_some();
         let repeat_interval = if repeating {
             Some(repeat_every_ms.unwrap_or(delay_ms).max(1))
@@ -235,6 +250,7 @@ impl<'a> TimerService<'a> {
         if watch_process_ids.is_empty() {
             return Err(TimerError::EmptyWatchList);
         }
+        self.validate_agent_targets(&owner_actor, delivery_process_id, &watch_process_ids)?;
         debug_assert!(matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll));
 
         let watch_process_ids = watch_process_ids
@@ -436,6 +452,21 @@ impl<'a> TimerService<'a> {
             if timer.paused || timer.fired {
                 continue;
             }
+            match self.validate_agent_targets(
+                &timer.owner_actor,
+                timer.delivery_process_id,
+                &timer.watch_process_ids,
+            ) {
+                Ok(()) => {}
+                Err(error @ TimerError::CrossProjectTarget { .. }) => {
+                    timer.fired = true;
+                    timer.fired_at = Some(now_ms);
+                    self.registry.store().put_timer(&timer)?;
+                    eprintln!("quarantined invalid timer {}: {error}", timer.id);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             let mut runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
             let mut reason = None;
             let mut transitioned_process_ids = Vec::new();
@@ -527,6 +558,39 @@ impl<'a> TimerService<'a> {
             .ok_or(TimerError::NotFound(timer_id))?;
         debug_assert_eq!(delivery.id, timer.delivery_process_id);
         Ok(timer)
+    }
+
+    fn validate_agent_targets(
+        &self,
+        owner_actor: &str,
+        delivery_process_id: ProcessId,
+        watch_process_ids: &[ProcessId],
+    ) -> TimerResult<()> {
+        let Some(actor) = self.registry.store().get_actor(owner_actor)? else {
+            return Ok(());
+        };
+        let Some(owner_process_id) = actor.process_id else {
+            return Ok(());
+        };
+        let Some(owner_process) = self.registry.store().get_process(owner_process_id)? else {
+            return Ok(());
+        };
+        let owner_project_id = owner_process.project_id;
+        for target_process_id in
+            std::iter::once(delivery_process_id).chain(watch_process_ids.iter().copied())
+        {
+            let Some(target_process) = self.registry.store().get_process(target_process_id)? else {
+                continue;
+            };
+            if target_process.project_id != owner_project_id {
+                return Err(TimerError::CrossProjectTarget {
+                    owner_project_id,
+                    target_process_id,
+                    target_project_id: target_process.project_id,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn next_timer_id(&self) -> TimerResult<TimerId> {
@@ -967,6 +1031,105 @@ mod tests {
             .list("actor-delay", PROJECT_ID, 10, 1_050)
             .unwrap();
         assert!(timers[0].timer.fired);
+    }
+
+    #[test]
+    fn agent_timers_reject_cross_project_targets_and_quarantine_legacy_rows() {
+        const FOREIGN_PROJECT_ID: ProjectId = 2;
+        const FOREIGN_PROCESS_ID: ProcessId = 30;
+        let mut registry = test_registry(false);
+        registry
+            .store()
+            .put_project(&Project {
+                id: FOREIGN_PROJECT_ID,
+                path: "/tmp/foreign".into(),
+                name: "foreign".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 1,
+            })
+            .unwrap();
+        let mut foreign = process(FOREIGN_PROCESS_ID, "foreign-agent", "sleep 30", None);
+        foreign.project_id = FOREIGN_PROJECT_ID;
+        registry.create(foreign).unwrap();
+        registry
+            .store()
+            .put_actor(&Actor {
+                id: "jailed-timer-owner".into(),
+                session_id: "jailed-timer-session".into(),
+                process_id: Some(DELIVERY_ID),
+                selected_project_id: Some(PROJECT_ID),
+                created_at: 1_000,
+                last_seen_at: 1_000,
+            })
+            .unwrap();
+
+        let delivery_error = TimerService::new(&mut registry)
+            .set_delay(
+                "jailed-timer-owner".into(),
+                FOREIGN_PROCESS_ID,
+                "must not deliver".into(),
+                1,
+                false,
+                None,
+                1_000,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            delivery_error,
+            TimerError::CrossProjectTarget {
+                target_process_id: FOREIGN_PROCESS_ID,
+                ..
+            }
+        ));
+
+        let watch_error = TimerService::new(&mut registry)
+            .set_idle(
+                "jailed-timer-owner".into(),
+                DELIVERY_ID,
+                "must not watch".into(),
+                TimerKind::IdleAny,
+                vec![FOREIGN_PROCESS_ID],
+                1_000,
+                1_000,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            watch_error,
+            TimerError::CrossProjectTarget {
+                target_process_id: FOREIGN_PROCESS_ID,
+                ..
+            }
+        ));
+
+        registry
+            .store()
+            .put_timer(&Timer {
+                id: 999,
+                owner_actor: "jailed-timer-owner".into(),
+                delivery_process_id: FOREIGN_PROCESS_ID,
+                body: "legacy escape".into(),
+                kind: TimerKind::Delay,
+                watch_process_ids: Vec::new(),
+                interval_ms: None,
+                repeating: false,
+                max_wait_deadline: Some(1_000),
+                paused: false,
+                fired: false,
+                fired_at: None,
+                created_at: 900,
+            })
+            .unwrap();
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(1_001)
+                .unwrap()
+                .is_empty()
+        );
+        let quarantined = registry.store().get_timer(999).unwrap().unwrap();
+        assert!(quarantined.fired);
+        assert_eq!(quarantined.fired_at, Some(1_001));
     }
 
     #[test]

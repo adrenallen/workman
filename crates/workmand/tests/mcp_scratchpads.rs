@@ -1,4 +1,4 @@
-use std::{error::Error, fs};
+use std::{collections::BTreeMap, error::Error, fs};
 
 use rmcp::{
     ServiceExt,
@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::Project;
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -89,6 +89,28 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             selected: false,
             sort_order: 0,
         })?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "scratchpad-agent".into(),
+            command: Some("true".into()),
+            working_dir: first_path.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        })?;
         registry.store().put_project(&Project {
             id: 2,
             path: second_path.to_string_lossy().into_owned(),
@@ -107,8 +129,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
     let second = connect(endpoint, discovery.token.clone()).await?;
-    call(&first, "select_project", json!({ "project_id": 1 })).await;
-    call(&second, "select_project", json!({ "project_id": 1 })).await;
+    call(&first, "identify_session", json!({ "process_id": 1 })).await;
+    call(&second, "identify_session", json!({ "process_id": 1 })).await;
 
     let tools = first.list_all_tools().await?;
     let append_section_tool = tools
@@ -502,7 +524,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let listed = call(&first, "scratchpad_list", json!({})).await;
     assert_eq!(listed["total_count"], 1, "archived scratchpad is hidden");
 
-    let transferred = call(
+    let transferred = invoke(
         &first,
         "scratchpad_transfer",
         json!({
@@ -512,26 +534,23 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         }),
     )
     .await;
-    assert_eq!(transferred["target_project_id"], 2);
-    assert_eq!(transferred["revision"], 2);
+    assert_error_code(&transferred, "project_scope_error");
     let cleared = call(
         &first,
         "scratchpad_clear",
         json!({
-            "project_id": 2,
             "scratchpad_id": imported_id,
-            "expected_revision": 2
+            "expected_revision": 1
         }),
     )
     .await;
-    assert_eq!(cleared["revision"], 3);
+    assert_eq!(cleared["revision"], 2);
     call(
         &first,
         "scratchpad_delete",
         json!({
-            "project_id": 2,
             "scratchpad_id": imported_id,
-            "expected_revision": 3
+            "expected_revision": 2
         }),
     )
     .await;

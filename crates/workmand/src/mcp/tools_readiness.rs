@@ -17,7 +17,7 @@ use crate::{DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService};
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ServicesListArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
 }

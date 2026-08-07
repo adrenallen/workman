@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{collections::BTreeMap, error::Error};
 
 use rmcp::{
     ServiceExt,
@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{NotificationType, Project};
+use workman_core::{NotificationType, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -65,6 +65,28 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             selected: false,
             sort_order: 0,
         })?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "todo-agent".into(),
+            command: Some("true".into()),
+            working_dir: first_path.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        })?;
         registry.store().put_project(&Project {
             id: 2,
             path: second_path.to_string_lossy().into_owned(),
@@ -83,8 +105,8 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
     let second = connect(endpoint, discovery.token.clone()).await?;
-    call(&first, "select_project", json!({ "project_id": 1 })).await;
-    call(&second, "select_project", json!({ "project_id": 1 })).await;
+    call(&first, "identify_session", json!({ "process_id": 1 })).await;
+    call(&second, "identify_session", json!({ "process_id": 1 })).await;
     let first_identity = call(&first, "whoami", json!({})).await;
     let second_identity = call(&second, "whoami", json!({})).await;
     assert_ne!(first_identity["actor_id"], second_identity["actor_id"]);
@@ -265,34 +287,25 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     assert_eq!(listed["total_count"], 1);
     assert_eq!(listed["has_more"], false);
 
-    call(
+    let transfer = invoke(
         &first,
         "todo_transfer",
         json!({ "todo_id": todo_id, "target_project_id": 2 }),
     )
     .await;
-    let transferred = call(
-        &first,
-        "todo_get",
-        json!({ "project_id": 2, "todo_id": todo_id, "include_comments": true }),
-    )
-    .await;
-    assert_eq!(transferred["todo"]["completed"], true);
-    assert_eq!(transferred["todo"]["locked_by"], Value::Null);
-    assert_eq!(transferred["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(transfer.is_error, Some(true));
+    assert_eq!(
+        transfer.structured_content.unwrap()["code"],
+        "project_scope_error"
+    );
 
     call(
         &first,
         "todo_comment_delete",
-        json!({ "project_id": 2, "comment_id": comment_id }),
+        json!({ "comment_id": comment_id }),
     )
     .await;
-    call(
-        &first,
-        "todo_delete",
-        json!({ "project_id": 2, "todo_id": todo_id }),
-    )
-    .await;
+    call(&first, "todo_delete", json!({ "todo_id": todo_id })).await;
 
     let _ = first.cancel().await;
     let _ = second.cancel().await;

@@ -1,5 +1,6 @@
 use std::{
-    env, error::Error, ffi::OsString, fs, os::unix::fs::PermissionsExt, path::Path, time::Duration,
+    collections::BTreeMap, env, error::Error, ffi::OsString, fs, os::unix::fs::PermissionsExt,
+    path::Path, time::Duration,
 };
 
 use rmcp::{
@@ -10,7 +11,9 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{AgentTool, AgentToolSource, Project};
+use workman_core::{
+    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_CONFIG_ENV};
 
 struct EnvGuard {
@@ -42,6 +45,31 @@ impl Drop for EnvGuard {
 
 fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().expect("tool arguments object").clone()
+}
+
+fn root_process(project_id: i64, working_dir: &Path) -> Process {
+    Process {
+        id: 1,
+        project_id,
+        kind: ProcessKind::Agent,
+        name: "test-orchestrator".into(),
+        command: Some("true".into()),
+        working_dir: working_dir.to_string_lossy().into_owned(),
+        env: BTreeMap::new(),
+        auto_start: false,
+        auto_restart: false,
+        restart_when_changed: Vec::new(),
+        source: ProcessSource::Local,
+        trust_hash: None,
+        status: ProcessStatus::Stopped,
+        pid: None,
+        exit_code: None,
+        exit_signal: None,
+        exited_at: None,
+        agent_tool_id: None,
+        spawned_by_process_id: None,
+        sort_order: 0,
+    }
 }
 
 async fn call(
@@ -288,6 +316,9 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             enabled: true,
             source: AgentToolSource::Local,
         })?;
+        registry
+            .store()
+            .put_process(&root_process(77, &project_path))?;
         (claude_id, codex_id)
     };
 
@@ -301,6 +332,7 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
         StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
     );
     let parent = ClientInfo::default().serve(transport).await?;
+    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     for (name, tool_id) in [("claude", claude_id), ("codex", codex_id)] {
         let launched = call(
@@ -390,6 +422,9 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
             selected: false,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .put_process(&root_process(424, &project_path))?;
         let tools = registry.store().list_agent_tools()?;
         (
             tools.iter().find(|tool| tool.name == "Claude").unwrap().id,
@@ -407,6 +442,7 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
         StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
     );
     let parent = ClientInfo::default().serve(transport).await?;
+    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
     let prompt = "Use only the MCP server named workman. Call whoami once. When it identifies you, print exactly WORKMAN_REAL_YOLO_OK and exit.";
 
     for (name, tool_id, extra_args) in [

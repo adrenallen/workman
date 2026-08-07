@@ -1,6 +1,12 @@
 #![cfg(unix)]
 
-use std::{collections::HashMap, error::Error, path::Path, process::Command, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use rmcp::{
@@ -15,7 +21,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use workman_core::Project;
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -36,11 +42,10 @@ async fn call(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Result<(), Box<dyn Error>>
-{
+async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let main = temp.path().join("rpc-repo");
-    let managed = temp.path().join("managed");
     let external = temp.path().join("external");
     git(temp.path(), &["init", "-b", "main", main.to_str().unwrap()])?;
     git(&main, &["config", "user.email", "fixture@example.test"])?;
@@ -78,6 +83,28 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
             selected: true,
             sort_order: 0,
         })?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "worktree-agent".into(),
+            command: Some("true".into()),
+            working_dir: std::fs::canonicalize(&main)?.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 0,
+        })?;
         workmand::worktrees::reconcile_existing_projects(registry.store())?;
     }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -91,6 +118,7 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
             .auth_header(discovery.token.clone()),
     );
     let client = ClientInfo::default().serve(transport).await?;
+    call(&client, "identify_session", json!({ "process_id": 1 })).await;
     let names = client
         .list_all_tools()
         .await?
@@ -114,7 +142,8 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
 
     let listed = call(&client, "worktree_list", json!({ "project_id": 1 })).await;
     assert_eq!(listed["repository"]["name"], "rpc-repo");
-    assert_eq!(listed["worktrees"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["worktrees"][0]["project_id"], 1);
     assert!(listed["repository"]["herd"]["available"].is_boolean());
     assert!(listed["pull_requests"]["available"].is_boolean());
     assert!(listed["pull_requests"]["checked_at"].is_number());
@@ -126,52 +155,29 @@ async fn mcp_drives_worktree_cycle_and_ws_exposes_the_same_repository() -> Resul
         check["detail"].is_string() && check["fix_hint"].is_string() || check["fix_hint"].is_null()
     }));
 
-    let adopted = call(
-        &client,
-        "worktree_adopt",
-        json!({ "path": external, "preferences": { "env_policy": "link" } }),
-    )
-    .await;
-    assert_eq!(adopted["project"]["name"], "rpc-repo: external");
-    assert_eq!(adopted["worktree"]["kind"], "adopted");
-    assert_eq!(adopted["repository"]["preferences"]["env_policy"], "link");
-
-    let created = call(
-        &client,
-        "worktree_create",
-        json!({
-            "project_id": 1,
-            "branch": "rpc-created",
-            "from_ref": "main",
-            "managed_root": managed,
-            "preferences": { "herd_enabled": "no" }
-        }),
-    )
-    .await;
-    let created_id = created["project"]["id"].as_i64().unwrap();
-    assert_eq!(created["project"]["parent_project_id"], 1);
-    assert_eq!(created["worktree"]["kind"], "managed");
-
-    let rejected = client
-        .call_tool(
-            CallToolRequestParams::new("worktree_remove").with_arguments(arguments(json!({
-                "project_id": created_id
-            }))),
-        )
-        .await?;
-    assert_eq!(rejected.is_error, Some(true));
-    assert_eq!(
-        rejected.structured_content.unwrap()["code"],
-        "confirmation_required"
-    );
-    let removed = call(
-        &client,
-        "worktree_remove",
-        json!({ "project_id": created_id, "confirm_remove": true }),
-    )
-    .await;
-    assert_eq!(removed["removed"], true);
-    assert_eq!(removed["branch_kept"], true);
+    for (tool, args) in [
+        (
+            "worktree_adopt",
+            json!({ "path": external, "preferences": { "env_policy": "link" } }),
+        ),
+        (
+            "worktree_create",
+            json!({ "project_id": 1, "branch": "rpc-created", "from_ref": "main" }),
+        ),
+        (
+            "worktree_fork",
+            json!({ "project_id": 1, "branch": "rpc-forked" }),
+        ),
+    ] {
+        let rejected = client
+            .call_tool(CallToolRequestParams::new(tool).with_arguments(arguments(args)))
+            .await?;
+        assert_eq!(rejected.is_error, Some(true));
+        assert_eq!(
+            rejected.structured_content.unwrap()["code"],
+            "project_scope_error"
+        );
+    }
 
     // The WebSocket control plane exposes canonical dotted names and returns
     // the same project-parent/branch-enriched model.

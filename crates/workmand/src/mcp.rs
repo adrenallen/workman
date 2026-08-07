@@ -147,7 +147,7 @@ struct HelpArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ProjectScopeArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
 }
@@ -157,6 +157,7 @@ struct ProjectSelectArgs {
     project_id: ProjectId,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ProjectCreateArgs {
     /// Existing directory to register. It is canonicalized before persistence.
@@ -243,6 +244,23 @@ impl WorkmanMcp {
             Err(error) => return failure("identity_error", error),
         };
         if let Some(process) = existing_process {
+            if args.process_id != process.id {
+                let target_detail = match registry.store().get_process(args.process_id) {
+                    Ok(Some(target)) => format!(
+                        "target process {} belongs to project {}",
+                        target.id, target.project_id
+                    ),
+                    Ok(None) => format!("target process {} was not found", args.process_id),
+                    Err(error) => return failure("store_error", error.to_string()),
+                };
+                return failure(
+                    "identity_scope_error",
+                    format!(
+                        "agent identities are scoped to project {} and bound to process {}; {target_detail}; this MCP identity cannot be retargeted",
+                        process.project_id, process.id
+                    ),
+                );
+            }
             let effective_project_id = resolve_project_id(&registry, &actor, None).ok();
             return success(IdentityResult {
                 actor_id: actor.id,
@@ -264,6 +282,7 @@ impl WorkmanMcp {
             Err(error) => return failure("store_error", error.to_string()),
         };
         actor.process_id = Some(process.id);
+        actor.selected_project_id = Some(process.project_id);
         actor.last_seen_at = now_millis();
         if let Err(error) = registry.store().put_actor(&actor) {
             return failure("store_error", error.to_string());
@@ -284,16 +303,16 @@ impl WorkmanMcp {
         let topic = args.topic.as_deref().unwrap_or("setup");
         let text = match topic {
             "setup" => {
-                "Connect to /mcp with Streamable HTTP. Daemon-spawned agents send x-workman-mcp-token; external clients use the daemon bearer token then identify_session."
+                "Connect to /mcp with Streamable HTTP. Daemon-spawned agents send x-workman-mcp-token and are automatically jailed to their owning project. External MCP clients use the daemon bearer token, then must call identify_session before project-scoped work."
             }
             "identity" => {
-                "whoami auto-resolves a process token. identify_session is the explicit fallback for externally launched sessions."
+                "whoami auto-resolves a process token. identify_session is the explicit fallback for externally launched agents. Once identified with a process, an MCP identity cannot be retargeted and can act or read only inside that process's project."
             }
             "scoping" => {
-                "Project-scoped tools resolve explicit project_id first, then the session-selected project, then the identified process's project."
+                "Agent identities are jailed by the daemon to their owning project: list_projects returns only that project, cross-project project_id overrides and indirect process/timer/transfer targets are rejected, select_project cannot escape the jail, and project-creating/global-config tools are unavailable. Unidentified bearer sessions may use discovery/help, but must call identify_session before project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
             }
             "projects" => {
-                "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Delete always requires confirm_delete and active processes require confirm_stop_running."
+                "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Agent identities see and target only their owning project and cannot register a new project. Delete always requires confirm_delete and active processes require confirm_stop_running."
             }
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
@@ -334,10 +353,23 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "List all registered projects")]
-    async fn list_projects(&self) -> CallToolResult {
-        let registry = self.registry.lock().await;
-        match registry.store().list_projects() {
+    #[tool(
+        description = "List registered projects visible to this identity (agents see only their owning project)"
+    )]
+    async fn list_projects(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (_actor, process) = match ensure_actor(&mut registry, &parts) {
+            Ok(identity) => identity,
+            Err(error) => return failure("identity_error", error),
+        };
+        let projects = match process {
+            Some(process) => registry
+                .store()
+                .get_project(process.project_id)
+                .map(|project| project.into_iter().collect()),
+            None => registry.store().list_projects(),
+        };
+        match projects {
             Ok(projects) => match crate::worktrees::project_envelopes(registry.store(), projects) {
                 Ok(projects) => success(json!({ "projects": projects })),
                 Err(error) => failure(error.code(), error.to_string()),
@@ -346,7 +378,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Select the effective project for this MCP session")]
+    #[tool(
+        description = "Select the effective project (agent identities cannot select outside their owning project)"
+    )]
     async fn select_project(
         &self,
         Extension(parts): Extension<Parts>,
@@ -357,6 +391,9 @@ impl WorkmanMcp {
             Ok(identity) => identity,
             Err(error) => return failure("identity_error", error),
         };
+        if let Err(error) = enforce_project_access(&registry, &actor, args.project_id) {
+            return failure("project_scope_error", error);
+        }
         let project = match registry.store().get_project(args.project_id) {
             Ok(Some(project)) => project,
             Ok(None) => {
@@ -443,65 +480,31 @@ impl WorkmanMcp {
         }))
     }
 
-    #[tool(description = "Register an existing directory as a project")]
+    #[tool(
+        description = "Register an existing directory as a project (user control only; agent identities cannot create project scope)"
+    )]
     async fn create_project(
         &self,
-        Parameters(args): Parameters<ProjectCreateArgs>,
+        Extension(parts): Extension<Parts>,
+        Parameters(_args): Parameters<ProjectCreateArgs>,
     ) -> CallToolResult {
-        let canonical = match std::fs::canonicalize(&args.path) {
-            Ok(path) if path.is_dir() => path,
-            Ok(_) => return failure("invalid_project_path", "project path is not a directory"),
-            Err(error) => return failure("invalid_project_path", error.to_string()),
+        let mut registry = self.registry.lock().await;
+        let (actor, _) = match ensure_actor(&mut registry, &parts) {
+            Ok(identity) => identity,
+            Err(error) => return failure("identity_error", error),
         };
-        let default_name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("project")
-            .to_owned();
-        let name = args.name.unwrap_or(default_name);
-        if name.trim().is_empty() {
-            return failure("invalid_project_name", "project name must not be empty");
-        }
-        let registry = self.registry.lock().await;
-        let canonical = canonical.to_string_lossy().into_owned();
-        match registry.store().list_projects() {
-            Ok(projects) => {
-                if let Some(project) = projects
-                    .into_iter()
-                    .find(|project| project.path == canonical)
-                {
-                    return match crate::worktrees::project_envelope(registry.store(), project) {
-                        Ok(project) => success(project),
-                        Err(error) => failure(error.code(), error.to_string()),
-                    };
-                }
-            }
-            Err(error) => return failure("store_error", error.to_string()),
-        }
-        let project = Project {
-            id: match registry.store().next_project_id() {
-                Ok(id) => id,
-                Err(error) => return failure("store_error", error.to_string()),
-            },
-            path: canonical,
-            name,
-            display_name: args.display_name,
-            icon: args.icon,
-            selected: false,
-            sort_order: match registry.store().next_project_sort_order() {
-                Ok(sort_order) => sort_order,
-                Err(error) => return failure("store_error", error.to_string()),
-            },
-        };
-        match registry.store().put_project(&project) {
-            Ok(()) => {
-                let _ = crate::worktrees::reconcile_existing_projects(registry.store());
-                match crate::worktrees::project_envelope(registry.store(), project) {
-                    Ok(project) => success(project),
-                    Err(error) => failure(error.code(), error.to_string()),
-                }
-            }
-            Err(error) => failure("project_create_failed", error.to_string()),
+        match process_project_id(&registry, &actor) {
+            Ok(Some(project_id)) => failure(
+                "project_scope_error",
+                format!(
+                    "agent identities are scoped to project {project_id}; creating another project is outside that scope"
+                ),
+            ),
+            Ok(None) => failure(
+                "identity_required",
+                "MCP session has no process identity; call identify_session before project-scoped actions (project registration remains available through the authenticated UI/CLI control channel)",
+            ),
+            Err(error) => failure("project_scope_error", error),
         }
     }
 
@@ -610,7 +613,7 @@ impl ServerHandler for WorkmanMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("workman", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "Workman workspace control. Call whoami first; project tools use explicit, selected, then owning-project scope. {HUMAN_HANDOFF_GUIDANCE}"
+                "Workman workspace control. Call whoami first. Agent identities are daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions must call identify_session before project-scoped work. {HUMAN_HANDOFF_GUIDANCE}"
             ))
     }
 }
@@ -656,6 +659,7 @@ fn ensure_actor(
         });
     if let Some(process) = &token_process {
         actor.process_id = Some(process.id);
+        actor.selected_project_id = Some(process.project_id);
     }
     actor.last_seen_at = now;
     registry
@@ -693,33 +697,59 @@ fn resolve_project_id(
     actor: &Actor,
     explicit_project_id: Option<ProjectId>,
 ) -> Result<ProjectId, String> {
-    if let Some(project_id) = explicit_project_id {
-        return registry
-            .store()
-            .get_project(project_id)
-            .map_err(|error| error.to_string())?
-            .map(|project| project.id)
-            .ok_or_else(|| format!("project {project_id} was not found"));
+    if let Some(owning_project_id) = process_project_id(registry, actor)? {
+        if let Some(project_id) = explicit_project_id
+            && project_id != owning_project_id
+        {
+            return Err(agent_project_scope_error(owning_project_id, project_id));
+        }
+        return Ok(owning_project_id);
     }
-    if let Some(project_id) = actor.selected_project_id
-        && registry
-            .store()
-            .get_project(project_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-    {
-        return Ok(project_id);
-    }
-    let process_id = actor.process_id.ok_or_else(|| {
-        "session has no selected or owning project; call select_project or identify_session"
-            .to_owned()
-    })?;
+    Err(
+        "MCP session has no process identity; call identify_session before project-scoped actions"
+            .to_owned(),
+    )
+}
+
+fn process_project_id(
+    registry: &ProcessRegistry,
+    actor: &Actor,
+) -> Result<Option<ProjectId>, String> {
+    let Some(process_id) = actor.process_id else {
+        return Ok(None);
+    };
     registry
         .store()
         .get_process(process_id)
         .map_err(|error| error.to_string())?
-        .map(|process| process.project_id)
-        .ok_or_else(|| format!("process {process_id} was not found"))
+        .map(|process| Some(process.project_id))
+        .ok_or_else(|| format!("identified process {process_id} was not found"))
+}
+
+fn enforce_project_access(
+    registry: &ProcessRegistry,
+    actor: &Actor,
+    requested_project_id: ProjectId,
+) -> Result<(), String> {
+    match process_project_id(registry, actor)? {
+        Some(owning_project_id) if owning_project_id != requested_project_id => Err(
+            agent_project_scope_error(owning_project_id, requested_project_id),
+        ),
+        Some(_) => Ok(()),
+        None => Err(
+            "MCP session has no process identity; call identify_session before project-scoped actions"
+                .to_owned(),
+        ),
+    }
+}
+
+fn agent_project_scope_error(
+    owning_project_id: ProjectId,
+    requested_project_id: ProjectId,
+) -> String {
+    format!(
+        "agent identities are scoped to project {owning_project_id}; project {requested_project_id} is outside that scope"
+    )
 }
 
 fn success(value: impl Serialize) -> CallToolResult {

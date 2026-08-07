@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::{collections::BTreeMap, error::Error, time::Duration};
 
 use rmcp::{
     ServiceExt,
@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::Project;
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -50,13 +50,37 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     let discovery = server.discovery().clone();
     {
         let registry = server.registry();
-        registry.lock().await.store().put_project(&Project {
+        let registry = registry.lock().await;
+        let project = Project {
             id: 1,
             path: project_path.to_string_lossy().into_owned(),
             name: "project".into(),
             display_name: None,
             icon: None,
             selected: false,
+            sort_order: 0,
+        };
+        registry.store().put_project(&project)?;
+        registry.store().put_process(&Process {
+            id: 1,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "lock-agent".into(),
+            command: Some("true".into()),
+            working_dir: project.path,
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
             sort_order: 0,
         })?;
     }
@@ -68,8 +92,8 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
     let second = connect(endpoint, discovery.token.clone()).await?;
-    call(&first, "select_project", json!({ "project_id": 1 })).await;
-    call(&second, "select_project", json!({ "project_id": 1 })).await;
+    call(&first, "identify_session", json!({ "process_id": 1 })).await;
+    call(&second, "identify_session", json!({ "process_id": 1 })).await;
     let first_actor = call(&first, "whoami", json!({})).await["actor_id"]
         .as_str()
         .unwrap()

@@ -26,7 +26,7 @@ const FRESH_RAW_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ProjectScopeArgs {
-    /// Explicit project override. Otherwise selected project, then owning project is used.
+    /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
 }
@@ -272,7 +272,21 @@ impl WorkmanMcp {
         let cascade = args.cascade.unwrap_or(true);
         let descendants = if cascade {
             match registry.live_agent_descendants(process.id) {
-                Ok(descendants) => descendants,
+                Ok(descendants) => {
+                    if let Some(descendant) = descendants
+                        .iter()
+                        .find(|descendant| descendant.project_id != process.project_id)
+                    {
+                        return failure(
+                            "project_scope_error",
+                            format!(
+                                "agent identities are scoped to project {}; descendant process {} belongs to project {} and cannot be controlled by this request",
+                                process.project_id, descendant.id, descendant.project_id
+                            ),
+                        );
+                    }
+                    descendants
+                }
                 Err(error) => return registry_failure(error),
             }
         } else {
@@ -672,10 +686,10 @@ fn resolve_process(
 
     if process.project_id != project.id {
         return Err((
-            "process_not_in_project",
+            "project_scope_error",
             format!(
-                "process {} belongs to project {}, not effective project {}",
-                process.id, process.project_id, project.id
+                "agent identities are scoped to project {}; process {} belongs to project {}",
+                project.id, process.id, process.project_id
             ),
         ));
     }
@@ -739,6 +753,24 @@ async fn lifecycle(
         Ok(resolved) => resolved,
         Err(error) => return target_failure(error),
     };
+    if matches!(action, LifecycleAction::Stop) && cascade {
+        let descendants = match registry.live_agent_descendants(process.id) {
+            Ok(descendants) => descendants,
+            Err(error) => return registry_failure(error),
+        };
+        if let Some(descendant) = descendants
+            .iter()
+            .find(|descendant| descendant.project_id != process.project_id)
+        {
+            return failure(
+                "project_scope_error",
+                format!(
+                    "agent identities are scoped to project {}; descendant process {} belongs to project {} and cannot be controlled by this request",
+                    process.project_id, descendant.id, descendant.project_id
+                ),
+            );
+        }
+    }
     let result = match action {
         LifecycleAction::Start => registry.start(process.id),
         LifecycleAction::Stop => registry.stop_with_descendants(process.id, cascade),

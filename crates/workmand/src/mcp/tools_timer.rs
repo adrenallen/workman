@@ -358,10 +358,10 @@ fn delivery_process(
         .map_err(|error| (error.code(), error.to_string()))?;
     if process.project_id != project.id {
         return Err((
-            "process_not_in_project",
+            "project_scope_error",
             format!(
-                "delivery process {} belongs to project {}, not effective project {}",
-                process.id, process.project_id, project.id
+                "agent identities are scoped to project {}; delivery process {} belongs to project {}",
+                project.id, process.id, process.project_id
             ),
         ));
     }
@@ -398,6 +398,17 @@ fn resolve_watch_processes(
             }
         };
         let process = if let Some(process_id) = process_id {
+            if let Ok(process) = registry.get(process_id)
+                && process.project_id != project.id
+            {
+                return Err((
+                    "project_scope_error",
+                    format!(
+                        "agent identities are scoped to project {}; watched process {} belongs to project {}",
+                        project.id, process.id, process.project_id
+                    ),
+                ));
+            }
             processes.iter().find(|process| process.id == process_id)
         } else if let Some(process_name) = process_name.as_deref() {
             processes

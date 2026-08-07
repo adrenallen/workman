@@ -1,6 +1,6 @@
 //! MCP Git-worktree discovery and lifecycle tools.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 use axum::http::request::Parts;
 use rmcp::{
@@ -11,10 +11,8 @@ use rmcp::{
 use serde::Deserialize;
 use workman_core::ProjectId;
 
-use super::{WorkmanMcp, failure, scoped_project, success};
-use crate::worktrees::{
-    self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, RemoveWorktree, WorktreeError,
-};
+use super::{WorkmanMcp, ensure_actor, failure, process_project_id, scoped_project, success};
+use crate::worktrees::{self, EnvPortPolicy, RemoveWorktree, WorktreeError};
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct WorktreeListArgs {
@@ -26,6 +24,7 @@ struct WorktreeListArgs {
     refresh_pull_requests: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WorktreeCreateArgs {
     /// A project in the source repository. Otherwise uses normal MCP project scope.
@@ -50,6 +49,7 @@ struct WorktreeCreateArgs {
     remember_env_policy: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WorktreeForkArgs {
     /// Selected source worktree. The new branch starts at this worktree's exact HEAD.
@@ -75,6 +75,7 @@ struct WorktreeForgetEnvArgs {
     project_id: Option<ProjectId>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WorktreeAdoptArgs {
     /// Existing Git worktree (or a directory inside it) to register without moving it.
@@ -124,13 +125,17 @@ impl WorkmanMcp {
         )
         .await
         {
-            Ok(list) => success(list),
+            Ok(mut list) => {
+                list.worktrees
+                    .retain(|worktree| worktree.project_id == Some(project_id));
+                success(list)
+            }
             Err(error) => worktree_failure(error),
         }
     }
 
     #[tool(
-        description = "Create or check out a branch as a managed linked worktree and register it as a Workman project named <repo>: <branch>"
+        description = "Create a managed worktree project through user control; project-jailed agent identities are rejected"
     )]
     async fn worktree_create(
         &self,
@@ -141,27 +146,16 @@ impl WorkmanMcp {
             Ok(project_id) => project_id,
             Err(result) => return result,
         };
-        match worktrees::create(
-            &self.registry,
-            CreateWorktree {
-                source_project_id: project_id,
-                branch: args.branch,
-                from_ref: args.from_ref,
-                managed_root: args.managed_root.map(PathBuf::from),
-                preferences: args.preferences,
-                env_policy: args.env_policy,
-                remember_env_policy: args.remember_env_policy,
-            },
+        failure(
+            "project_scope_error",
+            format!(
+                "agent identities are scoped to project {project_id}; creating a worktree project is outside that scope"
+            ),
         )
-        .await
-        {
-            Ok(created) => success(created),
-            Err(error) => worktree_failure(error),
-        }
     }
 
     #[tool(
-        description = "Fork again from a selected worktree's exact current HEAD into a new managed branch/project"
+        description = "Fork a managed worktree project through user control; project-jailed agent identities are rejected"
     )]
     async fn worktree_fork(
         &self,
@@ -172,22 +166,12 @@ impl WorkmanMcp {
             Ok(project_id) => project_id,
             Err(result) => return result,
         };
-        match worktrees::fork(
-            &self.registry,
-            ForkWorktree {
-                source_project_id: project_id,
-                branch: args.branch,
-                managed_root: args.managed_root.map(PathBuf::from),
-                preferences: args.preferences,
-                env_policy: args.env_policy,
-                remember_env_policy: args.remember_env_policy,
-            },
+        failure(
+            "project_scope_error",
+            format!(
+                "agent identities are scoped to project {project_id}; forking a worktree project is outside that scope"
+            ),
         )
-        .await
-        {
-            Ok(created) => success(created),
-            Err(error) => worktree_failure(error),
-        }
     }
 
     #[tool(
@@ -216,23 +200,30 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Register an existing Git worktree as an adopted workman project without creating a branch or moving files"
+        description = "Adopt a Git worktree project through user control; project-jailed agent identities are rejected"
     )]
     async fn worktree_adopt(
         &self,
-        Parameters(args): Parameters<WorktreeAdoptArgs>,
+        Extension(parts): Extension<Parts>,
+        Parameters(_args): Parameters<WorktreeAdoptArgs>,
     ) -> CallToolResult {
-        match worktrees::adopt(
-            &self.registry,
-            AdoptWorktree {
-                path: PathBuf::from(args.path),
-                preferences: args.preferences,
-            },
-        )
-        .await
-        {
-            Ok(adopted) => success(adopted),
-            Err(error) => worktree_failure(error),
+        let mut registry = self.registry.lock().await;
+        let (actor, _) = match ensure_actor(&mut registry, &parts) {
+            Ok(identity) => identity,
+            Err(error) => return failure("identity_error", error),
+        };
+        match process_project_id(&registry, &actor) {
+            Ok(Some(project_id)) => failure(
+                "project_scope_error",
+                format!(
+                    "agent identities are scoped to project {project_id}; adopting another worktree project is outside that scope"
+                ),
+            ),
+            Ok(None) => failure(
+                "identity_required",
+                "MCP session has no process identity; call identify_session before project-scoped actions",
+            ),
+            Err(error) => failure("project_scope_error", error),
         }
     }
 
