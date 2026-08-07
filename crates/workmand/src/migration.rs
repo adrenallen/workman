@@ -9,7 +9,7 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::{DATABASE_FILE, DISCOVERY_FILE, user_config};
+use crate::{DATABASE_FILE, DISCOVERY_FILE, MCP_ENDPOINT_FILE, user_config};
 
 const LEGACY_APP_NAMES: [&str; 2] = ["awm", "gbuild"];
 const LEGACY_DATABASE_FILES: [&str; 2] = ["awm.sqlite3", "gbuild.sqlite3"];
@@ -62,8 +62,9 @@ pub(crate) fn platform_data_dir(app_name: &str) -> PathBuf {
 ///
 /// The copy is staged beside `destination` and renamed into place so a failed
 /// copy never leaves a partially migrated database. The old discovery record
-/// is intentionally omitted; the new daemon always publishes its own token,
-/// port, and PID. SQLite files are renamed to the workman filename as they move.
+/// is intentionally omitted; the new identity establishes its own persistent
+/// MCP endpoint and publishes a current PID. SQLite files are renamed to the
+/// workman filename as they move.
 pub fn migrate_legacy_data_dir(legacy: &Path, destination: &Path) -> io::Result<bool> {
     if !legacy.is_dir() || !destination_is_absent_or_empty(destination)? {
         return Ok(false);
@@ -114,7 +115,10 @@ fn copy_directory_contents(source: &Path, destination: &Path, root: bool) -> io:
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let original_name = entry.file_name();
-        if root && original_name == OsStr::new(DISCOVERY_FILE) {
+        if root
+            && (original_name == OsStr::new(DISCOVERY_FILE)
+                || original_name == OsStr::new(MCP_ENDPOINT_FILE))
+        {
             continue;
         }
         let file_type = entry.file_type()?;
@@ -197,6 +201,7 @@ mod tests {
             fs::write(legacy.join(format!("{legacy_database}-wal")), b"wal").unwrap();
             fs::write(legacy.join("config.yml"), b"agent_tools: []\n").unwrap();
             fs::write(legacy.join(DISCOVERY_FILE), b"stale").unwrap();
+            fs::write(legacy.join(MCP_ENDPOINT_FILE), b"stale-endpoint").unwrap();
 
             assert!(migrate_legacy_data_dir(&legacy, &destination).unwrap());
             assert_eq!(
@@ -209,6 +214,7 @@ mod tests {
             );
             assert!(destination.join("config.yml").is_file());
             assert!(!destination.join(DISCOVERY_FILE).exists());
+            assert!(!destination.join(MCP_ENDPOINT_FILE).exists());
             assert!(legacy.join(legacy_database).is_file());
             assert!(!migrate_legacy_data_dir(&legacy, &destination).unwrap());
         }

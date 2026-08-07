@@ -56,6 +56,14 @@ auto-spawn unless one of those data-directory boundaries is explicit. Supplying 
 only chooses the executable and does not satisfy the isolation guard. Help, version, and update
 commands do not target a daemon and remain available.
 
+Each data directory keeps its MCP port and bearer credential in a private
+`mcp-endpoint.json` file. The first daemon start selects a free loopback port; later starts reuse
+that port and token so configured and already-running agent clients reconnect after an update.
+Stable, development, and isolated automation data directories therefore remain independent. If a
+persisted port is unexpectedly occupied, the daemon fails with the exact port and state path
+instead of silently changing the endpoint. Starting `workmand --port PORT` once explicitly moves
+that identity to a chosen free port while preserving its bearer token.
+
 ## Side-by-side development build
 
 Keep the stable release open while testing the current checkout with the isolated development

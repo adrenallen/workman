@@ -114,6 +114,9 @@ const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
 /// The name of the secure daemon discovery file in the workman data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
 
+/// The private port and bearer credential retained across daemon restarts.
+pub const MCP_ENDPOINT_FILE: &str = "mcp-endpoint.json";
+
 /// The SQLite state file stored beside daemon discovery metadata.
 pub const DATABASE_FILE: &str = "workman.sqlite3";
 
@@ -164,6 +167,56 @@ impl Discovery {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PersistentMcpEndpoint {
+    port: u16,
+    token: String,
+}
+
+impl PersistentMcpEndpoint {
+    fn endpoint(&self) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, self.port))
+    }
+
+    fn read(data_dir: &Path) -> io::Result<Option<Self>> {
+        let path = mcp_endpoint_path(data_dir);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        ensure_private_file(&path)?;
+        let endpoint: Self = serde_json::from_slice(&bytes).map_err(invalid_data)?;
+        if endpoint.port == 0 || endpoint.token.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} has an invalid port or token; remove it only if all MCP clients can be reconfigured",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(Some(endpoint))
+    }
+
+    fn publish(&self, data_dir: &Path) -> io::Result<()> {
+        let path = mcp_endpoint_path(data_dir);
+        let temporary = data_dir.join(format!(
+            ".{MCP_ENDPOINT_FILE}.{}.{}.tmp",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ));
+        let bytes = serde_json::to_vec(self).map_err(invalid_data)?;
+        write_private_file(&temporary, &bytes)?;
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        set_private_permissions(&path)?;
+        Ok(())
+    }
+}
+
 /// A bound server. Constructing this value writes its secure discovery file.
 pub struct DaemonServer {
     listener: TcpListener,
@@ -177,7 +230,7 @@ pub struct DaemonServer {
 }
 
 impl DaemonServer {
-    /// Bind only IPv4 loopback and publish the selected port and a fresh bearer token.
+    /// Bind only IPv4 loopback and publish this identity's stable port and bearer token.
     pub async fn bind(config: DaemonConfig) -> io::Result<Self> {
         let started_at = Instant::now();
         migration::migrate_default_paths_if_needed(&config.data_dir)?;
@@ -210,11 +263,68 @@ impl DaemonServer {
         // Build the HTTP update client before publishing discovery so readiness never advertises
         // a listener that is still loading platform TLS state.
         let updates = updates::UpdateService::new(&config.data_dir).map_err(io::Error::other)?;
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
+        let persisted = PersistentMcpEndpoint::read(&config.data_dir).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not read persistent MCP endpoint {}: {error}",
+                    mcp_endpoint_path(&config.data_dir).display()
+                ),
+            )
+        })?;
+        // During the first upgrade to persistent endpoints, a prior daemon generation may still
+        // have left valid discovery behind (for example while its live MCP connection drains).
+        // Adopt that address and credential once so the upgrade itself can be seamless too.
+        let persisted = persisted.or_else(|| {
+            Discovery::read(&config.data_dir)
+                .ok()
+                .map(|discovery| PersistentMcpEndpoint {
+                    port: discovery.port,
+                    token: discovery.token,
+                })
+        });
+        let requested_port = if config.port == 0 {
+            persisted.as_ref().map_or(0, |endpoint| endpoint.port)
+        } else {
+            config.port
+        };
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, requested_port))
+            .await
+            .map_err(|error| {
+                let source = if config.port != 0 {
+                    "configured"
+                } else if persisted.is_some() {
+                    "persisted"
+                } else {
+                    "ephemeral"
+                };
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not bind {source} Workman MCP port {requested_port} on 127.0.0.1: {error}; another identity or process may be using it. Stop that process or explicitly choose a free --port (the daemon will persist the override in {})",
+                        mcp_endpoint_path(&config.data_dir).display()
+                    ),
+                )
+            })?;
         let port = listener.local_addr()?.port();
+        let token = persisted.map_or_else(new_token, |endpoint| endpoint.token);
+        PersistentMcpEndpoint {
+            port,
+            token: token.clone(),
+        }
+        .publish(&config.data_dir)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not persist stable Workman MCP endpoint {}: {error}",
+                    mcp_endpoint_path(&config.data_dir).display()
+                ),
+            )
+        })?;
         let discovery = Discovery {
             port,
-            token: new_token(),
+            token,
             pid: std::process::id(),
         };
         let discovery_guard = DiscoveryGuard::publish(&config.data_dir, &discovery)?;
@@ -984,6 +1094,10 @@ pub fn discovery_path(data_dir: impl AsRef<Path>) -> PathBuf {
     data_dir.as_ref().join(DISCOVERY_FILE)
 }
 
+pub fn mcp_endpoint_path(data_dir: impl AsRef<Path>) -> PathBuf {
+    data_dir.as_ref().join(MCP_ENDPOINT_FILE)
+}
+
 pub fn database_path(data_dir: impl AsRef<Path>) -> PathBuf {
     data_dir.as_ref().join(DATABASE_FILE)
 }
@@ -999,6 +1113,7 @@ pub fn default_data_dir() -> PathBuf {
 struct DiscoveryGuard {
     path: PathBuf,
     token: String,
+    pid: u32,
 }
 
 impl DiscoveryGuard {
@@ -1022,17 +1137,19 @@ impl DiscoveryGuard {
         Ok(Self {
             path,
             token: discovery.token.clone(),
+            pid: discovery.pid,
         })
     }
 }
 
 impl Drop for DiscoveryGuard {
     fn drop(&mut self) {
-        // Never remove a newer daemon's discovery file if it replaced ours.
+        // The bearer token is intentionally stable now, so PID is the generation marker that
+        // prevents an old daemon from removing a replacement daemon's discovery record.
         let ours = std::fs::read(&self.path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Discovery>(&bytes).ok())
-            .is_some_and(|discovery| discovery.token == self.token);
+            .is_some_and(|discovery| discovery.token == self.token && discovery.pid == self.pid);
         if ours {
             let _ = std::fs::remove_file(&self.path);
         }
@@ -1118,6 +1235,20 @@ pub async fn discover_or_spawn(
         && probe(&discovery).await
     {
         return Ok(discovery);
+    }
+
+    if let Some(endpoint) = PersistentMcpEndpoint::read(data_dir)?
+        && TcpStream::connect(endpoint.endpoint()).await.is_ok()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "persisted Workman MCP port {} from {} is already in use, but no authenticated daemon discovery is available; stop the occupying process or run workmand --data-dir {} --port PORT once with a free port",
+                endpoint.port,
+                mcp_endpoint_path(data_dir).display(),
+                data_dir.display()
+            ),
+        ));
     }
 
     let mut child = Command::new(daemon_executable.as_ref())
@@ -1646,12 +1777,181 @@ mod tests {
         let path = discovery_path(&server.data_dir);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        let endpoint_path = mcp_endpoint_path(&server.data_dir);
+        let endpoint_mode = std::fs::metadata(&endpoint_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(endpoint_mode, 0o600);
         assert_eq!(Discovery::read(&server.data_dir).unwrap(), server.discovery);
         assert!(probe(&server.discovery).await);
 
         let data_dir = server.data_dir.clone();
         server.stop().await;
-        assert!(!discovery_path(data_dir).exists());
+        assert!(!discovery_path(&data_dir).exists());
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoint_survives_restart_and_stays_isolated_by_data_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary_dir = temp.path().join("com.workman.todo462");
+        let secondary_dir = temp.path().join("com.workman.todo462.second");
+
+        let first = DaemonServer::bind(DaemonConfig {
+            data_dir: primary_dir.clone(),
+            port: 0,
+        })
+        .await
+        .unwrap();
+        let original = first.discovery().clone();
+        let (shutdown, receive_shutdown) = oneshot::channel();
+        let task = tokio::spawn(first.serve_until(async move {
+            let _ = receive_shutdown.await;
+        }));
+        assert!(probe(&original).await);
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let restarted = DaemonServer::bind(DaemonConfig {
+            data_dir: primary_dir.clone(),
+            port: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(restarted.discovery().port, original.port);
+        assert_eq!(restarted.discovery().token, original.token);
+        assert_eq!(
+            mcp_connection_info(restarted.discovery()),
+            mcp_connection_info(&original),
+            "runtime-doctor and setup output must remain byte-stable across restart"
+        );
+        let restarted_discovery = restarted.discovery().clone();
+        let (shutdown, receive_shutdown) = oneshot::channel();
+        let task = tokio::spawn(restarted.serve_until(async move {
+            let _ = receive_shutdown.await;
+        }));
+        assert!(
+            probe(&original).await,
+            "the pre-restart URL and bearer token must authenticate to the restarted daemon"
+        );
+
+        let secondary = DaemonServer::bind(DaemonConfig {
+            data_dir: secondary_dir,
+            port: 0,
+        })
+        .await
+        .unwrap();
+        assert_ne!(secondary.discovery().port, restarted_discovery.port);
+        assert_ne!(secondary.discovery().token, restarted_discovery.token);
+        drop(secondary);
+
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let blocker = TcpListener::bind((Ipv4Addr::LOCALHOST, original.port))
+            .await
+            .unwrap();
+        let error = match DaemonServer::bind(DaemonConfig {
+            data_dir: primary_dir.clone(),
+            port: 0,
+        })
+        .await
+        {
+            Ok(_) => panic!("a persisted port conflict must not silently choose another port"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert!(error.to_string().contains("persisted Workman MCP port"));
+        assert!(error.to_string().contains(&original.port.to_string()));
+        let spawn_error = discover_or_spawn(
+            &primary_dir,
+            temp.path().join("daemon-should-not-be-spawned"),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(spawn_error.kind(), io::ErrorKind::AddrInUse);
+        assert!(
+            spawn_error
+                .to_string()
+                .contains("no authenticated daemon discovery")
+        );
+        drop(blocker);
+
+        let free = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let override_port = free.local_addr().unwrap().port();
+        drop(free);
+        let overridden = DaemonServer::bind(DaemonConfig {
+            data_dir: primary_dir.clone(),
+            port: override_port,
+        })
+        .await
+        .unwrap();
+        assert_eq!(overridden.discovery().port, override_port);
+        assert_eq!(overridden.discovery().token, original.token);
+        drop(overridden);
+
+        let after_override = DaemonServer::bind(DaemonConfig {
+            data_dir: primary_dir,
+            port: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(after_override.discovery().port, override_port);
+        assert_eq!(after_override.discovery().token, original.token);
+    }
+
+    #[test]
+    fn old_discovery_guard_cannot_remove_a_new_pid_with_the_persistent_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = Discovery {
+            port: 41_700,
+            token: "persistent-token".to_owned(),
+            pid: 100,
+        };
+        let old_guard = DiscoveryGuard::publish(temp.path(), &old).unwrap();
+        let new = Discovery { pid: 101, ..old };
+        let _new_guard = DiscoveryGuard::publish(temp.path(), &new).unwrap();
+
+        drop(old_guard);
+        assert_eq!(Discovery::read(temp.path()).unwrap(), new);
+    }
+
+    #[tokio::test]
+    async fn first_persistent_boot_adopts_existing_discovery_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let free = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let previous = Discovery {
+            port,
+            token: "pre-persistence-token".to_owned(),
+            pid: 100,
+        };
+        let previous_guard = DiscoveryGuard::publish(temp.path(), &previous).unwrap();
+
+        let upgraded = DaemonServer::bind(DaemonConfig {
+            data_dir: temp.path().to_path_buf(),
+            port: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(upgraded.discovery().port, previous.port);
+        assert_eq!(upgraded.discovery().token, previous.token);
+        assert_eq!(
+            PersistentMcpEndpoint::read(temp.path()).unwrap(),
+            Some(PersistentMcpEndpoint {
+                port: previous.port,
+                token: previous.token.clone(),
+            })
+        );
+
+        drop(previous_guard);
+        assert_eq!(
+            Discovery::read(temp.path()).unwrap(),
+            upgraded.discovery().clone()
+        );
     }
 
     #[tokio::test]
