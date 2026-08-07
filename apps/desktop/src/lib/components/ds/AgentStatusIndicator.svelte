@@ -106,6 +106,27 @@
   [data-state='working'] { color: var(--success); }
   [data-state='needs_input'] { color: var(--warning-token); }
   [data-state='waiting'] { color: var(--information); }
+  [data-state='waiting'] .status-glyph {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--information);
+    color: var(--information-foreground);
+  }
+  [data-state='waiting'] .status-glyph :global(svg) {
+    width: 9px;
+    height: 9px;
+    stroke-width: 2.2;
+  }
+  [data-state='waiting'][data-size='lg'] .status-glyph {
+    width: 25px;
+    height: 25px;
+  }
+  [data-state='waiting'][data-size='lg'] .status-glyph :global(svg) {
+    width: 13px;
+    height: 13px;
+  }
   [data-state='exited'] { color: var(--destructive); }
 
   @media (prefers-reduced-motion: no-preference) {

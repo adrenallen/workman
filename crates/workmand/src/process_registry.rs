@@ -487,6 +487,7 @@ impl ProcessRegistry {
                     "SELECT timer.id,
                             timer.kind,
                             COALESCE(runtime.due_at, timer.max_wait_deadline, timer.created_at),
+                            timer.created_at,
                             timer.paused,
                             runtime.paused_at,
                             timer.watch_list
@@ -515,9 +516,10 @@ impl ProcessRegistry {
                         row.get::<_, i64>(0)?,
                         row.get::<_, TimerKind>(1)?,
                         row.get::<_, i64>(2)?,
-                        row.get::<_, bool>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 })
                 .map_err(StoreError::from)?;
@@ -530,7 +532,7 @@ impl ProcessRegistry {
 
         let now = now_millis();
         let mut reasons = Vec::with_capacity(rows.len());
-        for (timer_id, kind, due_at, paused, paused_at, watch_list) in rows {
+        for (timer_id, kind, due_at, created_at, paused, paused_at, watch_list) in rows {
             let watch_process_ids: Vec<ProcessId> =
                 serde_json::from_str(&watch_list).map_err(StoreError::from)?;
             let mut watch_processes = Vec::with_capacity(watch_process_ids.len());
@@ -554,6 +556,7 @@ impl ProcessRegistry {
                 timer_id,
                 kind,
                 due_at,
+                max_wait_ms: due_at.saturating_sub(created_at).max(0),
                 remaining_ms: due_at.saturating_sub(clock).max(0),
                 paused,
                 watch_processes,

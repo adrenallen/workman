@@ -192,6 +192,7 @@ export interface AgentWaitingReason {
   timer_id: number;
   kind: 'delay' | 'idle_any' | 'idle_all';
   due_at: number;
+  max_wait_ms: number;
   remaining_ms: number;
   paused: boolean;
   watch_processes: AgentWaitingProcess[];

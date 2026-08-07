@@ -138,6 +138,7 @@
   });
 
   let agents = $derived(processes.filter((process) => process.kind === 'agent'));
+  let waitingAgents = $derived(agents.filter((process) => process.agent_state.state === 'waiting'));
   let terminals = $derived(processes.filter((process) => process.kind === 'terminal'));
   let commands = $derived(processes.filter((process) => process.kind === 'command'));
   let openTodos = $derived(todos.filter((todo) => !todo.completed));
@@ -510,7 +511,14 @@
             title={`Browse all ${groupLabel[group].toLowerCase()}`}
             onclick={() => openGroup(group)}
           >
-            <span class="group-icon" aria-hidden="true"><GroupIcon size={14} strokeWidth={1.8} /></span>
+            <span class="group-icon">
+              <GroupIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+              {#if collapsed && group === 'agents' && waitingAgents[0]}
+                <span class="collapsed-agent-waiting">
+                  <AgentStatusIndicator process={waitingAgents[0]} />
+                </span>
+              {/if}
+            </span>
             <strong>{groupLabel[group]}</strong>
           </button>
           <span class="group-badges">
@@ -806,6 +814,7 @@
   .project-tree.collapsed .group-title strong,
   .project-tree.collapsed .group-header :global(.badge) { display: none; }
   .project-tree.collapsed .group-title { width: 100%; grid-template-columns: 1fr; justify-items: center; }
-  .project-tree.collapsed .group-icon { font-size: var(--font-size-sm); }
+  .project-tree.collapsed .group-icon { position: relative; font-size: var(--font-size-sm); }
+  .project-tree.collapsed .collapsed-agent-waiting { position: absolute; top: -7px; right: -10px; }
   .project-tree.collapsed .tree-footer { justify-content: center; padding-inline: 4px; }
 </style>

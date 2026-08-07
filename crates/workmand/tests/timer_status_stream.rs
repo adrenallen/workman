@@ -86,12 +86,14 @@ impl TestServer {
                 "while IFS= read -r line; do printf 'received:[%s]\\n' \"$line\"; done",
                 None,
             ))?;
-            registry.create(process(
+            let mut worker = process(
                 WORKER_ID,
                 "worker",
                 "printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = go ]; then printf 'thinking...\\nesc to interrupt\\n'; sleep 0.7; printf '❯\\n'; fi; done",
                 Some(90),
-            ))?;
+            );
+            worker.spawned_by_process_id = Some(DELIVERY_ID);
+            registry.create(worker)?;
             registry.create(process(STALLED_ID, "stalled", "sleep 30", None))?;
             registry.start(DELIVERY_ID)?;
             registry.start(WORKER_ID)?;
@@ -254,6 +256,13 @@ fn has_timer(event: &Value, timer_id: i64) -> bool {
         .is_some_and(|timers| timers.iter().any(|timer| timer["id"] == timer_id))
 }
 
+fn process_status(event: &Value, process_id: i64) -> Option<&Value> {
+    event["processes"]
+        .as_array()?
+        .iter()
+        .find(|process| process["id"] == process_id)
+}
+
 fn lifecycle(event: &Value, kind: &str, timer_id: Option<i64>, reason: Option<&str>) -> bool {
     event["timer_events"].as_array().is_some_and(|events| {
         events.iter().any(|candidate| {
@@ -285,6 +294,98 @@ async fn wait_for_state(
         }
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
+}
+
+#[tokio::test]
+async fn parent_waiting_on_working_child_reaches_every_status_consumer()
+-> Result<(), Box<dyn Error>> {
+    let server = TestServer::start().await?;
+    wait_for_state(&server.registry, DELIVERY_ID, AttentionState::Idle).await?;
+    wait_for_state(&server.registry, WORKER_ID, AttentionState::Idle).await?;
+    let (mut socket, _) = connect_async(server.ws_request()).await?;
+    subscribe(&mut socket).await?;
+    let client = server.mcp_client().await?;
+
+    call(
+        &client,
+        "send_input",
+        json!({ "process_id": WORKER_ID, "input": "go" }),
+    )
+    .await;
+    wait_for_state(&server.registry, WORKER_ID, AttentionState::Working).await?;
+
+    let idle = call(
+        &client,
+        "timer_fire_when_idle_any",
+        json!({
+            "processes": [WORKER_ID],
+            "max_wait_ms": 12_000,
+            "body": "child finished",
+        }),
+    )
+    .await;
+    let timer_id = idle["timer"]["id"].as_i64().unwrap();
+    let waiting = next_timer_status(&mut socket, |event| {
+        has_timer(event, timer_id)
+            && process_status(event, DELIVERY_ID)
+                .is_some_and(|process| process["agent_state"]["state"] == "waiting")
+            && process_status(event, WORKER_ID)
+                .is_some_and(|process| process["agent_state"]["state"] == "working")
+    })
+    .await?;
+
+    let parent = process_status(&waiting, DELIVERY_ID).unwrap();
+    let child = process_status(&waiting, WORKER_ID).unwrap();
+    assert_eq!(parent["agent_state"]["waiting"], true);
+    assert_eq!(parent["agent_state"]["waiting_on"][0]["timer_id"], timer_id);
+    assert_eq!(
+        parent["agent_state"]["waiting_on"][0]["max_wait_ms"],
+        12_000
+    );
+    assert_eq!(
+        parent["agent_state"]["waiting_on"][0]["watch_processes"][0]["process_name"],
+        "worker"
+    );
+    assert_eq!(child["agent_state"]["watched"], true);
+    assert_ne!(child["agent_state"]["state"], "waiting");
+
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    {
+        let mut registry = server.registry.lock().await;
+        assert_eq!(
+            registry.get_status(WORKER_ID)?.agent_state.state,
+            AttentionState::Working,
+            "the child's transient prompt must remain debounced"
+        );
+        assert!(
+            registry
+                .store()
+                .get_timer(timer_id)?
+                .is_some_and(|timer| !timer.fired),
+            "the parent's timer must remain pending during the transient prompt"
+        );
+    }
+
+    wait_for_state(&server.registry, WORKER_ID, AttentionState::Idle).await?;
+    let delivered = next_timer_status(&mut socket, |event| {
+        !has_timer(event, timer_id)
+            && lifecycle(event, "fired", Some(timer_id), Some("idle_transition"))
+            && process_status(event, DELIVERY_ID).is_some_and(|process| {
+                process["agent_state"]["state"] != "waiting"
+                    && process["agent_state"]["waiting_on"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+            })
+    })
+    .await?;
+    assert_eq!(
+        process_status(&delivered, WORKER_ID).unwrap()["agent_state"]["state"],
+        "idle"
+    );
+
+    client.cancel().await?;
+    server.stop().await?;
+    Ok(())
 }
 
 #[tokio::test]

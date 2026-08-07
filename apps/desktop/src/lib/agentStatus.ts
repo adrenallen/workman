@@ -72,7 +72,8 @@ function waitingLabel(process: ProcessView): string {
   const names = reason.watch_processes.map((watched) => watched.process_name);
   const joiner = reason.kind === 'idle_all' ? ' and ' : ' or ';
   const watched = names.length > 0 ? names.join(joiner) : 'watched processes';
-  return `${process.name} · waiting: watching ${watched} for idle${more}`;
+  const watchKind = reason.kind === 'idle_all' ? 'all-idle watch' : 'idle watch';
+  return `${process.name} · waiting: ${watched} (${watchKind}, max ${formatDuration(reason.max_wait_ms)})${more}`;
 }
 
 function formatRemaining(milliseconds: number): string {
@@ -80,6 +81,16 @@ function formatRemaining(milliseconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${(seconds % 60).toString().padStart(2, '0')}`;
+}
+
+function formatDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder === 0 ? `${hours}h` : `${hours}h ${remainder}m`;
 }
 
 function exitLabel(process: ProcessView): string {

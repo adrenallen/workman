@@ -53,6 +53,8 @@ pub struct AgentWaitingReason {
     pub timer_id: TimerId,
     pub kind: TimerKind,
     pub due_at: i64,
+    /// Original hard-stop window chosen when the timer was armed.
+    pub max_wait_ms: i64,
     pub remaining_ms: i64,
     pub paused: bool,
     pub watch_processes: Vec<AgentWaitingProcess>,
@@ -896,6 +898,7 @@ mod tests {
             timer_id: 42,
             kind: TimerKind::IdleAll,
             due_at: 10_000,
+            max_wait_ms: 9_000,
             remaining_ms: 9_000,
             paused: false,
             watch_processes: vec![AgentWaitingProcess {
