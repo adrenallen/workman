@@ -65,16 +65,25 @@ assert.equal(
   '\x1b[27;3;13~'
 );
 
+const appOwnedCommands = [
+  key('c', { metaKey: true }),
+  key('v', { metaKey: true }),
+  key('w', { metaKey: true }),
+  key('q', { metaKey: true })
+];
+
+for (const mode of [plain, kitty, modifyOtherKeys]) {
+  for (const event of appOwnedCommands) {
+    assert.equal(encodeTerminalKey(event, mode), null);
+  }
+}
+
 for (const event of [
   key('e', { altKey: true }),
   key('Dead', { altKey: true }),
   key('é', { altKey: true }),
   key('ArrowLeft', { altKey: true, shiftKey: true }),
   key('Delete', { metaKey: true }),
-  key('c', { metaKey: true }),
-  key('v', { metaKey: true }),
-  key('w', { metaKey: true }),
-  key('q', { metaKey: true }),
   key('Backspace')
 ]) {
   assert.equal(encodeTerminalKey(event, plain), null);
