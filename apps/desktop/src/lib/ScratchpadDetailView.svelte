@@ -521,6 +521,7 @@
         <LiveMarkdownEditor
           value={bodyDraft}
           focusRequest={editorFocusRequest}
+          flow
           scrollRequest={outlineScrollRequest}
           onChange={handleBodyChange}
           onSave={() => void saveDraft()}
@@ -534,7 +535,7 @@
 {/if}
 
 <style>
-  .scratchpad-document { min-width: 0; }
+  .scratchpad-document { min-width: 0; min-height: 100%; }
   .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
   .title:hover { background: var(--card); }
   .title:focus { background: var(--card); box-shadow: 0 0 0 2px var(--ring); }
@@ -559,7 +560,7 @@
   .conflict-banner span, .recovery-banner span { font-size: var(--font-size-sm); }
   .recovery-banner { border-color: var(--border); background: var(--card); color: var(--muted-foreground); }
   .recovery-banner span { min-width: 0; flex: 1; }
-  .body-section { height: clamp(420px, 62vh, 720px); margin-top: 22px; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--radius) + 1px); background: var(--background); }
+  .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
   .outline-rail { position: sticky; top: 18px; }
   .outline-rail > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
   .outline-rail h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
@@ -589,7 +590,7 @@
     .save-state { width: 100%; margin: 3px 0 0; }
     .tags-editor { grid-template-columns: minmax(0, 1fr) auto auto; }
     .tags-editor label { grid-column: 1 / -1; }
-    .body-section { height: 460px; margin-top: 16px; }
+    .body-section { margin-top: 16px; }
     .conflict-banner, .recovery-banner { align-items: stretch; flex-wrap: wrap; }
     .conflict-banner div, .recovery-banner span { width: 100%; flex-basis: 100%; }
   }

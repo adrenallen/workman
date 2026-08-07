@@ -42,6 +42,7 @@
   interface Props {
     value: string;
     focusRequest?: number;
+    flow?: boolean;
     toolbar?: boolean;
     scrollRequest?: { key: number; line: number } | null;
     onChange: (value: string) => void;
@@ -52,6 +53,7 @@
   let {
     value,
     focusRequest = 0,
+    flow = false,
     toolbar = true,
     scrollRequest = null,
     onChange,
@@ -275,21 +277,27 @@
     { decorations: (plugin) => plugin.decorations }
   );
 
-  const editorTheme = EditorView.theme({
+  function createEditorTheme(flowLayout: boolean) {
+    return EditorView.theme({
     '&': {
-      height: '100%',
+      height: flowLayout ? 'auto' : '100%',
+      minHeight: flowLayout ? 'inherit' : '0',
       color: 'var(--foreground)',
       backgroundColor: 'transparent',
       fontSize: '13px'
     },
     '&.cm-focused': { outline: 'none' },
     '.cm-scroller': {
-      overflow: 'auto',
+      overflow: flowLayout ? 'visible' : 'auto',
       fontFamily: "'Inter Variable', sans-serif",
       lineHeight: '1.65',
       scrollbarColor: 'var(--border-strong) transparent'
     },
-    '.cm-content': { maxWidth: '920px', padding: '22px 28px 80px', caretColor: 'var(--ring)' },
+    '.cm-content': {
+      maxWidth: '920px',
+      padding: flowLayout ? '20px 4px 48px' : '22px 28px 80px',
+      caretColor: 'var(--ring)'
+    },
     '.cm-line': { padding: '0 2px' },
     '.cm-cursor': { borderLeftColor: 'var(--ring)' },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'color-mix(in srgb, var(--ring) 22%, transparent)' },
@@ -337,7 +345,8 @@
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
     '.cm-placeholder': { color: 'var(--muted-foreground)', fontStyle: 'italic' }
-  });
+    });
+  }
 
   onMount(() => {
     view = new EditorView({
@@ -356,7 +365,7 @@
           EditorView.lineWrapping,
           editorPlaceholder('Start writing Markdown…'),
           liveMarkdown,
-          editorTheme,
+          createEditorTheme(flow),
           EditorView.domEventHandlers({
             click: (event, editor) => {
               if (!event.metaKey || event.button !== 0) return false;
@@ -453,7 +462,7 @@
   });
 </script>
 
-<div class="editor-shell" class:with-toolbar={toolbar}>
+<div class="editor-shell" class:flow class:with-toolbar={toolbar}>
   {#if toolbar}
     <div class="format-toolbar" aria-label="Markdown formatting">
       <IconButton label="Bold" shortcut="⌘B" onclick={() => replaceSelection('**')}>
@@ -504,7 +513,11 @@
 <style>
   .editor-shell { display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--background); }
   .editor-shell.with-toolbar { grid-template-rows: auto minmax(0, 1fr); }
+  .editor-shell.flow { height: auto; min-height: clamp(380px, calc(100vh - 290px), 640px); grid-template-rows: minmax(0, auto); overflow: visible; background: transparent; }
+  .editor-shell.flow.with-toolbar { grid-template-rows: auto minmax(0, auto); }
+  .editor-shell.flow .format-toolbar { background: transparent; }
   .format-toolbar { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 1px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 2px 5px; background: var(--card); scrollbar-width: none; }
   .separator { width: 1px; height: 18px; flex: none; margin: 0 3px; background: var(--border); }
   .editor-host { min-height: 0; height: 100%; overflow: hidden; background: var(--background); }
+  .editor-shell.flow .editor-host { height: auto; min-height: inherit; overflow: visible; background: transparent; }
 </style>

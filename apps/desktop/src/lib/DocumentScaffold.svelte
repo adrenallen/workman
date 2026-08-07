@@ -117,7 +117,7 @@
   .document-viewport { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .document-layout { display: grid; width: 100%; min-height: 100%; grid-template-columns: minmax(0, 780px); justify-content: center; }
   .document-layout.with-rail { grid-template-columns: minmax(0, 780px) minmax(168px, 220px); gap: 28px; }
-  .document-column { min-width: 0; padding: 28px 28px 72px; }
+  .document-column { min-width: 0; min-height: 100%; padding: 28px 28px 56px; }
   .document-rail { min-width: 0; padding: 30px 18px 48px 0; }
 
   @container (max-width: 880px) {

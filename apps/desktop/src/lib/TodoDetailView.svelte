@@ -4,6 +4,7 @@
   import CirclePlusIcon from '@lucide/svelte/icons/circle-plus';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
   import LockIcon from '@lucide/svelte/icons/lock';
+  import MessageSquareIcon from '@lucide/svelte/icons/message-square';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
   import TagIcon from '@lucide/svelte/icons/tag';
@@ -92,6 +93,7 @@
   let tagsOpen = $state(false);
   let commentBody = $state('');
   let titleInput = $state<HTMLInputElement | null>(null);
+  let activitySection = $state<HTMLElement | null>(null);
   let bodyFocusRequest = $state(0);
   let bodySaveTimer: ReturnType<typeof setTimeout> | null = null;
   let focusedCommentKey = $state<string | null>(null);
@@ -251,6 +253,10 @@
   function navigate(todoId: number | null): void {
     if (todoId !== null) onNavigateTodo?.(todoId);
   }
+
+  function jumpToActivity(): void {
+    activitySection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 </script>
 
 {#if loading && !detail}
@@ -312,6 +318,17 @@
           {/if}
         </DropdownMenu.Content>
       </DropdownMenu.Root>
+    {/snippet}
+
+    {#snippet rail()}
+      <section class="activity-rail">
+        <span>Discussion</span>
+        <h2>{activityItems.length} item{activityItems.length === 1 ? '' : 's'}</h2>
+        <button type="button" onclick={jumpToActivity}>
+          <MessageSquareIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+          <span><strong>Activity</strong><small>Jump to comments</small></span>
+        </button>
+      </section>
     {/snippet}
 
     <article class="todo-document">
@@ -436,10 +453,17 @@
         </form>
       {/if}
 
+      <button class="activity-jump-inline" type="button" onclick={jumpToActivity}>
+        <MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+        Jump to activity
+        <small>{activityItems.length}</small>
+      </button>
+
       <section class="body-section" aria-label="Todo body">
         <LiveMarkdownEditor
           value={bodyDraft}
           focusRequest={bodyFocusRequest}
+          flow
           onChange={changeBody}
           onSave={saveBody}
         />
@@ -450,7 +474,7 @@
         {#if detail.todo.tags.length === 0}<button class="add-tag" type="button" onclick={() => (tagsOpen = true)}>+ Add tags</button>{/if}
       </div>
 
-      <section class="activity" aria-labelledby="activity-title">
+      <section class="activity" bind:this={activitySection} aria-labelledby="activity-title">
         <header>
           <div><span>History and discussion</span><h2 id="activity-title">Activity</h2></div>
           <small>{activityItems.length} item{activityItems.length === 1 ? '' : 's'}</small>
@@ -494,8 +518,8 @@
 {/if}
 
 <style>
-  .todo-document { min-width: 0; }
-  .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 'Archivo Variable', sans-serif; letter-spacing: -0.025em; }
+  .todo-document { min-width: 0; min-height: 100%; }
+  .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
   .title:hover { background: var(--card); }
   .title:focus { background: var(--card); box-shadow: 0 0 0 2px var(--ring); }
   .metadata { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
@@ -524,7 +548,10 @@
   .tags-editor input { min-width: 0; height: 29px; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 0 8px; background: var(--background); color: var(--foreground); font-size: var(--font-size-sm); }
   .tags-editor button, .comment-composer button { min-height: 29px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 9px; background: var(--card); color: var(--text-soft); font-size: var(--font-size-sm); cursor: pointer; }
   button.primary { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); font-weight: 650; }
-  .body-section { height: clamp(310px, 46vh, 520px); margin-top: 22px; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--radius) + 1px); background: var(--background); }
+  .activity-jump-inline { display: none; min-height: 28px; align-items: center; gap: 6px; margin: 12px 0 -5px auto; border: 0; border-radius: var(--radius); padding: 0 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); cursor: pointer; }
+  .activity-jump-inline:hover { background: var(--card); color: var(--foreground); }
+  .activity-jump-inline small { min-width: 18px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 5px; font: 10px var(--terminal-font-family); text-align: center; }
+  .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
   .tag-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
   .tag-list button { min-height: 24px; border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; background: var(--card); color: var(--muted-foreground); font-size: var(--font-size-xs); cursor: pointer; }
   .tag-list .add-tag { border-style: dashed; background: transparent; }
@@ -539,12 +566,12 @@
   .event-row strong { color: var(--text-soft); font-weight: 620; }
   .event-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); background: var(--card); }
   .event-row time, .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
-  .comment-row { margin: 12px 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
-  .comment-row.comment-focus-target { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
+  .comment-row { margin: 0; border-bottom: 1px solid var(--border); padding: 10px 0 11px 32px; background: transparent; }
+  .comment-row.comment-focus-target { box-shadow: inset 2px 0 0 var(--ring); }
   .comment-row:focus { outline: 0; }
-  .comment-row > header { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 9px; }
+  .comment-row > header { display: flex; min-height: 24px; align-items: center; justify-content: space-between; gap: 8px; }
   .comment-row > header strong { font-size: var(--font-size-sm); font-weight: 650; }
-  .comment-row :global(.markdown) { padding: 8px 10px 10px; }
+  .comment-row :global(.markdown) { padding: 4px 0 0; }
   .empty-activity { margin: 0; border: 1px dashed var(--border); border-radius: var(--radius); padding: 13px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .comment-composer { display: grid; gap: 6px; margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; background: var(--card); }
   .comment-composer label { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 650; }
@@ -552,14 +579,26 @@
   .comment-composer > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .comment-composer small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .state { display: grid; width: 100%; height: 100%; place-items: center; color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .activity-rail { position: sticky; top: 18px; }
+  .activity-rail > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
+  .activity-rail h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
+  .activity-rail button { display: flex; width: 100%; min-height: 44px; align-items: center; gap: 8px; border: 0; border-left: 2px solid var(--border); border-radius: 0 var(--radius) var(--radius) 0; padding: 5px 8px; background: transparent; color: var(--muted-foreground); text-align: left; cursor: pointer; }
+  .activity-rail button:hover { border-left-color: var(--foreground); background: var(--card); color: var(--foreground); }
+  .activity-rail button > span { display: grid; gap: 2px; }
+  .activity-rail strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 630; }
+  .activity-rail small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+
+  @container (max-width: 880px) {
+    .activity-jump-inline { display: flex; }
+  }
 
   @container (max-width: 620px) {
     .metadata { gap: 4px; }
     .metadata-chip { max-width: 100%; }
     .tags-editor { grid-template-columns: minmax(0, 1fr) auto auto; }
     .tags-editor label { grid-column: 1 / -1; }
-    .body-section { height: 360px; margin-top: 16px; }
+    .body-section { margin-top: 16px; }
     .activity { margin-top: 30px; }
-    .comment-row { margin-left: 0; }
+    .comment-row { padding-left: 0; }
   }
 </style>
