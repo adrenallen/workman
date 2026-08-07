@@ -72,8 +72,8 @@
     onAddTerminal: () => void;
     onAddCommand: () => void;
     onAddScratchpad: () => void;
-    commandBusyId: number | null;
-    onStartCommand: (process: ProcessView) => void;
+    processBusyId: number | null;
+    onStartProcess: (process: ProcessView) => void;
     onStopCommand: (process: ProcessView) => void;
     onRestartCommand: (process: ProcessView) => void;
     onOpenSettings: () => void;
@@ -104,8 +104,8 @@
     onAddTerminal,
     onAddCommand,
     onAddScratchpad,
-    commandBusyId,
-    onStartCommand,
+    processBusyId,
+    onStartProcess,
     onStopCommand,
     onRestartCommand,
     onOpenSettings,
@@ -707,52 +707,70 @@
                 {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
                   <InlineTreeRename value={process.name} label="Agent name" depth={row.depth} onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
                 {:else}
-                  <button
-                    type="button"
-                    class="tree-row agent-row"
+                  <div
+                    class="process-row-shell agent-row-shell"
+                    class:has-actions={!isRunning(process)}
                     class:agent-child={row.depth > 0}
                     class:selected={selection?.key === `agent:${process.id}`}
                     style={`--agent-depth: ${row.depth}`}
-                    data-tree-row
-                    data-context-kind="agent"
-                    data-context-id={process.id}
-                    use:reorderItem={reorderOptions(process)}
-                    onclick={() => selectProcess(process)}
-                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
-                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    aria-busy={processBusyId === process.id}
                   >
-                    {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
-                    <AgentStatusIndicator {process} />
-                    <span class="row-copy"><strong>{process.name}</strong></span>
-                    {#if process.agent_state.unread || row.rollup.total > 0 || stats}
-                      <span class="row-badges">
-                        {#if process.agent_state.unread}
-                          <TooltipLabel label="Unread: agent finished while no timer was watching">
-                            <span class="agent-unread-dot" aria-label={`${process.name} has unread finished output`}></span>
-                          </TooltipLabel>
-                        {/if}
-                        {#if row.rollup.total > 0}
-                          <TooltipLabel label={lineageTitle(row.rollup)}>
-                            <span
-                              class={`lineage-rollup ${lineageTone(row.rollup)}`}
-                              aria-label={lineageTitle(row.rollup)}
-                            >↳{row.rollup.total}</span>
-                          </TooltipLabel>
-                        {/if}
-                        {#if row.rollup.unread > 0}
-                          <TooltipLabel label={`${row.rollup.unread} unread finished descendant agent${row.rollup.unread === 1 ? '' : 's'}`}>
-                            <span class="unread-lineage-rollup" aria-label={`${row.rollup.unread} unread descendant agents`}>
-                              <span aria-hidden="true"></span>{row.rollup.unread}
-                            </span>
-                          </TooltipLabel>
-                        {/if}
-                        {#if stats?.descendant_count}
-                          <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
-                        {/if}
-                        {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
-                      </span>
+                    <button
+                      type="button"
+                      class="tree-row agent-row"
+                      data-tree-row
+                      data-context-kind="agent"
+                      data-context-id={process.id}
+                      use:reorderItem={reorderOptions(process)}
+                      onclick={() => selectProcess(process)}
+                      oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                      onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    >
+                      {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
+                      <AgentStatusIndicator {process} />
+                      <span class="row-copy"><strong>{process.name}</strong></span>
+                      {#if process.agent_state.unread || row.rollup.total > 0 || stats}
+                        <span class="row-badges">
+                          {#if process.agent_state.unread}
+                            <TooltipLabel label="Unread: agent finished while no timer was watching">
+                              <span class="agent-unread-dot" aria-label={`${process.name} has unread finished output`}></span>
+                            </TooltipLabel>
+                          {/if}
+                          {#if row.rollup.total > 0}
+                            <TooltipLabel label={lineageTitle(row.rollup)}>
+                              <span
+                                class={`lineage-rollup ${lineageTone(row.rollup)}`}
+                                aria-label={lineageTitle(row.rollup)}
+                              >↳{row.rollup.total}</span>
+                            </TooltipLabel>
+                          {/if}
+                          {#if row.rollup.unread > 0}
+                            <TooltipLabel label={`${row.rollup.unread} unread finished descendant agent${row.rollup.unread === 1 ? '' : 's'}`}>
+                              <span class="unread-lineage-rollup" aria-label={`${row.rollup.unread} unread descendant agents`}>
+                                <span aria-hidden="true"></span>{row.rollup.unread}
+                              </span>
+                            </TooltipLabel>
+                          {/if}
+                          {#if stats?.descendant_count}
+                            <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
+                          {/if}
+                          {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
+                        </span>
+                      {/if}
+                    </button>
+                    {#if !isRunning(process)}
+                      <div class="process-actions" aria-label={`${process.name} actions`}>
+                        <IconButton
+                          class="size-6 rounded-sm text-success hover:text-success"
+                          label={`Start agent ${process.name}`}
+                          disabled={processBusyId !== null}
+                          onclick={() => onStartProcess(process)}
+                        >
+                          {#snippet icon()}<PlayIcon size={13} strokeWidth={1.8} />{/snippet}
+                        </IconButton>
+                      </div>
                     {/if}
-                  </button>
+                  </div>
                 {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
@@ -766,22 +784,40 @@
                 {#if renameTarget?.kind === 'process' && renameTarget.process.id === process.id}
                   <InlineTreeRename value={process.name} label="Terminal name" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
                 {:else}
-                  <button
-                    type="button"
-                    class="tree-row"
+                  <div
+                    class="process-row-shell"
+                    class:has-actions={!isRunning(process)}
                     class:selected={selection?.key === `terminal:${process.id}`}
-                    data-tree-row
-                    data-context-kind="terminal"
-                    data-context-id={process.id}
-                    use:reorderItem={reorderOptions(process)}
-                    onclick={() => selectProcess(process)}
-                    oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
-                    onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    aria-busy={processBusyId === process.id}
                   >
-                    <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
-                    <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
-                    {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
-                  </button>
+                    <button
+                      type="button"
+                      class="tree-row"
+                      data-tree-row
+                      data-context-kind="terminal"
+                      data-context-id={process.id}
+                      use:reorderItem={reorderOptions(process)}
+                      onclick={() => selectProcess(process)}
+                      oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                      onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
+                    >
+                      <StatusIndicator tone={processStatusTone(process)} label={processStatusLabel(process)} />
+                      <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
+                      {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
+                    </button>
+                    {#if !isRunning(process)}
+                      <div class="process-actions" aria-label={`${process.name} actions`}>
+                        <IconButton
+                          class="size-6 rounded-sm text-success hover:text-success"
+                          label={`Start terminal ${process.name}`}
+                          disabled={processBusyId !== null}
+                          onclick={() => onStartProcess(process)}
+                        >
+                          {#snippet icon()}<PlayIcon size={13} strokeWidth={1.8} />{/snippet}
+                        </IconButton>
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching terminals' : 'No terminals'}</p>
@@ -798,7 +834,7 @@
                   <div
                     class="command-row-shell"
                     class:selected={selection?.key === `command:${process.id}`}
-                    aria-busy={commandBusyId === process.id}
+                    aria-busy={processBusyId === process.id}
                   >
                     <button
                       type="button"
@@ -817,14 +853,14 @@
                     </button>
                     <div class="command-actions" aria-label={`${process.name} actions`}>
                       {#if isRunning(process)}
-                        <IconButton class="size-6 rounded-sm" label={`Restart ${process.name}`} disabled={commandBusyId !== null} onclick={() => onRestartCommand(process)}>
+                        <IconButton class="size-6 rounded-sm" label={`Restart ${process.name}`} disabled={processBusyId !== null} onclick={() => onRestartCommand(process)}>
                           {#snippet icon()}<RefreshCwIcon size={13} strokeWidth={1.8} />{/snippet}
                         </IconButton>
-                        <IconButton class="size-6 rounded-sm hover:text-destructive" label={`Stop ${process.name}`} disabled={commandBusyId !== null} onclick={() => onStopCommand(process)}>
+                        <IconButton class="size-6 rounded-sm hover:text-destructive" label={`Stop ${process.name}`} disabled={processBusyId !== null} onclick={() => onStopCommand(process)}>
                           {#snippet icon()}<SquareIcon size={12} strokeWidth={1.8} />{/snippet}
                         </IconButton>
                       {:else}
-                        <IconButton class="size-6 rounded-sm text-success hover:text-success" label={`Start ${process.name}`} disabled={commandBusyId !== null} onclick={() => onStartCommand(process)}>
+                        <IconButton class="size-6 rounded-sm text-success hover:text-success" label={`Start ${process.name}`} disabled={processBusyId !== null} onclick={() => onStartProcess(process)}>
                           {#snippet icon()}<PlayIcon size={13} strokeWidth={1.8} />{/snippet}
                         </IconButton>
                       {/if}
@@ -917,9 +953,18 @@
   .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 2px; border-radius: 1px; background: var(--ring); content: ''; pointer-events: none; }
   .project-tree :global(.tree-row[data-reorder-drop='before']::after) { top: -1px; }
   .project-tree :global(.tree-row[data-reorder-drop='after']::after) { bottom: -1px; }
-  .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
+  .agent-row-shell.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
+  .agent-row-shell.agent-child .agent-row { grid-template-columns: 12px 17px minmax(0, 1fr) auto; }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
   .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .process-row-shell { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-radius: 3px; }
+  .process-row-shell.has-actions { grid-template-columns: minmax(0, 1fr) 28px; }
+  .process-row-shell:hover { background: var(--popover); }
+  .process-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .process-row-shell .tree-row:hover { background: transparent; }
+  .process-row-shell.selected .tree-row { color: #fff; }
+  .process-actions { display: flex; width: 28px; align-items: center; justify-content: center; opacity: 0; transition: opacity 120ms ease; }
+  .process-row-shell:hover .process-actions, .process-row-shell:focus-within .process-actions { opacity: 1; }
   .command-row-shell { display: grid; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; border-radius: 3px; }
   .command-row-shell:hover { background: var(--popover); }
   .command-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
@@ -948,7 +993,7 @@
   .empty-row { margin: 0; padding: 5px 5px 5px 22px; color: #686f78; font-size: var(--font-size-sm); }
   .tree-footer { display: flex; min-height: 38px; align-items: center; justify-content: flex-end; padding: 5px 6px; border-top: 1px solid var(--border); }
 
-  @media (prefers-reduced-motion: reduce) { .command-actions { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .command-actions, .process-actions { transition: none; } }
 
   .project-tree.collapsed .tree-toolbar { justify-content: center; padding-inline: 0; }
   .project-tree.collapsed .tree-groups { padding-inline: 4px; }

@@ -170,6 +170,12 @@ export interface ProcessView {
   claimed_todos?: ClaimedTodo[];
 }
 
+export interface RenderedProcessOutput {
+  text: string;
+  raw_end_offset: number;
+  status: ProcessStatus;
+}
+
 export interface AgentState {
   state: AttentionState;
   working: boolean;
@@ -599,6 +605,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
       process_id: processId,
       expected_hash: expectedHash
     });
+  }
+
+  renderedProcessOutput(processId: number): Promise<RenderedProcessOutput> {
+    return this.request('process.rendered_output', { process_id: processId });
   }
 
   attachTerminal(

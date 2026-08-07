@@ -3202,8 +3202,8 @@
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={() => (dialog = 'command')}
         onAddScratchpad={() => void createScratchpad()}
-        commandBusyId={processBusyId}
-        onStartCommand={(process) => void startOrReviewProcess(process)}
+        {processBusyId}
+        onStartProcess={(process) => void startOrReviewProcess(process)}
         onStopCommand={(process) => void stopProcess(process)}
         onRestartCommand={(process) => void restartProcess(process)}
         onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
@@ -3269,7 +3269,15 @@
         {:else if selectedProcess}
           {#key selectedProcess.id}
             <div class="terminal-view">
-              <TerminalView {client} process={selectedProcess} connected={connection.status === 'connected'} onError={reportError} onUnfocus={unfocusSelectedProcess} />
+              <TerminalView
+                {client}
+                process={selectedProcess}
+                connected={connection.status === 'connected'}
+                busy={processBusyId === selectedProcess.id}
+                onStart={(process) => void startOrReviewProcess(process)}
+                onError={reportError}
+                onUnfocus={unfocusSelectedProcess}
+              />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
             </div>
           {/key}

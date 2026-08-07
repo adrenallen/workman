@@ -1,4 +1,7 @@
 <script lang="ts">
+  import BotIcon from '@lucide/svelte/icons/bot';
+  import PlayIcon from '@lucide/svelte/icons/play';
+  import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { WebglAddon } from '@xterm/addon-webgl';
@@ -14,6 +17,7 @@
   } from './appearance';
   import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
+  import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { encodeTerminalKey } from './terminalKeys';
   import { installTerminalTransfers } from './terminalTransfers';
@@ -22,12 +26,16 @@
     client,
     process,
     connected,
+    busy = false,
+    onStart,
     onError,
     onUnfocus
   }: {
     client: DaemonClient;
     process: ProcessView;
     connected: boolean;
+    busy?: boolean;
+    onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
     onUnfocus?: () => void;
   } = $props();
@@ -46,14 +54,23 @@
   let inputBytes: number[] = [];
   let attachedProcessId: number | null = null;
   let attachedConnected = false;
+  let attachedStatus = '';
   let attachmentGeneration = 0;
   let inputEnabled = false;
   let replayState: TerminalReplayState | null = null;
   let kittyKeyboardFlags = 0;
   let modifyOtherKeys = 0;
   let appliedThemeSignature = '';
+  let retainedOutput = $state('');
+  let retainedOutputLoading = $state(false);
+  let retainedOutputGeneration = 0;
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
+  let processDead = $derived(
+    process.status === 'stopped' || process.status === 'exited' || process.status === 'crashed'
+  );
+  let processStarting = $derived(process.status === 'starting');
+  let retainedTail = $derived(outputTail(retainedOutput));
 
   interface TerminalReplayState {
     generation: number;
@@ -215,11 +232,17 @@
     const instance = terminal;
     const processId = process.id;
     const isConnected = connected;
+    const processStatus = process.status;
     if (!instance) return;
-    if (attachedProcessId === processId && attachedConnected === isConnected) return;
+    if (
+      attachedProcessId === processId
+      && attachedConnected === isConnected
+      && attachedStatus === processStatus
+    ) return;
 
     attachedProcessId = processId;
     attachedConnected = isConnected;
+    attachedStatus = processStatus;
 
     flushInput();
     inputEnabled = false;
@@ -227,10 +250,14 @@
     setKeyboardProtocol(0, 0);
     instance.reset();
     hasOutput = false;
-    if (!isConnected) return;
+    linkHintVisible = false;
+    if (!isConnected || processStatus !== 'running') {
+      attachmentGeneration += 1;
+      void client.detachTerminal().catch(() => undefined);
+      return;
+    }
 
     const generation = ++attachmentGeneration;
-    const processRunning = process.status === 'running';
     const state: TerminalReplayState = {
       generation,
       processId,
@@ -250,15 +277,13 @@
       await nextAnimationFrame();
       if (replayState !== state) return;
       fitTerminal();
-      if (processRunning) {
-        await client.resizeTerminal(
-          processId,
-          instance.rows,
-          instance.cols,
-          Math.round(host.clientWidth),
-          Math.round(host.clientHeight)
-        );
-      }
+      await client.resizeTerminal(
+        processId,
+        instance.rows,
+        instance.cols,
+        Math.round(host.clientWidth),
+        Math.round(host.clientHeight)
+      );
       if (replayState !== state) return;
 
       const attached = await client.attachTerminal(processId);
@@ -275,8 +300,29 @@
     });
   });
 
+  $effect(() => {
+    const processId = process.id;
+    const shouldLoad = connected && processDead;
+    const generation = ++retainedOutputGeneration;
+    retainedOutput = '';
+    retainedOutputLoading = shouldLoad;
+    if (!shouldLoad) return;
+
+    void client.renderedProcessOutput(processId).then((output) => {
+      if (generation !== retainedOutputGeneration || process.id !== processId) return;
+      retainedOutput = output.text;
+    }).catch((cause) => {
+      if (generation !== retainedOutputGeneration || process.id !== processId) return;
+      onError(cause instanceof Error ? cause.message : String(cause));
+    }).finally(() => {
+      if (generation === retainedOutputGeneration && process.id === processId) {
+        retainedOutputLoading = false;
+      }
+    });
+  });
+
   function handleTerminalFrame(frame: TerminalFrame): void {
-    if (frame.process_id !== process.id || !terminal) return;
+    if (frame.process_id !== process.id || process.status !== 'running' || !terminal) return;
     if (frame.data.length > 0) hasOutput = true;
     const state = replayState;
     if (state) {
@@ -382,23 +428,114 @@
     }
   }
 
+  function outputTail(output: string): string {
+    const rows = output.replaceAll('\r', '').split('\n');
+    while (rows.length > 0 && rows.at(-1)?.trim() === '') rows.pop();
+    return rows.slice(-24).join('\n');
+  }
+
+  function processNoun(): 'agent' | 'terminal' {
+    return process.kind === 'agent' ? 'agent' : 'terminal';
+  }
+
+  function deadTitle(): string {
+    if (process.status === 'crashed') return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} crashed`;
+    if (process.status === 'stopped') return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} stopped`;
+    return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} exited`;
+  }
+
+  function exitSummary(): string {
+    if (process.exit_signal !== null) return `Terminated by signal ${process.exit_signal}`;
+    if (process.exit_code !== null) {
+      return process.exit_code === 0
+        ? 'Exited cleanly · code 0'
+        : `Exited with code ${process.exit_code}`;
+    }
+    if (process.status === 'stopped') return 'Stopped by you';
+    if (process.status === 'crashed') return 'The process ended unexpectedly';
+    return 'The process has ended';
+  }
+
+  function exitedAtLabel(): string | null {
+    if (process.exited_at === null) return null;
+    return new Intl.DateTimeFormat([], {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    }).format(new Date(process.exited_at));
+  }
+
 </script>
 
 <section
   bind:this={frame}
   class="terminal-frame"
-  class:is-stopped={process.status !== 'running'}
+  class:is-dead={processDead}
   class:is-drop-target={transferDropActive}
 >
-  <div class="terminal-host" bind:this={host} aria-label={`${process.name} terminal`}></div>
+  <div
+    class="terminal-host"
+    class:is-hidden={process.status !== 'running'}
+    bind:this={host}
+    aria-hidden={process.status !== 'running'}
+    aria-label={`${process.name} terminal`}
+  ></div>
   {#if process.status === 'running' && !hasOutput}
     <div class="terminal-starting" aria-live="polite">
       <span aria-hidden="true"></span>
       <strong>Waiting for first output…</strong>
     </div>
   {/if}
-  {#if process.status !== 'running'}
-    <div class="terminal-state">{process.status} · retained output</div>
+  {#if processStarting}
+    <div class="process-starting" aria-live="polite">
+      <span aria-hidden="true"></span>
+      <strong>Starting {processNoun()}…</strong>
+      <small>The live terminal will appear when the process is ready.</small>
+    </div>
+  {:else if processDead}
+    {@const ProcessIcon = process.kind === 'agent' ? BotIcon : SquareTerminalIcon}
+    {@const stoppedAt = exitedAtLabel()}
+    <div class="dead-pane" aria-label={`${process.name} ${process.status}`}>
+      <div class="dead-document">
+        <header class="dead-summary">
+          <span class="dead-icon" class:is-crashed={process.status === 'crashed'} aria-hidden="true">
+            <ProcessIcon size={20} strokeWidth={1.7} />
+          </span>
+          <div class="dead-copy">
+            <span class="dead-kicker">Session ended</span>
+            <h2>{deadTitle()}</h2>
+            <p>{exitSummary()}{#if stoppedAt}<span> · {stoppedAt}</span>{/if}</p>
+          </div>
+          {#if onStart}
+            <span class="dead-start">
+              <Button
+                class="w-full"
+                size="sm"
+                disabled={!connected || busy}
+                aria-busy={busy}
+                onclick={() => onStart?.(process)}
+              >
+                <PlayIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+                {busy ? 'Starting…' : `Start ${processNoun()}`}
+              </Button>
+            </span>
+          {/if}
+        </header>
+
+        <section class="output-card" aria-label={`Last output from ${process.name}`}>
+          <header>
+            <strong>Last output</strong>
+            <span>Read only</span>
+          </header>
+          {#if retainedOutputLoading}
+            <p class="output-empty">Loading retained output…</p>
+          {:else if retainedTail}
+            <pre>{retainedTail}</pre>
+          {:else}
+            <p class="output-empty">No output was retained for this session.</p>
+          {/if}
+        </section>
+      </div>
+    </div>
   {/if}
   {#if linkHintVisible}
     <div class="terminal-link-hint" role="tooltip">{EXTERNAL_LINK_TOOLTIP}</div>
@@ -420,6 +557,10 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--terminal-background);
+  }
+
+  .terminal-frame.is-dead {
+    background: var(--background);
   }
 
   .terminal-frame.is-drop-target {
@@ -455,6 +596,11 @@
     background: var(--terminal-background);
   }
 
+  .terminal-host.is-hidden {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
   .terminal-host :global(.xterm) {
     box-sizing: border-box;
     height: 100%;
@@ -481,19 +627,154 @@
     image-rendering: auto;
   }
 
-  .terminal-state {
+  .process-starting {
     position: absolute;
-    right: 14px;
-    bottom: 12px;
-    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 28%, var(--terminal-background));
-    border-radius: 3px;
-    padding: 5px 7px;
-    color: color-mix(in srgb, var(--terminal-foreground) 68%, var(--terminal-background));
-    background: color-mix(in srgb, var(--terminal-background) 88%, transparent);
-    font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    color: var(--muted-foreground);
+    background: var(--background);
+    text-align: center;
+  }
+
+  .process-starting > span {
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid var(--border-strong);
+    border-top-color: var(--agent-state-working);
+    border-radius: 50%;
+    animation: terminal-waiting-spin 800ms linear infinite;
+  }
+
+  .process-starting strong {
+    color: var(--foreground);
+    font-size: var(--font-size-base);
+  }
+
+  .process-starting small {
+    font-size: var(--font-size-sm);
+  }
+
+  .dead-pane {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    padding: clamp(var(--space-4), 4vw, 40px);
+    color: var(--foreground);
+    background: var(--background);
+  }
+
+  .dead-document {
+    display: grid;
+    width: min(760px, 100%);
+    min-height: 100%;
+    align-content: center;
+    gap: var(--space-4);
+    margin: 0 auto;
+  }
+
+  .dead-summary {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    background: var(--card);
+  }
+
+  .dead-icon {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--agent-state-exited) 34%, var(--border));
+    border-radius: var(--radius);
+    color: var(--agent-state-exited);
+    background: color-mix(in srgb, var(--agent-state-exited) 6%, var(--card));
+  }
+
+  .dead-icon.is-crashed {
+    border-color: color-mix(in srgb, var(--destructive) 44%, var(--border));
+    color: var(--destructive);
+    background: color-mix(in srgb, var(--destructive) 7%, var(--card));
+  }
+
+  .dead-copy {
+    min-width: 0;
+  }
+
+  .dead-kicker {
+    display: block;
+    margin-bottom: var(--space-1);
+    color: var(--muted-foreground);
+    font: 650 var(--font-size-xs)/1 var(--terminal-font-family);
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    pointer-events: none;
+  }
+
+  .dead-copy h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 650;
+    line-height: 1.25;
+  }
+
+  .dead-copy p {
+    margin: var(--space-1) 0 0;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-sm);
+  }
+
+  .dead-start {
+    min-width: 116px;
+  }
+
+  .output-card {
+    min-height: 132px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--terminal-background);
+  }
+
+  .output-card > header {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid color-mix(in srgb, var(--terminal-foreground) 18%, var(--terminal-background));
+    padding: 0 var(--space-3);
+    color: color-mix(in srgb, var(--terminal-foreground) 70%, var(--terminal-background));
+    font: var(--font-size-xs)/1 var(--terminal-font-family);
+  }
+
+  .output-card > header strong {
+    color: color-mix(in srgb, var(--terminal-foreground) 86%, var(--terminal-background));
+    font-weight: 600;
+  }
+
+  .output-card pre {
+    max-height: min(44vh, 440px);
+    overflow: auto;
+    margin: 0;
+    padding: var(--space-3);
+    color: color-mix(in srgb, var(--terminal-foreground) 86%, var(--terminal-background));
+    font: var(--font-size-sm)/1.45 var(--terminal-font-family);
+    tab-size: 4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .output-empty {
+    margin: 0;
+    padding: var(--space-4) var(--space-3);
+    color: color-mix(in srgb, var(--terminal-foreground) 55%, var(--terminal-background));
+    font: var(--font-size-sm)/1.4 var(--terminal-font-family);
   }
 
   .terminal-link-hint {
@@ -520,6 +801,24 @@
     background: color-mix(in srgb, var(--terminal-background) 94%, transparent);
     font: 500 11px/1.2 var(--terminal-font-family);
     pointer-events: none;
+  }
+
+  @media (max-width: 720px) {
+    .dead-summary {
+      grid-template-columns: 40px minmax(0, 1fr);
+    }
+
+    .dead-start {
+      grid-column: 1 / -1;
+      justify-self: stretch;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .terminal-starting span,
+    .process-starting > span {
+      animation: none;
+    }
   }
 
 </style>
