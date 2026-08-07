@@ -9,6 +9,7 @@ export interface TodoSummary {
   priority: TodoPriority;
   status: TodoStatus;
   completed: boolean;
+  sort_order: number;
   assignee: string | null;
   locked_by: string | null;
   comment_count: number;
@@ -55,6 +56,7 @@ export interface ScratchpadSummary {
   name: string;
   revision: number;
   archived: boolean;
+  sort_order: number;
   tags: string[];
   matched_fields: string[];
   match_snippet?: string;
@@ -116,6 +118,10 @@ export interface CoordinationClient {
   coordinationSnapshot(projectId: number): Promise<CoordinationSnapshot>;
   coordinationTodo(projectId: number, todoId: number): Promise<TodoDetail>;
   coordinationTodoCreate(projectId: number, input: NewTodoInput): Promise<TodoView>;
+  coordinationTodoReorder(
+    projectId: number,
+    orderedIds: number[]
+  ): Promise<CoordinationSnapshot>;
   coordinationTodoComplete(
     projectId: number,
     todoId: number,
@@ -124,6 +130,10 @@ export interface CoordinationClient {
   coordinationTodoComment(projectId: number, todoId: number, body: string): Promise<TodoComment>;
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead>;
   coordinationScratchpadCreate(projectId: number, input: NewScratchpadInput): Promise<Scratchpad>;
+  coordinationScratchpadReorder(
+    projectId: number,
+    orderedIds: number[]
+  ): Promise<CoordinationSnapshot>;
   coordinationScratchpadUpdate(
     projectId: number,
     scratchpadId: number,

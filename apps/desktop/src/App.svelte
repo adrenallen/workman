@@ -238,6 +238,7 @@
   let projectReorderBusy = $state(false);
   let flatProjectOrderChecked = false;
   let processReorderBusy = $state(false);
+  let coordinationReorderBusy = $state(false);
   let agentCascadeRequest = $state<AgentCascadeRequest | null>(null);
   let agentCascadeBusy = $state(false);
   let agentCascadeError = $state<string | null>(null);
@@ -2382,6 +2383,69 @@
     }
   }
 
+  async function persistTodoOrder(orderedIds: number[]): Promise<void> {
+    if (!selectedProject || !coordination || coordinationReorderBusy) return;
+    const projectId = selectedProject.id;
+    const previous = coordination;
+    const open = previous.todos.filter((todo) => !todo.completed);
+    const currentIds = [...open]
+      .sort((left, right) => left.sort_order - right.sort_order || left.id - right.id)
+      .map((todo) => todo.id);
+    if (orderedIds.join(',') === currentIds.join(',')) return;
+
+    const slots = open.map((todo) => todo.sort_order).sort((left, right) => left - right);
+    const sortById = new Map(orderedIds.map((id, index) => [id, slots[index]]));
+    coordination = {
+      ...previous,
+      todos: previous.todos.map((todo) => ({
+        ...todo,
+        sort_order: sortById.get(todo.id) ?? todo.sort_order
+      }))
+    };
+    coordinationReorderBusy = true;
+    try {
+      const next = await client.coordinationTodoReorder(projectId, orderedIds);
+      if (selectedProject?.id === projectId) coordination = next;
+    } catch (cause) {
+      if (selectedProject?.id === projectId) coordination = previous;
+      reportError(cause);
+    } finally {
+      coordinationReorderBusy = false;
+    }
+  }
+
+  async function persistScratchpadOrder(orderedIds: number[]): Promise<void> {
+    if (!selectedProject || !coordination || coordinationReorderBusy) return;
+    const projectId = selectedProject.id;
+    const previous = coordination;
+    const currentIds = [...previous.scratchpads]
+      .sort((left, right) => left.sort_order - right.sort_order || left.id - right.id)
+      .map((scratchpad) => scratchpad.id);
+    if (orderedIds.join(',') === currentIds.join(',')) return;
+
+    const slots = previous.scratchpads
+      .map((scratchpad) => scratchpad.sort_order)
+      .sort((left, right) => left - right);
+    const sortById = new Map(orderedIds.map((id, index) => [id, slots[index]]));
+    coordination = {
+      ...previous,
+      scratchpads: previous.scratchpads.map((scratchpad) => ({
+        ...scratchpad,
+        sort_order: sortById.get(scratchpad.id) ?? scratchpad.sort_order
+      }))
+    };
+    coordinationReorderBusy = true;
+    try {
+      const next = await client.coordinationScratchpadReorder(projectId, orderedIds);
+      if (selectedProject?.id === projectId) coordination = next;
+    } catch (cause) {
+      if (selectedProject?.id === projectId) coordination = previous;
+      reportError(cause);
+    } finally {
+      coordinationReorderBusy = false;
+    }
+  }
+
   function beginRename(project: Project): void {
     renameId = project.id;
     renameValue = projectDisplayName(project);
@@ -3144,8 +3208,10 @@
         onRestartCommand={(process) => void restartProcess(process)}
         onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
-        reordering={processReorderBusy}
+        reordering={processReorderBusy || coordinationReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
+        onReorderTodos={(orderedIds) => void persistTodoOrder(orderedIds)}
+        onReorderScratchpads={(orderedIds) => void persistScratchpadOrder(orderedIds)}
         renameTarget={treeRenameTarget}
         onContextMenu={showContextMenu}
         onRenameSubmit={(name) => void commitTreeRename(name)}

@@ -359,6 +359,16 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('coordination.todo_create', { project_id: projectId, ...input });
   }
 
+  coordinationTodoReorder(
+    projectId: number,
+    orderedIds: number[]
+  ): Promise<CoordinationSnapshot> {
+    return this.request('coordination.todo_reorder', {
+      project_id: projectId,
+      ordered_ids: orderedIds
+    });
+  }
+
   coordinationTodoComplete(
     projectId: number,
     todoId: number,
@@ -394,6 +404,16 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('coordination.scratchpad_create', {
       project_id: projectId,
       ...input
+    });
+  }
+
+  coordinationScratchpadReorder(
+    projectId: number,
+    orderedIds: number[]
+  ): Promise<CoordinationSnapshot> {
+    return this.request('coordination.scratchpad_reorder', {
+      project_id: projectId,
+      ordered_ids: orderedIds
     });
   }
 

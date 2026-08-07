@@ -80,6 +80,8 @@
     onToggleCollapse: () => void;
     reordering: boolean;
     onReorderProcesses: (kind: ProcessKind, orderedIds: number[]) => void;
+    onReorderTodos: (orderedIds: number[]) => void;
+    onReorderScratchpads: (orderedIds: number[]) => void;
     renameTarget: ContextMenuTarget | null;
     onContextMenu: (request: ContextMenuRequest) => void;
     onRenameSubmit: (name: string) => void;
@@ -110,6 +112,8 @@
     onToggleCollapse,
     reordering,
     onReorderProcesses,
+    onReorderTodos,
+    onReorderScratchpads,
     renameTarget,
     onContextMenu,
     onRenameSubmit,
@@ -161,7 +165,7 @@
     .sort((left, right) => {
       const claimPriority = Number(todoClaimState(right) === 'claimed')
         - Number(todoClaimState(left) === 'claimed');
-      return claimPriority || right.id - left.id;
+      return claimPriority || left.sort_order - right.sort_order || left.id - right.id;
     }));
   let visibleTodos = $derived(matchingTodos.slice(0, sidebarTodoLimit));
   let hiddenTodoCount = $derived(Math.max(0, matchingTodos.length - sidebarTodoLimit));
@@ -172,8 +176,11 @@
   let visibleCommands = $derived(
     commands.filter((process) => matchesQuery(`${process.name} ${process.command ?? ''}`))
   );
+  let orderedScratchpads = $derived(
+    [...scratchpads].sort((left, right) => left.sort_order - right.sort_order || left.id - right.id)
+  );
   let visibleScratchpads = $derived(
-    scratchpads.filter((scratchpad) => matchesQuery(`${scratchpad.name} ${scratchpad.tags.join(' ')}`))
+    orderedScratchpads.filter((scratchpad) => matchesQuery(`${scratchpad.name} ${scratchpad.tags.join(' ')}`))
   );
   let projectCounts = $derived($liveStats.counts[project.id]);
 
@@ -393,6 +400,92 @@
     };
   }
 
+  function todoReorderOptions(todo: TodoSummary): ReorderItemOptions {
+    const bucket = todosInBucket(todo);
+    return {
+      id: todo.id,
+      group: `todo:${project.id}:${todoIsClaimed(todo) ? 'claimed' : 'ordinary'}`,
+      disabled: reordering || Boolean(query.trim()) || bucket.length < 2,
+      label: todo.title,
+      onDrop: (drop) => handleTodoDrop(todo, drop),
+      onKeyboardMove: (id, direction) => moveTodoFromKeyboard(todo, id, direction)
+    };
+  }
+
+  function scratchpadReorderOptions(scratchpad: ScratchpadSummary): ReorderItemOptions {
+    return {
+      id: scratchpad.id,
+      group: `scratchpad:${project.id}`,
+      disabled: reordering || Boolean(query.trim()) || orderedScratchpads.length < 2,
+      label: scratchpad.name,
+      onDrop: handleScratchpadDrop,
+      onKeyboardMove: moveScratchpadFromKeyboard
+    };
+  }
+
+  function todoIsClaimed(todo: TodoSummary): boolean {
+    return todoClaimState(todo) === 'claimed';
+  }
+
+  function todosInBucket(todo: TodoSummary): TodoSummary[] {
+    const claimed = todoIsClaimed(todo);
+    return matchingTodos.filter((candidate) => todoIsClaimed(candidate) === claimed);
+  }
+
+  function handleTodoDrop(todo: TodoSummary, drop: ReorderDrop): void {
+    const bucket = todosInBucket(todo);
+    const reorderedBucket = moveOrderedId(
+      bucket.map((candidate) => candidate.id),
+      drop.sourceId,
+      drop.targetId,
+      drop.placement
+    );
+    const claimed = matchingTodos.filter(todoIsClaimed).map((candidate) => candidate.id);
+    const ordinary = matchingTodos.filter((candidate) => !todoIsClaimed(candidate)).map((candidate) => candidate.id);
+    onReorderTodos(todoIsClaimed(todo)
+      ? [...reorderedBucket, ...ordinary]
+      : [...claimed, ...reorderedBucket]);
+  }
+
+  function moveTodoFromKeyboard(
+    todo: TodoSummary,
+    todoId: number,
+    direction: ReorderDirection
+  ): void {
+    const bucket = todosInBucket(todo);
+    const index = bucket.findIndex((candidate) => candidate.id === todoId);
+    const target = bucket[index + direction];
+    if (!target) return;
+    handleTodoDrop(todo, {
+      sourceId: todoId,
+      targetId: target.id,
+      placement: direction < 0 ? 'before' : 'after'
+    });
+  }
+
+  function handleScratchpadDrop(drop: ReorderDrop): void {
+    onReorderScratchpads(moveOrderedId(
+      orderedScratchpads.map((scratchpad) => scratchpad.id),
+      drop.sourceId,
+      drop.targetId,
+      drop.placement
+    ));
+  }
+
+  function moveScratchpadFromKeyboard(
+    scratchpadId: number,
+    direction: ReorderDirection
+  ): void {
+    const index = orderedScratchpads.findIndex((scratchpad) => scratchpad.id === scratchpadId);
+    const target = orderedScratchpads[index + direction];
+    if (!target) return;
+    handleScratchpadDrop({
+      sourceId: scratchpadId,
+      targetId: target.id,
+      placement: direction < 0 ? 'before' : 'after'
+    });
+  }
+
   function processesForKind(kind: ProcessKind): ProcessView[] {
     if (kind === 'agent') return agents;
     if (kind === 'terminal') return terminals;
@@ -570,6 +663,7 @@
                   data-tree-row
                   data-context-kind="todo"
                   data-context-id={todo.id}
+                  use:reorderItem={todoReorderOptions(todo)}
                   onclick={() => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title))}
                   oncontextmenu={(event) => openPointerMenu(event, todoTarget(todo))}
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
@@ -755,6 +849,7 @@
                     data-tree-row
                     data-context-kind="scratchpad"
                     data-context-id={scratchpad.id}
+                    use:reorderItem={scratchpadReorderOptions(scratchpad)}
                     onclick={() => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name))}
                     oncontextmenu={(event) => openPointerMenu(event, scratchpadTarget(scratchpad))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
@@ -819,7 +914,7 @@
   .todo-assigned-marker { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--text-soft); }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
   .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
-  .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }
+  .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 2px; border-radius: 1px; background: var(--ring); content: ''; pointer-events: none; }
   .project-tree :global(.tree-row[data-reorder-drop='before']::after) { top: -1px; }
   .project-tree :global(.tree-row[data-reorder-drop='after']::after) { bottom: -1px; }
   .agent-row.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); grid-template-columns: 12px 17px minmax(0, 1fr) auto; margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
