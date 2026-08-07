@@ -36,7 +36,10 @@ use workmand::{
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-const DAEMON_WAIT: Duration = Duration::from_secs(5);
+// A healthy daemon normally publishes discovery in well under a second, but debug binaries can
+// be starved for several seconds while a workspace build is saturating the machine. Keep the
+// first `wrk` invocation attached long enough to survive that transient load.
+const DAEMON_WAIT: Duration = Duration::from_secs(15);
 const OUTPUT_POLL: Duration = Duration::from_millis(30);
 const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 const HELLO_REQUEST_ID: &str = "__workman_cli_hello__";

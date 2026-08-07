@@ -1123,6 +1123,7 @@ pub async fn discover_or_spawn(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    let child_pid = child.id();
     let deadline = Instant::now() + wait_timeout;
 
     loop {
@@ -1131,18 +1132,38 @@ pub async fn discover_or_spawn(
         {
             return Ok(discovery);
         }
-        if let Some(status) = child.try_wait()? {
-            return Err(io::Error::other(format!(
-                "workmand exited before becoming ready: {status}"
-            )));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                clean_failed_spawn(&mut child, child_pid, data_dir).await;
+                return Err(io::Error::other(format!(
+                    "workmand exited before becoming ready: {status}"
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                clean_failed_spawn(&mut child, child_pid, data_dir).await;
+                return Err(error);
+            }
         }
         if Instant::now() >= deadline {
+            clean_failed_spawn(&mut child, child_pid, data_dir).await;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timed out waiting for workmand discovery",
             ));
         }
         sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn clean_failed_spawn(child: &mut tokio::process::Child, pid: Option<u32>, data_dir: &Path) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill().await;
+    }
+    if let Some(pid) = pid
+        && Discovery::read(data_dir).is_ok_and(|discovery| discovery.pid == pid)
+    {
+        let _ = std::fs::remove_file(discovery_path(data_dir));
     }
 }
 
@@ -1626,6 +1647,40 @@ mod tests {
 
         let data_dir = server.data_dir.clone();
         server.stop().await;
+        assert!(!discovery_path(data_dir).exists());
+    }
+
+    #[tokio::test]
+    async fn timed_out_discovery_reaps_the_spawned_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let daemon = temp.path().join("slow-workmand");
+        std::fs::write(
+            &daemon,
+            "#!/bin/sh\nmkdir -p \"$2\"\nprintf '%s' \"$$\" > \"$2/spawn.pid\"\nexec /bin/sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = discover_or_spawn(&data_dir, &daemon, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        let pid = std::fs::read_to_string(data_dir.join("spawn.pid")).unwrap();
+        let process_is_running = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if process_is_running {
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", pid.trim()])
+                .status();
+        }
+        assert!(!process_is_running, "timed-out daemon {pid} was leaked");
         assert!(!discovery_path(data_dir).exists());
     }
 
