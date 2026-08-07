@@ -4,6 +4,30 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.3 - 2026-08-07
+
+Workman 0.1.3 sharpens terminal and agent lifecycle behavior, adds native attention signals,
+and expands collaboration tools while keeping local development and installed releases isolated.
+
+### Highlights
+
+- Added native notifications, a live Dock unread badge, and first-class needs-input, assignment,
+  and mention events, with focus-aware delivery and direct navigation back to the relevant work.
+- Made relaunched agents, terminals, and commands fit their PTY geometry on first paint; added
+  conversation resume, clearer start and restart controls, and accurate idle, working, waiting,
+  completed, failed, and stopped activity semantics.
+- Improved terminal fidelity with modern keyboard protocols, natural editing shortcuts, themes,
+  file and image transfer support, durable replay, and more reliable input handling.
+- Expanded project and document workflows with a flat reorderable rail, durable pane state,
+  optimistic navigation, richer todo and scratchpad documents, blockers, claimants, and mentions.
+
+### Runtime and operations
+
+- Added a side-by-side Workman Dev identity and current-tree installer whose app, daemon, CLI,
+  configuration, and data remain separate from the stable installation.
+- Hardened MCP agent identities and project boundaries, installer routing, authenticated updates,
+  release retention, and compatibility endpoints for older installed updaters.
+
 ## 0.1.2 - 2026-08-06
 
 Workman 0.1.2 makes the desktop easier to read and operate, strengthens isolated agent launches,
