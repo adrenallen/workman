@@ -252,6 +252,10 @@ pub struct ProcessEvent {
 pub struct ProcessRegistry {
     store: Store,
     running: HashMap<ProcessId, PtyProcess>,
+    /// Last geometry measured by a desktop terminal surface, including while stopped.
+    /// Keeping this process-local lets the next spawn start at the correct size before the
+    /// child emits its first frame, while a newly attached desktop can immediately replace it.
+    pty_sizes: HashMap<ProcessId, PtySize>,
     outputs: HashMap<ProcessId, ProcessOutput>,
     selected: HashMap<ProjectId, ProcessId>,
     trust_snapshots: HashMap<ProcessId, TrustFields>,
@@ -341,6 +345,7 @@ impl ProcessRegistry {
         let mut registry = Self {
             store,
             running: HashMap::new(),
+            pty_sizes: HashMap::new(),
             outputs: HashMap::new(),
             selected: HashMap::new(),
             trust_snapshots,
@@ -652,7 +657,12 @@ impl ProcessRegistry {
         self.store
             .set_process_mcp_token(process.id, &token, now_millis())?;
         let user_environment = self.resolved_user_environment();
-        let mut options = PtySpawnOptions::new(process.id, token, command);
+        let size = self
+            .pty_sizes
+            .get(&process_id)
+            .copied()
+            .unwrap_or(DEFAULT_PTY_SIZE);
+        let mut options = PtySpawnOptions::new(process.id, token, command).with_size(size);
         for (key, value) in user_environment.pty_environment() {
             options = options.with_env(key, value);
         }
@@ -922,6 +932,7 @@ impl ProcessRegistry {
         self.cleanup_user_stopped_process(&process)?;
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
+        self.pty_sizes.remove(&process_id);
         self.remove_output_file(process_id)?;
         self.trust_snapshots.remove(&process_id);
         self.selected.retain(|_, selected| *selected != process_id);
@@ -1395,6 +1406,14 @@ impl ProcessRegistry {
         pixel_height: u16,
     ) -> RegistryResult<Process> {
         self.refresh_exits()?;
+        self.require(process_id)?;
+        let size = PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
+            pixel_width,
+            pixel_height,
+        };
+        self.pty_sizes.insert(process_id, size);
         if let Some(output) = self.outputs.get(&process_id)
             && matches!(
                 output.attention.snapshot().state,
@@ -1403,21 +1422,12 @@ impl ProcessRegistry {
         {
             output.attention.suppress_ui_activity();
         }
-        let hosted = self
-            .running
-            .get(&process_id)
-            .ok_or(RegistryError::NotRunning(process_id))?;
-        hosted
-            .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width,
-                pixel_height,
-            })
-            .map_err(|error| RegistryError::Pty {
+        if let Some(hosted) = self.running.get(&process_id) {
+            hosted.resize(size).map_err(|error| RegistryError::Pty {
                 process_id,
                 message: error.to_string(),
             })?;
+        }
         self.require(process_id)
     }
 

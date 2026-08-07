@@ -53,6 +53,7 @@
   let inputProcessId: number | null = null;
   let inputBytes: number[] = [];
   let attachedProcessId: number | null = null;
+  let attachedProcessPid: number | null = null;
   let attachedConnected = false;
   let attachedStatus = '';
   let attachmentGeneration = 0;
@@ -231,16 +232,19 @@
   $effect(() => {
     const instance = terminal;
     const processId = process.id;
+    const processPid = process.pid;
     const isConnected = connected;
     const processStatus = process.status;
     if (!instance) return;
     if (
       attachedProcessId === processId
+      && attachedProcessPid === processPid
       && attachedConnected === isConnected
       && attachedStatus === processStatus
     ) return;
 
     attachedProcessId = processId;
+    attachedProcessPid = processPid;
     attachedConnected = isConnected;
     attachedStatus = processStatus;
 
@@ -254,6 +258,7 @@
     if (!isConnected || processStatus !== 'running') {
       attachmentGeneration += 1;
       void client.detachTerminal().catch(() => undefined);
+      if (isConnected) scheduleFit();
       return;
     }
 
@@ -370,7 +375,7 @@
       resizeFrame = 0;
       const instance = terminal;
       if (!instance || !fitTerminal()) return;
-      if (process.status !== 'running' || !connected) return;
+      if (!connected) return;
       void client
         .resizeTerminal(
           process.id,
@@ -597,7 +602,7 @@
   }
 
   .terminal-host.is-hidden {
-    visibility: hidden;
+    opacity: 0;
     pointer-events: none;
   }
 
