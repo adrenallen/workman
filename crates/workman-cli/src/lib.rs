@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     env,
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt, io,
     os::fd::RawFd,
     path::{Path, PathBuf},
@@ -41,6 +41,8 @@ const OUTPUT_POLL: Duration = Duration::from_millis(30);
 const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 const HELLO_REQUEST_ID: &str = "__workman_cli_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
+const WORKMAN_DATA_DIR_ENV: &str = "WORKMAN_DATA_DIR";
+const REQUIRE_EXPLICIT_DAEMON_ENV: &str = "WORKMAN_REQUIRE_EXPLICIT_DAEMON";
 
 const ROOT_HELP: &str = concat!(
     "wrk ",
@@ -79,6 +81,14 @@ const ROOT_HELP: &str = concat!(
     "  --daemon PATH    Use a specific workmand executable\n",
     "  -h, --help       Show help and exit\n",
     "  -V, --version    Show version and exit\n",
+    "\n",
+    "Environment\n",
+    "  WORKMAN_DATA_DIR=PATH                 Default data directory; --data-dir wins\n",
+    "  WORKMAN_REQUIRE_EXPLICIT_DAEMON=1     Refuse implicit default-daemon access\n",
+    "\n",
+    "Automation\n",
+    "  Set the guard and give each worker a fresh data directory. --daemon alone does not isolate\n",
+    "  daemon state. Help, version, and update do not target a daemon.\n",
     "\n",
     "Examples\n",
     "  wrk\n",
@@ -228,8 +238,21 @@ Example
 
 /// Parse process arguments and execute one CLI invocation.
 pub async fn run_env() -> Result<()> {
+    run(
+        env::args_os(),
+        env::var_os(WORKMAN_DATA_DIR_ENV),
+        env::var_os(REQUIRE_EXPLICIT_DAEMON_ENV),
+    )
+    .await
+}
+
+async fn run(
+    args: impl IntoIterator<Item = OsString>,
+    data_dir_environment: Option<OsString>,
+    require_explicit_environment: Option<OsString>,
+) -> Result<()> {
     let identity = RuntimeIdentity::current();
-    let cli = Cli::parse(env::args_os())?;
+    let cli = Cli::parse(args)?;
     if let Command::Help(topic) = &cli.command {
         print!("{}", help_text_for(identity, *topic));
         return Ok(());
@@ -249,11 +272,16 @@ pub async fn run_env() -> Result<()> {
             println!("{}", dev_update_notice());
             return Ok(());
         }
-        let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
+        let data_dir = resolve_data_dir(cli.data_dir, data_dir_environment);
         return self_update(&data_dir, *check_only, *channel, key.as_deref()).await;
     }
 
-    let data_dir = cli.data_dir.unwrap_or_else(workmand::default_data_dir);
+    require_explicit_daemon_target(
+        cli.data_dir.as_deref(),
+        data_dir_environment.as_deref(),
+        require_explicit_environment.as_deref(),
+    )?;
+    let data_dir = resolve_data_dir(cli.data_dir, data_dir_environment);
     let daemon = daemon_executable(cli.daemon, identity);
 
     if matches!(&cli.command, Command::App) {
@@ -285,6 +313,31 @@ pub async fn run_env() -> Result<()> {
             unreachable!()
         }
     }
+}
+
+fn resolve_data_dir(
+    data_dir_option: Option<PathBuf>,
+    data_dir_environment: Option<OsString>,
+) -> PathBuf {
+    data_dir_option
+        .or_else(|| data_dir_environment.map(PathBuf::from))
+        .unwrap_or_else(workmand::default_data_dir)
+}
+
+fn require_explicit_daemon_target(
+    data_dir_option: Option<&Path>,
+    data_dir_environment: Option<&OsStr>,
+    require_explicit_environment: Option<&OsStr>,
+) -> Result<()> {
+    let guard_enabled = require_explicit_environment == Some(OsStr::new("1"));
+    let has_explicit_data_dir =
+        data_dir_option.is_some() || data_dir_environment.is_some_and(|value| !value.is_empty());
+    if guard_enabled && !has_explicit_data_dir {
+        return Err(cli_error(format!(
+            "{REQUIRE_EXPLICIT_DAEMON_ENV}=1 blocked implicit default-daemon access; pass --data-dir PATH or set {WORKMAN_DATA_DIR_ENV}=PATH to an isolated directory"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2457,6 +2510,8 @@ mod tests {
         assert!(ROOT_HELP.contains("Workspace\n"));
         assert!(ROOT_HELP.contains("Processes\n"));
         assert!(ROOT_HELP.contains("Worktrees\n"));
+        assert!(ROOT_HELP.contains("WORKMAN_DATA_DIR=PATH"));
+        assert!(ROOT_HELP.contains("WORKMAN_REQUIRE_EXPLICIT_DAEMON=1"));
         assert!(ROOT_HELP.contains("Docs: https://github.com/adrenallen/workman"));
 
         for (command, topic) in HelpTopic::SUBCOMMANDS {
@@ -2483,6 +2538,61 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(cli.command, Command::Help(HelpTopic::Run)));
+    }
+
+    #[test]
+    fn explicit_daemon_guard_requires_a_data_directory_boundary() {
+        let guard = Some(OsStr::new("1"));
+        let data_dir = Path::new("/tmp/workman-todo405");
+
+        let error = require_explicit_daemon_target(None, None, guard).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("blocked implicit default-daemon access")
+        );
+        assert!(error.to_string().contains("--data-dir PATH"));
+        assert!(error.to_string().contains("WORKMAN_DATA_DIR=PATH"));
+        assert!(require_explicit_daemon_target(Some(data_dir), None, guard).is_ok());
+        assert!(
+            require_explicit_daemon_target(None, Some(OsStr::new("/tmp/workman-todo405")), guard,)
+                .is_ok()
+        );
+        assert!(require_explicit_daemon_target(None, None, Some(OsStr::new("true"))).is_ok());
+        assert!(require_explicit_daemon_target(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn data_dir_flag_takes_precedence_over_environment() {
+        assert_eq!(
+            resolve_data_dir(
+                Some(PathBuf::from("/tmp/workman-flag")),
+                Some(OsString::from("/tmp/workman-environment")),
+            ),
+            Path::new("/tmp/workman-flag")
+        );
+        assert_eq!(
+            resolve_data_dir(None, Some(OsString::from("/tmp/workman-environment"))),
+            Path::new("/tmp/workman-environment")
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_cli_invocation_stops_before_default_daemon_discovery() {
+        let error = run(
+            ["wrk", "ps"].map(OsString::from),
+            None,
+            Some(OsString::from("1")),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains(REQUIRE_EXPLICIT_DAEMON_ENV));
+        assert!(
+            error
+                .to_string()
+                .contains("blocked implicit default-daemon access")
+        );
     }
 
     #[test]

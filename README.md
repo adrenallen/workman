@@ -39,6 +39,23 @@ belong in `workman.yml`; `awm.yml` and then `gbuild.yml` remain readable with de
 
 Run `cargo build --workspace` or `just build` to build the Rust workspace.
 
+## Automation isolation
+
+Automation must target a fresh, disposable Workman data directory rather than whichever daemon a
+developer is using. Set the safety guard in every harness or worker environment:
+
+```sh
+export WORKMAN_REQUIRE_EXPLICIT_DAEMON=1
+export WORKMAN_DATA_DIR="$(mktemp -d /tmp/workman-automation.XXXXXX)"
+wrk ps
+```
+
+`wrk --data-dir PATH ...` is the equivalent per-invocation form and takes precedence over
+`WORKMAN_DATA_DIR`. With the guard set to `1`, daemon-targeting commands fail before discovery or
+auto-spawn unless one of those data-directory boundaries is explicit. Supplying `--daemon` alone
+only chooses the executable and does not satisfy the isolation guard. Help, version, and update
+commands do not target a daemon and remain available.
+
 ## Side-by-side development build
 
 Keep the stable release open while testing the current checkout with the isolated development
