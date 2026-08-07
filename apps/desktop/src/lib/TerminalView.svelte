@@ -14,6 +14,7 @@
   } from './appearance';
   import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
+  import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
 
   let {
     client,
@@ -33,6 +34,7 @@
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
   let hasOutput = $state(false);
+  let linkHintVisible = $state(false);
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
   let inputProcessId: number | null = null;
@@ -63,6 +65,13 @@
   onMount(() => {
     const initialPalette = initialAppearance.terminalTheme.palette;
     appliedThemeSignature = Object.values(initialPalette).join('|');
+    const activateLink = (event: MouseEvent, uri: string) => {
+      if (!event.metaKey || event.button !== 0) return;
+      event.preventDefault();
+      openExternalUrl(uri, onError);
+    };
+    const showLinkHint = () => { linkHintVisible = true; };
+    const hideLinkHint = () => { linkHintVisible = false; };
     const instance = new Terminal({
       allowTransparency: false,
       convertEol: false,
@@ -72,6 +81,12 @@
       fontSize: initialAppearance.terminalFontSize,
       fontWeight: 430,
       lineHeight: 1.18,
+      linkHandler: {
+        activate: activateLink,
+        hover: showLinkHint,
+        leave: hideLinkHint,
+        allowNonHttpProtocols: false
+      },
       scrollback: 10_000,
       smoothScrollDuration: 80,
       theme: terminalXtermTheme(initialPalette)
@@ -79,8 +94,9 @@
     fitAddon = new FitAddon();
     instance.loadAddon(fitAddon);
     instance.loadAddon(
-      new WebLinksAddon((_event, uri) => {
-        if (/^https?:\/\//i.test(uri)) window.open(uri, '_blank', 'noopener,noreferrer');
+      new WebLinksAddon(activateLink, {
+        hover: showLinkHint,
+        leave: hideLinkHint
       })
     );
     instance.open(host);
@@ -378,6 +394,9 @@
   {#if process.status !== 'running'}
     <div class="terminal-state">{process.status} · retained output</div>
   {/if}
+  {#if linkHintVisible}
+    <div class="terminal-link-hint" role="tooltip">{EXTERNAL_LINK_TOOLTIP}</div>
+  {/if}
 </section>
 
 <style>
@@ -446,6 +465,19 @@
     font: 500 var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+    pointer-events: none;
+  }
+
+  .terminal-link-hint {
+    position: absolute;
+    right: 10px;
+    bottom: 9px;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 24%, var(--terminal-background));
+    border-radius: 3px;
+    padding: 4px 6px;
+    color: color-mix(in srgb, var(--terminal-foreground) 80%, var(--terminal-background));
+    background: color-mix(in srgb, var(--terminal-background) 94%, transparent);
+    font: 500 11px/1.2 var(--terminal-font-family);
     pointer-events: none;
   }
 

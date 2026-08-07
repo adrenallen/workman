@@ -11,6 +11,7 @@
     editorActionLabel,
     ensureOpenersLoaded,
     openerSettings,
+    openBrowserUrl,
     openProjectCustom,
     openProjectEditor,
     openProjectFinder
@@ -49,7 +50,7 @@
       if (action === 'editor') await openProjectEditor(path);
       else if (action === 'finder') await openProjectFinder(path);
       else if (action === 'custom') await openProjectCustom(path);
-      else if (siteUrl) window.open(siteUrl, '_blank', 'noopener,noreferrer');
+      else if (siteUrl) await openBrowserUrl(siteUrl);
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause));
     } finally {

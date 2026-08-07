@@ -57,6 +57,7 @@ APP_NAME="Workman Todo ${TODO_ID}.app"
 QA_APP="$QA_ROOT/$APP_NAME"
 DATA_DIR="$QA_ROOT/data"
 CONFIG="$QA_ROOT/config.yml"
+OPEN_CAPTURE="$QA_ROOT/browser-open.log"
 BUNDLE_ID="com.workman.todo${TODO_ID}"
 cleanup_on_error() {
   status=$?
@@ -71,6 +72,8 @@ trap cleanup_on_error EXIT
 mkdir -p "$DATA_DIR"
 umask 077
 printf 'agent_tools: []\n' > "$CONFIG"
+: > "$OPEN_CAPTURE"
+chmod 600 "$OPEN_CAPTURE"
 
 PLIST="$QA_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
@@ -83,6 +86,7 @@ fi
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_DATA_DIR string $DATA_DIR" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_CONFIG string $CONFIG" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON string 1" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE string $OPEN_CAPTURE" "$PLIST"
 if [[ -n "$DAEMON_BIN" ]]; then
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_DAEMON_BIN string $DAEMON_BIN" "$PLIST"
 fi
@@ -91,14 +95,15 @@ actual_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")"
 actual_data="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_DATA_DIR' "$PLIST")"
 actual_config="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_CONFIG' "$PLIST")"
 actual_guard="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$PLIST")"
-[[ "$actual_id" == "$BUNDLE_ID" && "$actual_data" == "$DATA_DIR" && "$actual_config" == "$CONFIG" && "$actual_guard" == 1 ]] || {
+actual_capture="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$PLIST")"
+[[ "$actual_id" == "$BUNDLE_ID" && "$actual_data" == "$DATA_DIR" && "$actual_config" == "$CONFIG" && "$actual_guard" == 1 && "$actual_capture" == "$OPEN_CAPTURE" ]] || {
   printf 'native visual QA: persisted isolation contract did not verify\n' >&2
   exit 70
 }
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-printf 'QA_ROOT=%s\nQA_APP=%s\nBUNDLE_ID=%s\nWORKMAN_DATA_DIR=%s\nWORKMAN_CONFIG=%s\n' \
-  "$QA_ROOT" "$QA_APP" "$BUNDLE_ID" "$DATA_DIR" "$CONFIG"
+printf 'QA_ROOT=%s\nQA_APP=%s\nBUNDLE_ID=%s\nWORKMAN_DATA_DIR=%s\nWORKMAN_CONFIG=%s\nWORKMAN_BROWSER_OPEN_CAPTURE=%s\n' \
+  "$QA_ROOT" "$QA_APP" "$BUNDLE_ID" "$DATA_DIR" "$CONFIG" "$OPEN_CAPTURE"
 if [[ -n "$DAEMON_BIN" ]]; then
   printf 'WORKMAN_DAEMON_BIN=%s\n' "$DAEMON_BIN"
 fi

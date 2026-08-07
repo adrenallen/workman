@@ -33,6 +33,11 @@
   import { onMount } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import {
+    EXTERNAL_LINK_TOOLTIP,
+    markdownLinkAt,
+    openExternalUrl
+  } from './externalLinks';
 
   interface Props {
     value: string;
@@ -181,7 +186,12 @@
       const labelEnd = start + match[1].length + 1;
       const end = start + match[0].length;
       replaceMarker(ranges, editor, start, start + 1);
-      ranges.push(Decoration.mark({ class: 'cm-live-link' }).range(start + 1, labelEnd));
+      ranges.push(
+        Decoration.mark({
+          attributes: { title: EXTERNAL_LINK_TOOLTIP },
+          class: 'cm-live-link'
+        }).range(start + 1, labelEnd)
+      );
       replaceMarker(ranges, editor, labelEnd, end);
     }
   }
@@ -347,6 +357,18 @@
           editorPlaceholder('Start writing Markdown…'),
           liveMarkdown,
           editorTheme,
+          EditorView.domEventHandlers({
+            click: (event, editor) => {
+              if (!event.metaKey || event.button !== 0) return false;
+              const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
+              if (position === null) return false;
+              const href = markdownLinkAt(editor.state.doc.toString(), position);
+              if (!href) return false;
+              event.preventDefault();
+              openExternalUrl(href);
+              return true;
+            }
+          }),
           keymap.of([
             {
               key: 'Mod-b',

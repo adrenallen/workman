@@ -29,16 +29,20 @@ QA_ROOT="$(printf '%s\n' "$output" | awk -F= '$1 == "QA_ROOT" { sub(/^QA_ROOT=/,
 QA_APP="$(printf '%s\n' "$output" | awk -F= '$1 == "QA_APP" { sub(/^QA_APP=/, ""); print; exit }')"
 DATA_DIR="$(printf '%s\n' "$output" | awk -F= '$1 == "WORKMAN_DATA_DIR" { sub(/^WORKMAN_DATA_DIR=/, ""); print; exit }')"
 CONFIG="$(printf '%s\n' "$output" | awk -F= '$1 == "WORKMAN_CONFIG" { sub(/^WORKMAN_CONFIG=/, ""); print; exit }')"
+OPEN_CAPTURE="$(printf '%s\n' "$output" | awk -F= '$1 == "WORKMAN_BROWSER_OPEN_CAPTURE" { sub(/^WORKMAN_BROWSER_OPEN_CAPTURE=/, ""); print; exit }')"
 
 [[ "$QA_ROOT" == /tmp/workman-todo307-qa.* ]]
 test -d "$QA_APP"
 test -d "$DATA_DIR"
 test -f "$CONFIG"
+test -f "$OPEN_CAPTURE"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$QA_APP/Contents/Info.plist")" == com.workman.todo307 ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_DATA_DIR' "$QA_APP/Contents/Info.plist")" == "$DATA_DIR" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_CONFIG' "$QA_APP/Contents/Info.plist")" == "$CONFIG" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$QA_APP/Contents/Info.plist")" == 1 ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$QA_APP/Contents/Info.plist")" == "$OPEN_CAPTURE" ]]
 grep -qx 'agent_tools: \[\]' "$CONFIG"
+test ! -s "$OPEN_CAPTURE"
 test -z "$(find "$DATA_DIR" -mindepth 1 -print -quit)"
 
 if "$REPO_ROOT/scripts/native-visual-qa.sh" --todo unsafe --source-app "$SOURCE_APP" --prepare-only >/dev/null 2>&1; then

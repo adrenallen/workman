@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { isBrowserUrl } from './openers';
+
   interface Props {
     source: string;
   }
@@ -107,7 +109,7 @@
         tokens.push({ kind: 'strong', text: token.slice(2, -2) });
       } else {
         const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
-        if (link && /^(https?:|mailto:)/i.test(link[2])) {
+        if (link && isBrowserUrl(link[2])) {
           tokens.push({ kind: 'link', text: link[1], href: link[2] });
         } else {
           tokens.push({ kind: 'text', text: token });
@@ -127,7 +129,7 @@
     {:else if token.kind === 'code'}
       <code>{token.text}</code>
     {:else if token.kind === 'link'}
-      <a href={token.href} target="_blank" rel="noreferrer">{token.text}</a>
+      <a href={token.href}>{token.text}</a>
     {:else}
       {token.text}
     {/if}

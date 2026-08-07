@@ -154,7 +154,22 @@ export function openProjectFinder(path: string): Promise<void> {
   return invoke('shell_open_path', { path, target: 'finder' });
 }
 
+export function isBrowserUrl(url: string): boolean {
+  if (url.trim() !== url || [...url].some((character) => /[\u0000-\u001f\u007f]/.test(character))) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function openBrowserUrl(url: string): Promise<void> {
+  if (!isBrowserUrl(url)) {
+    return Promise.reject(new Error('Browser links must use http or https.'));
+  }
   return invoke('shell_open_url', { url });
 }
 
