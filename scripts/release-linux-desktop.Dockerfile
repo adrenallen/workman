@@ -2,7 +2,7 @@
 FROM node:22-bookworm AS build
 
 ARG TARGETARCH
-ARG RUST_VERSION=1.88.0
+ARG RUST_VERSION=1.90.0
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
