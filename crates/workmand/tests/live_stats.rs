@@ -92,6 +92,29 @@ impl TestServer {
                 sort_order: 0,
             })?;
             registry.start(101)?;
+            registry.create(Process {
+                id: 102,
+                project_id: 1,
+                kind: ProcessKind::Terminal,
+                name: "interactive-shell".into(),
+                command: Some("/bin/sh".into()),
+                working_dir: project_path.to_string_lossy().into_owned(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 1,
+            })?;
+            registry.start(102)?;
         }
         timeout(TEST_PROGRESS_TIMEOUT, async {
             while !process_ready.exists() {
@@ -130,6 +153,7 @@ impl TestServer {
         {
             let mut registry = self.registry.lock().await;
             let _ = registry.stop(101);
+            let _ = registry.stop(102);
         }
         let _ = self.shutdown.take().unwrap().send(());
         self.task.take().unwrap().await??;
@@ -147,6 +171,7 @@ impl Drop for TestServer {
         }
         if let Ok(mut registry) = self.registry.try_lock() {
             let _ = registry.kill(101);
+            let _ = registry.kill(102);
         }
     }
 }
@@ -168,12 +193,17 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
             .as_u64()
             .is_some_and(|bytes| bytes > 0)
             && stats["processes"]["101"]["descendant_count"] == 0
+            && stats["processes"]["102"]["foreground_active"] == false
     })
     .await?;
     assert_eq!(initial["counts"]["1"]["todo_open"], 0);
     assert_eq!(initial["counts"]["1"]["scratchpad_total"], 1);
-    assert_eq!(initial["counts"]["1"]["terminal_running"], 1);
-    assert_eq!(initial["counts"]["1"]["terminal_total"], 1);
+    assert_eq!(initial["counts"]["1"]["terminal_running"], 2);
+    assert_eq!(initial["counts"]["1"]["terminal_total"], 2);
+    assert_eq!(
+        initial["processes"]["102"]["foreground_process_group"], initial["processes"]["102"]["pid"],
+        "idle interactive shell should own its foreground"
+    );
     let initial_sample = initial["sampled_at"].as_u64().unwrap();
 
     rpc(
@@ -220,6 +250,52 @@ async fn status_stream_rolls_up_memory_counts_and_new_descendants() -> Result<()
         after_child["processes"]["101"]["descendants"][0]["memory_bytes"]
             .as_u64()
             .is_some_and(|bytes| bytes > 0)
+    );
+
+    rpc(
+        &mut socket,
+        "run-foreground-job",
+        "process.send_input",
+        json!({
+            "process_id": 102,
+            "data": BASE64.encode("sleep 30"),
+            "submit": true
+        }),
+    )
+    .await?;
+    let foreground = next_stats(
+        &mut socket,
+        "interactive terminal foreground job",
+        after_child["sampled_at"].as_u64().unwrap(),
+        |stats| stats["processes"]["102"]["foreground_active"] == true,
+    )
+    .await?;
+    assert_ne!(
+        foreground["processes"]["102"]["foreground_process_group"],
+        foreground["processes"]["102"]["pid"]
+    );
+
+    rpc(
+        &mut socket,
+        "interrupt-foreground-job",
+        "process.send_input",
+        json!({
+            "process_id": 102,
+            "data": BASE64.encode([0x03]),
+            "submit": false
+        }),
+    )
+    .await?;
+    let idle_again = next_stats(
+        &mut socket,
+        "interactive terminal idle after foreground job",
+        foreground["sampled_at"].as_u64().unwrap(),
+        |stats| stats["processes"]["102"]["foreground_active"] == false,
+    )
+    .await?;
+    assert_eq!(
+        idle_again["processes"]["102"]["foreground_process_group"],
+        idle_again["processes"]["102"]["pid"]
     );
 
     socket.close(None).await?;

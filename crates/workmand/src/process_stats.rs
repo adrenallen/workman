@@ -39,6 +39,10 @@ pub struct DescendantProcessStats {
 pub struct ProcessRuntimeStats {
     pub process_id: ProcessId,
     pub pid: Option<u32>,
+    /// Kernel PTY foreground process group. Present for live terminal sessions.
+    pub foreground_process_group: Option<u32>,
+    /// True only when a terminal has handed the foreground to a job.
+    pub foreground_active: bool,
     pub cpu_percent: f32,
     pub memory_bytes: u64,
     pub uptime_seconds: u64,
@@ -243,10 +247,22 @@ fn refresh_system(system: &mut System) {
 
 async fn sample_inputs(
     registry: &SharedProcessRegistry,
-) -> RegistryResult<(Vec<Process>, BTreeMap<ProjectId, ProjectCounts>)> {
+) -> RegistryResult<(
+    Vec<(Process, Option<u32>)>,
+    BTreeMap<ProjectId, ProjectCounts>,
+)> {
     let mut registry = registry.lock().await;
     let processes = registry.list(None)?;
     let counts = collect_project_counts(registry.store(), &processes)?;
+    let processes = processes
+        .into_iter()
+        .map(|process| {
+            let foreground_process_group = (process.kind == ProcessKind::Terminal)
+                .then(|| registry.foreground_process_group(process.id))
+                .flatten();
+            (process, foreground_process_group)
+        })
+        .collect();
     Ok((processes, counts))
 }
 
@@ -308,13 +324,13 @@ fn sql_count(store: &Store, sql: &str, project_id: ProjectId) -> RegistryResult<
 
 fn snapshot_from_system(
     system: &System,
-    processes: Vec<Process>,
+    processes: Vec<(Process, Option<u32>)>,
     counts: BTreeMap<ProjectId, ProjectCounts>,
 ) -> LiveStatsSnapshot {
     let mut runtime_processes = BTreeMap::new();
     let mut project_pids = BTreeMap::<ProjectId, HashSet<u32>>::new();
 
-    for process in processes {
+    for (process, foreground_process_group) in processes {
         let descendants = process
             .pid
             .map(|pid| inspect_process_tree_in(system, pid))
@@ -347,6 +363,8 @@ fn snapshot_from_system(
             ProcessRuntimeStats {
                 process_id: process.id,
                 pid: process.pid.filter(|_| root.is_some()),
+                foreground_process_group,
+                foreground_active: terminal_foreground_active(&process, foreground_process_group),
                 cpu_percent,
                 memory_bytes,
                 uptime_seconds,
@@ -389,6 +407,18 @@ fn snapshot_from_system(
         projects,
         counts,
     }
+}
+
+fn terminal_foreground_active(process: &Process, foreground_process_group: Option<u32>) -> bool {
+    process.kind == ProcessKind::Terminal
+        && matches!(
+            process.status,
+            ProcessStatus::Starting | ProcessStatus::Running
+        )
+        && process
+            .pid
+            .zip(foreground_process_group)
+            .is_some_and(|(shell_pid, foreground_group)| shell_pid != foreground_group)
 }
 
 fn descendant_stats(process: &sysinfo::Process) -> DescendantProcessStats {
@@ -501,6 +531,22 @@ mod tests {
                 ..ProjectCounts::default()
             }
         );
+    }
+
+    #[test]
+    fn terminal_activity_requires_a_distinct_foreground_job_group() {
+        let mut terminal = process(1, ProcessKind::Terminal, ProcessStatus::Running);
+        terminal.pid = Some(100);
+        assert!(!terminal_foreground_active(&terminal, None));
+        assert!(!terminal_foreground_active(&terminal, Some(100)));
+        assert!(terminal_foreground_active(&terminal, Some(101)));
+
+        terminal.status = ProcessStatus::Stopped;
+        assert!(!terminal_foreground_active(&terminal, Some(101)));
+
+        let mut command = process(2, ProcessKind::Command, ProcessStatus::Running);
+        command.pid = Some(200);
+        assert!(!terminal_foreground_active(&command, Some(201)));
     }
 
     fn process(id: ProcessId, kind: ProcessKind, status: ProcessStatus) -> Process {

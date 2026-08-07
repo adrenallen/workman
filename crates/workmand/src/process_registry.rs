@@ -419,6 +419,13 @@ impl ProcessRegistry {
         self.require(process_id)
     }
 
+    /// Foreground process group reported by a live PTY, when the host exposes it.
+    pub(crate) fn foreground_process_group(&self, process_id: ProcessId) -> Option<u32> {
+        self.running
+            .get(&process_id)
+            .and_then(PtyProcess::foreground_process_group)
+    }
+
     /// Get a process with raw signals, adapter flags, and derived attention state.
     pub fn get_status(&mut self, process_id: ProcessId) -> RegistryResult<ProcessStatusView> {
         let process = self.get(process_id)?;

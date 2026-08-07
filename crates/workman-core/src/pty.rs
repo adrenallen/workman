@@ -582,6 +582,23 @@ impl PtyProcess {
         self.pid
     }
 
+    /// Read the foreground process group currently attached to this PTY.
+    ///
+    /// Interactive shells keep their own process group in the foreground while
+    /// resting at a prompt and hand the terminal to a job's process group while
+    /// that job runs. A missing value is treated as unknown by telemetry callers.
+    #[cfg(unix)]
+    pub fn foreground_process_group(&self) -> Option<u32> {
+        use std::os::fd::BorrowedFd;
+
+        let raw_fd = self.master.as_ref()?.as_raw_fd()?;
+        // SAFETY: `raw_fd` remains owned by `self.master` and the temporary
+        // borrow cannot outlive this call.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let process_group = nix::unistd::tcgetpgrp(borrowed).ok()?.as_raw();
+        u32::try_from(process_group).ok()
+    }
+
     /// Clone a thread-safe handle to the bounded raw output ring.
     pub fn raw_output(&self) -> RawOutput {
         self.raw_output.clone()
@@ -1223,6 +1240,61 @@ mod tests {
             "command was reinterpreted or split: {output}"
         );
         assert!(process.wait().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_process_group_tracks_an_interactive_shell_job() {
+        fn wait_for_group(process: &PtyProcess, expected: impl Fn(u32) -> bool) -> u32 {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(group) = process.foreground_process_group()
+                    && expected(group)
+                {
+                    return group;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for PTY foreground group; root={} current={:?}",
+                    process.pid(),
+                    process.foreground_process_group()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let mut process = PtyProcess::spawn(
+            PtySpawnOptions::new(50, "token", "/bin/sh").with_login_shell("/bin/sh"),
+        )
+        .expect("spawn interactive shell");
+        process
+            .write_all(b"printf '__WORKMAN_SHELL_READY__\\n'\n")
+            .expect("probe interactive shell");
+        wait_for_output(&process, b"__WORKMAN_SHELL_READY__");
+
+        assert_eq!(
+            wait_for_group(&process, |group| group == process.pid()),
+            process.pid(),
+            "the resting shell should own the foreground"
+        );
+
+        process
+            .write_all(b"sleep 30\n")
+            .expect("start foreground job");
+        let job_group = wait_for_group(&process, |group| group != process.pid());
+        assert_ne!(job_group, process.pid());
+
+        process
+            .write_all(&[0x03])
+            .expect("interrupt foreground job");
+        assert_eq!(
+            wait_for_group(&process, |group| group == process.pid()),
+            process.pid(),
+            "the shell should reclaim the foreground after the job exits"
+        );
+        process
+            .terminate(Duration::from_millis(500))
+            .expect("stop interactive shell");
     }
 
     #[test]
