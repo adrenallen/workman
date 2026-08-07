@@ -142,6 +142,7 @@
   import {
     buildProjectRailGroups,
     projectBranchLabel,
+    projectDisplayName,
     projectRepositoryTitle,
     type ProjectRailGroup,
     type WorktreeBranchOption,
@@ -2318,7 +2319,7 @@
 
   function beginRename(project: Project): void {
     renameId = project.id;
-    renameValue = project.display_name ?? project.name;
+    renameValue = projectDisplayName(project);
   }
 
   function cancelRename(): void {
@@ -2755,7 +2756,7 @@
   }
 
   function projectLabel(project: Project): string {
-    return project.display_name ?? project.name;
+    return projectDisplayName(project);
   }
 
   function projectRailLabel(project: Project, nested = false): string {
@@ -3221,10 +3222,10 @@
             detail={todoDetail}
             loading={detailLoading}
             busy={detailBusy}
-            projectName={selectedProject.display_name ?? selectedProject.name}
+            projectName={projectDisplayName(selectedProject)}
             todos={coordination?.todos ?? []}
             navigationIds={todoNavigationIds}
-            projectOptions={projects.filter((project) => project.id !== selectedProject.id).map((project) => ({ id: project.id, name: project.display_name ?? project.name }))}
+            projectOptions={projects.filter((project) => project.id !== selectedProject.id).map((project) => ({ id: project.id, name: projectDisplayName(project) }))}
             processes={treeProcesses}
             focusCommentId={todoCommentFocusId}
             onBack={openTodosBrowser}
@@ -3243,7 +3244,7 @@
             read={scratchpadRead}
             loading={detailLoading}
             busy={detailBusy}
-            projectName={selectedProject.display_name ?? selectedProject.name}
+            projectName={projectDisplayName(selectedProject)}
             navigationIds={(scratchpadRead?.scratchpad.archived
               ? coordination?.archived_scratchpads ?? []
               : coordination?.scratchpads ?? []).map((scratchpad) => scratchpad.id)}

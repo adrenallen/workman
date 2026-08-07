@@ -44,6 +44,7 @@
     type ProjectTreeSelection
   } from './projectTree';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
+  import { projectDisplayName } from './worktrees';
   import {
     moveOrderedId,
     moveTreeOrderBlock,
@@ -114,6 +115,8 @@
     onRenameSubmit,
     onRenameCancel
   }: Props = $props();
+
+  let projectName = $derived(projectDisplayName(project));
 
   const groupOrder: ProjectTreeGroup[] = [
     'todos',
@@ -469,7 +472,7 @@
   }
 </script>
 
-<section class="project-tree" class:collapsed aria-label={`${project.name} project tree`}>
+<section class="project-tree" class:collapsed aria-label={`${projectName} project tree`}>
   <header class="tree-toolbar" data-tauri-drag-region>
     {#if !collapsed}
       <label class="tree-filter">
@@ -546,7 +549,7 @@
           {#if !collapsed}
             <IconButton
               class="group-create size-6 rounded-sm"
-              label={`${groupCreateLabel(group)} in ${project.name}`}
+              label={`${groupCreateLabel(group)} in ${projectName}`}
               data-tree-row
               onclick={() => createInGroup(group)}
             >

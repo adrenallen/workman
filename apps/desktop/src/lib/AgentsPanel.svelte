@@ -15,6 +15,7 @@
   } from './agentTools';
   import type { ProcessView } from './daemon';
   import type { AgentsPanelProps } from './workspace';
+  import { projectDisplayName } from './worktrees';
 
   let {
     client,
@@ -284,7 +285,7 @@
       <div class="roster-empty">
         <div class="radar" aria-hidden="true"><i></i></div>
         <strong>No agents on deck</strong>
-        <p>Spawn a configured tool to give it a terminal in {project.display_name ?? project.name}.</p>
+        <p>Spawn a configured tool to give it a terminal in {projectDisplayName(project)}.</p>
         <button type="button" onclick={openDefaultSpawn} disabled={!connected}>Spawn an agent</button>
       </div>
     {:else}
