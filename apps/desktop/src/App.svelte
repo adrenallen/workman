@@ -19,7 +19,6 @@
   import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
-  import EmptyState from './lib/EmptyState.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
@@ -27,6 +26,7 @@
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectOpeners from './lib/ProjectOpeners.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectOverview from './lib/ProjectOverview.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
@@ -300,6 +300,17 @@
     ...visibleProcesses.filter((process) => process.kind === 'terminal'),
     ...visibleProcesses.filter((process) => process.kind === 'command')
   ]);
+  let projectOverviewOpen = $derived(
+    selectedProject !== null &&
+      !settingsOpen &&
+      activeWorktreeOperation === null &&
+      selectedOptimisticProcess === null &&
+      selectedProcess === null &&
+      !todoBrowserOpen &&
+      !scratchpadBrowserOpen &&
+      processOverviewKind === null &&
+      selection === null
+  );
   let frameItemLabel = $derived(
     settingsOpen
       ? 'Settings'
@@ -311,12 +322,16 @@
             ? 'Scratchpads'
             : processOverviewKind
               ? `${processOverviewKind[0].toUpperCase()}${processOverviewKind.slice(1)}s`
-              : (selection?.label ?? 'Project')
+              : projectOverviewOpen && selectedProject
+                ? projectLabel(selectedProject)
+                : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
     selectedProject && selectedProcess
       ? `${projectLabel(selectedProject)}: ${selectedProcess.name}`
-      : 'workman'
+      : projectOverviewOpen && selectedProject
+        ? projectLabel(selectedProject)
+        : 'workman'
   );
   let contextMenuDescriptor = $derived(
     contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
@@ -974,6 +989,7 @@
         case 'project':
           settingsOpen = false;
           clearSelection();
+          if (selectedProject) void refreshWorktreeRepository(selectedProject, false);
           return;
         case 'item':
           await selectTreeItem(target.selection);
@@ -2160,8 +2176,10 @@
 
   function selectProject(project: Project): void {
     if (project.selected) {
+      settingsOpen = false;
       activeWorktreeOperationId = null;
       clearSelection();
+      void refreshWorktreeRepository(project, false);
       return;
     }
     if (busy || projectReorderBusy) return;
@@ -3184,7 +3202,23 @@
             onDelete={deleteSelectedScratchpad}
           />
         {:else}
-          <EmptyState eyebrow="Project tree" title="Select an item" body="Choose a todo, agent, terminal, command, or scratchpad from the project tree." actionLabel="New terminal" icon="↖" onAction={() => void spawnTerminal()} />
+          <ProjectOverview
+            project={selectedProject}
+            repository={worktreeRepositoryFor(selectedProject)}
+            worktree={worktreeEntryFor(selectedProject)}
+            pullRequestCache={worktreeListFor(selectedProject)?.pull_requests ?? null}
+            refreshing={worktreeRefreshingRepositoryId === selectedProject.repository_id}
+            counts={{
+              agent: visibleProcesses.filter((process) => process.kind === 'agent').length,
+              terminal: visibleProcesses.filter((process) => process.kind === 'terminal').length,
+              todo: coordination?.todos.filter((todo) => !todo.completed).length ?? 0
+            }}
+            onRefresh={() => refreshWorktreeRepository(selectedProject!, true)}
+            onBrowse={(target) => {
+              if (target === 'todo') openTodosBrowser();
+              else openProcessOverview(target);
+            }}
+          />
         {/if}
       </div>
       {#if selectedProcess && !selectedOptimisticProcess}
