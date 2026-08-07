@@ -566,6 +566,14 @@
       return;
     }
     if (
+      selection?.kind === 'scratchpad' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+    ) {
+      event.preventDefault();
+      void navigateAdjacentScratchpad(event.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
+    if (
       event.metaKey && !event.ctrlKey && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
@@ -594,6 +602,7 @@
       else if (dialog) dialog = null;
       else if (settingsOpen) settingsOpen = false;
       else if (selection?.kind === 'todo') openTodosBrowser();
+      else if (selection?.kind === 'scratchpad') openScratchpadsBrowser();
       else clearSelection();
     }
   }
@@ -1311,10 +1320,33 @@
     await selectTreeItem(projectTreeSelection('todo', summary.id, summary.project_id, summary.title));
   }
 
+  async function navigateAdjacentScratchpad(direction: -1 | 1): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    const archived = scratchpadRead?.scratchpad.archived
+      ?? coordination?.archived_scratchpads.some((scratchpad) => scratchpad.id === selection?.id)
+      ?? false;
+    const source = archived ? coordination?.archived_scratchpads ?? [] : coordination?.scratchpads ?? [];
+    const currentIndex = source.findIndex((scratchpad) => scratchpad.id === selection?.id);
+    const next = currentIndex < 0 ? null : source[currentIndex + direction];
+    if (!next) return;
+    await selectTreeItem(projectTreeSelection('scratchpad', next.id, next.project_id, next.name));
+  }
+
   async function navigateToTodo(todoId: number): Promise<void> {
     const summary = coordination?.todos.find((todo) => todo.id === todoId);
     if (!summary) return;
     await selectTreeItem(projectTreeSelection('todo', summary.id, summary.project_id, summary.title));
+  }
+
+  async function navigateToScratchpad(scratchpadId: number): Promise<void> {
+    const summary = [
+      ...(coordination?.scratchpads ?? []),
+      ...(coordination?.archived_scratchpads ?? [])
+    ].find((scratchpad) => scratchpad.id === scratchpadId);
+    if (!summary) return;
+    await selectTreeItem(
+      projectTreeSelection('scratchpad', summary.id, summary.project_id, summary.name)
+    );
   }
 
   async function loadScratchpad(scratchpadId: number, showLoading = true): Promise<void> {
@@ -1766,6 +1798,74 @@
 
   async function archiveBrowserScratchpad(scratchpad: ScratchpadSummary): Promise<void> {
     await runBrowserScratchpadAction(scratchpad, 'coordination.scratchpad_archive');
+  }
+
+  async function setSelectedScratchpadTags(
+    tags: string[],
+    expectedRevision: number
+  ): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    const projectId = selectedProject.id;
+    const scratchpadId = selection.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.scratchpad_set_tags', {
+        project_id: projectId,
+        scratchpad_id: scratchpadId,
+        expected_revision: expectedRevision,
+        tags
+      });
+      await Promise.all([
+        loadScratchpad(scratchpadId, false),
+        refreshCoordination(projectId, false)
+      ]);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function archiveSelectedScratchpad(expectedRevision: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    const projectId = selectedProject.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.scratchpad_archive', {
+        project_id: projectId,
+        scratchpad_id: selection.id,
+        expected_revision: expectedRevision
+      });
+      await refreshCoordination(projectId, false);
+      openScratchpadsBrowser();
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function deleteSelectedScratchpad(expectedRevision: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad' || !scratchpadRead) return;
+    if (!window.confirm(`Delete ${scratchpadRead.scratchpad.name}? This cannot be undone.`)) return;
+    const projectId = selectedProject.id;
+    detailBusy = true;
+    try {
+      await client.control('coordination.scratchpad_delete', {
+        project_id: projectId,
+        scratchpad_id: selection.id,
+        expected_revision: expectedRevision
+      });
+      await refreshCoordination(projectId, false);
+      openScratchpadsBrowser();
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
   }
 
   async function deleteBrowserScratchpad(scratchpad: ScratchpadSummary): Promise<void> {
@@ -3064,9 +3164,19 @@
           <ScratchpadDetailView
             read={scratchpadRead}
             loading={detailLoading}
+            busy={detailBusy}
+            projectName={selectedProject.display_name ?? selectedProject.name}
+            navigationIds={(scratchpadRead?.scratchpad.archived
+              ? coordination?.archived_scratchpads ?? []
+              : coordination?.scratchpads ?? []).map((scratchpad) => scratchpad.id)}
             focusRequest={scratchpadFocusRequest}
+            onBack={openScratchpadsBrowser}
+            onNavigateScratchpad={(scratchpadId) => void navigateToScratchpad(scratchpadId)}
             onRefresh={() => loadScratchpad(selection?.id ?? 0, false)}
             onSave={saveScratchpad}
+            onSetTags={setSelectedScratchpadTags}
+            onArchive={archiveSelectedScratchpad}
+            onDelete={deleteSelectedScratchpad}
           />
         {:else}
           <EmptyState eyebrow="Project tree" title="Select an item" body="Choose a todo, agent, terminal, command, or scratchpad from the project tree." actionLabel="New terminal" icon="↖" onAction={() => void spawnTerminal()} />

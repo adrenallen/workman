@@ -118,6 +118,14 @@ struct RenameScratchpadParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetScratchpadTagsParams {
+    project_id: ProjectId,
+    scratchpad_id: ScratchpadId,
+    tags: Vec<String>,
+    expected_revision: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ScratchpadRevisionParams {
     project_id: ProjectId,
     scratchpad_id: ScratchpadId,
@@ -144,6 +152,7 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
         "coordination.scratchpad_create" => Some(scratchpad_create(params, store)),
         "coordination.scratchpad_update" => Some(scratchpad_update(params, store)),
         "coordination.scratchpad_rename" => Some(scratchpad_rename(params, store)),
+        "coordination.scratchpad_set_tags" => Some(scratchpad_set_tags(params, store)),
         "coordination.scratchpad_archive" => Some(scratchpad_archive(params, store)),
         "coordination.scratchpad_delete" => Some(scratchpad_delete(params, store)),
         _ => None,
@@ -471,6 +480,32 @@ fn scratchpad_rename(params: Value, store: &Store) -> ControlResult {
             params.expected_revision,
         )
         .map(json_value)
+        .map_err(scratchpad_error)
+}
+
+fn scratchpad_set_tags(params: Value, store: &Store) -> ControlResult {
+    let params: SetScratchpadTagsParams = params_as(params)?;
+    let service = ScratchpadService::new(store);
+    let current = service
+        .read(
+            params.project_id,
+            params.scratchpad_id,
+            ScratchpadReadMode::Full,
+            None,
+            0,
+            None,
+        )
+        .map_err(scratchpad_error)?;
+    service
+        .write(
+            params.project_id,
+            Some(params.scratchpad_id),
+            current.scratchpad.name,
+            current.scratchpad.content,
+            Some(params.tags),
+            Some(params.expected_revision),
+        )
+        .map(|(scratchpad, _)| json_value(scratchpad))
         .map_err(scratchpad_error)
 }
 

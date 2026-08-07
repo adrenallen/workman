@@ -264,6 +264,20 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
         updated_scratchpad["scratchpad"]["content"],
         "### Desktop\n\nSaved as plain Markdown."
     );
+    let tagged_scratchpad = rpc(
+        &mut socket,
+        "scratchpad-set-tags",
+        "coordination.scratchpad_set_tags",
+        json!({
+            "project_id": 1,
+            "scratchpad_id": created_scratchpad["id"],
+            "expected_revision": 2,
+            "tags": ["desktop", "release"]
+        }),
+    )
+    .await;
+    assert_eq!(tagged_scratchpad["revision"], 3);
+    assert_eq!(tagged_scratchpad["tags"], json!(["desktop", "release"]));
     let stale_update = rpc_error(
         &mut socket,
         "scratchpad-stale-update",

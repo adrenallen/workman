@@ -18,10 +18,12 @@
     type ViewUpdate
   } from '@codemirror/view';
   import BoldIcon from '@lucide/svelte/icons/bold';
+  import CheckSquare2Icon from '@lucide/svelte/icons/square-check-big';
   import Code2Icon from '@lucide/svelte/icons/code-2';
   import Heading2Icon from '@lucide/svelte/icons/heading-2';
   import Heading3Icon from '@lucide/svelte/icons/heading-3';
   import ItalicIcon from '@lucide/svelte/icons/italic';
+  import ImageIcon from '@lucide/svelte/icons/image';
   import LinkIcon from '@lucide/svelte/icons/link';
   import ListIcon from '@lucide/svelte/icons/list';
   import ListOrderedIcon from '@lucide/svelte/icons/list-ordered';
@@ -36,14 +38,25 @@
     value: string;
     focusRequest?: number;
     toolbar?: boolean;
+    scrollRequest?: { key: number; line: number } | null;
     onChange: (value: string) => void;
     onSave: () => void;
+    onViewportLineChange?: (line: number) => void;
   }
 
-  let { value, focusRequest = 0, toolbar = true, onChange, onSave }: Props = $props();
+  let {
+    value,
+    focusRequest = 0,
+    toolbar = true,
+    scrollRequest = null,
+    onChange,
+    onSave,
+    onViewportLineChange
+  }: Props = $props();
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   let appliedFocusRequest = -1;
+  let appliedScrollRequest = -1;
 
   const externalChange = Annotation.define<boolean>();
 
@@ -91,6 +104,10 @@
       scrollIntoView: true
     });
     view.focus();
+  }
+
+  function reportViewportLine(editor: EditorView): void {
+    onViewportLineChange?.(editor.state.doc.lineAt(editor.viewport.from).number);
   }
 
   class MarkerWidget extends WidgetType {
@@ -357,6 +374,9 @@
             indentWithTab
           ]),
           EditorView.updateListener.of((update) => {
+            if (update.docChanged || update.viewportChanged || update.geometryChanged) {
+              reportViewportLine(update.view);
+            }
             if (
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))
@@ -371,6 +391,9 @@
       appliedFocusRequest = focusRequest;
       queueMicrotask(() => view?.focus());
     }
+    queueMicrotask(() => {
+      if (view) reportViewportLine(view);
+    });
     return () => {
       view?.destroy();
       view = null;
@@ -391,6 +414,20 @@
     if (!view || request <= appliedFocusRequest) return;
     appliedFocusRequest = request;
     queueMicrotask(() => view?.focus());
+  });
+
+  $effect(() => {
+    const request = scrollRequest;
+    if (!view || !request || request.key <= appliedScrollRequest) return;
+    appliedScrollRequest = request.key;
+    const lineNumber = Math.max(1, Math.min(request.line, view.state.doc.lines));
+    const line = view.state.doc.line(lineNumber);
+    view.dispatch({
+      effects: EditorView.scrollIntoView(line.from, { y: 'start', yMargin: 24 })
+    });
+    requestAnimationFrame(() => {
+      if (view) reportViewportLine(view);
+    });
   });
 </script>
 
@@ -425,8 +462,14 @@
       <IconButton label="Numbered list" onclick={() => prefixLines('1. ')}>
         {#snippet icon()}<ListOrderedIcon size={14} strokeWidth={1.8} />{/snippet}
       </IconButton>
+      <IconButton label="Checklist" onclick={() => prefixLines('- [ ] ')}>
+        {#snippet icon()}<CheckSquare2Icon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
       <IconButton label="Quote" onclick={() => prefixLines('> ')}>
         {#snippet icon()}<TextQuoteIcon size={14} strokeWidth={1.8} />{/snippet}
+      </IconButton>
+      <IconButton label="Embed media" onclick={() => replaceSelection('![', '](https://)', 'description')}>
+        {#snippet icon()}<ImageIcon size={14} strokeWidth={1.8} />{/snippet}
       </IconButton>
       <IconButton label="Horizontal rule" onclick={insertRule}>
         {#snippet icon()}<MinusIcon size={14} strokeWidth={1.8} />{/snippet}
