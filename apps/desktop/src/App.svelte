@@ -96,6 +96,10 @@
   } from './lib/navigation';
   import { liveStats } from './lib/liveStats';
   import {
+    beginOptimisticNavigation,
+    selectProjectOptimistically
+  } from './lib/optimisticNavigation';
+  import {
     deliverNativeNotification,
     listenForNativeNotificationActions,
     refreshNativeNotificationPermission,
@@ -205,6 +209,9 @@
   let loadedProjectId = $state<number | null>(null);
   let processRequest = 0;
   let coordinationRequest = 0;
+  let detailRequest = 0;
+  let projectActivationRequest = 0;
+  let pendingProjectSelectionId: number | null = null;
   let error = $state<string | null>(null);
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
@@ -1028,7 +1035,7 @@
     try {
       const target = request.target;
       const projectId = navigationProjectId(target);
-      if (projectId !== null && !(await activateProject(projectId))) return;
+      if (projectId !== null && !activateProject(projectId)) return;
 
       recordRecentNavigation(target);
       quickJumpRecentKeys = readRecentNavigationKeys();
@@ -1096,30 +1103,58 @@
     return selectedProject?.id ?? projects[0]?.id ?? null;
   }
 
-  async function activateProject(projectId: number): Promise<boolean> {
+  function activateProject(projectId: number): boolean {
     if (selectedProject?.id === projectId) return true;
     if (!projects.some((project) => project.id === projectId)) return false;
 
-    busy = true;
-    try {
-      projects = await client.select(projectId);
-      loadedProjectId = projectId;
-      processes = [];
-      coordination = null;
-      selection = null;
-      todoDetail = null;
-      scratchpadRead = null;
-      settingsOpen = false;
-      todoBrowserOpen = false;
-      scratchpadBrowserOpen = false;
-      processOverviewKind = null;
-      await tick();
-      await loadProject(projectId);
-      await refreshWorktreeMetadata(projects);
-      return selectedProject?.id === projectId;
-    } finally {
-      busy = false;
-    }
+    const request = ++projectActivationRequest;
+    const projectSnapshot = [...projects];
+    pendingProjectSelectionId = projectId;
+    beginOptimisticNavigation(
+      () => applyOptimisticProjectActivation(projectId),
+      () => hydrateProjectActivation(projectId, request, projectSnapshot),
+      (cause) => {
+        if (request !== projectActivationRequest) return;
+        pendingProjectSelectionId = null;
+        reportError(cause);
+      }
+    );
+    return true;
+  }
+
+  function applyOptimisticProjectActivation(projectId: number): void {
+    const cached = navigationIndex[projectId];
+    loadedProjectId = projectId;
+    processRequest += 1;
+    coordinationRequest += 1;
+    detailRequest += 1;
+    projects = selectProjectOptimistically(projects, projectId);
+    processes = cached?.processes ?? [];
+    optimisticProcesses = [];
+    coordination = cached?.coordination ?? null;
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+    detailLoading = false;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
+    processOverviewKind = null;
+    activeWorktreeOperationId = null;
+  }
+
+  async function hydrateProjectActivation(
+    projectId: number,
+    request: number,
+    projectSnapshot: Project[]
+  ): Promise<void> {
+    const selectionRequest = client.select(projectId);
+    void loadProject(projectId);
+    void refreshWorktreeMetadata(projectSnapshot);
+    const selectedProjects = await selectionRequest;
+    if (request !== projectActivationRequest || selectedProject?.id !== projectId) return;
+    pendingProjectSelectionId = null;
+    projects = selectProjectOptimistically(selectedProjects, projectId);
   }
 
   async function loadProject(projectId: number): Promise<void> {
@@ -1268,9 +1303,18 @@
   }
 
   async function refreshProjects(): Promise<void> {
+    const activationAtStart = projectActivationRequest;
     busy = true;
     try {
-      projects = await client.projects();
+      const nextProjects = await client.projects();
+      const currentSelectionId = pendingProjectSelectionId ?? selectedProject?.id ?? null;
+      const preserveLocalSelection = pendingProjectSelectionId !== null
+        || activationAtStart !== projectActivationRequest;
+      projects = preserveLocalSelection
+        && currentSelectionId !== null
+        && nextProjects.some((project) => project.id === currentSelectionId)
+        ? selectProjectOptimistically(nextProjects, currentSelectionId)
+        : nextProjects;
       void refreshWorktreeMetadata(projects);
       void refreshQuickJumpIndex(false);
     } catch (cause) {
@@ -1373,13 +1417,21 @@
 
   async function loadTodo(todoId: number): Promise<void> {
     if (!selectedProject) return;
+    const projectId = selectedProject.id;
+    const request = ++detailRequest;
     detailLoading = true;
     try {
-      todoDetail = await client.coordinationTodo(selectedProject.id, todoId);
+      const next = await client.coordinationTodo(projectId, todoId);
+      if (
+        request === detailRequest
+        && selectedProject?.id === projectId
+        && selection?.kind === 'todo'
+        && selection.id === todoId
+      ) todoDetail = next;
     } catch (cause) {
-      reportError(cause);
+      if (request === detailRequest) reportError(cause);
     } finally {
-      detailLoading = false;
+      if (request === detailRequest) detailLoading = false;
     }
   }
 
@@ -1425,10 +1477,12 @@
   async function loadScratchpad(scratchpadId: number, showLoading = true): Promise<void> {
     if (!selectedProject) return;
     const projectId = selectedProject.id;
+    const request = ++detailRequest;
     if (showLoading) detailLoading = true;
     try {
       const next = await client.coordinationScratchpad(projectId, scratchpadId);
       if (
+        request === detailRequest &&
         selectedProject?.id === projectId &&
         selection?.kind === 'scratchpad' &&
         selection.id === scratchpadId
@@ -1442,9 +1496,9 @@
         );
       }
     } catch (cause) {
-      reportError(cause);
+      if (request === detailRequest) reportError(cause);
     } finally {
-      if (showLoading) detailLoading = false;
+      if (showLoading && request === detailRequest) detailLoading = false;
     }
   }
 
@@ -2310,7 +2364,6 @@
       void refreshWorktreeRepository(project, false);
       return;
     }
-    if (busy || projectReorderBusy) return;
     appNavigation.navigate({ type: 'project', projectId: project.id }, 'project-rail');
   }
 
