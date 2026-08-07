@@ -41,6 +41,8 @@ mod identity;
 pub mod lifecycle;
 mod mcp;
 mod migration;
+#[cfg(test)]
+mod notification_pipeline_tests;
 mod process_registry;
 pub mod process_stats;
 pub mod readiness;

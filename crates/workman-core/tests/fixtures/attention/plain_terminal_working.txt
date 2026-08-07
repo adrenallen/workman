@@ -1,0 +1,2 @@
+running deterministic notification fixture
+phase 2 of 3

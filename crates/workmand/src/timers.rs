@@ -97,10 +97,25 @@ impl From<RegistryError> for TimerError {
 pub(crate) type TimerResult<T> = Result<T, TimerError>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct WatchProgress {
+pub(crate) struct WatchProgress {
     armed: bool,
     satisfied: bool,
     last_idle: bool,
+}
+
+impl WatchProgress {
+    pub(crate) const fn new(initial_idle: bool, already_satisfied: bool) -> Self {
+        Self {
+            armed: !initial_idle,
+            satisfied: already_satisfied,
+            last_idle: initial_idle,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn satisfied(&self) -> bool {
+        self.satisfied
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -232,12 +247,8 @@ impl<'a> TimerService<'a> {
             let idle = self.process_is_idle(*process_id)?;
             watch_state.insert(
                 *process_id,
-                WatchProgress {
-                    // idle_any deliberately starts unarmed for an already-idle process.
-                    armed: !idle,
-                    satisfied: kind == TimerKind::IdleAll && idle,
-                    last_idle: idle,
-                },
+                // idle_any deliberately starts unarmed for an already-idle process.
+                WatchProgress::new(idle, kind == TimerKind::IdleAll && idle),
             );
         }
         if kind == TimerKind::IdleAll && watch_state.values().all(|progress| progress.satisfied) {
@@ -600,11 +611,7 @@ impl<'a> TimerService<'a> {
             let idle = self.process_is_idle(*process_id)?;
             watch_state.insert(
                 *process_id,
-                WatchProgress {
-                    armed: !idle,
-                    satisfied: timer.kind == TimerKind::IdleAll && idle,
-                    last_idle: idle,
-                },
+                WatchProgress::new(idle, timer.kind == TimerKind::IdleAll && idle),
             );
         }
         let runtime = TimerRuntime {
@@ -661,11 +668,10 @@ impl<'a> TimerService<'a> {
             let progress = runtime
                 .watch_state
                 .entry(*process_id)
-                .or_insert(WatchProgress {
-                    armed: !idle,
-                    satisfied: timer.kind == TimerKind::IdleAll && idle,
-                    last_idle: idle,
-                });
+                .or_insert(WatchProgress::new(
+                    idle,
+                    timer.kind == TimerKind::IdleAll && idle,
+                ));
             let before = progress.clone();
             advance_watch_progress(progress, idle);
             changed |= *progress != before;
@@ -674,7 +680,7 @@ impl<'a> TimerService<'a> {
     }
 }
 
-fn advance_watch_progress(progress: &mut WatchProgress, idle: bool) {
+pub(crate) fn advance_watch_progress(progress: &mut WatchProgress, idle: bool) {
     if !progress.satisfied {
         if !progress.armed {
             // idle_any ignores a process that was already idle until it first
