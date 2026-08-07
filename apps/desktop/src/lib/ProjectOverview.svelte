@@ -24,7 +24,7 @@
     WorktreeEntry,
     WorktreeRepository
   } from './worktrees';
-  import { pullRequestLabel } from './worktrees';
+  import { projectDisplayName, pullRequestLabel } from './worktrees';
 
   type CountTarget = 'agent' | 'terminal' | 'todo';
 
@@ -52,7 +52,7 @@
 
   let actionBusy = $state<'editor' | 'finder' | 'pull-request' | null>(null);
   let actionError = $state<string | null>(null);
-  let projectName = $derived(project.display_name?.trim() || project.name);
+  let projectName = $derived(projectDisplayName(project));
   let editorLabel = $derived.by(() => {
     const label = editorActionLabel($openerSettings.config, $openerSettings.editors);
     return label === 'Open in editor' ? 'Open in IDE' : label;

@@ -13,6 +13,7 @@
     type ProcessView,
     type Project
   } from './daemon';
+  import { projectDisplayName } from './worktrees';
 
   export interface CommandInput {
     project_id: number;
@@ -189,7 +190,7 @@
 
     <div class="command-body">
       <p id="command-dialog-description" class="description">
-        Add a repeatable process to <strong>{project.name}</strong>.
+        Add a repeatable process to <strong>{projectDisplayName(project)}</strong>.
       </p>
 
       <div class="fields">

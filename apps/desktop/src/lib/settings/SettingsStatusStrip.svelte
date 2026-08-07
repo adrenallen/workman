@@ -2,6 +2,7 @@
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import type { ConnectionStatus, Project } from '../daemon';
   import type { DaemonSettingsInfo } from '../settings';
+  import { projectDisplayName } from '../worktrees';
 
   interface Props {
     project: Project;
@@ -11,7 +12,10 @@
 
   let { project, connection, info }: Props = $props();
 
-  let projectName = $derived(project.display_name?.trim() || project.name || project.path.split('/').filter(Boolean).at(-1) || 'Project');
+  let projectName = $derived(projectDisplayName(
+    project,
+    project.path.split('/').filter(Boolean).at(-1) || 'Project'
+  ));
   let daemonLabel = $derived(
     connection.status === 'connected'
       ? `Daemon ${info?.version ?? connection.daemon_version ?? ''}`.trim()

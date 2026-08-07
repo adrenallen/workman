@@ -20,6 +20,7 @@
     type NavigationProjectSnapshot
   } from './navigation';
   import { projectTreeSelection, type ProjectTreeItemKind } from './projectTree';
+  import { projectDisplayName } from './worktrees';
 
   interface Props {
     projects: Project[];
@@ -292,7 +293,7 @@
   }
 
   function projectLabel(project: Project): string {
-    return project.display_name ?? project.name;
+    return projectDisplayName(project);
   }
 
   function workingDirLabel(path: string): string {

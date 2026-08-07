@@ -31,6 +31,7 @@
   import { liveStats, type DescendantProcessStats } from './liveStats';
   import { killSubprocess, listSubprocesses } from './subprocesses';
   import TimerCountdown from './TimerCountdown.svelte';
+  import { projectDisplayName } from './worktrees';
 
   let {
     client,
@@ -198,7 +199,7 @@
   class:stage-narrow={statusWidth <= 680}
   class:stage-tiny={statusWidth <= 480}
   bind:clientWidth={statusWidth}
-  aria-label={`${project.name} selected process status`}
+  aria-label={`${projectDisplayName(project)} selected process status`}
 >
   <nav class="navigation" aria-label="Process selection">
     <button

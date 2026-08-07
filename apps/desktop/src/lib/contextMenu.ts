@@ -9,6 +9,7 @@ import {
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
 import type { WorktreeEntry, WorktreeRepository } from './worktrees';
+import { projectRepositoryTitle } from './worktrees';
 import type { ContextActionId } from './contextMenuIcons';
 
 export {
@@ -112,9 +113,7 @@ export function describeContextMenu(
   switch (target.kind) {
     case 'project':
       return {
-        title: target.worktree && target.repository
-          ? `${target.repository.name}: ${target.worktree.branch}`
-          : target.project.display_name?.trim() || target.project.name,
+        title: projectRepositoryTitle(target.project, target.repository),
         subtitle: target.worktree?.kind === 'main'
           ? `REPOSITORY · ${target.project.id}`
           : target.worktree
@@ -236,6 +235,7 @@ function projectItems(
   return [
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected },
     { id: 'project-settings', label: 'Project settings…' },
+    { id: 'rename', label: 'Rename' },
     { id: 'new-agent', label: 'New agent…', separatorBefore: true },
     { id: 'new-terminal', label: 'New terminal' },
     { id: 'add-command', label: 'Add command…' },

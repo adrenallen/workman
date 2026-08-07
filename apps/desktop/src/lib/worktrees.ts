@@ -181,17 +181,23 @@ export function buildProjectRailGroups(projects: Project[]): ProjectRailGroup[] 
 }
 
 export function projectBranchLabel(project: Project): string {
-  return project.branch?.trim() || project.display_name?.trim() || project.name;
+  return projectDisplayName(project, project.branch?.trim() || project.name);
 }
 
 export function projectRepositoryTitle(project: Project, repository?: WorktreeRepository | null): string {
-  if (!project.branch) return project.display_name?.trim() || project.name;
+  const displayName = project.display_name?.trim();
+  if (displayName) return displayName;
+  if (!project.branch) return project.name;
   return `${repository?.name ?? repositoryNameFromProject(project)}: ${project.branch}`;
+}
+
+export function projectDisplayName(project: Project, fallback = project.name): string {
+  return project.display_name?.trim() || fallback;
 }
 
 export function repositoryNameFromProject(project: Project): string {
   const separator = project.name.indexOf(': ');
-  return separator > 0 ? project.name.slice(0, separator) : project.display_name?.trim() || project.name;
+  return separator > 0 ? project.name.slice(0, separator) : project.name;
 }
 
 export function rollupProjectStatus(projects: Project[]): ProjectStatus {

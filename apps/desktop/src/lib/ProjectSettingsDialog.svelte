@@ -17,6 +17,7 @@
     type ProjectIconColor,
     type ProjectSettingsInput
   } from './projectAppearance';
+  import { projectDisplayName } from './worktrees';
 
   interface Props {
     project: Project;
@@ -37,7 +38,7 @@
   }: Props = $props();
 
   function initialDisplayName(): string {
-    return project.display_name ?? project.name;
+    return projectDisplayName(project);
   }
 
   function initialIcon(): string | null {
