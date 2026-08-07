@@ -36,6 +36,13 @@ struct ProcessIdParams {
     process_id: ProcessId,
 }
 
+#[derive(Debug, Deserialize)]
+struct CascadeProcessParams {
+    process_id: ProcessId,
+    #[serde(default)]
+    cascade: Option<bool>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct NotificationsListParams {
     read: Option<bool>,
@@ -842,8 +849,10 @@ async fn dispatch(
             registry.start(params.process_id).map(json_value)
         }
         "process.stop" => {
-            let params: ProcessIdParams = params_as(params)?;
-            registry.stop(params.process_id).map(json_value)
+            let params: CascadeProcessParams = params_as(params)?;
+            registry
+                .stop_with_descendants(params.process_id, params.cascade.unwrap_or(true))
+                .map(json_value)
         }
         "process.restart" => {
             let params: ProcessIdParams = params_as(params)?;
@@ -864,8 +873,10 @@ async fn dispatch(
             spawn_terminal(&mut registry, params).map(json_value)
         }
         "process.close" | "process.delete" => {
-            let params: ProcessIdParams = params_as(params)?;
-            registry.close(params.process_id).map(json_value)
+            let params: CascadeProcessParams = params_as(params)?;
+            registry
+                .close_with_descendants(params.process_id, params.cascade.unwrap_or(true))
+                .map(json_value)
         }
         "process.rename" => {
             let params: RenameParams = params_as(params)?;
