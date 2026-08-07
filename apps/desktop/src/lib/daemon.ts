@@ -166,6 +166,8 @@ export interface ProcessView {
   agent_tool_id: number | null;
   spawned_by_process_id: number | null;
   sort_order: number;
+  agent_session_id: string | null;
+  agent_launch_mode: 'fresh' | 'continued_latest' | 'resumed_session' | null;
   agent_state: AgentState;
   claimed_todos?: ClaimedTodo[];
 }

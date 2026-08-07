@@ -100,6 +100,8 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
             tool_type: "scripted".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry.store().put_process(&Process {
             id: 1,

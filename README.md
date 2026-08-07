@@ -131,6 +131,9 @@ agent_tools:
     command: codex --dangerously-bypass-approvals-and-sandbox
     tool_type: codex
     enabled: true
+    # Appended to the original command when restarting a stopped agent.
+    resume_args: resume {session_id}
+    continue_args: resume --last
   - name: Custom agent
     command: /opt/agents/custom --interactive
     # tool_type is optional and inferred from the command executable.
@@ -138,7 +141,10 @@ agent_tools:
 
 Names are the stable identity for file-backed entries. Removing one from the file removes that
 managed entry at the next daemon restart. Unknown `tool_type` values are accepted and use the
-generic terminal-prompt attention detector.
+generic terminal-prompt attention detector. Resume behavior is preset-level and agent-agnostic:
+`resume_args` must contain `{session_id}`, while `continue_args` is the cwd-scoped fallback used
+when no captured ID is available. Omitting both always starts that preset fresh. Workman discovers
+session IDs passively from supported CLIs' own stores; it never probes or injects input into a PTY.
 
 ## Scratchpad Markdown Titles
 

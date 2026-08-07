@@ -27,6 +27,8 @@ struct KnownAgentDefault {
     tool_types: &'static [&'static str],
     legacy_commands: &'static [&'static str],
     command: &'static str,
+    resume_args: Option<&'static str>,
+    continue_args: Option<&'static str>,
 }
 
 const KNOWN_AGENT_DEFAULTS: &[KnownAgentDefault] = &[
@@ -35,36 +37,48 @@ const KNOWN_AGENT_DEFAULTS: &[KnownAgentDefault] = &[
         tool_types: &["claude", "claude_code"],
         legacy_commands: &["claude"],
         command: "claude --dangerously-skip-permissions",
+        resume_args: Some("--resume {session_id}"),
+        continue_args: Some("--continue"),
     },
     KnownAgentDefault {
         name: "Codex",
         tool_types: &["codex"],
         legacy_commands: &["codex"],
         command: "codex --dangerously-bypass-approvals-and-sandbox",
+        resume_args: Some("resume {session_id}"),
+        continue_args: Some("resume --last"),
     },
     KnownAgentDefault {
         name: "Gemini",
         tool_types: &["gemini", "gemini_cli"],
         legacy_commands: &["gemini", "gemini --yolo"],
         command: "gemini --approval-mode=yolo",
+        resume_args: None,
+        continue_args: Some("--resume latest"),
     },
     KnownAgentDefault {
         name: "OpenCode",
         tool_types: &["opencode", "open_code"],
         legacy_commands: &["opencode"],
         command: "opencode --auto",
+        resume_args: Some("--session {session_id}"),
+        continue_args: Some("--continue"),
     },
     KnownAgentDefault {
         name: "Kimi",
         tool_types: &["kimi", "kimi_code"],
         legacy_commands: &["kimi"],
         command: "kimi --yolo",
+        resume_args: Some("--session {session_id}"),
+        continue_args: Some("--continue"),
     },
     KnownAgentDefault {
         name: "DeepSeek v4 flash",
         tool_types: &["opencode", "open_code"],
         legacy_commands: &["opencode --model deepseek/deepseek-v4-flash"],
         command: "opencode --auto --model deepseek/deepseek-v4-flash",
+        resume_args: Some("--session {session_id}"),
+        continue_args: Some("--continue"),
     },
 ];
 
@@ -123,6 +137,10 @@ pub struct UserAgentTool {
     pub tool_type: Option<String>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_args: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_args: Option<String>,
 }
 
 /// Counts from reconciling config-managed tools into the durable registry.
@@ -402,7 +420,21 @@ fn save_agent_tool_from_settings_at(
             )));
         }
     };
-    set_agent_tool_entry(entry, &name, &command, &tool_type, enabled)?;
+    let resume_args = existing
+        .as_ref()
+        .and_then(|tool| tool.resume_args.as_deref());
+    let continue_args = existing
+        .as_ref()
+        .and_then(|tool| tool.continue_args.as_deref());
+    set_agent_tool_entry(
+        entry,
+        &name,
+        &command,
+        &tool_type,
+        enabled,
+        resume_args,
+        continue_args,
+    )?;
 
     let config = validated_document(&root)?;
     write_user_config_document(path, &source, &root)?;
@@ -417,6 +449,8 @@ fn save_agent_tool_from_settings_at(
         tool_type,
         enabled,
         source: AgentToolSource::Config,
+        resume_args: resume_args.map(str::to_owned),
+        continue_args: continue_args.map(str::to_owned),
     })?;
     sync_user_agent_tools(store, &config.agent_tools)?;
     reorder_store_from_config(store, &config.agent_tools)?;
@@ -555,6 +589,8 @@ fn reorder_agent_tools_from_settings_at(
             &tool.command,
             &tool.tool_type,
             tool.enabled,
+            tool.resume_args.as_deref(),
+            tool.continue_args.as_deref(),
         )?;
         entries.push(entry);
     }
@@ -621,6 +657,8 @@ fn set_agent_tool_entry(
     command: &str,
     tool_type: &str,
     enabled: bool,
+    resume_args: Option<&str>,
+    continue_args: Option<&str>,
 ) -> Result<(), UserConfigError> {
     let entry = entry.as_mapping_mut().ok_or_else(|| {
         UserConfigError::Invalid("each agent_tools entry must be a mapping".to_owned())
@@ -632,6 +670,17 @@ fn set_agent_tool_entry(
         ("enabled", serde_yaml::Value::Bool(enabled)),
     ] {
         entry.insert(serde_yaml::Value::String(key.to_owned()), value);
+    }
+    for (key, value) in [
+        ("resume_args", resume_args),
+        ("continue_args", continue_args),
+    ] {
+        let key = serde_yaml::Value::String(key.to_owned());
+        if let Some(value) = value {
+            entry.insert(key, serde_yaml::Value::String(value.to_owned()));
+        } else {
+            entry.remove(&key);
+        }
     }
     Ok(())
 }
@@ -803,11 +852,36 @@ pub fn sync_user_agent_tools(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| infer_tool_type(command));
+        let known = KNOWN_AGENT_DEFAULTS.iter().find(|known| {
+            name == known.name
+                && known.tool_types.contains(&tool_type.as_str())
+                && command == known.command
+        });
+        let resume_args = normalize_agent_args(
+            name,
+            "resume_args",
+            entry
+                .resume_args
+                .as_deref()
+                .or_else(|| known.and_then(|known| known.resume_args)),
+            true,
+        )?;
+        let continue_args = normalize_agent_args(
+            name,
+            "continue_args",
+            entry
+                .continue_args
+                .as_deref()
+                .or_else(|| known.and_then(|known| known.continue_args)),
+            false,
+        )?;
         normalized.push((
             name.to_owned(),
             command.to_owned(),
             tool_type,
             entry.enabled,
+            resume_args,
+            continue_args,
         ));
     }
 
@@ -819,7 +893,7 @@ pub fn sync_user_agent_tools(
         .collect::<HashMap<_, _>>();
     let mut next_id = store.next_agent_tool_id()?;
 
-    for (name, command, tool_type, enabled) in normalized {
+    for (name, command, tool_type, enabled, resume_args, continue_args) in normalized {
         let (id, is_new) = existing_by_name
             .remove(&name)
             .map_or_else(|| (next_id, true), |tool| (tool.id, false));
@@ -833,6 +907,8 @@ pub fn sync_user_agent_tools(
             tool_type,
             enabled,
             source: AgentToolSource::Config,
+            resume_args,
+            continue_args,
         };
         let changed = existing.iter().find(|old| old.id == id) != Some(&tool);
         if changed {
@@ -854,6 +930,32 @@ pub fn sync_user_agent_tools(
     }
 
     Ok(report)
+}
+
+fn normalize_agent_args(
+    tool_name: &str,
+    field: &str,
+    value: Option<&str>,
+    requires_session_id: bool,
+) -> Result<Option<String>, UserConfigError> {
+    let Some(value) = value else { return Ok(None) };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool {tool_name:?} {field} cannot be empty"
+        )));
+    }
+    if value.contains('\0') {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool {tool_name:?} {field} may not contain NUL bytes"
+        )));
+    }
+    if requires_session_id && !value.contains("{session_id}") {
+        return Err(UserConfigError::Invalid(format!(
+            "agent tool {tool_name:?} resume_args must contain {{session_id}}"
+        )));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn infer_tool_type(command: &str) -> String {
@@ -885,6 +987,8 @@ mod tests {
             command: command.to_owned(),
             tool_type: tool_type.map(str::to_owned),
             enabled: true,
+            resume_args: None,
+            continue_args: None,
         }
     }
 
@@ -899,6 +1003,8 @@ mod tests {
                 tool_type: "bespoke".to_owned(),
                 enabled: true,
                 source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
 
@@ -953,6 +1059,35 @@ mod tests {
             config.agent_tools[0].tool_type.as_deref(),
             Some("future_v9")
         );
+        assert_eq!(config.agent_tools[0].resume_args, None);
+        assert_eq!(config.agent_tools[0].continue_args, None);
+    }
+
+    #[test]
+    fn resume_templates_are_agent_agnostic_and_require_the_session_placeholder() {
+        let configured = parse_user_config(
+            "agent_tools:\n  - name: Future Agent\n    command: future-agent --yes\n    tool_type: future_v9\n    resume_args: attach --conversation {session_id}\n    continue_args: attach --latest\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        sync_user_agent_tools(&store, &configured.agent_tools).unwrap();
+        let tool = store
+            .list_agent_tools()
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.name == "Future Agent")
+            .unwrap();
+        assert_eq!(
+            tool.resume_args.as_deref(),
+            Some("attach --conversation {session_id}")
+        );
+        assert_eq!(tool.continue_args.as_deref(), Some("attach --latest"));
+
+        let invalid = parse_user_config(
+            "agent_tools:\n  - name: Broken\n    command: broken\n    resume_args: --resume fixed-id\n",
+        )
+        .unwrap();
+        assert!(sync_user_agent_tools(&store, &invalid.agent_tools).is_err());
     }
 
     #[test]
@@ -1001,6 +1136,8 @@ mod tests {
                 tool_type: "opencode".to_owned(),
                 enabled: true,
                 source: AgentToolSource::Config,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
 
@@ -1093,6 +1230,13 @@ mod tests {
         ] {
             assert_eq!(commands[name], command);
         }
+        let tools = store.list_agent_tools().unwrap();
+        let claude = tools.iter().find(|tool| tool.name == "Claude").unwrap();
+        assert_eq!(claude.resume_args.as_deref(), Some("--resume {session_id}"));
+        assert_eq!(claude.continue_args.as_deref(), Some("--continue"));
+        let codex = tools.iter().find(|tool| tool.name == "Codex").unwrap();
+        assert_eq!(codex.resume_args.as_deref(), Some("resume {session_id}"));
+        assert_eq!(codex.continue_args.as_deref(), Some("resume --last"));
         assert_eq!(commands["Custom Codex"], "codex");
         assert_eq!(commands["Custom OpenCode"], "opencode --model private");
         assert_eq!(commands["Claude custom runtime"], "claude");
@@ -1129,6 +1273,13 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
         for tool in tools {
             assert_eq!(persisted[tool.name.as_str()], tool.command);
+            let configured = config
+                .agent_tools
+                .iter()
+                .find(|configured| configured.name == tool.name)
+                .unwrap();
+            assert_eq!(configured.resume_args, tool.resume_args);
+            assert_eq!(configured.continue_args, tool.continue_args);
         }
     }
 

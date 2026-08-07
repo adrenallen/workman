@@ -716,6 +716,8 @@ mod tests {
             tool_type: tool_type.to_owned(),
             enabled,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         }
     }
 

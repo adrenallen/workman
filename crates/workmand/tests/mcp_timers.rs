@@ -159,6 +159,8 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
             tool_type: "claude_code".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry.create(process(
             DELIVERY_ID,

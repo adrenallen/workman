@@ -33,6 +33,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod agent_sessions;
 pub mod config;
 mod context_actions;
 mod control;

@@ -486,6 +486,8 @@ pub(crate) fn save_agent_tool(
         tool_type: tool_type.to_owned(),
         enabled,
         source: AgentToolSource::Local,
+        resume_args: None,
+        continue_args: None,
     };
     registry
         .store()
@@ -1265,6 +1267,8 @@ mod tests {
                 tool_type: "claude_code".into(),
                 enabled: true,
                 source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
         let tools = load_agent_tools(&registry).unwrap();
@@ -1289,6 +1293,8 @@ mod tests {
                 tool_type: "future".into(),
                 enabled: true,
                 source: AgentToolSource::Config,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
 

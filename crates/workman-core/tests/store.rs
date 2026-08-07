@@ -6,9 +6,10 @@ use std::{
 };
 
 use workman_core::{
-    Actor, AgentTool, AgentToolSource, LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource,
-    ProcessStatus, Project, ProjectLock, ProjectWorktree, Scratchpad, Store, Timer, TimerKind,
-    Todo, TodoBlocker, TodoComment, TodoPriority, TodoStatus, WorktreeRepository,
+    Actor, AgentLaunchMode, AgentTool, AgentToolSource, LATEST_SCHEMA_VERSION, Process,
+    ProcessKind, ProcessSource, ProcessStatus, Project, ProjectLock, ProjectWorktree, Scratchpad,
+    Store, Timer, TimerKind, Todo, TodoBlocker, TodoComment, TodoPriority, TodoStatus,
+    WorktreeRepository,
 };
 
 #[test]
@@ -52,6 +53,7 @@ fn fresh_database_migrates_to_current_schema() {
             "consumed_idle_watches",
             "locks",
             "notifications",
+            "process_agent_sessions",
             "process_mcp_tokens",
             "processes",
             "project_worktrees",
@@ -359,6 +361,8 @@ fn domain_records_round_trip_through_store() {
         tool_type: "codex".into(),
         enabled: true,
         source: AgentToolSource::Local,
+        resume_args: None,
+        continue_args: None,
     };
     store.put_agent_tool(&agent_tool).expect("put agent tool");
     assert_eq!(
@@ -416,6 +420,28 @@ fn domain_records_round_trip_through_store() {
         store.get_process(process.id).unwrap(),
         Some(process.clone())
     );
+    store
+        .set_agent_launch_mode(process.id, AgentLaunchMode::Fresh, 1_700_000_000_100)
+        .expect("set agent launch mode");
+    store
+        .set_agent_session_id(process.id, "session-codex", 1_700_000_000_200)
+        .expect("capture agent session");
+    let agent_session = store
+        .get_agent_session(process.id)
+        .unwrap()
+        .expect("agent session");
+    assert_eq!(agent_session.session_id.as_deref(), Some("session-codex"));
+    assert_eq!(agent_session.launch_mode, AgentLaunchMode::Fresh);
+    store
+        .set_agent_launch_mode(
+            process.id,
+            AgentLaunchMode::ResumedSession,
+            1_700_000_000_300,
+        )
+        .expect("update launch mode");
+    let agent_session = store.get_agent_session(process.id).unwrap().unwrap();
+    assert_eq!(agent_session.session_id.as_deref(), Some("session-codex"));
+    assert_eq!(agent_session.launch_mode, AgentLaunchMode::ResumedSession);
     store
         .set_process_mcp_token(process.id, "process-secret", 1_700_000_000_000)
         .expect("set process token");

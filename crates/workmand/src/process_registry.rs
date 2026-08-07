@@ -13,8 +13,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use workman_core::{
-    ClaimedTodo, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, ProjectId, Store,
-    StoreError, TimerKind,
+    AgentLaunchMode, AgentTool, ClaimedTodo, Process, ProcessId, ProcessKind, ProcessSource,
+    ProcessStatus, ProjectId, Store, StoreError, TimerKind,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionState, AttentionTracker,
         PendingDialog, pending_dialog,
@@ -34,6 +34,7 @@ const SUBMIT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Initial Enter plus two bounded bare-CR recovery attempts.
 const SUBMIT_MAX_ATTEMPTS: usize = 3;
 
+use crate::agent_sessions::SessionCapture;
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -236,6 +237,10 @@ pub struct ProcessStatusView {
     pub agent_state: AgentState,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
+    /// Conversation ID passively discovered from the agent CLI's own session store.
+    pub agent_session_id: Option<String>,
+    /// Strategy selected by the most recent start: exact resume, cwd latest, or fresh.
+    pub agent_launch_mode: Option<AgentLaunchMode>,
     /// Unexpired todo leases held by MCP actors attached to this process.
     pub claimed_todos: Vec<ClaimedTodo>,
 }
@@ -262,6 +267,13 @@ pub struct ProcessRegistry {
     stop_grace: Duration,
     output_persistence: Option<OutputPersistence>,
     user_environment: UserEnvironmentResolver,
+    agent_session_captures: HashMap<ProcessId, PendingSessionCapture>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSessionCapture {
+    capture: SessionCapture,
+    last_checked_at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -352,6 +364,7 @@ impl ProcessRegistry {
             stop_grace,
             output_persistence,
             user_environment,
+            agent_session_captures: HashMap::new(),
         };
         registry.reconcile_stale_processes()?;
         registry.reload_persisted_outputs()?;
@@ -481,6 +494,11 @@ impl ProcessRegistry {
             .get(&process.id)
             .map(|output| output.events.clone())
             .unwrap_or_default();
+        let agent_session = if process.kind == ProcessKind::Agent {
+            self.store.get_agent_session(process.id)?
+        } else {
+            None
+        };
         let claimed_todos = self
             .store
             .claimed_todos_for_process(process.id, now_millis())?;
@@ -488,6 +506,10 @@ impl ProcessRegistry {
             process,
             agent_state,
             events,
+            agent_session_id: agent_session
+                .as_ref()
+                .and_then(|session| session.session_id.clone()),
+            agent_launch_mode: agent_session.map(|session| session.launch_mode),
             claimed_todos,
         })
     }
@@ -632,12 +654,59 @@ impl ProcessRegistry {
                 }
             })?;
         }
-        let command = process
+        let base_command = process
             .command
             .as_deref()
             .filter(|command| !command.trim().is_empty())
             .ok_or(RegistryError::MissingCommand(process_id))?
             .to_owned();
+        let previous_session = if process.kind == ProcessKind::Agent {
+            self.store.get_agent_session(process_id)?
+        } else {
+            None
+        };
+        let agent_tool = process
+            .agent_tool_id
+            .map(|id| self.store.get_agent_tool(id))
+            .transpose()?
+            .flatten();
+        let tool_type = self.tool_type_for(&process)?;
+        let started_at = now_millis();
+        let capture = tool_type.as_deref().and_then(|tool_type| {
+            SessionCapture::new(tool_type, &process.working_dir, &process.env, started_at)
+        });
+        let needs_continue_check = process.exited_at.is_some()
+            && previous_session
+                .as_ref()
+                .and_then(|session| session.session_id.as_ref())
+                .is_none()
+            && agent_tool
+                .as_ref()
+                .and_then(|tool| tool.continue_args.as_ref())
+                .is_some();
+        let cwd_has_session = needs_continue_check.then(|| {
+            capture.as_ref().and_then(|capture| {
+                capture
+                    .latest_existing()
+                    .map(|session| session.is_some())
+                    .map_err(|error| {
+                        eprintln!(
+                            "process {process_id}: could not inspect cwd agent sessions before launch: {error}"
+                        );
+                    })
+                    .ok()
+            })
+        }).flatten();
+        let launch = agent_start_command(
+            &process,
+            &base_command,
+            agent_tool.as_ref(),
+            previous_session.as_ref(),
+            cwd_has_session,
+        );
+        let launch_mode = launch.mode;
+        let launch_message = launch.mode_message();
+        let command = launch.command;
         // Terminals created by Workman store the shell executable as their command. Keep that
         // interactive, including legacy/custom shell paths; terminal-kind fixtures with an actual
         // command still run through the resolved login shell like every other command.
@@ -652,7 +721,6 @@ impl ProcessRegistry {
         process.exited_at = None;
         self.store.put_process(&process)?;
 
-        let tool_type = self.tool_type_for(&process)?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         self.store
             .set_process_mcp_token(process.id, &token, now_millis())?;
@@ -666,7 +734,7 @@ impl ProcessRegistry {
         for (key, value) in user_environment.pty_environment() {
             options = options.with_env(key, value);
         }
-        if let Some(tool_type) = tool_type {
+        if let Some(tool_type) = tool_type.as_deref() {
             options = options.with_tool_type(tool_type);
         }
         if !process.working_dir.is_empty() {
@@ -721,13 +789,37 @@ impl ProcessRegistry {
             let _ = hosted.terminate(self.stop_grace);
             return Err(error.into());
         }
+        if process.kind == ProcessKind::Agent {
+            if let Err(error) =
+                self.store
+                    .set_agent_launch_mode(process.id, launch_mode, started_at)
+            {
+                let _ = self.store.clear_process_mcp_token(process_id);
+                let _ = hosted.terminate(self.stop_grace);
+                return Err(error.into());
+            }
+            if let Some(capture) = capture {
+                self.agent_session_captures.insert(
+                    process_id,
+                    PendingSessionCapture {
+                        capture,
+                        last_checked_at: started_at,
+                    },
+                );
+            }
+        }
+        let launch_event = (process.kind == ProcessKind::Agent).then(|| ProcessEvent {
+            at: started_at,
+            kind: "agent_launch".into(),
+            message: launch_message.into(),
+        });
         self.outputs.insert(
             process_id,
             ProcessOutput {
                 raw: hosted.raw_output(),
                 terminal: hosted.terminal_output(),
                 attention: hosted.attention_tracker(),
-                events: Vec::new(),
+                events: launch_event.into_iter().collect(),
             },
         );
         self.running.insert(process_id, hosted);
@@ -813,6 +905,7 @@ impl ProcessRegistry {
 
         match hosted.terminate(self.stop_grace) {
             Ok(status) => {
+                self.capture_agent_session_id(process_id)?;
                 apply_exit_info(&mut process, &status);
                 process.status = ProcessStatus::Stopped;
                 self.store.put_process(&process)?;
@@ -820,6 +913,7 @@ impl ProcessRegistry {
                 Ok(process)
             }
             Err(error) => {
+                self.capture_agent_session_id(process_id)?;
                 process.status = ProcessStatus::Crashed;
                 process.pid = None;
                 process.exited_at = Some(now_millis());
@@ -1483,6 +1577,7 @@ impl ProcessRegistry {
 
     fn refresh_exits(&mut self) -> RegistryResult<()> {
         self.drain_submission_events();
+        self.refresh_agent_session_ids(false)?;
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();
         for process_id in process_ids {
             let status = self
@@ -1496,6 +1591,7 @@ impl ProcessRegistry {
                 })?;
             let Some(status) = status else { continue };
 
+            self.capture_agent_session_id(process_id)?;
             self.running.remove(&process_id);
             let _ = self.store.clear_process_mcp_token(process_id);
             let mut process = self.require(process_id)?;
@@ -1506,6 +1602,40 @@ impl ProcessRegistry {
                 ProcessStatus::Crashed
             };
             self.store.put_process(&process)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_agent_session_ids(&mut self, force: bool) -> RegistryResult<()> {
+        let now = now_millis();
+        let process_ids = self
+            .agent_session_captures
+            .iter()
+            .filter(|(_, pending)| force || now.saturating_sub(pending.last_checked_at) >= 1_000)
+            .map(|(process_id, _)| *process_id)
+            .collect::<Vec<_>>();
+        for process_id in process_ids {
+            self.capture_agent_session_id(process_id)?;
+        }
+        Ok(())
+    }
+
+    fn capture_agent_session_id(&mut self, process_id: ProcessId) -> RegistryResult<()> {
+        let now = now_millis();
+        let Some(pending) = self.agent_session_captures.get_mut(&process_id) else {
+            return Ok(());
+        };
+        pending.last_checked_at = now;
+        match pending.capture.discover() {
+            Ok(Some(session_id)) => {
+                self.store
+                    .set_agent_session_id(process_id, &session_id, now)?;
+                self.agent_session_captures.remove(&process_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("process {process_id}: could not discover agent session: {error}");
+            }
         }
         Ok(())
     }
@@ -1691,6 +1821,13 @@ impl Drop for ProcessRegistry {
         for (process_id, mut hosted) in self.running.drain() {
             let _ = self.store.clear_process_mcp_token(process_id);
             let status = hosted.terminate(self.stop_grace).ok();
+            if let Some(pending) = self.agent_session_captures.remove(&process_id)
+                && let Ok(Some(session_id)) = pending.capture.discover()
+            {
+                let _ = self
+                    .store
+                    .set_agent_session_id(process_id, &session_id, now_millis());
+            }
             if let Ok(Some(mut process)) = self.store.get_process(process_id) {
                 if let Some(status) = status {
                     apply_exit_info(&mut process, &status);
@@ -1703,6 +1840,71 @@ impl Drop for ProcessRegistry {
             }
         }
     }
+}
+
+#[derive(Debug)]
+struct AgentStartCommand {
+    command: String,
+    mode: AgentLaunchMode,
+}
+
+impl AgentStartCommand {
+    const fn mode_message(&self) -> &'static str {
+        match self.mode {
+            AgentLaunchMode::Fresh => "Started a fresh agent conversation",
+            AgentLaunchMode::ContinuedLatest => {
+                "Continued the latest agent conversation for this working directory"
+            }
+            AgentLaunchMode::ResumedSession => "Resumed the captured agent conversation",
+        }
+    }
+}
+
+fn agent_start_command(
+    process: &Process,
+    base_command: &str,
+    tool: Option<&AgentTool>,
+    session: Option<&workman_core::AgentSession>,
+    cwd_has_session: Option<bool>,
+) -> AgentStartCommand {
+    if process.kind != ProcessKind::Agent || process.exited_at.is_none() {
+        return AgentStartCommand {
+            command: base_command.to_owned(),
+            mode: AgentLaunchMode::Fresh,
+        };
+    }
+    if let (Some(session_id), Some(resume_args)) = (
+        session.and_then(|session| session.session_id.as_deref()),
+        tool.and_then(|tool| tool.resume_args.as_deref()),
+    ) {
+        return AgentStartCommand {
+            command: append_shell_args(
+                base_command,
+                &resume_args.replace("{session_id}", &shell_quote(session_id)),
+            ),
+            mode: AgentLaunchMode::ResumedSession,
+        };
+    }
+    if cwd_has_session != Some(false)
+        && let Some(continue_args) = tool.and_then(|tool| tool.continue_args.as_deref())
+    {
+        return AgentStartCommand {
+            command: append_shell_args(base_command, continue_args),
+            mode: AgentLaunchMode::ContinuedLatest,
+        };
+    }
+    AgentStartCommand {
+        command: base_command.to_owned(),
+        mode: AgentLaunchMode::Fresh,
+    }
+}
+
+fn append_shell_args(command: &str, args: &str) -> String {
+    format!("{} {}", command.trim_end(), args.trim())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[derive(Clone, Copy)]
@@ -1837,7 +2039,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{thread, time::Instant};
 
-    use workman_core::{AgentTool, ProcessSource, Project, attention::AttentionState};
+    use workman_core::{
+        AgentSession, AgentTool, ProcessSource, Project, attention::AttentionState,
+    };
 
     use super::*;
 
@@ -1866,6 +2070,104 @@ mod tests {
             spawned_by_process_id: None,
             sort_order: 0,
         }
+    }
+
+    #[test]
+    fn dead_agent_start_prefers_exact_then_latest_then_fresh_without_losing_flags() {
+        let mut process = output_test_process("/tmp/repo");
+        process.kind = ProcessKind::Agent;
+        process.exited_at = Some(1);
+        let tool = AgentTool {
+            id: 7,
+            name: "Codex".into(),
+            command: "codex --model gpt-5 --dangerously-bypass-approvals-and-sandbox".into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: workman_core::AgentToolSource::Config,
+            resume_args: Some("resume {session_id}".into()),
+            continue_args: Some("resume --last".into()),
+        };
+        let session = AgentSession {
+            process_id: process.id,
+            session_id: Some("abc'def".into()),
+            launch_mode: AgentLaunchMode::Fresh,
+            launched_at: 1,
+            captured_at: Some(2),
+        };
+
+        let exact = agent_start_command(
+            &process,
+            &tool.command,
+            Some(&tool),
+            Some(&session),
+            Some(true),
+        );
+        assert_eq!(exact.mode, AgentLaunchMode::ResumedSession);
+        assert_eq!(
+            exact.command,
+            "codex --model gpt-5 --dangerously-bypass-approvals-and-sandbox resume 'abc'\\''def'"
+        );
+
+        let latest = agent_start_command(&process, &tool.command, Some(&tool), None, Some(true));
+        assert_eq!(latest.mode, AgentLaunchMode::ContinuedLatest);
+        assert_eq!(
+            latest.command,
+            "codex --model gpt-5 --dangerously-bypass-approvals-and-sandbox resume --last"
+        );
+
+        let custom = AgentTool {
+            resume_args: None,
+            continue_args: None,
+            ..tool.clone()
+        };
+        let fresh = agent_start_command(
+            &process,
+            &custom.command,
+            Some(&custom),
+            Some(&session),
+            Some(true),
+        );
+        assert_eq!(fresh.mode, AgentLaunchMode::Fresh);
+        assert_eq!(fresh.command, custom.command);
+    }
+
+    #[test]
+    fn first_agent_start_is_fresh_even_when_the_preset_can_continue() {
+        let mut process = output_test_process("/tmp/repo");
+        process.kind = ProcessKind::Agent;
+        let tool = AgentTool {
+            id: 7,
+            name: "Claude".into(),
+            command: "claude --dangerously-skip-permissions".into(),
+            tool_type: "claude_code".into(),
+            enabled: true,
+            source: workman_core::AgentToolSource::Config,
+            resume_args: Some("--resume {session_id}".into()),
+            continue_args: Some("--continue".into()),
+        };
+        let launch = agent_start_command(&process, &tool.command, Some(&tool), None, Some(true));
+        assert_eq!(launch.mode, AgentLaunchMode::Fresh);
+        assert_eq!(launch.command, tool.command);
+    }
+
+    #[test]
+    fn dead_agent_without_a_cwd_session_falls_back_to_fresh() {
+        let mut process = output_test_process("/tmp/repo");
+        process.kind = ProcessKind::Agent;
+        process.exited_at = Some(1);
+        let tool = AgentTool {
+            id: 7,
+            name: "Claude".into(),
+            command: "claude --dangerously-skip-permissions".into(),
+            tool_type: "claude_code".into(),
+            enabled: true,
+            source: workman_core::AgentToolSource::Config,
+            resume_args: Some("--resume {session_id}".into()),
+            continue_args: Some("--continue".into()),
+        };
+        let launch = agent_start_command(&process, &tool.command, Some(&tool), None, Some(false));
+        assert_eq!(launch.mode, AgentLaunchMode::Fresh);
+        assert_eq!(launch.command, tool.command);
     }
 
     fn wait_for_persisted_output(registry: &mut ProcessRegistry) {
@@ -2218,6 +2520,8 @@ mod tests {
                 tool_type: "claude_code".into(),
                 enabled: true,
                 source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
 

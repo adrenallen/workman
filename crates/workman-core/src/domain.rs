@@ -170,6 +170,16 @@ string_enum! {
     }
 }
 
+string_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentLaunchMode {
+        Fresh => "fresh",
+        ContinuedLatest => "continued_latest",
+        ResumedSession => "resumed_session",
+    }
+}
+
 /// A registered repository/workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -214,6 +224,21 @@ pub struct AgentTool {
     pub tool_type: String,
     pub enabled: bool,
     pub source: AgentToolSource,
+    /// Shell arguments appended to the original command when an exact session is known.
+    /// The template must contain `{session_id}`.
+    pub resume_args: Option<String>,
+    /// Shell arguments appended to continue the cwd-scoped latest session.
+    pub continue_args: Option<String>,
+}
+
+/// Durable conversation identity and the strategy used for an agent's latest launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub process_id: ProcessId,
+    pub session_id: Option<String>,
+    pub launch_mode: AgentLaunchMode,
+    pub launched_at: i64,
+    pub captured_at: Option<i64>,
 }
 
 /// Persisted process metadata. PTY output is intentionally kept out of SQLite.

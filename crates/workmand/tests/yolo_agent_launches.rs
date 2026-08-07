@@ -304,6 +304,8 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             tool_type: "claude_code".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: codex_id,
@@ -315,6 +317,8 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             tool_type: "codex".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry
             .store()

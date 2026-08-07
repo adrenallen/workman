@@ -73,6 +73,8 @@ impl TestDaemon {
                 tool_type: "codex".into(),
                 enabled: true,
                 source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
         sync_workman_yml_file(&mut registry, 1).unwrap();

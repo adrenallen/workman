@@ -193,6 +193,19 @@
   function childCommand(child: DescendantProcessStats): string {
     return child.command?.trim() || child.name;
   }
+
+  function agentConversationLabel(process: ProcessView): string {
+    switch (process.agent_launch_mode) {
+      case 'resumed_session':
+        return 'Resumed captured session';
+      case 'continued_latest':
+        return 'Continued latest in folder';
+      case 'fresh':
+        return 'Fresh session';
+      default:
+        return '—';
+    }
+  }
 </script>
 
 <footer
@@ -388,6 +401,12 @@
             <div><dt>CPU</dt><dd>{(stats?.cpu_percent ?? 0).toFixed(1)}%</dd></div>
             <div><dt>Memory</dt><dd>{formatMemory(stats?.memory_bytes)}</dd></div>
             {#if process.kind === 'agent'}<div><dt>Agent state</dt><dd>{agentStatusPresentation(process).shortLabel}</dd></div>{/if}
+            {#if process.kind === 'agent'}
+              <div>
+                <dt>Conversation</dt>
+                <dd title={process.agent_session_id ?? undefined}>{agentConversationLabel(process)}</dd>
+              </div>
+            {/if}
             <div><dt>State</dt><dd>{process.status}</dd></div>
             <div><dt>PID</dt><dd>{process.pid ?? '—'}</dd></div>
           </dl>

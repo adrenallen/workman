@@ -81,6 +81,8 @@ async fn run_migration_case(
         tool_type: "custom".into(),
         enabled: true,
         source: AgentToolSource::Local,
+        resume_args: None,
+        continue_args: None,
     })?;
     let legacy_tool_count = store.list_agent_tools()?.len();
     drop(store);

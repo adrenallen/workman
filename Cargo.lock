@@ -6227,6 +6227,7 @@ dependencies = [
  "listeners",
  "notify",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

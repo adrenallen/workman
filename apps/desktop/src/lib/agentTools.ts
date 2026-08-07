@@ -7,6 +7,8 @@ export interface AgentTool {
   tool_type: string;
   enabled: boolean;
   source: 'local' | 'config';
+  resume_args: string | null;
+  continue_args: string | null;
 }
 
 export interface AgentToolInput {

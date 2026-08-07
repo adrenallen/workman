@@ -57,6 +57,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "gemini".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
         AgentTool {
             id: 102,
@@ -65,6 +67,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
         AgentTool {
             id: 103,
@@ -73,6 +77,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "kimi".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
         AgentTool {
             id: 104,
@@ -81,6 +87,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "claude_code".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
         AgentTool {
             id: 105,
@@ -89,6 +97,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "codex".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
         AgentTool {
             id: 106,
@@ -97,6 +107,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         },
     ] {
         registry.store().put_agent_tool(&tool)?;

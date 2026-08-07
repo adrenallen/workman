@@ -6,9 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentTool, Process, ProcessId, ProcessKind, Project, ProjectId, ProjectLock,
-    ProjectWorktree, Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
-    WorktreeRepositoryId,
+    Actor, AgentLaunchMode, AgentSession, AgentTool, Process, ProcessId, ProcessKind, Project,
+    ProjectId, ProjectLock, ProjectWorktree, Scratchpad, Timer, Todo, TodoBlocker, TodoComment,
+    TodoId, WorktreeRepository, WorktreeRepositoryId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -108,10 +108,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sidebar_sort_order",
         include_str!("../migrations/0020_sidebar_sort_order.sql"),
     ),
+    (
+        21,
+        "agent_session_resume",
+        include_str!("../migrations/0021_agent_session_resume.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 20;
+pub const LATEST_SCHEMA_VERSION: i64 = 21;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -516,24 +521,31 @@ impl Store {
 
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
         self.connection.execute(
-            "INSERT INTO agent_tools (id, name, command, tool_type, enabled, source, sort_order)
+            "INSERT INTO agent_tools (
+                id, name, command, tool_type, enabled, source, sort_order,
+                resume_args, continue_args
+             )
              VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
-                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools), 0)
+                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools), 0), ?7, ?8
              )
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 command = excluded.command,
                 tool_type = excluded.tool_type,
                 enabled = excluded.enabled,
-                source = excluded.source",
+                source = excluded.source,
+                resume_args = excluded.resume_args,
+                continue_args = excluded.continue_args",
             params![
                 tool.id,
                 tool.name,
                 tool.command,
                 tool.tool_type,
                 tool.enabled,
-                tool.source
+                tool.source,
+                tool.resume_args,
+                tool.continue_args,
             ],
         )?;
         Ok(())
@@ -543,7 +555,8 @@ impl Store {
         let tool = self
             .connection
             .query_row(
-                "SELECT id, name, command, tool_type, enabled, source
+                "SELECT id, name, command, tool_type, enabled, source,
+                        resume_args, continue_args
                  FROM agent_tools WHERE id = ?1",
                 [id],
                 |row| {
@@ -554,6 +567,8 @@ impl Store {
                         tool_type: row.get(3)?,
                         enabled: row.get(4)?,
                         source: row.get(5)?,
+                        resume_args: row.get(6)?,
+                        continue_args: row.get(7)?,
                     })
                 },
             )
@@ -563,7 +578,8 @@ impl Store {
 
     pub fn list_agent_tools(&self) -> StoreResult<Vec<AgentTool>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, command, tool_type, enabled, source
+            "SELECT id, name, command, tool_type, enabled, source,
+                    resume_args, continue_args
              FROM agent_tools ORDER BY sort_order, id",
         )?;
         let tools = statement
@@ -575,6 +591,8 @@ impl Store {
                     tool_type: row.get(3)?,
                     enabled: row.get(4)?,
                     source: row.get(5)?,
+                    resume_args: row.get(6)?,
+                    continue_args: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -617,6 +635,61 @@ impl Store {
             .connection
             .execute("DELETE FROM agent_tools WHERE id = ?1", [id])?
             > 0)
+    }
+
+    /// Persist the strategy used for the latest agent launch while retaining any captured ID.
+    pub fn set_agent_launch_mode(
+        &self,
+        process_id: ProcessId,
+        launch_mode: AgentLaunchMode,
+        launched_at: i64,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO process_agent_sessions (
+                process_id, session_id, launch_mode, launched_at, captured_at
+             ) VALUES (?1, NULL, ?2, ?3, NULL)
+             ON CONFLICT(process_id) DO UPDATE SET
+                launch_mode = excluded.launch_mode,
+                launched_at = excluded.launched_at",
+            params![process_id, launch_mode, launched_at],
+        )?;
+        Ok(())
+    }
+
+    /// Attach a passively discovered CLI conversation ID to an agent process.
+    pub fn set_agent_session_id(
+        &self,
+        process_id: ProcessId,
+        session_id: &str,
+        captured_at: i64,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "UPDATE process_agent_sessions
+             SET session_id = ?2, captured_at = ?3
+             WHERE process_id = ?1",
+            params![process_id, session_id, captured_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent_session(&self, process_id: ProcessId) -> StoreResult<Option<AgentSession>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT process_id, session_id, launch_mode, launched_at, captured_at
+                 FROM process_agent_sessions WHERE process_id = ?1",
+                [process_id],
+                |row| {
+                    Ok(AgentSession {
+                        process_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        launch_mode: row.get(2)?,
+                        launched_at: row.get(3)?,
+                        captured_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn put_process(&self, process: &Process) -> StoreResult<()> {

@@ -121,6 +121,8 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             tool_type: "scripted".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry.store().put_process(&Process {
             id: 1,

@@ -40,6 +40,8 @@ export function createOptimisticProcess(input: OptimisticProcessInput): Optimist
       agent_tool_id: input.agentToolId ?? null,
       spawned_by_process_id: null,
       sort_order: Number.MAX_SAFE_INTEGER,
+      agent_session_id: null,
+      agent_launch_mode: null,
       agent_state: {
         state: 'working',
         working: true,

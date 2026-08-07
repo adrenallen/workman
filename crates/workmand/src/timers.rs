@@ -908,6 +908,8 @@ mod tests {
                 tool_type: "claude_code".into(),
                 enabled: true,
                 source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
             })
             .unwrap();
         let mut registry =

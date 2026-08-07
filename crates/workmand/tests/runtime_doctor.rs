@@ -179,6 +179,8 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
             tool_type: "custom".to_owned(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
     }
 

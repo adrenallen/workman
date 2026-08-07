@@ -248,6 +248,8 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             tool_type: "codex".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry
             .store()
@@ -421,6 +423,8 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
             tool_type: "codex".into(),
             enabled: true,
             source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
         })?;
         registry
             .store()
