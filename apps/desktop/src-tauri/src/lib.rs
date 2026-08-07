@@ -35,6 +35,7 @@ use workmand::{
 
 mod external_navigation;
 mod native_notifications;
+mod terminal_clipboard;
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
@@ -308,6 +309,7 @@ pub fn run() {
             shell_open_url,
             shell_detect_editors,
             shell_open_with,
+            terminal_clipboard::terminal_save_clipboard_image,
             native_notifications::native_notification_permission_state,
             native_notifications::native_notification_request_permission,
             native_notifications::native_notification_show
