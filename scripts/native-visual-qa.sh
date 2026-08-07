@@ -58,6 +58,7 @@ QA_APP="$QA_ROOT/$APP_NAME"
 DATA_DIR="$QA_ROOT/data"
 CONFIG="$QA_ROOT/config.yml"
 OPEN_CAPTURE="$QA_ROOT/browser-open.log"
+FAKE_BIN="$QA_ROOT/fake-bin"
 BUNDLE_ID="com.workman.todo${TODO_ID}"
 cleanup_on_error() {
   status=$?
@@ -70,10 +71,19 @@ trap cleanup_on_error EXIT
 
 /usr/bin/ditto "$SOURCE_APP" "$QA_APP"
 mkdir -p "$DATA_DIR"
+mkdir -p "$FAKE_BIN"
 umask 077
 printf 'agent_tools: []\n' > "$CONFIG"
 : > "$OPEN_CAPTURE"
 chmod 600 "$OPEN_CAPTURE"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'case "${1:-}" in' \
+  '  http://*|https://*) printf "%s\\n" "$1" >> "${WORKMAN_BROWSER_OPEN_CAPTURE:?}" ;;' \
+  '  *) printf "isolated QA refused non-browser open: %s\\n" "${1:-}" >&2; exit 78 ;;' \
+  'esac' > "$FAKE_BIN/open"
+chmod 700 "$FAKE_BIN/open"
 
 PLIST="$QA_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
@@ -87,6 +97,7 @@ fi
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_CONFIG string $CONFIG" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON string 1" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE string $OPEN_CAPTURE" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :LSEnvironment:PATH string $FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$PLIST"
 if [[ -n "$DAEMON_BIN" ]]; then
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_DAEMON_BIN string $DAEMON_BIN" "$PLIST"
 fi
@@ -96,7 +107,8 @@ actual_data="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_DATA_DIR
 actual_config="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_CONFIG' "$PLIST")"
 actual_guard="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$PLIST")"
 actual_capture="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$PLIST")"
-[[ "$actual_id" == "$BUNDLE_ID" && "$actual_data" == "$DATA_DIR" && "$actual_config" == "$CONFIG" && "$actual_guard" == 1 && "$actual_capture" == "$OPEN_CAPTURE" ]] || {
+actual_path="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:PATH' "$PLIST")"
+[[ "$actual_id" == "$BUNDLE_ID" && "$actual_data" == "$DATA_DIR" && "$actual_config" == "$CONFIG" && "$actual_guard" == 1 && "$actual_capture" == "$OPEN_CAPTURE" && "$actual_path" == "$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" ]] || {
   printf 'native visual QA: persisted isolation contract did not verify\n' >&2
   exit 70
 }

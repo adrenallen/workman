@@ -41,8 +41,16 @@ test -f "$OPEN_CAPTURE"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_CONFIG' "$QA_APP/Contents/Info.plist")" == "$CONFIG" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$QA_APP/Contents/Info.plist")" == 1 ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$QA_APP/Contents/Info.plist")" == "$OPEN_CAPTURE" ]]
+FAKE_PATH="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:PATH' "$QA_APP/Contents/Info.plist")"
+[[ "$FAKE_PATH" == "$QA_ROOT/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin" ]]
 grep -qx 'agent_tools: \[\]' "$CONFIG"
 test ! -s "$OPEN_CAPTURE"
+WORKMAN_BROWSER_OPEN_CAPTURE="$OPEN_CAPTURE" "$QA_ROOT/fake-bin/open" 'https://example.test/harness'
+grep -qx 'https://example.test/harness' "$OPEN_CAPTURE"
+if WORKMAN_BROWSER_OPEN_CAPTURE="$OPEN_CAPTURE" "$QA_ROOT/fake-bin/open" 'file:///tmp/private' >/dev/null 2>&1; then
+  printf 'expected fake open to reject non-http URL\n' >&2
+  exit 1
+fi
 test -z "$(find "$DATA_DIR" -mindepth 1 -print -quit)"
 
 if "$REPO_ROOT/scripts/native-visual-qa.sh" --todo unsafe --source-app "$SOURCE_APP" --prepare-only >/dev/null 2>&1; then
