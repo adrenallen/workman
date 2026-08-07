@@ -9,6 +9,7 @@ export interface TodoSummary {
   priority: TodoPriority;
   status: TodoStatus;
   completed: boolean;
+  assignee: string | null;
   locked_by: string | null;
   comment_count: number;
   tags: string[];

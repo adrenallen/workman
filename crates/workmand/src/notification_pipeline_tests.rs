@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use workman_core::{
-    Notification, NotificationId, NotificationType, Process, ProcessKind, ProcessSource,
-    ProcessStatus, Project, Store, Timer, TimerKind,
+    NewTodo, Notification, NotificationId, NotificationType, Process, ProcessKind, ProcessSource,
+    ProcessStatus, Project, Store, Timer, TimerKind, TodoPriority, TodoService, UpdateTodo,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionConfig, AttentionState,
         AttentionTracker,
@@ -211,6 +211,119 @@ fn finish_recorded_turn(pipeline: &mut ScriptedPipeline, resting: &str) -> Agent
         "the debounce boundary must remain exclusive"
     );
     pipeline.observe_at(7_000)
+}
+
+fn create_handoff_todo(pipeline: &ScriptedPipeline) -> i64 {
+    TodoService::new(&pipeline.store)
+        .create(
+            PROJECT_ID,
+            NewTodo {
+                title: "Review the discovered edge case".into(),
+                body: "Agent-authored context for the human.".into(),
+                priority: TodoPriority::High,
+                tags: vec!["handoff".into()],
+            },
+            1_000,
+        )
+        .expect("create handoff todo")
+        .id
+}
+
+#[test]
+fn assigned_to_user_emits_one_notification_even_when_agent_is_watched() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    pipeline.capture_native_emission_points();
+    pipeline.watched = true;
+    let todo_id = create_handoff_todo(&pipeline);
+
+    let assigned = TodoService::new(&pipeline.store)
+        .assign(
+            PROJECT_ID,
+            todo_id,
+            Some("user".into()),
+            "scripted-agent",
+            2_000,
+        )
+        .expect("assign todo to user");
+    pipeline.capture_native_emission_points();
+
+    assert_eq!(assigned.assignee.as_deref(), Some("user"));
+    let notifications = pipeline.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, NotificationType::TodoAssignedToYou);
+    assert_eq!(notifications[0].todo_id, Some(todo_id));
+    assert_eq!(notifications[0].comment_id, None);
+    assert_eq!(pipeline.native_emissions.len(), 1);
+}
+
+#[test]
+fn editing_an_assigned_todo_without_reassignment_emits_no_new_notification() {
+    let pipeline = ScriptedPipeline::new(Some("claude_code"));
+    let todo_id = create_handoff_todo(&pipeline);
+    let service = TodoService::new(&pipeline.store);
+    service
+        .assign(
+            PROJECT_ID,
+            todo_id,
+            Some("user".into()),
+            "scripted-agent",
+            2_000,
+        )
+        .expect("assign todo to user");
+
+    service
+        .update(
+            PROJECT_ID,
+            todo_id,
+            UpdateTodo {
+                body: Some("More evidence, same assignment.".into()),
+                ..UpdateTodo::default()
+            },
+            3_000,
+        )
+        .expect("edit assigned todo");
+    service
+        .assign(
+            PROJECT_ID,
+            todo_id,
+            Some("user".into()),
+            "scripted-agent",
+            3_100,
+        )
+        .expect("repeat same assignment");
+
+    assert_eq!(
+        pipeline.notifications().len(),
+        1,
+        "no fresh assignment edge"
+    );
+}
+
+#[test]
+fn user_mention_emits_one_notification_with_a_comment_navigation_anchor() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    pipeline.capture_native_emission_points();
+    pipeline.watched = true;
+    let todo_id = create_handoff_todo(&pipeline);
+
+    let comment = TodoService::new(&pipeline.store)
+        .comment_create_as(
+            PROJECT_ID,
+            todo_id,
+            "agent-process-7",
+            "scripted-agent",
+            "@user, can you choose between these approaches?".into(),
+            2_000,
+        )
+        .expect("create user mention comment");
+    pipeline.capture_native_emission_points();
+
+    let notifications = pipeline.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, NotificationType::MentionedInComment);
+    assert_eq!(notifications[0].todo_id, Some(todo_id));
+    assert_eq!(notifications[0].comment_id, Some(comment.id));
+    assert_eq!(pipeline.native_emissions.len(), 1);
 }
 
 #[test]

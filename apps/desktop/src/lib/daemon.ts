@@ -57,7 +57,13 @@ export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'cra
 export type ProcessKind = 'command' | 'terminal' | 'agent';
 export type ProcessSource = 'yml' | 'local';
 export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'exited';
-export type NotificationType = 'agent_done' | 'needs_input' | 'process_crashed' | 'timer_fired';
+export type NotificationType =
+  | 'agent_done'
+  | 'needs_input'
+  | 'process_crashed'
+  | 'timer_fired'
+  | 'todo_assigned_to_you'
+  | 'mentioned_in_comment';
 
 export interface Notification {
   id: number;
@@ -65,6 +71,7 @@ export interface Notification {
   project_id: number | null;
   process_id: number | null;
   todo_id: number | null;
+  comment_id: number | null;
   body: string;
   created_at: number;
   read_at: number | null;

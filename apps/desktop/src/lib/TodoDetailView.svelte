@@ -9,6 +9,8 @@
   import TagIcon from '@lucide/svelte/icons/tag';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import UnlockIcon from '@lucide/svelte/icons/unlock';
+  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
+  import { tick } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import AgentStatusIndicator from '$lib/components/ds/AgentStatusIndicator.svelte';
@@ -48,6 +50,7 @@
     navigationIds?: number[];
     projectOptions?: ProjectOption[];
     processes?: ProcessView[];
+    focusCommentId?: number | null;
     onBack?: () => void;
     onNavigateTodo?: (todoId: number) => void;
     onNavigateClaimant?: (processId: number) => void;
@@ -69,6 +72,7 @@
     navigationIds = [],
     projectOptions = [],
     processes = [],
+    focusCommentId = null,
     onBack,
     onNavigateTodo,
     onNavigateClaimant,
@@ -90,6 +94,7 @@
   let titleInput = $state<HTMLInputElement | null>(null);
   let bodyFocusRequest = $state(0);
   let bodySaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let focusedCommentKey = $state<string | null>(null);
 
   let currentIndex = $derived(detail ? navigationIds.indexOf(detail.todo.id) : -1);
   let previousId = $derived(currentIndex > 0 ? navigationIds[currentIndex - 1] : null);
@@ -122,6 +127,24 @@
     tagsDraft = todo.tags.join(', ');
     tagsOpen = false;
     commentBody = '';
+  });
+
+  $effect(() => {
+    const todoId = detail?.todo.id;
+    const commentId = focusCommentId;
+    if (
+      todoId === undefined ||
+      commentId === null ||
+      !detail?.comments.some((comment) => comment.id === commentId)
+    ) return;
+    const key = `${todoId}:${commentId}`;
+    if (focusedCommentKey === key) return;
+    focusedCommentKey = key;
+    void tick().then(() => {
+      const comment = document.getElementById(`todo-comment-${commentId}`);
+      comment?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      comment?.focus({ preventScroll: true });
+    });
   });
 
   $effect(() => () => {
@@ -354,6 +377,13 @@
           </span>
         {/if}
 
+        {#if detail.todo.assignee === 'user'}
+          <span class="metadata-chip assignment-chip" aria-label="Assigned to you" title="Assigned to you by an agent or orchestrator">
+            <UserRoundCheckIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+            <strong>Assigned to you</strong>
+          </span>
+        {/if}
+
         <button class="metadata-chip" type="button" aria-expanded={tagsOpen} onclick={() => (tagsOpen = !tagsOpen)}>
           <TagIcon size={13} strokeWidth={1.8} aria-hidden="true" />
           {detail.todo.tags.length} tag{detail.todo.tags.length === 1 ? '' : 's'}
@@ -436,7 +466,12 @@
                 <time title={exactTime(item.timestamp)}>{relativeTime(item.timestamp)}</time>
               </article>
             {:else}
-              <article class="comment-row">
+              <article
+                id={`todo-comment-${item.comment.id}`}
+                class:comment-focus-target={focusCommentId === item.comment.id}
+                class="comment-row"
+                tabindex="-1"
+              >
                 <header><strong>{item.comment.actor}</strong><time title={exactTime(item.timestamp)}>{relativeTime(item.timestamp)}</time></header>
                 <MarkdownView source={item.comment.body} />
               </article>
@@ -470,6 +505,8 @@
   .claimant-chip { border-color: color-mix(in srgb, var(--todo-state-claimed) 38%, var(--border)); }
   .claimant-chip strong { overflow: hidden; max-width: 150px; color: var(--todo-state-claimed); font-size: inherit; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
   .claimant-chip.external { cursor: default; }
+  .assignment-chip { cursor: default; }
+  .assignment-chip strong { font-size: inherit; font-weight: 650; }
   .metadata-chip select { max-width: 132px; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   .priority-chip > span { width: 7px; height: 7px; border-radius: 2px; background: var(--muted-foreground); }
   .priority-chip.high { color: var(--destructive); }
@@ -503,6 +540,8 @@
   .event-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); background: var(--card); }
   .event-row time, .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
   .comment-row { margin: 12px 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .comment-row.comment-focus-target { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
+  .comment-row:focus { outline: 0; }
   .comment-row > header { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 4px 9px; }
   .comment-row > header strong { font-size: var(--font-size-sm); font-weight: 650; }
   .comment-row :global(.markdown) { padding: 8px 10px 10px; }

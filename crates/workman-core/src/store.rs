@@ -98,10 +98,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "consumed_idle_watches",
         include_str!("../migrations/0018_consumed_idle_watches.sql"),
     ),
+    (
+        19,
+        "human_assignment_mentions",
+        include_str!("../migrations/0019_human_assignment_mentions.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 18;
+pub const LATEST_SCHEMA_VERSION: i64 = 19;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

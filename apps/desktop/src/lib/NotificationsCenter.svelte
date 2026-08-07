@@ -1,8 +1,10 @@
 <script lang="ts">
   import BellIcon from '@lucide/svelte/icons/bell';
+  import AtSignIcon from '@lucide/svelte/icons/at-sign';
   import CheckIcon from '@lucide/svelte/icons/check';
   import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -57,6 +59,8 @@
       case 'process_crashed': return 'Process crashed';
       case 'timer_fired': return 'Timer fired';
       case 'needs_input': return 'Agent needs input';
+      case 'todo_assigned_to_you': return 'Todo assigned to you';
+      case 'mentioned_in_comment': return 'Mentioned in a comment';
       default: return 'Agent finished';
     }
   }
@@ -138,6 +142,10 @@
                 <span class="type-icon" aria-hidden="true">
                   {#if notification.type === 'needs_input'}
                     <CircleHelpIcon size={16} strokeWidth={1.8} />
+                  {:else if notification.type === 'todo_assigned_to_you'}
+                    <UserRoundCheckIcon size={16} strokeWidth={1.8} />
+                  {:else if notification.type === 'mentioned_in_comment'}
+                    <AtSignIcon size={16} strokeWidth={1.8} />
                   {:else}
                     <CircleCheckIcon size={16} strokeWidth={1.8} />
                   {/if}

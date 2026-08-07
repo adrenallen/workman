@@ -9,8 +9,8 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use workman_core::{
-    NewTodo, ProjectId, TodoCommentId, TodoId, TodoListQuery, TodoPriority, TodoService,
-    TodoServiceError, TodoSort, TodoStatus, TodoView, UpdateTodo,
+    Actor, NewTodo, ProjectId, Store, TodoCommentId, TodoId, TodoListQuery, TodoPriority,
+    TodoService, TodoServiceError, TodoSort, TodoStatus, TodoView, USER_ASSIGNEE, UpdateTodo,
 };
 
 use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
@@ -37,6 +37,9 @@ struct TodoCreateArgs {
     priority: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Assign the new todo to the human with `user`; omit for no assignment.
+    #[serde(default)]
+    assignee: Option<String>,
     #[serde(default)]
     response_mode: Option<ResponseMode>,
 }
@@ -65,6 +68,9 @@ struct TodoUpdateArgs {
     status: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Assign to the human with `user`, or clear with `none`; omit to preserve.
+    #[serde(default)]
+    assignee: Option<String>,
     #[serde(default)]
     response_mode: Option<ResponseMode>,
 }
@@ -88,6 +94,9 @@ struct TodoListArgs {
     is_blocked: Option<bool>,
     #[serde(default)]
     priority: Option<String>,
+    /// Filter to todos assigned to the human with `user`.
+    #[serde(default)]
+    assignee: Option<String>,
     #[serde(default)]
     query: Option<String>,
     #[serde(default)]
@@ -190,6 +199,18 @@ struct TodoWriteArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TodoAssignArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    todo_id: TodoId,
+    /// Assign to the human with `user`; omit, use null, or use `none` to clear.
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    response_mode: Option<ResponseMode>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TodoCompleteArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
@@ -219,7 +240,9 @@ struct TodoReceipt {
 
 #[tool_router(router = todo_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
-    #[tool(description = "Create a project-scoped todo item; response_mode=rich returns the todo")]
+    #[tool(
+        description = "Create a project-scoped todo; assignee=user assigns it to the human and notifies them"
+    )]
     async fn todo_create(
         &self,
         Extension(parts): Extension<Parts>,
@@ -230,12 +253,16 @@ impl WorkmanMcp {
             Err(error) => return todo_failure(error),
         };
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
+        let actor_label = match actor_label(registry.store(), &actor) {
+            Ok(label) => label,
+            Err(error) => return todo_failure(error),
+        };
         let service = TodoService::new(registry.store());
-        match service.create(
+        let created = match service.create(
             project.id,
             NewTodo {
                 title: args.title,
@@ -243,6 +270,49 @@ impl WorkmanMcp {
                 priority,
                 tags: args.tags.unwrap_or_default(),
             },
+            now_millis(),
+        ) {
+            Ok(todo) => todo,
+            Err(error) => return todo_failure(error),
+        };
+        let todo = match args.assignee {
+            Some(assignee) => match service.assign(
+                project.id,
+                created.id,
+                Some(assignee),
+                &actor_label,
+                now_millis(),
+            ) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            },
+            None => created,
+        };
+        todo_response(todo, args.response_mode)
+    }
+
+    #[tool(
+        description = "Assign a todo to the human with assignee=user, or omit assignee/use none to unassign"
+    )]
+    async fn todo_assign(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<TodoAssignArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        let actor_label = match actor_label(registry.store(), &actor) {
+            Ok(label) => label,
+            Err(error) => return todo_failure(error),
+        };
+        match TodoService::new(registry.store()).assign(
+            project.id,
+            args.todo_id,
+            args.assignee,
+            &actor_label,
             now_millis(),
         ) {
             Ok(todo) => todo_response(todo, args.response_mode),
@@ -287,7 +357,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Update todo fields; omitted fields are preserved")]
+    #[tool(
+        description = "Update todo fields; assignee=user assigns the human, assignee=none clears, omitted fields are preserved"
+    )]
     async fn todo_update(
         &self,
         Extension(parts): Extension<Parts>,
@@ -302,12 +374,16 @@ impl WorkmanMcp {
             Err(error) => return todo_failure(error),
         };
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
+        let actor_label = match actor_label(registry.store(), &actor) {
+            Ok(label) => label,
+            Err(error) => return todo_failure(error),
+        };
         let service = TodoService::new(registry.store());
-        match service.update(
+        let updated = match service.update(
             project.id,
             args.todo_id,
             UpdateTodo {
@@ -319,9 +395,23 @@ impl WorkmanMcp {
             },
             now_millis(),
         ) {
-            Ok(todo) => todo_response(todo, args.response_mode),
-            Err(error) => todo_failure(error),
-        }
+            Ok(todo) => todo,
+            Err(error) => return todo_failure(error),
+        };
+        let todo = match args.assignee {
+            Some(assignee) => match service.assign(
+                project.id,
+                args.todo_id,
+                Some(assignee),
+                &actor_label,
+                now_millis(),
+            ) {
+                Ok(todo) => todo,
+                Err(error) => return todo_failure(error),
+            },
+            None => updated,
+        };
+        todo_response(todo, args.response_mode)
     }
 
     #[tool(description = "Delete a project-scoped todo item")]
@@ -360,6 +450,10 @@ impl WorkmanMcp {
             Ok(priority) => priority,
             Err(error) => return todo_failure(error),
         };
+        let assignee = match args.assignee.as_deref().map(parse_assignee).transpose() {
+            Ok(assignee) => assignee,
+            Err(error) => return todo_failure(error),
+        };
         let sort = match parse_sort(args.sort.as_deref()) {
             Ok(sort) => sort,
             Err(error) => return todo_failure(error),
@@ -377,6 +471,7 @@ impl WorkmanMcp {
                 completed: args.completed,
                 is_blocked: args.is_blocked,
                 priority,
+                assignee,
                 query: args.query,
                 tags: args.tags.unwrap_or_default(),
                 sort,
@@ -466,7 +561,7 @@ impl WorkmanMcp {
         self.todo_blocker_change(parts, args, false).await
     }
 
-    #[tool(description = "Add a todo comment")]
+    #[tool(description = "Add a todo comment; mention @user to notify the human")]
     async fn todo_comment_create(
         &self,
         Extension(parts): Extension<Parts>,
@@ -477,8 +572,19 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
+        let actor_label = match actor_label(registry.store(), &actor) {
+            Ok(label) => label,
+            Err(error) => return todo_failure(error),
+        };
         let service = TodoService::new(registry.store());
-        match service.comment_create(project.id, args.todo_id, &actor.id, args.body, now_millis()) {
+        match service.comment_create_as(
+            project.id,
+            args.todo_id,
+            &actor.id,
+            &actor_label,
+            args.body,
+            now_millis(),
+        ) {
             Ok(comment) if matches!(args.response_mode, Some(ResponseMode::Rich)) => {
                 success(comment)
             }
@@ -750,6 +856,26 @@ fn parse_status(value: &str) -> Result<TodoStatus, TodoServiceError> {
             "status must be one of open, in_progress, backlog, or completed".into(),
         )
     })
+}
+
+fn parse_assignee(value: &str) -> Result<String, TodoServiceError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "user" | "@user" | "me" | "you" => Ok(USER_ASSIGNEE.into()),
+        _ => Err(TodoServiceError::InvalidInput(
+            "assignee filter must be user".into(),
+        )),
+    }
+}
+
+fn actor_label(store: &Store, actor: &Actor) -> Result<String, TodoServiceError> {
+    let process = actor
+        .process_id
+        .map(|process_id| store.get_process(process_id))
+        .transpose()?
+        .flatten();
+    Ok(process
+        .map(|process| process.name)
+        .unwrap_or_else(|| actor.id.clone()))
 }
 
 fn parse_sort(value: Option<&str>) -> Result<TodoSort, TodoServiceError> {

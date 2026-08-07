@@ -41,6 +41,7 @@ mod tools_worktree;
 pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate Workman project.";
+pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -139,7 +140,7 @@ struct IdentifySessionArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct HelpArgs {
-    /// Optional topic: setup, identity, scoping, projects, scratchpads, or tools.
+    /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, or tools.
     #[serde(default)]
     topic: Option<String>,
 }
@@ -285,6 +286,7 @@ impl WorkmanMcp {
             "projects" => {
                 "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Delete always requires confirm_delete and active processes require confirm_stop_running."
             }
+            "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
             "worktrees" => WORKTREE_AGENT_GUIDANCE,
             "tools" => "Use mcp_tools_summary for the complete core tool list.",
@@ -572,9 +574,9 @@ impl ServerHandler for WorkmanMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("workman", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "Workman workspace control. Call whoami first; project tools use explicit, selected, then owning-project scope.",
-            )
+            .with_instructions(format!(
+                "Workman workspace control. Call whoami first; project tools use explicit, selected, then owning-project scope. {HUMAN_HANDOFF_GUIDANCE}"
+            ))
     }
 }
 

@@ -2,6 +2,7 @@
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import SearchIcon from '@lucide/svelte/icons/search';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
+  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
   import XIcon from '@lucide/svelte/icons/x';
 
   import TodoStatusIndicator from './components/ds/TodoStatusIndicator.svelte';
@@ -25,6 +26,7 @@
   type StatusFilter = 'active' | TodoStatus | 'all';
   type ClaimFilter = 'all' | 'claimed' | 'unclaimed' | `actor:${string}`;
   type BlockedFilter = 'all' | 'blocked' | 'unblocked';
+  type AssignmentFilter = 'all' | 'me';
   type PriorityFilter = 'all' | TodoPriority;
   type SortMode = 'state' | 'priority' | 'newest' | 'title';
 
@@ -33,6 +35,7 @@
   let status = $state<StatusFilter>('active');
   let claim = $state<ClaimFilter>('all');
   let blocked = $state<BlockedFilter>('all');
+  let assignment = $state<AssignmentFilter>('all');
   let tag = $state('all');
   let priority = $state<PriorityFilter>('all');
   let sort = $state<SortMode>('state');
@@ -61,6 +64,7 @@
         if (claim.startsWith('actor:') && todo.locked_by !== claim.slice(6)) return false;
         if (blocked === 'blocked' && !todo.is_blocked) return false;
         if (blocked === 'unblocked' && todo.is_blocked) return false;
+        if (assignment === 'me' && todo.assignee !== 'user') return false;
         if (tag !== 'all' && !todo.tags.includes(tag)) return false;
         if (priority !== 'all' && todo.priority !== priority) return false;
         if (
@@ -77,6 +81,7 @@
     Number(status !== 'active') +
       Number(claim !== 'all') +
       Number(blocked !== 'all') +
+      Number(assignment !== 'all') +
       Number(tag !== 'all') +
       Number(priority !== 'all')
   );
@@ -99,6 +104,7 @@
     status = 'active';
     claim = 'all';
     blocked = 'all';
+    assignment = 'all';
     tag = 'all';
     priority = 'all';
     sort = 'state';
@@ -142,6 +148,7 @@
       </label>
       <label><span>Status</span><select bind:value={status} aria-label="Filter todos by status"><option value="active">Active</option><option value="all">All</option><option value="backlog">Backlog</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Done</option></select></label>
       <label><span>Claimed by</span><select bind:value={claim} aria-label="Filter todos by claimant"><option value="all">Anyone</option><option value="claimed">Claimed</option><option value="unclaimed">Unclaimed</option>{#each actors as actor}<option value={`actor:${actor.actorId}`}>{actor.name}</option>{/each}</select></label>
+      <label><span>Assigned</span><select bind:value={assignment} aria-label="Filter todos by assignment"><option value="all">Anyone</option><option value="me">Assigned to me</option></select></label>
       <label><span>Dependency</span><select bind:value={blocked} aria-label="Filter blocked todos"><option value="all">Any</option><option value="blocked">Blocked</option><option value="unblocked">Not blocked</option></select></label>
       <label><span>Tag</span><select bind:value={tag} aria-label="Filter todos by tag"><option value="all">Any tag</option>{#each tags as item}<option value={item}>{item}</option>{/each}</select></label>
       <label><span>Priority</span><select bind:value={priority} aria-label="Filter todos by priority"><option value="all">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
@@ -161,7 +168,7 @@
         type="button"
         class="todo-row"
         data-state={todoClaimState(todo)}
-        title={`${todoClaimLabel(todo)}${claimant ? ` · Claimed by ${claimant.name}` : ''} · ${statusCopy(todo)} · ${todo.priority} priority`}
+        title={`${todoClaimLabel(todo)}${claimant ? ` · Claimed by ${claimant.name}` : ''}${todo.assignee === 'user' ? ' · Assigned to you' : ''} · ${statusCopy(todo)} · ${todo.priority} priority`}
         onclick={() => onSelect(todo, filteredTodos.map((candidate) => candidate.id))}
       >
         <span class="state-rail" aria-hidden="true"></span>
@@ -180,7 +187,13 @@
           <small>{claimant ? claimant.name : todo.is_blocked ? `${todo.unresolved_blocker_count} blockers` : '—'}</small>
         </span>
         <span class={`priority ${todo.priority}`}>{todo.priority}</span>
-        <span class="signals">{#if todo.comment_count > 0}<span title={`${todo.comment_count} comments`}>◌ {todo.comment_count}</span>{/if}{#if todo.blocker_ids.length > 0}<span title={`Depends on ${todo.blocker_ids.map((id) => `#${id}`).join(', ')}`}>↳ {todo.blocker_ids.length}</span>{/if}</span>
+        <span class="signals">
+          {#if todo.assignee === 'user'}
+            <span class="assigned-marker" title="Assigned to you" aria-label="Assigned to you"><UserRoundCheckIcon size={12} strokeWidth={1.8} aria-hidden="true" />You</span>
+          {/if}
+          {#if todo.comment_count > 0}<span title={`${todo.comment_count} comments`}>◌ {todo.comment_count}</span>{/if}
+          {#if todo.blocker_ids.length > 0}<span title={`Depends on ${todo.blocker_ids.map((id) => `#${id}`).join(', ')}`}>↳ {todo.blocker_ids.length}</span>{/if}
+        </span>
       </button>
     {:else}
       <div class="empty-results">
@@ -197,7 +210,7 @@
   .primary-action { min-height: 30px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 10px; background: var(--primary); color: var(--primary-foreground); font-size: var(--font-size-sm); font-weight: 650; cursor: pointer; }
   .primary-action:active { transform: translateY(1px); }
 
-  .filter-panel { display: grid; grid-template-columns: minmax(190px, 1.7fr) repeat(6, minmax(92px, 0.72fr)); gap: 6px; padding: 8px 10px; }
+  .filter-panel { display: grid; grid-template-columns: minmax(190px, 1.7fr) repeat(7, minmax(92px, 0.72fr)); gap: 6px; padding: 8px 10px; }
   .filter-panel label { display: grid; min-width: 0; gap: 3px; }
   .filter-panel label > span { color: var(--muted-foreground); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
   .filter-panel select, .search-field { width: 100%; height: 28px; border: 1px solid var(--input); border-radius: var(--radius); background: var(--background); color: var(--text-soft); font-size: var(--font-size-xs); outline: 0; }
@@ -234,6 +247,7 @@
   .priority { justify-self: start; border: 1px solid var(--border-strong); border-radius: 999px; padding: 2px 6px; color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; }
   .priority.high { border-color: color-mix(in srgb, var(--destructive) 42%, var(--border)); color: var(--destructive); }
   .signals { display: flex; justify-content: flex-end; gap: 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .assigned-marker { display: inline-flex; align-items: center; gap: 3px; color: var(--text-soft); }
   .empty-results { display: grid; min-height: 180px; place-content: center; justify-items: center; text-align: center; }
   .empty-results strong { font-size: var(--font-size-base); }
   .empty-results p { max-width: 380px; margin: 5px 0 9px; color: var(--muted-foreground); font-size: var(--font-size-sm); }

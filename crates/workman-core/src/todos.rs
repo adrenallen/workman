@@ -6,12 +6,14 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ProjectId, Store, StoreError, Todo, TodoComment, TodoCommentId, TodoId, TodoPriority,
-    TodoStatus,
+    NotificationType, ProjectId, Store, StoreError, Todo, TodoComment, TodoCommentId, TodoId,
+    TodoPriority, TodoStatus,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
+pub const USER_ASSIGNEE: &str = "user";
+pub const USER_MENTION: &str = "@user";
 
 /// Hydrated todo data returned by the service and rich MCP responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +25,7 @@ pub struct TodoView {
     pub priority: TodoPriority,
     pub status: TodoStatus,
     pub completed: bool,
+    pub assignee: Option<String>,
     pub locked_by: Option<String>,
     pub lock_expiry: Option<i64>,
     pub comment_count: usize,
@@ -42,6 +45,7 @@ pub struct TodoSummary {
     pub priority: TodoPriority,
     pub status: TodoStatus,
     pub completed: bool,
+    pub assignee: Option<String>,
     pub locked_by: Option<String>,
     pub comment_count: usize,
     pub tags: Vec<String>,
@@ -60,6 +64,7 @@ impl From<TodoView> for TodoSummary {
             priority: todo.priority,
             status: todo.status,
             completed: todo.completed,
+            assignee: todo.assignee,
             locked_by: todo.locked_by,
             comment_count: todo.comment_count,
             tags: todo.tags,
@@ -152,6 +157,7 @@ pub struct TodoListQuery {
     pub completed: Option<bool>,
     pub is_blocked: Option<bool>,
     pub priority: Option<TodoPriority>,
+    pub assignee: Option<String>,
     pub query: Option<String>,
     pub tags: Vec<String>,
     pub sort: TodoSort,
@@ -354,6 +360,50 @@ impl<'store> TodoService<'store> {
         self.require_todo(project_id, todo_id, now_ms)
     }
 
+    /// Assign a todo to the supported human principal, or clear its assignment.
+    ///
+    /// Repeating the same assignment is a no-op. Clearing and later reassigning creates a fresh
+    /// notification edge. The nullable string column intentionally leaves room for agent
+    /// principals without conflating assignment with an edit lock.
+    pub fn assign(
+        &self,
+        project_id: ProjectId,
+        todo_id: TodoId,
+        assignee: Option<String>,
+        actor: &str,
+        now_ms: i64,
+    ) -> TodoServiceResult<TodoView> {
+        let current = self.require_todo(project_id, todo_id, now_ms)?;
+        let assignee = normalize_assignee(assignee)?;
+        if current.assignee == assignee {
+            return Ok(current);
+        }
+
+        let actor = actor.trim();
+        let actor = if actor.is_empty() { "Workman" } else { actor };
+        let transaction = self.store.connection().unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE todos SET assignee = ?1 WHERE id = ?2 AND project_id = ?3",
+            params![assignee.as_deref(), todo_id, project_id],
+        )?;
+        if assignee.as_deref() == Some(USER_ASSIGNEE) {
+            transaction.execute(
+                "INSERT INTO notifications
+                    (type, project_id, todo_id, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    NotificationType::TodoAssignedToYou.as_str(),
+                    project_id,
+                    todo_id,
+                    format!("{actor} assigned ‘{}’ to you.", current.title),
+                    now_ms,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        self.require_todo(project_id, todo_id, now_ms)
+    }
+
     pub fn delete(
         &self,
         project_id: ProjectId,
@@ -406,6 +456,10 @@ impl<'store> TodoService<'store> {
                 || query
                     .priority
                     .is_some_and(|priority| todo.priority != priority)
+                || query
+                    .assignee
+                    .as_ref()
+                    .is_some_and(|assignee| todo.assignee.as_ref() != Some(assignee))
                 || (!tags.is_empty() && !tags.iter().any(|tag| todo.tags.contains(tag)))
                 || !matches_query
             {
@@ -555,14 +609,52 @@ impl<'store> TodoService<'store> {
         body: String,
         now_ms: i64,
     ) -> TodoServiceResult<TodoComment> {
-        self.require_todo(project_id, todo_id, now_ms)?;
+        self.comment_create_as(project_id, todo_id, actor, actor, body, now_ms)
+    }
+
+    /// Create a comment while retaining the durable actor id and using a human-readable actor
+    /// label for a possible mention notification.
+    pub fn comment_create_as(
+        &self,
+        project_id: ProjectId,
+        todo_id: TodoId,
+        actor: &str,
+        actor_label: &str,
+        body: String,
+        now_ms: i64,
+    ) -> TodoServiceResult<TodoComment> {
+        let todo = self.require_todo(project_id, todo_id, now_ms)?;
         validate_body("comment", &body)?;
-        self.store.connection().execute(
+        let mentions_user = mentions_user(&body);
+        let transaction = self.store.connection().unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO todo_comments (todo_id, actor, body, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)",
             params![todo_id, actor, body, now_ms],
         )?;
-        let comment_id = self.store.connection().last_insert_rowid();
+        let comment_id = transaction.last_insert_rowid();
+        if mentions_user {
+            let actor_label = actor_label.trim();
+            let actor_label = if actor_label.is_empty() {
+                "Workman"
+            } else {
+                actor_label
+            };
+            transaction.execute(
+                "INSERT INTO notifications
+                    (type, project_id, todo_id, comment_id, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    NotificationType::MentionedInComment.as_str(),
+                    project_id,
+                    todo_id,
+                    comment_id,
+                    format!("{actor_label} mentioned you on ‘{}’.", todo.title),
+                    now_ms,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         self.require_comment(project_id, comment_id, now_ms)
     }
 
@@ -882,6 +974,11 @@ impl<'store> TodoService<'store> {
             [todo.id],
             |row| row.get::<_, usize>(0),
         )?;
+        let assignee = self.store.connection().query_row(
+            "SELECT assignee FROM todos WHERE id = ?1",
+            [todo.id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
         Ok(TodoView {
             id: todo.id,
             project_id: todo.project_id,
@@ -890,6 +987,7 @@ impl<'store> TodoService<'store> {
             priority: todo.priority,
             status: todo.status,
             completed: todo.completed,
+            assignee,
             locked_by: todo.lock_actor,
             lock_expiry: todo.lock_expiry,
             comment_count,
@@ -953,6 +1051,37 @@ impl<'store> TodoService<'store> {
 
 fn validate_title(title: &str) -> TodoServiceResult<()> {
     validate_body("todo title", title)
+}
+
+fn normalize_assignee(assignee: Option<String>) -> TodoServiceResult<Option<String>> {
+    let Some(assignee) = assignee else {
+        return Ok(None);
+    };
+    match assignee.trim().to_ascii_lowercase().as_str() {
+        "" | "none" | "unassigned" => Ok(None),
+        "user" | "@user" | "me" | "you" => Ok(Some(USER_ASSIGNEE.into())),
+        _ => Err(TodoServiceError::InvalidInput(
+            "assignee must be user (or none to clear); agent assignees are not supported yet"
+                .into(),
+        )),
+    }
+}
+
+fn mentions_user(body: &str) -> bool {
+    let lowercase = body.to_ascii_lowercase();
+    let bytes = lowercase.as_bytes();
+    lowercase
+        .match_indices(USER_MENTION)
+        .any(|(start, mention)| {
+            let end = start + mention.len();
+            let before_is_boundary = start == 0 || !is_mention_word_byte(bytes[start - 1]);
+            let after_is_boundary = end == bytes.len() || !is_mention_word_byte(bytes[end]);
+            before_is_boundary && after_is_boundary
+        })
+}
+
+fn is_mention_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'@')
 }
 
 fn validate_body(field: &str, value: &str) -> TodoServiceResult<()> {

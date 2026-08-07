@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::Project;
+use workman_core::{NotificationType, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -52,6 +52,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     })
     .await?;
     let discovery = server.discovery().clone();
+    let registry_handle = server.registry();
     {
         let registry = server.registry();
         let registry = registry.lock().await;
@@ -88,14 +89,14 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let second_identity = call(&second, "whoami", json!({})).await;
     assert_ne!(first_identity["actor_id"], second_identity["actor_id"]);
 
-    let tool_names: Vec<_> = first
-        .list_all_tools()
-        .await?
+    let tools = first.list_all_tools().await?;
+    let tool_names: Vec<_> = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
     for name in [
         "todo_create",
+        "todo_assign",
         "todo_get",
         "todo_update",
         "todo_delete",
@@ -120,6 +121,14 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             "missing {name}"
         );
     }
+    let handoff_help = call(&first, "help", json!({ "topic": "todos" })).await;
+    assert!(
+        handoff_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("todo_assign")
+    );
+    assert!(handoff_help["text"].as_str().unwrap().contains("@user"));
 
     let created = call(
         &first,
@@ -138,6 +147,13 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
         "default receipt must stay slim"
     );
     let todo_id = created["todo_id"].as_i64().unwrap();
+    let assigned = call(
+        &first,
+        "todo_assign",
+        json!({ "todo_id": todo_id, "assignee": "user", "response_mode": "rich" }),
+    )
+    .await;
+    assert_eq!(assigned["assignee"], "user");
     let rich_update = call(
         &first,
         "todo_update",
@@ -201,7 +217,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let comment = call(
         &first,
         "todo_comment_create",
-        json!({ "todo_id": todo_id, "body": "lease verified" }),
+        json!({ "todo_id": todo_id, "body": "@user, lease verified" }),
     )
     .await;
     let comment_id = comment["comment_id"].as_i64().unwrap();
@@ -218,6 +234,19 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     )
     .await;
     assert_eq!(comments["total_count"], 1);
+    {
+        let registry = registry_handle.lock().await;
+        let notifications = registry.store().list_notifications(None, 20)?;
+        assert_eq!(notifications.len(), 2);
+        assert!(
+            notifications
+                .iter()
+                .any(|row| row.kind == NotificationType::TodoAssignedToYou)
+        );
+        assert!(notifications.iter().any(|row| {
+            row.kind == NotificationType::MentionedInComment && row.comment_id == Some(comment_id)
+        }));
+    }
 
     let rich = call(
         &first,
@@ -230,7 +259,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let listed = call(
         &first,
         "todo_list",
-        json!({ "completed": true, "tags": ["coordination"], "limit": 1 }),
+        json!({ "completed": true, "assignee": "user", "tags": ["coordination"], "limit": 1 }),
     )
     .await;
     assert_eq!(listed["total_count"], 1);

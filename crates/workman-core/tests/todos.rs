@@ -1,6 +1,6 @@
 use workman_core::{
-    NewTodo, Project, Store, TodoActivityKind, TodoListQuery, TodoPriority, TodoService,
-    TodoServiceError, TodoSort, TodoStatus, UpdateTodo,
+    NewTodo, NotificationType, Project, Store, TodoActivityKind, TodoListQuery, TodoPriority,
+    TodoService, TodoServiceError, TodoSort, TodoStatus, UpdateTodo,
 };
 
 const NOW: i64 = 1_800_000_000_000;
@@ -251,6 +251,96 @@ fn todo_service_filters_sorts_and_paginates() {
         .unwrap();
     assert_eq!(search.todos.len(), 1);
     assert_eq!(search.todos[0].id, low);
+}
+
+#[test]
+fn user_assignment_edges_filter_and_reassignment_notifications_are_durable() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_project(&project(1, "one")).unwrap();
+    let service = TodoService::new(&store);
+    let todo_id = create_todo(&service, 1, "Human review");
+
+    let assigned = service
+        .assign(1, todo_id, Some("@user".into()), "agent-one", NOW + 1)
+        .unwrap();
+    assert_eq!(assigned.assignee.as_deref(), Some("user"));
+    service
+        .assign(1, todo_id, Some("user".into()), "agent-one", NOW + 2)
+        .unwrap();
+    service
+        .assign(1, todo_id, Some("none".into()), "agent-one", NOW + 3)
+        .unwrap();
+    service
+        .assign(1, todo_id, Some("user".into()), "agent-two", NOW + 4)
+        .unwrap();
+
+    let notifications = store.list_notifications(None, 20).unwrap();
+    assert_eq!(notifications.len(), 2);
+    assert!(
+        notifications
+            .iter()
+            .all(|notification| notification.kind == NotificationType::TodoAssignedToYou)
+    );
+    assert!(notifications[0].body.contains("agent-two"));
+    assert!(notifications[0].body.contains("Human review"));
+
+    let assigned_page = service
+        .list(
+            1,
+            TodoListQuery {
+                assignee: Some("user".into()),
+                ..TodoListQuery::default()
+            },
+            NOW + 4,
+        )
+        .unwrap();
+    assert_eq!(assigned_page.todos.len(), 1);
+    assert_eq!(assigned_page.todos[0].id, todo_id);
+}
+
+#[test]
+fn new_user_mentions_notify_once_and_comment_edits_do_not_create_edges() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_project(&project(1, "one")).unwrap();
+    let service = TodoService::new(&store);
+    let todo_id = create_todo(&service, 1, "Choose an approach");
+
+    let comment = service
+        .comment_create_as(
+            1,
+            todo_id,
+            "process-7",
+            "review-agent",
+            "Could @UsEr choose the safer option?".into(),
+            NOW + 1,
+        )
+        .unwrap();
+    service
+        .comment_update(
+            1,
+            comment.id,
+            "Could @user choose the safer option, please?".into(),
+            NOW + 2,
+        )
+        .unwrap();
+    service
+        .comment_create_as(
+            1,
+            todo_id,
+            "process-7",
+            "review-agent",
+            "Email agent@user.example instead.".into(),
+            NOW + 3,
+        )
+        .unwrap();
+
+    let notifications = store.list_notifications(None, 20).unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, NotificationType::MentionedInComment);
+    assert_eq!(notifications[0].todo_id, Some(todo_id));
+    assert_eq!(notifications[0].comment_id, Some(comment.id));
+    assert!(notifications[0].body.contains("review-agent"));
+    assert!(notifications[0].body.contains("Choose an approach"));
 }
 
 #[test]

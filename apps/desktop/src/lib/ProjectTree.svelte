@@ -12,6 +12,7 @@
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import SquareIcon from '@lucide/svelte/icons/square';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
   import XIcon from '@lucide/svelte/icons/x';
   import { onMount } from 'svelte';
   import type { Component } from 'svelte';
@@ -573,7 +574,16 @@
                   <span class="todo-state-rail" aria-hidden="true"></span>
                   <TodoStatusIndicator state={todoClaimState(todo)} label={todoStatusLabel(todo)} />
                   <span class="row-copy"><strong>{todo.title}</strong></span>
-                  {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
+                  {#if todo.assignee === 'user' || todo.comment_count > 0}
+                    <span class="row-badges">
+                      {#if todo.assignee === 'user'}
+                        <TooltipLabel label="Assigned to you">
+                          <span class="todo-assigned-marker" aria-label="Assigned to you"><UserRoundCheckIcon size={12} strokeWidth={1.8} aria-hidden="true" /></span>
+                        </TooltipLabel>
+                      {/if}
+                      {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
+                    </span>
+                  {/if}
                 </button>
               {:else}
                 <p class="empty-row">{query ? 'No matching todos' : 'No open todos'}</p>
@@ -803,6 +813,7 @@
   .todo-row[data-todo-state='claimed'] { background: color-mix(in srgb, var(--todo-state-claimed) 5%, transparent); }
   .todo-row[data-todo-state='blocked'] { background: color-mix(in srgb, var(--todo-state-blocked) 6%, transparent); }
   .todo-row .row-copy strong { font-size: var(--font-size-xs); font-weight: 570; }
+  .todo-assigned-marker { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--text-soft); }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
   .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
   .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 1px; background: var(--signal); box-shadow: 0 0 0 1px rgb(95 214 183 / 16%), 0 0 8px rgb(95 214 183 / 48%); content: ''; pointer-events: none; }

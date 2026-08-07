@@ -184,6 +184,8 @@
   });
   let selection = $state<ProjectTreeSelection | null>(null);
   let todoDetail = $state<TodoDetail | null>(null);
+  let todoCommentFocusId = $state<number | null>(null);
+  let pendingTodoCommentFocus = $state<{ todoId: number; commentId: number } | null>(null);
   let scratchpadRead = $state<ScratchpadRead | null>(null);
   let detailLoading = $state(false);
   let detailBusy = $state(false);
@@ -797,6 +799,8 @@
 
   function openNotification(notification: Notification): void {
     void markCenterNotificationRead(notification);
+    pendingTodoCommentFocus = null;
+    todoCommentFocusId = null;
     const process = notification.process_id === null
       ? null
       : Object.values(navigationIndex)
@@ -819,6 +823,13 @@
         )
       }, 'api');
     } else if (notification.todo_id !== null && projectId !== null) {
+      if (notification.comment_id !== null) {
+        todoCommentFocusId = notification.comment_id;
+        pendingTodoCommentFocus = {
+          todoId: notification.todo_id,
+          commentId: notification.comment_id
+        };
+      }
       appNavigation.navigate({
         type: 'item',
         selection: projectTreeSelection('todo', notification.todo_id, projectId, notification.body)
@@ -1274,6 +1285,10 @@
 
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
+    todoCommentFocusId = next.kind === 'todo' && pendingTodoCommentFocus?.todoId === next.id
+      ? pendingTodoCommentFocus.commentId
+      : null;
+    pendingTodoCommentFocus = null;
     scratchpadFocusRequest = 0;
     recordRecentNavigation({ type: 'item', selection: next });
     quickJumpRecentKeys = readRecentNavigationKeys();
@@ -1803,6 +1818,8 @@
     processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = null;
+    todoCommentFocusId = null;
+    pendingTodoCommentFocus = null;
     todoDetail = null;
     scratchpadRead = null;
     if (todoNavigationIds.length === 0) {
@@ -3209,6 +3226,7 @@
             navigationIds={todoNavigationIds}
             projectOptions={projects.filter((project) => project.id !== selectedProject.id).map((project) => ({ id: project.id, name: project.display_name ?? project.name }))}
             processes={treeProcesses}
+            focusCommentId={todoCommentFocusId}
             onBack={openTodosBrowser}
             onNavigateTodo={(todoId) => void navigateToTodo(todoId)}
             onNavigateClaimant={selectProcessById}

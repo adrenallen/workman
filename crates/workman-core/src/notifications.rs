@@ -3,7 +3,7 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::{ProcessId, ProjectId, Store, StoreResult, TodoId};
+use crate::{ProcessId, ProjectId, Store, StoreResult, TodoCommentId, TodoId};
 
 pub type NotificationId = i64;
 
@@ -14,15 +14,19 @@ pub enum NotificationType {
     NeedsInput,
     ProcessCrashed,
     TimerFired,
+    TodoAssignedToYou,
+    MentionedInComment,
 }
 
 impl NotificationType {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::AgentDone => "agent_done",
             Self::NeedsInput => "needs_input",
             Self::ProcessCrashed => "process_crashed",
             Self::TimerFired => "timer_fired",
+            Self::TodoAssignedToYou => "todo_assigned_to_you",
+            Self::MentionedInComment => "mentioned_in_comment",
         }
     }
 
@@ -31,6 +35,8 @@ impl NotificationType {
             "needs_input" => Self::NeedsInput,
             "process_crashed" => Self::ProcessCrashed,
             "timer_fired" => Self::TimerFired,
+            "todo_assigned_to_you" => Self::TodoAssignedToYou,
+            "mentioned_in_comment" => Self::MentionedInComment,
             _ => Self::AgentDone,
         }
     }
@@ -44,6 +50,7 @@ pub struct Notification {
     pub project_id: Option<ProjectId>,
     pub process_id: Option<ProcessId>,
     pub todo_id: Option<TodoId>,
+    pub comment_id: Option<TodoCommentId>,
     pub body: String,
     pub created_at: i64,
     pub read_at: Option<i64>,
@@ -103,7 +110,7 @@ impl Store {
         limit: usize,
     ) -> StoreResult<Vec<Notification>> {
         let mut statement = self.connection().prepare(
-            "SELECT id, type, project_id, process_id, todo_id, body, created_at, read_at
+            "SELECT id, type, project_id, process_id, todo_id, comment_id, body, created_at, read_at
              FROM notifications
              WHERE (?1 IS NULL)
                 OR (?1 = 0 AND read_at IS NULL)
@@ -118,9 +125,10 @@ impl Store {
                 project_id: row.get(2)?,
                 process_id: row.get(3)?,
                 todo_id: row.get(4)?,
-                body: row.get(5)?,
-                created_at: row.get(6)?,
-                read_at: row.get(7)?,
+                comment_id: row.get(5)?,
+                body: row.get(6)?,
+                created_at: row.get(7)?,
+                read_at: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
