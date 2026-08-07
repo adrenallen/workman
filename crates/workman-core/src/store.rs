@@ -113,10 +113,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent_session_resume",
         include_str!("../migrations/0021_agent_session_resume.sql"),
     ),
+    (
+        22,
+        "actor_attribution",
+        include_str!("../migrations/0022_actor_attribution.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 21;
+pub const LATEST_SCHEMA_VERSION: i64 = 22;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -1060,14 +1065,17 @@ impl Store {
     pub fn put_scratchpad(&mut self, scratchpad: &Scratchpad) -> StoreResult<()> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO scratchpads (id, project_id, name, content, revision, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO scratchpads (
+                id, project_id, name, content, revision, archived, created_by, updated_by
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 name = excluded.name,
                 content = excluded.content,
                 revision = excluded.revision,
-                archived = excluded.archived",
+                archived = excluded.archived,
+                created_by = excluded.created_by,
+                updated_by = excluded.updated_by",
             params![
                 scratchpad.id,
                 scratchpad.project_id,
@@ -1075,6 +1083,8 @@ impl Store {
                 scratchpad.content,
                 scratchpad.revision,
                 scratchpad.archived,
+                scratchpad.created_by,
+                scratchpad.updated_by,
             ],
         )?;
         transaction.execute(
@@ -1096,7 +1106,7 @@ impl Store {
         let mut scratchpad = self
             .connection
             .query_row(
-                "SELECT id, project_id, name, content, revision, archived
+                "SELECT id, project_id, name, content, revision, archived, created_by, updated_by
                  FROM scratchpads WHERE id = ?1",
                 [id],
                 |row| {
@@ -1108,6 +1118,8 @@ impl Store {
                         revision: row.get(4)?,
                         tags: Vec::new(),
                         archived: row.get(5)?,
+                        created_by: row.get(6)?,
+                        updated_by: row.get(7)?,
                     })
                 },
             )
@@ -1303,6 +1315,32 @@ impl Store {
         Ok(actor)
     }
 
+    /// Resolve a stored server-issued actor id into stable, human-readable attribution.
+    /// Already-readable user/service labels are returned unchanged.
+    pub fn actor_display_label(&self, actor_id: &str) -> String {
+        if !actor_id.starts_with("mcp-") {
+            return actor_id.to_string();
+        }
+
+        let actor = self.get_actor(actor_id).ok().flatten();
+        if actor.is_none() && !looks_like_mcp_actor_id(actor_id) {
+            return actor_id.to_string();
+        }
+        let process = actor
+            .and_then(|actor| actor.process_id)
+            .and_then(|process_id| self.get_process(process_id).ok().flatten());
+        if let Some(process) = process {
+            let role = if process.kind == ProcessKind::Agent {
+                "agent"
+            } else {
+                "process"
+            };
+            return format!("{} ({role} {})", process.name, process.id);
+        }
+
+        external_actor_label(actor_id)
+    }
+
     /// Exercise a temporary write/read/delete cycle on the active SQLite connection.
     pub fn smoke_test(&mut self) -> StoreResult<bool> {
         let transaction = self.connection.transaction()?;
@@ -1326,6 +1364,34 @@ impl Store {
         transaction.commit()?;
         Ok(value == "ok")
     }
+}
+
+fn external_actor_label(actor_id: &str) -> String {
+    let suffix: String = actor_id
+        .strip_prefix("mcp-")
+        .unwrap_or(actor_id)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if suffix.is_empty() {
+        "external agent".into()
+    } else {
+        format!("external agent ({suffix})")
+    }
+}
+
+fn looks_like_mcp_actor_id(actor_id: &str) -> bool {
+    actor_id.strip_prefix("mcp-").is_some_and(|suffix| {
+        suffix.len() >= 12
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    })
 }
 
 fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {

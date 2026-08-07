@@ -257,11 +257,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = match actor_label(registry.store(), &actor) {
-            Ok(label) => label,
-            Err(error) => return todo_failure(error),
-        };
-        let service = TodoService::new(registry.store());
+        let actor_label = actor_label(registry.store(), &actor);
+        let service = TodoService::attributed(registry.store(), actor_label.clone());
         let created = match service.create(
             project.id,
             NewTodo {
@@ -304,10 +301,7 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = match actor_label(registry.store(), &actor) {
-            Ok(label) => label,
-            Err(error) => return todo_failure(error),
-        };
+        let actor_label = actor_label(registry.store(), &actor);
         match TodoService::new(registry.store()).assign(
             project.id,
             args.todo_id,
@@ -378,11 +372,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = match actor_label(registry.store(), &actor) {
-            Ok(label) => label,
-            Err(error) => return todo_failure(error),
-        };
-        let service = TodoService::new(registry.store());
+        let actor_label = actor_label(registry.store(), &actor);
+        let service = TodoService::attributed(registry.store(), actor_label.clone());
         let updated = match service.update(
             project.id,
             args.todo_id,
@@ -572,11 +563,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = match actor_label(registry.store(), &actor) {
-            Ok(label) => label,
-            Err(error) => return todo_failure(error),
-        };
-        let service = TodoService::new(registry.store());
+        let actor_label = actor_label(registry.store(), &actor);
+        let service = TodoService::attributed(registry.store(), actor_label.clone());
         match service.comment_create_as(
             project.id,
             args.todo_id,
@@ -687,7 +675,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let service = TodoService::new(registry.store());
+        let actor_label = actor_label(registry.store(), &actor);
+        let service = TodoService::attributed(registry.store(), actor_label);
         match service.lock(
             project.id,
             args.todo_id,
@@ -711,7 +700,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match TodoService::new(registry.store()).unlock(
+        let actor_label = actor_label(registry.store(), &actor);
+        match TodoService::attributed(registry.store(), actor_label).unlock(
             project.id,
             args.todo_id,
             &actor.id,
@@ -735,7 +725,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match TodoService::new(registry.store()).complete(
+        let actor_label = actor_label(registry.store(), &actor);
+        match TodoService::attributed(registry.store(), actor_label).complete(
             project.id,
             args.todo_id,
             &actor.id,
@@ -873,15 +864,8 @@ fn parse_assignee(value: &str) -> Result<String, TodoServiceError> {
     }
 }
 
-fn actor_label(store: &Store, actor: &Actor) -> Result<String, TodoServiceError> {
-    let process = actor
-        .process_id
-        .map(|process_id| store.get_process(process_id))
-        .transpose()?
-        .flatten();
-    Ok(process
-        .map(|process| process.name)
-        .unwrap_or_else(|| actor.id.clone()))
+fn actor_label(store: &Store, actor: &Actor) -> String {
+    store.actor_display_label(&actor.id)
 }
 
 fn parse_sort(value: Option<&str>) -> Result<TodoSort, TodoServiceError> {

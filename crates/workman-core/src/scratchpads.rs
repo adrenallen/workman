@@ -70,6 +70,8 @@ pub struct ScratchpadSummary {
     pub archived: bool,
     pub sort_order: i64,
     pub tags: Vec<String>,
+    pub created_by: String,
+    pub updated_by: String,
     pub matched_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_snippet: Option<String>,
@@ -100,6 +102,8 @@ pub struct ScratchpadTail {
     pub project_id: ProjectId,
     pub name: String,
     pub revision: i64,
+    pub created_by: String,
+    pub updated_by: String,
     pub content: String,
     pub total_lines: usize,
     pub requested_lines: usize,
@@ -140,6 +144,8 @@ pub struct ScratchpadFindResult {
     pub project_id: ProjectId,
     pub name: String,
     pub revision: i64,
+    pub created_by: String,
+    pub updated_by: String,
     pub query: String,
     pub scope: ScratchpadFindScope,
     pub case_sensitive: bool,
@@ -247,11 +253,22 @@ pub type ScratchpadServiceResult<T> = Result<T, ScratchpadServiceError>;
 /// Internal scratchpad service shared by MCP and future control/UI adapters.
 pub struct ScratchpadService<'store> {
     store: &'store Store,
+    actor_label: String,
 }
 
 impl<'store> ScratchpadService<'store> {
     pub fn new(store: &'store Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            actor_label: "workman".into(),
+        }
+    }
+
+    pub fn attributed(store: &'store Store, actor_label: impl Into<String>) -> Self {
+        Self {
+            store,
+            actor_label: actor_label.into(),
+        }
     }
 
     pub fn write(
@@ -277,13 +294,15 @@ impl<'store> ScratchpadService<'store> {
                 let transaction = self.store.connection().unchecked_transaction()?;
                 transaction.execute(
                     "INSERT INTO scratchpads (
-                        project_id, name, content, revision, archived, sort_order
+                        project_id, name, content, revision, archived, sort_order,
+                        created_by, updated_by
                      ) VALUES (
                         ?1, ?2, ?3, 1, 0,
                         (SELECT COALESCE(MAX(sort_order), -1) + 1
-                         FROM scratchpads WHERE project_id = ?1)
+                         FROM scratchpads WHERE project_id = ?1),
+                        ?4, ?4
                      )",
-                    params![project_id, name, content],
+                    params![project_id, name, content, self.actor_label],
                 )?;
                 let id = transaction.last_insert_rowid();
                 replace_tags(&transaction, id, tags.as_deref().unwrap_or_default())?;
@@ -306,6 +325,8 @@ impl<'store> ScratchpadService<'store> {
                     revision: current.revision,
                     tags: tags.unwrap_or(current.tags),
                     archived: current.archived,
+                    created_by: current.created_by,
+                    updated_by: self.actor_label.clone(),
                 };
                 Ok((self.persist_update(updated, current.revision)?, false))
             }
@@ -557,6 +578,8 @@ impl<'store> ScratchpadService<'store> {
             project_id,
             name: scratchpad.name,
             revision: scratchpad.revision,
+            created_by: scratchpad.created_by,
+            updated_by: scratchpad.updated_by,
             query: query.query,
             scope: query.scope,
             case_sensitive: query.case_sensitive,
@@ -590,6 +613,8 @@ impl<'store> ScratchpadService<'store> {
             project_id,
             name: scratchpad.name,
             revision: scratchpad.revision,
+            created_by: scratchpad.created_by,
+            updated_by: scratchpad.updated_by,
             content: selected,
             total_lines: lines.len(),
             requested_lines,
@@ -654,6 +679,8 @@ impl<'store> ScratchpadService<'store> {
                 archived: scratchpad.archived,
                 sort_order,
                 tags: scratchpad.tags,
+                created_by: scratchpad.created_by,
+                updated_by: scratchpad.updated_by,
                 matched_fields,
                 match_snippet,
             });
@@ -853,6 +880,7 @@ impl<'store> ScratchpadService<'store> {
         self.ensure_name_available(target_project_id, &scratchpad.name, None)?;
         let changed = self.store.connection().execute(
             "UPDATE scratchpads SET project_id = ?1, revision = revision + 1,
+                 updated_by = ?5,
                  sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1
                                FROM scratchpads WHERE project_id = ?1)
              WHERE id = ?2 AND project_id = ?3 AND revision = ?4",
@@ -860,7 +888,8 @@ impl<'store> ScratchpadService<'store> {
                 target_project_id,
                 scratchpad_id,
                 project_id,
-                expected_revision
+                expected_revision,
+                self.actor_label,
             ],
         )?;
         if changed == 0 {
@@ -985,7 +1014,8 @@ impl<'store> ScratchpadService<'store> {
     ) -> ScratchpadServiceResult<Scratchpad> {
         let transaction = self.store.connection().unchecked_transaction()?;
         let changed = transaction.execute(
-            "UPDATE scratchpads SET name = ?1, content = ?2, revision = revision + 1, archived = ?3
+            "UPDATE scratchpads SET name = ?1, content = ?2, revision = revision + 1,
+                 archived = ?3, updated_by = ?7
              WHERE id = ?4 AND project_id = ?5 AND revision = ?6",
             params![
                 scratchpad.name,
@@ -994,6 +1024,7 @@ impl<'store> ScratchpadService<'store> {
                 scratchpad.id,
                 scratchpad.project_id,
                 expected_revision,
+                self.actor_label,
             ],
         )?;
         if changed == 0 {

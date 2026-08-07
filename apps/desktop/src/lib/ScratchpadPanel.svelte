@@ -124,7 +124,7 @@
           <span class="note-copy">
             <strong>{scratchpad.name}</strong>
             <small>
-              rev {scratchpad.revision}
+              rev {scratchpad.revision} · {scratchpad.updated_by}
               {#if scratchpad.tags.length > 0} · {scratchpad.tags.slice(0, 2).join(' / ')}{/if}
             </small>
           </span>
@@ -169,7 +169,7 @@
         </div>
         <div class="revision" title="This view refreshes whenever the revision changes">
           <StatusIndicator tone="success" label={`Scratchpad synced · revision ${read.scratchpad.revision}`} />
-          rev {read.scratchpad.revision} · {read.total_lines} lines
+          rev {read.scratchpad.revision} · {read.total_lines} lines · {read.scratchpad.updated_by}
         </div>
       </header>
       {#if read.scratchpad.tags.length > 0}

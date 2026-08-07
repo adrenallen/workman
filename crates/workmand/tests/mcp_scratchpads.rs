@@ -77,6 +77,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     })
     .await?;
     let discovery = server.discovery().clone();
+    let registry_handle = server.registry();
     {
         let registry = server.registry();
         let registry = registry.lock().await;
@@ -187,7 +188,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         json!({
             "name": "ignored by H1",
             "content": "# Shared Plan\n\nIntro\n\n## Next   Steps\n\nAlpha\nBeta\n\n### Detail\n\nGamma",
-            "tags": ["Planning", "MCP", "planning"]
+            "tags": ["Planning", "MCP", "planning"],
+            "actor": "Garrett"
         }),
     )
     .await;
@@ -195,6 +197,21 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_eq!(created["revision"], 1);
     assert_eq!(created["name"], "Shared Plan");
     let scratchpad_id = created["scratchpad_id"].as_i64().unwrap();
+    {
+        let registry = registry_handle.lock().await;
+        let attribution: (String, String) = registry.store().connection().query_row(
+            "SELECT created_by, updated_by FROM scratchpads WHERE id = ?1",
+            [scratchpad_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            attribution,
+            (
+                "scratchpad-agent (agent 1)".into(),
+                "scratchpad-agent (agent 1)".into()
+            )
+        );
+    }
 
     let headings = call(
         &first,
@@ -205,6 +222,14 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_eq!(
         headings["scratchpad"]["content"],
         "# Shared Plan\n## Next Steps\n### Detail"
+    );
+    assert_eq!(
+        headings["scratchpad"]["created_by"],
+        "scratchpad-agent (agent 1)"
+    );
+    assert_eq!(
+        headings["scratchpad"]["updated_by"],
+        "scratchpad-agent (agent 1)"
     );
     let section = call(
         &first,
@@ -369,6 +394,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     .await;
     assert_eq!(tail["requested_lines"], 2);
     assert_eq!(tail["returned_lines"], 2);
+    assert_eq!(tail["updated_by"], "scratchpad-agent (agent 1)");
     let listed = call(
         &first,
         "scratchpad_list",
@@ -376,6 +402,10 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     )
     .await;
     assert_eq!(listed["total_count"], 1);
+    assert_eq!(
+        listed["scratchpads"][0]["updated_by"],
+        "scratchpad-agent (agent 1)"
+    );
     assert_eq!(listed["scratchpads"][0]["matched_fields"][0], "content");
     assert!(
         listed["scratchpads"][0]["match_snippet"]

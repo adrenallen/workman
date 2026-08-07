@@ -27,6 +27,5 @@ export function todoClaimLabel(todo: TodoClaimFields): string {
 }
 
 export function shortTodoActor(actor: string): string {
-  const parts = actor.split('-');
-  return parts.length > 2 ? `${parts[0]}-${parts.at(-1)}` : actor;
+  return actor;
 }

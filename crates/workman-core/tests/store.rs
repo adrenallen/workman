@@ -464,6 +464,12 @@ fn domain_records_round_trip_through_store() {
         store.get_actor_by_session_id(&actor.session_id).unwrap(),
         Some(actor.clone())
     );
+    assert_eq!(store.actor_display_label(&actor.id), "codex-w1 (agent 3)");
+    assert_eq!(
+        store.actor_display_label("mcp-0123456789abcdef"),
+        "external agent (abcdef)"
+    );
+    assert_eq!(store.actor_display_label("desktop-ui"), "desktop-ui");
 
     let prerequisite = Todo {
         id: 4,
@@ -529,6 +535,8 @@ fn domain_records_round_trip_through_store() {
         revision: 3,
         tags: vec!["shared".into(), "architecture".into()],
         archived: false,
+        created_by: "codex-w1 (agent 3)".into(),
+        updated_by: "codex-w1 (agent 3)".into(),
     };
     store.put_scratchpad(&scratchpad).expect("put scratchpad");
     assert_eq!(

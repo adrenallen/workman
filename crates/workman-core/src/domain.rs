@@ -311,6 +311,8 @@ pub struct Scratchpad {
     pub revision: i64,
     pub tags: Vec<String>,
     pub archived: bool,
+    pub created_by: String,
+    pub updated_by: String,
 }
 
 /// A project-scoped coordination lease.

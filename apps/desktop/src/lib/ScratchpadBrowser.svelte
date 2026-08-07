@@ -131,7 +131,7 @@
           <span class="scratchpad-copy">
             <strong>{scratchpad.name}</strong>
             <small>
-              <span>revision {scratchpad.revision}</span>
+              <span>revision {scratchpad.revision} · {scratchpad.updated_by}</span>
               {#if scratchpad.tags.length > 0}<span>{scratchpad.tags.join(' · ')}</span>{/if}
             </small>
           </span>

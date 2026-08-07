@@ -8,7 +8,9 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use workman_core::{LockService, LockServiceError, MAX_LOCK_LEASE_TTL_MS, ProjectId};
+use workman_core::{
+    LeaseView, LockService, LockServiceError, MAX_LOCK_LEASE_TTL_MS, ProjectId, Store,
+};
 
 use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
 
@@ -38,11 +40,11 @@ impl WorkmanMcp {
         Parameters(args): Parameters<LockAcquireArgs>,
     ) -> CallToolResult {
         if !(1..=MAX_LOCK_LEASE_TTL_SECONDS).contains(&args.lease_ttl_seconds) {
-            return lock_failure(LockServiceError::InvalidLeaseTtl);
+            return lock_failure(None, LockServiceError::InvalidLeaseTtl);
         }
         let lease_ttl_ms = match args.lease_ttl_seconds.checked_mul(1_000) {
             Some(ttl) => ttl,
-            None => return lock_failure(LockServiceError::InvalidLeaseTtl),
+            None => return lock_failure(None, LockServiceError::InvalidLeaseTtl),
         };
         let mut registry = self.registry.lock().await;
         let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
@@ -56,8 +58,11 @@ impl WorkmanMcp {
             lease_ttl_ms,
             now_millis(),
         ) {
-            Ok(lease) => success(json!({ "acquired": true, "lease": lease })),
-            Err(error) => lock_failure(error),
+            Ok(lease) => success(json!({
+                "acquired": true,
+                "lease": readable_lease(registry.store(), lease),
+            })),
+            Err(error) => lock_failure(Some(registry.store()), error),
         }
     }
 
@@ -83,7 +88,7 @@ impl WorkmanMcp {
                 "lock_key": args.lock_key,
                 "released": released,
             })),
-            Err(error) => lock_failure(error),
+            Err(error) => lock_failure(Some(registry.store()), error),
         }
     }
 
@@ -99,12 +104,48 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         match LockService::new(registry.store()).status(project.id, &args.lock_key, now_millis()) {
-            Ok(lease) => success(json!({ "lease": lease })),
-            Err(error) => lock_failure(error),
+            Ok(lease) => success(json!({
+                "lease": lease.map(|lease| readable_lease(registry.store(), lease)),
+            })),
+            Err(error) => lock_failure(Some(registry.store()), error),
         }
     }
 }
 
-fn lock_failure(error: LockServiceError) -> CallToolResult {
-    failure(error.code(), error.to_string())
+fn readable_lease(store: &Store, lease: LeaseView) -> serde_json::Value {
+    json!({
+        "project_id": lease.project_id,
+        "lock_key": lease.lock_key,
+        "owner_actor": store.actor_display_label(&lease.owner_actor_id),
+        "acquired_at": lease.acquired_at,
+        "expires_at": lease.expires_at,
+    })
+}
+
+fn lock_failure(store: Option<&Store>, error: LockServiceError) -> CallToolResult {
+    let message = match (&error, store) {
+        (
+            LockServiceError::Held {
+                lock_key,
+                owner_actor_id,
+                expires_at,
+            },
+            Some(store),
+        ) => format!(
+            "lock {lock_key:?} is held by {} until {expires_at}",
+            store.actor_display_label(owner_actor_id)
+        ),
+        (
+            LockServiceError::NotOwned {
+                lock_key,
+                owner_actor_id,
+            },
+            Some(store),
+        ) => format!(
+            "lock {lock_key:?} is owned by {}, not this actor",
+            store.actor_display_label(owner_actor_id)
+        ),
+        _ => error.to_string(),
+    };
+    failure(error.code(), message)
 }

@@ -472,6 +472,9 @@
           <ArchiveIcon size={13} strokeWidth={1.8} aria-hidden="true" />
           {read.scratchpad.archived ? 'Archived' : 'Active'}
         </span>
+        <span class="metadata-chip" title={`Created by ${read.scratchpad.created_by}`}>
+          Updated by {read.scratchpad.updated_by}
+        </span>
         {#each read.scratchpad.tags as tag (tag)}
           <button class="metadata-chip tag-chip" type="button" disabled={metadataDisabled} onclick={() => (tagsOpen = true)}>{tag}</button>
         {/each}

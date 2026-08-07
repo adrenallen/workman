@@ -253,11 +253,23 @@ pub type TodoServiceResult<T> = Result<T, TodoServiceError>;
 /// Internal service shared by MCP and future control/UI adapters.
 pub struct TodoService<'store> {
     store: &'store Store,
+    actor_label: Option<String>,
 }
 
 impl<'store> TodoService<'store> {
     pub fn new(store: &'store Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            actor_label: None,
+        }
+    }
+
+    /// Build a service whose audit writes use a server-resolved actor label.
+    pub fn attributed(store: &'store Store, actor_label: impl Into<String>) -> Self {
+        Self {
+            store,
+            actor_label: Some(actor_label.into()),
+        }
     }
 
     pub fn create(
@@ -283,8 +295,8 @@ impl<'store> TodoService<'store> {
         replace_tags(&transaction, todo_id, &tags)?;
         transaction.execute(
             "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
-             VALUES (?1, 'workman', 'created', ?2)",
-            params![todo_id, now_ms],
+             VALUES (?1, ?2, 'created', ?3)",
+            params![todo_id, self.write_actor("workman"), now_ms],
         )?;
         transaction.commit()?;
         self.require_todo(project_id, todo_id, now_ms)
@@ -354,8 +366,8 @@ impl<'store> TodoService<'store> {
                 if let Some(kind) = kind {
                     transaction.execute(
                         "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
-                         VALUES (?1, 'workman', ?2, ?3)",
-                        params![todo_id, kind.as_str(), now_ms],
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![todo_id, self.write_actor("workman"), kind.as_str(), now_ms],
                     )?;
                 }
             }
@@ -663,8 +675,7 @@ impl<'store> TodoService<'store> {
         self.comment_create_as(project_id, todo_id, actor, actor, body, now_ms)
     }
 
-    /// Create a comment while retaining the durable actor id and using a human-readable actor
-    /// label for a possible mention notification.
+    /// Create a comment while keeping the notification label separate from trusted attribution.
     pub fn comment_create_as(
         &self,
         project_id: ProjectId,
@@ -681,7 +692,7 @@ impl<'store> TodoService<'store> {
         transaction.execute(
             "INSERT INTO todo_comments (todo_id, actor, body, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![todo_id, actor, body, now_ms],
+            params![todo_id, self.write_actor(actor), body, now_ms],
         )?;
         let comment_id = transaction.last_insert_rowid();
         if mentions_user {
@@ -759,9 +770,12 @@ impl<'store> TodoService<'store> {
              FROM todo_comments WHERE todo_id = ?1
              ORDER BY created_at, id LIMIT ?2 OFFSET ?3",
         )?;
-        let comments = statement
+        let mut comments = statement
             .query_map(params![todo_id, limit, offset], comment_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        for comment in &mut comments {
+            comment.actor = self.store.actor_display_label(&comment.actor);
+        }
         let end = offset + comments.len();
         let has_more = end < total_count;
         Ok(TodoCommentPage {
@@ -792,8 +806,12 @@ impl<'store> TodoService<'store> {
                 "lease duration must be positive".into(),
             ));
         }
-        let current = self.require_todo(project_id, todo_id, now_ms)?;
-        let new_claim = current.locked_by.as_deref() != Some(actor);
+        self.require_todo(project_id, todo_id, now_ms)?;
+        let current_actor = self
+            .store
+            .get_todo(todo_id)?
+            .and_then(|todo| todo.lock_actor);
+        let new_claim = current_actor.as_deref() != Some(actor);
         let expiry = now_ms
             .checked_add(lease_ttl_ms)
             .ok_or_else(|| TodoServiceError::InvalidInput("lease duration is too large".into()))?;
@@ -947,7 +965,7 @@ impl<'store> TodoService<'store> {
             activity.push(TodoActivity {
                 id,
                 todo_id,
-                actor,
+                actor: self.store.actor_display_label(&actor),
                 kind: TodoActivityKind::parse(&kind)?,
                 created_at,
             });
@@ -965,7 +983,7 @@ impl<'store> TodoService<'store> {
         self.store.connection().execute(
             "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![todo_id, actor, kind.as_str(), now_ms],
+            params![todo_id, self.write_actor(actor), kind.as_str(), now_ms],
         )?;
         Ok(())
     }
@@ -993,11 +1011,12 @@ impl<'store> TodoService<'store> {
         comment_id: TodoCommentId,
         now_ms: i64,
     ) -> TodoServiceResult<TodoComment> {
-        let comment = self
+        let mut comment = self
             .store
             .get_todo_comment(comment_id)?
             .ok_or(TodoServiceError::CommentNotFound(comment_id))?;
         self.require_todo(project_id, comment.todo_id, now_ms)?;
+        comment.actor = self.store.actor_display_label(&comment.actor);
         Ok(comment)
     }
 
@@ -1043,7 +1062,10 @@ impl<'store> TodoService<'store> {
             completed: todo.completed,
             sort_order,
             assignee,
-            locked_by: todo.lock_actor,
+            locked_by: todo
+                .lock_actor
+                .as_deref()
+                .map(|actor| self.store.actor_display_label(actor)),
             lock_expiry: todo.lock_expiry,
             comment_count,
             tags: todo.tags,
@@ -1051,6 +1073,10 @@ impl<'store> TodoService<'store> {
             is_blocked: unresolved_blocker_count > 0,
             unresolved_blocker_count,
         })
+    }
+
+    fn write_actor<'actor>(&'actor self, fallback: &'actor str) -> &'actor str {
+        self.actor_label.as_deref().unwrap_or(fallback)
     }
 
     fn todo_matches_query(&self, todo: &TodoView, needle: &str) -> TodoServiceResult<bool> {

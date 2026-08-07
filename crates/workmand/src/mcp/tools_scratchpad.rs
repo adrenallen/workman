@@ -259,11 +259,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadWriteArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).write(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).write(
             project.id,
             args.scratchpad_id,
             args.name,
@@ -320,11 +321,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadAppendArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).append(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).append(
             project.id,
             args.scratchpad_id,
             args.content,
@@ -344,18 +346,20 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadAppendSectionArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).append_section_with_create(
-            project.id,
-            args.scratchpad_id,
-            &args.heading,
-            args.content,
-            args.create_heading,
-            args.expected_revision,
-        ) {
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label)
+            .append_section_with_create(
+                project.id,
+                args.scratchpad_id,
+                &args.heading,
+                args.content,
+                args.create_heading,
+                args.expected_revision,
+            ) {
             Ok(scratchpad) => revision_receipt(&scratchpad),
             Err(error) => scratchpad_failure(error),
         }
@@ -368,11 +372,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadEditArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).edit(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).edit(
             project.id,
             args.scratchpad_id,
             args.target.into(),
@@ -467,11 +472,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadRenameArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).rename(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).rename(
             project.id,
             args.scratchpad_id,
             args.name,
@@ -529,11 +535,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadArchiveArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).archive(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).archive(
             project.id,
             args.scratchpad_id,
             args.expected_revision,
@@ -555,11 +562,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadRevisionArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).clear(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).clear(
             project.id,
             args.scratchpad_id,
             args.expected_revision,
@@ -611,7 +619,8 @@ impl WorkmanMcp {
         {
             return failure("project_scope_error", error);
         }
-        match ScratchpadService::new(registry.store()).transfer(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).transfer(
             project.id,
             args.scratchpad_id,
             args.target_project_id,
@@ -663,11 +672,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadLoadArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).load_from_file(
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        match ScratchpadService::attributed(registry.store(), actor_label).load_from_file(
             project.id,
             args.scratchpad_id,
             args.name,
@@ -693,11 +703,12 @@ impl WorkmanMcp {
         add: bool,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let service = ScratchpadService::new(registry.store());
+        let actor_label = registry.store().actor_display_label(&actor.id);
+        let service = ScratchpadService::attributed(registry.store(), actor_label);
         let result = if add {
             service.add_tags(
                 project.id,

@@ -8,7 +8,10 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{NotificationType, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{
+    Actor, NotificationType, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    TodoService,
+};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -159,7 +162,8 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             "title": "Claim exactly once",
             "body": "Concurrency acceptance test",
             "priority": "high",
-            "tags": ["mcp", "coordination"]
+            "tags": ["mcp", "coordination"],
+            "actor": "Garrett"
         }),
     )
     .await;
@@ -239,7 +243,11 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let comment = call(
         &first,
         "todo_comment_create",
-        json!({ "todo_id": todo_id, "body": "@user, lease verified" }),
+        json!({
+            "todo_id": todo_id,
+            "body": "@user, lease verified",
+            "actor": "Garrett"
+        }),
     )
     .await;
     let comment_id = comment["comment_id"].as_i64().unwrap();
@@ -278,6 +286,55 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     .await;
     assert_eq!(rich["todo"]["completed"], true);
     assert_eq!(rich["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        rich["comments"][0]["actor"], "todo-agent (agent 1)",
+        "client-supplied actor names must not cross the server trust boundary"
+    );
+    {
+        let registry = registry_handle.lock().await;
+        let activity_actors = registry
+            .store()
+            .connection()
+            .prepare("SELECT actor FROM todo_activity WHERE todo_id = ?1 ORDER BY id")?
+            .query_map([todo_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(!activity_actors.is_empty());
+        assert!(
+            activity_actors
+                .iter()
+                .all(|actor| actor == "todo-agent (agent 1)")
+        );
+        let stored_comment_actor: String = registry.store().connection().query_row(
+            "SELECT actor FROM todo_comments WHERE id = ?1",
+            [comment_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_comment_actor, "todo-agent (agent 1)");
+        registry.store().connection().execute(
+            "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+             VALUES (?1, ?2, 'locked', 9999999999999)",
+            rusqlite::params![todo_id, first_identity["actor_id"].as_str().unwrap()],
+        )?;
+        let activity = TodoService::new(registry.store()).activity_list(1, todo_id, 10_000)?;
+        assert_eq!(activity.last().unwrap().actor, "todo-agent (agent 1)");
+        let external_actor_id = "mcp-0123456789abcdef";
+        registry.store().put_actor(&Actor {
+            id: external_actor_id.into(),
+            session_id: "external-session".into(),
+            process_id: None,
+            selected_project_id: None,
+            created_at: 1,
+            last_seen_at: 1,
+        })?;
+        registry.store().connection().execute(
+            "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
+             VALUES (?1, ?2, 'locked', 99999999999999)",
+            rusqlite::params![todo_id, external_actor_id],
+        )?;
+        let activity = TodoService::new(registry.store()).activity_list(1, todo_id, 10_000)?;
+        assert_eq!(activity.last().unwrap().actor, "external agent (abcdef)");
+        assert!(!activity.last().unwrap().actor.contains(external_actor_id));
+    }
     let listed = call(
         &first,
         "todo_list",

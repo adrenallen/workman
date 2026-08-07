@@ -121,7 +121,9 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     )
     .await;
     assert_eq!(acquired["acquired"], true);
-    assert_eq!(acquired["lease"]["owner_actor_id"], first_actor);
+    assert_eq!(acquired["lease"]["owner_actor"], "lock-agent (agent 1)");
+    assert!(acquired["lease"].get("owner_actor_id").is_none());
+    assert!(!acquired.to_string().contains(&first_actor));
     let denied = invoke(
         &second,
         "lock_acquire",
@@ -155,7 +157,8 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
         json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
-    assert_eq!(acquired["lease"]["owner_actor_id"], second_actor);
+    assert_eq!(acquired["lease"]["owner_actor"], "lock-agent (agent 1)");
+    assert!(!acquired.to_string().contains(&second_actor));
     call(
         &second,
         "lock_release",
@@ -186,8 +189,8 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     )
     .await;
     assert_eq!(
-        acquired_after_expiry["lease"]["owner_actor_id"],
-        second_actor
+        acquired_after_expiry["lease"]["owner_actor"],
+        "lock-agent (agent 1)"
     );
 
     let _ = first.cancel().await;

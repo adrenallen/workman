@@ -58,6 +58,8 @@ export interface ScratchpadSummary {
   archived: boolean;
   sort_order: number;
   tags: string[];
+  created_by: string;
+  updated_by: string;
   matched_fields: string[];
   match_snippet?: string;
 }
@@ -70,6 +72,8 @@ export interface Scratchpad {
   revision: number;
   tags: string[];
   archived: boolean;
+  created_by: string;
+  updated_by: string;
 }
 
 export interface ScratchpadRead {

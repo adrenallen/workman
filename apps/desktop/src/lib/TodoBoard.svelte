@@ -68,8 +68,7 @@
   }
 
   function shortActor(actor: string): string {
-    const parts = actor.split('-');
-    return parts.length > 2 ? `${parts[0]}-${parts.at(-1)}` : actor;
+    return actor;
   }
 
   function formatTime(epochMillis: number): string {
