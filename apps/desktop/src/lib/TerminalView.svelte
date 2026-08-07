@@ -452,16 +452,29 @@
   .terminal-host {
     min-width: 0;
     min-height: 0;
-    padding: 7px 6px 5px 8px;
+    background: var(--terminal-background);
   }
 
   .terminal-host :global(.xterm) {
+    box-sizing: border-box;
     height: 100%;
+    padding: 7px 6px 5px 8px;
+    background: var(--terminal-background);
   }
 
   .terminal-host :global(.xterm-viewport) {
+    background-color: var(--terminal-background);
     scrollbar-color: color-mix(in srgb, var(--terminal-foreground) 24%, var(--terminal-background)) transparent;
     scrollbar-width: thin;
+  }
+
+  .terminal-host :global(.xterm-screen) {
+    background: var(--terminal-background);
+  }
+
+  .terminal-host :global(.composition-view) {
+    background: var(--terminal-background);
+    color: var(--terminal-foreground);
   }
 
   .terminal-host :global(.xterm-screen canvas) {
