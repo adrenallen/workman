@@ -1,6 +1,6 @@
 import { isBrowserUrl, openBrowserUrl } from './openers';
 
-export const EXTERNAL_LINK_TOOLTIP = 'Cmd+click to open in browser';
+export const EXTERNAL_LINK_TOOLTIP = 'Cmd+click to open';
 
 export function openExternalUrl(
   url: string,
@@ -27,7 +27,7 @@ export function markdownLinkAt(source: string, offset: number): string | null {
 
 export function installExternalLinkGuard(root: Document = document): () => void {
   const onClick = (event: MouseEvent) => {
-    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.defaultPrevented || (event.button !== 0 && event.button !== 1)) return;
     const target = event.target instanceof Element ? event.target.closest('a[href]') : null;
     if (!(target instanceof HTMLAnchorElement)) return;
 
@@ -43,5 +43,9 @@ export function installExternalLinkGuard(root: Document = document): () => void 
     if (/^[a-z][a-z0-9+.-]*:/i.test(href)) event.preventDefault();
   };
   root.addEventListener('click', onClick, true);
-  return () => root.removeEventListener('click', onClick, true);
+  root.addEventListener('auxclick', onClick, true);
+  return () => {
+    root.removeEventListener('click', onClick, true);
+    root.removeEventListener('auxclick', onClick, true);
+  };
 }

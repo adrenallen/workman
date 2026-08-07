@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(debug_assertions)]
+use std::{fs::OpenOptions, io::Write};
+
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,6 +33,7 @@ use workmand::{
     user_config_path,
 };
 
+mod external_navigation;
 mod native_notifications;
 
 const STATUS_EVENT: &str = "daemon://status";
@@ -288,6 +292,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(external_navigation::plugin())
         .manage(state)
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
@@ -791,15 +796,22 @@ fn validated_browser_url(url: &str) -> Result<&str, String> {
             "browser URL cannot contain surrounding whitespace or control characters".to_owned(),
         );
     }
-    if !url.starts_with("https://") && !url.starts_with("http://") {
+    let parsed = tauri::Url::parse(url).map_err(|_| "browser URL is invalid".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err("browser URL must use http or https".to_owned());
     }
     Ok(url)
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    if let Some(capture_path) = env::var_os("WORKMAN_BROWSER_OPEN_CAPTURE") {
+        append_browser_open_capture(Path::new(&capture_path), url)?;
+        return Ok(());
+    }
+
     #[cfg(target_os = "macos")]
-    return spawn_detached(Command::new("open").arg(url), "default browser");
+    return spawn_detached(Command::new("/usr/bin/open").arg(url), "default browser");
 
     #[cfg(target_os = "linux")]
     return spawn_detached(Command::new("xdg-open").arg(url), "default browser");
@@ -809,6 +821,47 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 
     #[allow(unreachable_code)]
     Err("opening a browser is not supported on this platform".to_owned())
+}
+
+#[cfg(debug_assertions)]
+fn append_browser_open_capture(path: &Path, url: &str) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("browser-open capture is unavailable: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("browser-open capture must be a pre-existing regular file".to_owned());
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("browser-open capture path is invalid: {error}"))?;
+    let temp_root = std::fs::canonicalize("/tmp")
+        .map_err(|error| format!("could not resolve the isolated QA root: {error}"))?;
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| "browser-open capture has no parent directory".to_owned())?;
+    let root_name = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "browser-open capture has an invalid QA root".to_owned())?;
+    let Some((todo_id, nonce)) = root_name
+        .strip_prefix("workman-todo")
+        .and_then(|suffix| suffix.split_once("-qa."))
+    else {
+        return Err("browser-open capture must be inside a per-todo QA root".to_owned());
+    };
+    if parent.parent() != Some(temp_root.as_path())
+        || todo_id.is_empty()
+        || !todo_id.bytes().all(|byte| byte.is_ascii_digit())
+        || nonce.is_empty()
+        || canonical.file_name().and_then(|name| name.to_str()) != Some("browser-open.log")
+    {
+        return Err("browser-open capture must be inside a per-todo QA root".to_owned());
+    }
+
+    let mut capture = OpenOptions::new()
+        .append(true)
+        .open(&canonical)
+        .map_err(|error| format!("could not open browser-open capture: {error}"))?;
+    writeln!(capture, "{url}")
+        .map_err(|error| format!("could not record browser-open dispatch: {error}"))
 }
 
 fn open_shell_target(path: &Path, target: ShellOpenTarget) -> Result<(), String> {
@@ -1312,10 +1365,36 @@ mod tests {
             validated_browser_url("http://127.0.0.1:4173/pr/1").unwrap(),
             "http://127.0.0.1:4173/pr/1"
         );
+        assert_eq!(
+            validated_browser_url("HTTPS://example.com/docs").unwrap(),
+            "HTTPS://example.com/docs"
+        );
         assert!(validated_browser_url("file:///tmp/report.html").is_err());
         assert!(validated_browser_url("javascript:alert(1)").is_err());
         assert!(validated_browser_url(" https://github.com/example ").is_err());
         assert!(validated_browser_url("https://github.com/example\n").is_err());
+    }
+
+    #[test]
+    fn debug_browser_capture_is_scoped_to_precreated_per_todo_files() {
+        let qa_root = tempfile::Builder::new()
+            .prefix("workman-todo436-qa.")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let capture = qa_root.path().join("browser-open.log");
+        std::fs::write(&capture, "").unwrap();
+
+        append_browser_open_capture(&capture, "https://example.test/todo-436").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&capture).unwrap(),
+            "https://example.test/todo-436\n"
+        );
+
+        let outside = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+        assert!(append_browser_open_capture(outside.path(), "https://example.test").is_err());
+        let wrong_name = qa_root.path().join("not-the-capture.log");
+        std::fs::write(&wrong_name, "").unwrap();
+        assert!(append_browser_open_capture(&wrong_name, "https://example.test").is_err());
     }
 
     #[test]

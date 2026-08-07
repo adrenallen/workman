@@ -102,6 +102,7 @@
   } from './lib/nativeMenu';
   import {
     openerSettings,
+    openBrowserUrl,
     openProjectCustom,
     openProjectEditor,
     openProjectFinder
@@ -2473,12 +2474,12 @@
         return;
       case 'open-pull-request':
         if (target.worktree?.pull_request?.url) {
-          window.open(target.worktree.pull_request.url, '_blank', 'noopener,noreferrer');
+          await openBrowserUrl(target.worktree.pull_request.url);
         }
         return;
       case 'open-herd-site':
         if (target.worktree?.site_url) {
-          window.open(target.worktree.site_url, '_blank', 'noopener,noreferrer');
+          await openBrowserUrl(target.worktree.site_url);
         }
         return;
       case 'start-all-commands':
