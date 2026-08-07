@@ -39,9 +39,9 @@
 
 <style>
   .operation-row { min-width: 0; }
-  button { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 17px minmax(0, 1fr); align-items: center; gap: 6px; border: 0; border-left: 2px solid var(--information); padding: 4px 7px; background: color-mix(in srgb, var(--information) 6%, transparent); color: var(--foreground); text-align: left; cursor: pointer; }
+  button { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 17px minmax(0, 1fr); align-items: center; gap: 6px; border: 0; border-left: 2px solid var(--agent-state-working); padding: 4px 7px; background: color-mix(in srgb, var(--agent-state-working) 6%, transparent); color: var(--foreground); text-align: left; cursor: pointer; }
   button:active { transform: translateY(1px); }
-  .state-icon { display: inline-flex; color: var(--information); }
+  .state-icon { display: inline-flex; color: var(--agent-state-working); }
   .copy { min-width: 0; }
   .copy strong, .copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .copy strong { font-size: var(--font-size-sm); font-weight: 570; }

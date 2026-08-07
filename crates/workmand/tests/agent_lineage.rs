@@ -11,7 +11,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{Actor, AgentTool, AgentToolSource, Project, Timer, TimerKind};
+use workman_core::{AgentTool, AgentToolSource, Project};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -52,7 +52,7 @@ async fn wait_for_context(path: &Path) -> Result<(i64, String), Box<dyn Error>> 
 }
 
 #[tokio::test]
-async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
+async fn agent_spawns_record_lineage_and_parent_close_promotes_children()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_dir = temp.path().join("workspace");
@@ -137,56 +137,18 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
         parent_id
     );
 
-    let first_child_context = temp.path().join("first-child-context.txt");
-    let first_child_spawn = call(
+    let child_context = temp.path().join("child-context.txt");
+    let child_spawn = call(
         &parent,
         "spawn_agent",
         json!({
             "agent_tool_id": 99,
-            "name": "first-child",
-            "extra_args": [first_child_context],
+            "name": "child-agent",
+            "extra_args": [child_context],
         }),
     )
     .await;
-    let first_child_id = first_child_spawn["process_id"].as_i64().unwrap();
-    let (injected_child_id, first_child_token) = wait_for_context(&first_child_context).await?;
-    assert_eq!(injected_child_id, first_child_id);
-
-    let first_child_headers = HashMap::from([(
-        HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
-        HeaderValue::from_str(&first_child_token)?,
-    )]);
-    let first_child_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-            .custom_headers(first_child_headers),
-    );
-    let first_child = ClientInfo::default().serve(first_child_transport).await?;
-
-    let grandchild_context = temp.path().join("grandchild-context.txt");
-    let grandchild_spawn = call(
-        &first_child,
-        "spawn_agent",
-        json!({
-            "agent_tool_id": 99,
-            "name": "grandchild",
-            "extra_args": [grandchild_context],
-        }),
-    )
-    .await;
-    let grandchild_id = grandchild_spawn["process_id"].as_i64().unwrap();
-
-    let second_child_context = temp.path().join("second-child-context.txt");
-    let second_child_spawn = call(
-        &parent,
-        "spawn_agent",
-        json!({
-            "agent_tool_id": 99,
-            "name": "second-child",
-            "extra_args": [second_child_context],
-        }),
-    )
-    .await;
-    let second_child_id = second_child_spawn["process_id"].as_i64().unwrap();
+    let child_id = child_spawn["process_id"].as_i64().unwrap();
 
     let terminal_spawn = call(
         &parent,
@@ -196,238 +158,60 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
     .await;
     let terminal_id = terminal_spawn["process_id"].as_i64().unwrap();
 
-    let observer_context = temp.path().join("observer-context.txt");
-    let observer_spawn = call(
-        &root,
-        "spawn_agent",
-        json!({
-            "project_id": 7,
-            "agent_tool_id": 99,
-            "name": "independent-observer",
-            "extra_args": [observer_context],
-        }),
-    )
-    .await;
-    let observer_id = observer_spawn["process_id"].as_i64().unwrap();
-
-    // A surviving observer's watch must remain available to resolve the
-    // child's exited edge. Parent-owned/delivered timers are removed below.
-    {
-        let registry = registry.lock().await;
-        registry.store().put_actor(&Actor {
-            id: "observer-owner".into(),
-            session_id: "observer-owner-session".into(),
-            process_id: Some(observer_id),
-            selected_project_id: Some(7),
-            created_at: 1,
-            last_seen_at: 1,
-        })?;
-        registry.store().put_timer(&Timer {
-            id: 900,
-            owner_actor: "observer-owner".into(),
-            delivery_process_id: observer_id,
-            body: "child finished".into(),
-            kind: TimerKind::IdleAny,
-            watch_process_ids: vec![first_child_id],
-            interval_ms: None,
-            repeating: false,
-            max_wait_deadline: Some(i64::MAX),
-            paused: false,
-            fired: false,
-            fired_at: None,
-            created_at: 1,
-        })?;
-    }
-
     let listed = call(&parent, "list_processes", json!({})).await;
     let processes = listed["processes"].as_array().expect("process envelope");
     let parent_view = processes
         .iter()
         .find(|view| view["id"] == parent_id)
         .unwrap();
-    let first_child_view = processes
+    let child_view = processes
         .iter()
-        .find(|view| view["id"] == first_child_id)
-        .unwrap();
-    let grandchild_view = processes
-        .iter()
-        .find(|view| view["id"] == grandchild_id)
-        .unwrap();
-    let second_child_view = processes
-        .iter()
-        .find(|view| view["id"] == second_child_id)
+        .find(|view| view["id"] == child_id)
         .unwrap();
     let terminal_view = processes
         .iter()
         .find(|view| view["id"] == terminal_id)
         .unwrap();
     assert_eq!(parent_view["spawned_by_process_id"], Value::Null);
-    assert_eq!(first_child_view["spawned_by_process_id"], parent_id);
-    assert_eq!(second_child_view["spawned_by_process_id"], parent_id);
-    assert_eq!(grandchild_view["spawned_by_process_id"], first_child_id);
+    assert_eq!(child_view["spawned_by_process_id"], parent_id);
     assert_eq!(terminal_view["spawned_by_process_id"], parent_id);
 
-    call(
+    let child_status = call(
         &parent,
-        "timer_set",
-        json!({ "delay_ms": 60_000, "body": "must never fire" }),
+        "get_process_status",
+        json!({ "process_id": child_id }),
     )
     .await;
+    assert_eq!(child_status["spawned_by_process_id"], parent_id);
 
     assert_eq!(
         call(
             &root,
-            "stop_process",
-            json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
+            "close_process",
+            json!({ "project_id": 7, "process_id": parent_id }),
         )
-        .await["status"],
-        "stopped"
+        .await["closed"],
+        true
     );
-    let after_parent_only = call(&root, "list_processes", json!({ "project_id": 7 })).await;
-    let after_parent_only = after_parent_only["processes"].as_array().unwrap();
-    for process_id in [first_child_id, second_child_id, grandchild_id, terminal_id] {
-        assert_eq!(
-            after_parent_only
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["status"],
-            "running"
-        );
-    }
-    for process_id in [first_child_id, second_child_id, terminal_id] {
-        assert_eq!(
-            after_parent_only
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["spawned_by_process_id"],
-            Value::Null
-        );
-    }
-    assert_eq!(
-        after_parent_only
-            .iter()
-            .find(|view| view["id"] == grandchild_id)
-            .unwrap()["spawned_by_process_id"],
-        first_child_id
-    );
-    {
-        let registry = registry.lock().await;
-        let timer_count: i64 =
-            registry
-                .store()
-                .connection()
-                .query_row("SELECT COUNT(*) FROM timers", [], |row| row.get(0))?;
-        assert_eq!(timer_count, 1, "parent-owned timer survived parent stop");
-        let observer_timer = registry.store().get_timer(900)?.unwrap();
-        assert_eq!(observer_timer.watch_process_ids, vec![first_child_id]);
-    }
-
-    // Rebuild the original lineage after proving the opt-out promotion path.
-    {
-        let mut registry = registry.lock().await;
-        for (process_id, spawner_id) in [
-            (first_child_id, parent_id),
-            (second_child_id, parent_id),
-            (grandchild_id, first_child_id),
-            (terminal_id, parent_id),
-        ] {
-            let mut process = registry.get(process_id)?;
-            process.spawned_by_process_id = Some(spawner_id);
-            registry.store().put_process(&process)?;
-        }
-    }
-    call(
-        &root,
-        "start_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
-    )
-    .await;
-
-    // Omitting cascade is the safe default: grandchild and both children stop first.
-    call(
-        &root,
-        "stop_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
-    )
-    .await;
-    let after_cascade = call(&root, "list_processes", json!({ "project_id": 7 })).await;
-    let after_cascade = after_cascade["processes"].as_array().unwrap();
-    for process_id in [parent_id, first_child_id, second_child_id, grandchild_id] {
-        assert_eq!(
-            after_cascade
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["status"],
-            "stopped"
-        );
-    }
-    let terminal = after_cascade
+    let after_close = call(&root, "list_processes", json!({ "project_id": 7 })).await;
+    let child_after_close = after_close["processes"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|view| view["id"] == terminal_id)
+        .find(|view| view["id"] == child_id)
         .unwrap();
-    assert_eq!(terminal["status"], "running");
-    assert_eq!(terminal["spawned_by_process_id"], Value::Null);
-    assert!(registry.lock().await.store().get_timer(900)?.is_some());
-    assert!(
-        registry
-            .lock()
-            .await
-            .store()
-            .list_notifications(None, 200)?
-            .is_empty(),
-        "user-initiated cascade emitted notification spam"
-    );
+    assert_eq!(child_after_close["spawned_by_process_id"], Value::Null);
 
-    for process_id in [parent_id, first_child_id, second_child_id, grandchild_id] {
-        call(
+    for process_id in [child_id, terminal_id] {
+        let closed = call(
             &root,
-            "start_process",
+            "close_process",
             json!({ "project_id": 7, "process_id": process_id }),
         )
         .await;
-    }
-    let closed_parent = call(
-        &root,
-        "close_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
-    )
-    .await;
-    assert_eq!(closed_parent["closed"], true);
-    assert_eq!(closed_parent["cascade"], true);
-    assert_eq!(
-        closed_parent["cascaded_processes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
-    let after_close = call(&root, "list_processes", json!({ "project_id": 7 })).await;
-    let after_close = after_close["processes"].as_array().unwrap();
-    assert_eq!(after_close.len(), 2);
-    for process_id in [terminal_id, observer_id] {
-        let survivor = after_close
-            .iter()
-            .find(|view| view["id"] == process_id)
-            .unwrap();
-        assert_eq!(survivor["spawned_by_process_id"], Value::Null);
+        assert_eq!(closed["closed"], true);
     }
 
-    let closed = call(
-        &root,
-        "close_process",
-        json!({ "project_id": 7, "process_id": terminal_id, "cascade": false }),
-    )
-    .await;
-    assert_eq!(closed["closed"], true);
-    let closed = call(
-        &root,
-        "close_process",
-        json!({ "project_id": 7, "process_id": observer_id, "cascade": false }),
-    )
-    .await;
-    assert_eq!(closed["closed"], true);
-
-    let _ = first_child.cancel().await;
     let _ = parent.cancel().await;
     let _ = root.cancel().await;
     let _ = shutdown_tx.send(());

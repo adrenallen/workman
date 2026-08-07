@@ -181,7 +181,7 @@
   }
 
   .idle .direction {
-    color: var(--warning);
+    color: var(--agent-state-waiting);
   }
 
   .paused .direction {

@@ -11,7 +11,6 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
-  import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
   import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
@@ -50,11 +49,6 @@
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import type { AgentTool } from './lib/agentTools';
-  import {
-    liveAgentDescendants,
-    type AgentCascadeAction,
-    type AgentCascadeRequest
-  } from './lib/agentCascade';
   import type { ClaimedTodo } from './lib/claimedTodos';
   import type {
     CoordinationSnapshot,
@@ -239,9 +233,6 @@
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
   let processReorderBusy = $state(false);
-  let agentCascadeRequest = $state<AgentCascadeRequest | null>(null);
-  let agentCascadeBusy = $state(false);
-  let agentCascadeError = $state<string | null>(null);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
@@ -1443,56 +1434,14 @@
 
   async function stopProcess(process: ProcessView): Promise<void> {
     if (processBusyId !== null) return;
-    if (openAgentCascadeDialog(process, 'stop')) return;
     processBusyId = process.id;
     try {
-      await client.stopProcess(process.id, true);
+      await client.stopProcess(process.id);
       await refreshProcesses(process.project_id);
     } catch (cause) {
       reportError(cause);
     } finally {
       processBusyId = null;
-    }
-  }
-
-  function openAgentCascadeDialog(
-    process: ProcessView,
-    action: AgentCascadeAction
-  ): boolean {
-    if (process.kind !== 'agent') return false;
-    const descendants = liveAgentDescendants(processes, process.id);
-    if (descendants.length === 0) return false;
-    agentCascadeError = null;
-    agentCascadeRequest = { process, action, descendants };
-    return true;
-  }
-
-  async function confirmAgentCascade(cascade: boolean): Promise<void> {
-    const request = agentCascadeRequest;
-    if (!request || agentCascadeBusy || processBusyId !== null) return;
-    agentCascadeBusy = true;
-    processBusyId = request.process.id;
-    agentCascadeError = null;
-    try {
-      if (request.action === 'stop') {
-        await client.stopProcess(request.process.id, cascade);
-      } else if (request.action === 'kill') {
-        await client.control('process.kill', {
-          process_id: request.process.id,
-          confirm_kill: true,
-          cascade
-        });
-      } else {
-        await client.closeProcess(request.process.id, cascade);
-        if (selection?.id === request.process.id && isProcessSelection(selection)) clearSelection();
-      }
-      await refreshProcesses(request.process.project_id);
-      agentCascadeRequest = null;
-    } catch (cause) {
-      agentCascadeError = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      processBusyId = null;
-      agentCascadeBusy = false;
     }
   }
 
@@ -2659,15 +2608,13 @@
         await restartProcess(process);
         return;
       case 'kill':
-        if (openAgentCascadeDialog(process, 'kill')) return;
         if (!window.confirm(`Kill ${process.name} immediately? Unsaved terminal state may be lost.`)) return;
-        await client.control('process.kill', { process_id: process.id, confirm_kill: true, cascade: true });
+        await client.control('process.kill', { process_id: process.id, confirm_kill: true });
         await refreshProcesses(process.project_id);
         return;
       case 'close':
-        if (openAgentCascadeDialog(process, 'close')) return;
         if (!window.confirm(`Close ${process.name}? Its saved terminal entry will be removed.`)) return;
-        await client.closeProcess(process.id, true);
+        await client.closeProcess(process.id);
         if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
         await refreshProcesses(process.project_id);
         return;
@@ -3392,18 +3339,6 @@
   <KeyboardShortcuts onClose={closeShortcuts} />
 {/if}
 
-{#if agentCascadeRequest}
-  <AgentCascadeDialog
-    process={agentCascadeRequest.process}
-    descendants={agentCascadeRequest.descendants}
-    action={agentCascadeRequest.action}
-    busy={agentCascadeBusy}
-    error={agentCascadeError}
-    onConfirm={(cascade) => void confirmAgentCascade(cascade)}
-    onClose={() => { if (!agentCascadeBusy) agentCascadeRequest = null; }}
-  />
-{/if}
-
 {#if worktreeDialog}
   <WorktreeDialog
     mode={worktreeDialog.mode}
@@ -3552,8 +3487,8 @@
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, #8fb8ff 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: #b9d2ff; background: color-mix(in srgb, #8fb8ff 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
-  .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: #8fb8ff; }
+  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
@@ -3580,7 +3515,7 @@
   .project-rail.collapsed :global(.project-actions) { display: none; }
   .project-rail.collapsed :global(.project-status-badge) { position: absolute; z-index: 2; right: 2px; bottom: 2px; width: 12px; height: 12px; border: 1px solid var(--card); border-radius: 999px; background: var(--card); }
   .project-rail.collapsed :global(.project-status-badge > span) { width: 6px; height: 6px; }
-  .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--information); font-size: 9px; }
+  .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
 

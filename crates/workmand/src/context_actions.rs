@@ -13,8 +13,6 @@ struct ProcessParams {
     process_id: ProcessId,
     #[serde(default)]
     confirm_kill: bool,
-    #[serde(default)]
-    cascade: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +44,7 @@ fn kill_process(params: Value, registry: &mut ProcessRegistry) -> ControlResult 
         ));
     }
     registry
-        .kill_with_descendants(params.process_id, params.cascade.unwrap_or(true))
+        .kill(params.process_id)
         .map(json_value)
         .map_err(registry_error)
 }

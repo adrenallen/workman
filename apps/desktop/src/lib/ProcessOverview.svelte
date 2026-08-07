@@ -136,9 +136,9 @@
       <span class="summary-divider" aria-hidden="true">·</span>
       <span class="active">{workingCount} working</span>
       <span class="summary-divider" aria-hidden="true">·</span>
-      <span class:attention={waitingCount > 0}>{waitingCount} waiting</span>
+      <span class:waiting-state={waitingCount > 0}>{waitingCount} waiting</span>
       <span class="summary-divider" aria-hidden="true">·</span>
-      <span class:attention={attentionCount > 0}>{attentionCount} need input</span>
+      <span class:needs-input-state={attentionCount > 0}>{attentionCount} need input</span>
     {:else}
       <span class="summary-divider" aria-hidden="true">·</span>
       <span class="active">{runningCount} running</span>
@@ -168,7 +168,11 @@
             <strong>{process.name}</strong>
             <small>{secondaryCopy(process)}</small>
           </span>
-          <span class:attention={process.kind === 'agent' && process.agent_state.needs_input} class="process-state">{stateLabel(process)}</span>
+          <span
+            class:needs-input-state={process.kind === 'agent' && process.agent_state.needs_input}
+            class:waiting-state={process.kind === 'agent' && agentStatusPresentation(process).state === 'waiting'}
+            class="process-state"
+          >{stateLabel(process)}</span>
         </button>
         {#if kind === 'command'}
           <div class="process-actions" aria-label={`${process.name} actions`}>
@@ -200,7 +204,8 @@
 <style>
   .summary-divider { color: var(--muted-foreground); }
   .active { color: var(--success); }
-  .attention { color: var(--warning-token); }
+  .needs-input-state { color: var(--agent-state-needs-input); }
+  .waiting-state { color: var(--agent-state-waiting); }
   .process-ledger { height: 100%; min-height: 0; overflow-y: auto; padding: 4px 7px 10px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .process-row { display: grid; width: 100%; min-height: 42px; grid-template-columns: minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--border); background: transparent; color: var(--foreground); }
   .process-row.with-actions { grid-template-columns: minmax(0, 1fr) 64px; }

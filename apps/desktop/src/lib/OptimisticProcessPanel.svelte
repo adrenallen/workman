@@ -55,7 +55,7 @@
   .terminal-copy strong { color: var(--text); font: 600 var(--font-size-sm)/1.35 var(--terminal-font-family); }
   .terminal-copy p { margin: 5px 0 0; color: var(--text-soft); font: var(--font-size-sm)/1.5 var(--terminal-font-family); }
   .failed .terminal-copy > :global(svg) { color: var(--destructive); }
-  :global(.spinner) { color: var(--information); animation: spin 800ms linear infinite; }
+  :global(.spinner) { color: var(--agent-state-working); animation: spin 800ms linear infinite; }
   footer { display: flex; justify-content: flex-end; gap: 7px; border-top: 1px solid var(--border); padding: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>

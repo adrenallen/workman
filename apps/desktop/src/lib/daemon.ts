@@ -443,8 +443,8 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('process.start', { process_id: processId });
   }
 
-  stopProcess(processId: number, cascade = true): Promise<ProcessView> {
-    return this.request('process.stop', { process_id: processId, cascade });
+  stopProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.stop', { process_id: processId });
   }
 
   markProcessRead(processId: number): Promise<ProcessView> {
@@ -566,8 +566,8 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('agents.spawn', { ...input });
   }
 
-  closeProcess(processId: number, cascade = true): Promise<ProcessView> {
-    return this.request('process.close', { process_id: processId, cascade });
+  closeProcess(processId: number): Promise<ProcessView> {
+    return this.request('process.close', { process_id: processId });
   }
 
   trustReview(processId: number): Promise<TrustReview> {

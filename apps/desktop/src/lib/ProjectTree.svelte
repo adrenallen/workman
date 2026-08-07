@@ -838,13 +838,13 @@
   .row-badges { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 3px; }
   .lineage-glyph { color: #687e74; font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace; transform: translateY(-1px); }
   .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
-  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--warning) 48%, var(--border)); color: var(--warning); }
-  .lineage-rollup.working { border-color: color-mix(in srgb, var(--signal) 42%, var(--border)); color: var(--signal); }
-  .lineage-rollup.waiting { border-color: color-mix(in srgb, var(--information) 42%, var(--border)); color: var(--information); }
-  .lineage-rollup.error { border-color: color-mix(in srgb, var(--fault) 42%, var(--border)); color: var(--fault); }
-  .agent-unread-dot { display: block; width: 7px; height: 7px; flex: none; border-radius: 999px; background: #8fb8ff; box-shadow: 0 0 0 2px color-mix(in srgb, #8fb8ff 17%, transparent); }
-  .unread-lineage-rollup, .unread-group-rollup { display: inline-flex; height: 18px; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, #8fb8ff 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: #b9d2ff; background: color-mix(in srgb, #8fb8ff 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
-  .unread-lineage-rollup > span, .unread-group-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: #8fb8ff; }
+  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--agent-state-needs-input) 48%, var(--border)); color: var(--agent-state-needs-input); }
+  .lineage-rollup.working { border-color: color-mix(in srgb, var(--agent-state-working) 42%, var(--border)); color: var(--agent-state-working); }
+  .lineage-rollup.waiting { border-color: color-mix(in srgb, var(--agent-state-waiting) 42%, var(--border)); color: var(--agent-state-waiting); }
+  .lineage-rollup.error { border-color: color-mix(in srgb, var(--agent-state-exited) 42%, var(--border)); color: var(--agent-state-exited); }
+  .agent-unread-dot { display: block; width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--notification-unread); box-shadow: 0 0 0 2px color-mix(in srgb, var(--notification-unread) 17%, transparent); }
+  .unread-lineage-rollup, .unread-group-rollup { display: inline-flex; height: 18px; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .unread-lineage-rollup > span, .unread-group-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .unread-group-rollup { margin-left: -4px; }
   .scratchpad-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
   .scratchpad-ref { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }

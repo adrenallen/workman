@@ -69,10 +69,10 @@
     min-height: 58px;
     align-items: center;
     gap: 4px;
-    border: 1px solid color-mix(in srgb, #8fb8ff 48%, var(--border));
+    border: 1px solid color-mix(in srgb, var(--notification-unread) 48%, var(--border));
     border-radius: 7px;
     padding: 5px;
-    background: color-mix(in srgb, var(--popover) 94%, #8fb8ff 6%);
+    background: color-mix(in srgb, var(--popover) 94%, var(--notification-unread) 6%);
     box-shadow: 0 14px 34px rgb(0 0 0 / 34%);
     pointer-events: auto;
   }
@@ -92,8 +92,8 @@
     cursor: pointer;
   }
 
-  .toast-open:focus-visible { outline: 1px solid #8fb8ff; outline-offset: 1px; }
-  .toast-icon { display: grid; color: #8fb8ff; place-items: center; }
+  .toast-open:focus-visible { outline: 1px solid var(--ring); outline-offset: 1px; }
+  .toast-icon { display: grid; color: var(--notification-unread); place-items: center; }
   .toast-copy { min-width: 0; }
   .toast-copy strong, .toast-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toast-copy strong { font-size: var(--font-size-sm); font-weight: 680; }

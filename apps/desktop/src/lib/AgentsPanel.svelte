@@ -755,10 +755,10 @@
     text-transform: uppercase;
   }
 
-  .agent-state[data-state='working'] { color: var(--success); }
-  .agent-state[data-state='needs_input'] { color: var(--warning-token); }
-  .agent-state[data-state='waiting'] { color: var(--information); }
-  .agent-state[data-state='exited'] { color: var(--destructive); }
+  .agent-state[data-state='working'] { color: var(--agent-state-working); }
+  .agent-state[data-state='needs_input'] { color: var(--agent-state-needs-input); }
+  .agent-state[data-state='waiting'] { color: var(--agent-state-waiting); }
+  .agent-state[data-state='exited'] { color: var(--agent-state-exited); }
 
   .close-agent {
     align-self: center;

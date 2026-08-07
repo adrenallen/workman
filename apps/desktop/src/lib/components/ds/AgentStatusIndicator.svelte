@@ -103,16 +103,16 @@
     height: 14px;
   }
 
-  [data-state='working'] { color: var(--success); }
-  [data-state='needs_input'] { color: var(--warning-token); }
-  [data-state='waiting'] { color: var(--information); }
+  [data-state='idle'] { color: var(--agent-state-idle); }
+  [data-state='working'] { color: var(--agent-state-working); }
+  [data-state='needs_input'] { color: var(--agent-state-needs-input); }
+  [data-state='waiting'] { color: var(--agent-state-waiting); }
   [data-state='waiting'] .status-glyph {
     width: 14px;
     height: 14px;
     border: 0;
-    border-radius: 999px;
-    background: var(--information);
-    color: var(--information-foreground);
+    background: transparent;
+    color: inherit;
   }
   [data-state='waiting'] .status-glyph :global(svg) {
     width: 9px;
@@ -122,12 +122,14 @@
   [data-state='waiting'][data-size='lg'] .status-glyph {
     width: 25px;
     height: 25px;
+    border: 0;
+    background: transparent;
   }
   [data-state='waiting'][data-size='lg'] .status-glyph :global(svg) {
     width: 13px;
     height: 13px;
   }
-  [data-state='exited'] { color: var(--destructive); }
+  [data-state='exited'] { color: var(--agent-state-exited); }
 
   @media (prefers-reduced-motion: no-preference) {
     [data-state='working'] .status-glyph :global(svg) {

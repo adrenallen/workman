@@ -41,6 +41,13 @@
   --warning-foreground: #fff3cf;
   --information: #6f9fe8;
   --information-foreground: #e4efff;
+  --agent-state-idle: var(--muted-foreground);
+  --agent-state-working: var(--success);
+  --agent-state-needs-input: #b79add;
+  --agent-state-waiting: #e58a46;
+  --agent-state-exited: var(--destructive);
+  --notification-unread: #8fb8ff;
+  --notification-unread-foreground: #b9d2ff;
   --project-icon-slate: #bec3cb;
   --project-icon-blue: #8aa8d8;
   --project-icon-teal: #78ad9c;
@@ -124,6 +131,14 @@
   --warning-foreground: #3f2a08;
   --information: #3765ad;
   --information-foreground: #102c57;
+  --agent-state-idle: var(--muted-foreground);
+  --agent-state-working: #1f7450;
+  --agent-state-needs-input: #715295;
+  --agent-state-waiting: #a94f1d;
+  --agent-state-exited: #a94049;
+  --notification-unread: #3765ad;
+  --notification-unread-foreground: #244b88;
+  --todo-state-claimed: #805814;
   --project-icon-slate: #59616b;
   --project-icon-blue: #486b9f;
   --project-icon-teal: #397765;

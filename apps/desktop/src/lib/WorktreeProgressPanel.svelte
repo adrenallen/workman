@@ -62,11 +62,11 @@
   header { display: flex; min-height: 70px; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--border); padding: 12px 14px; }
   header span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.08em; text-transform: uppercase; }
   h2 { margin: 5px 0 0; font-size: var(--font-size-lg); letter-spacing: -0.015em; }
-  header > strong { color: var(--information); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); }
+  header > strong { color: var(--agent-state-working); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); }
   header > strong.failed { color: var(--destructive); }
   header > strong.complete { color: var(--success); }
   .progress-track { height: 2px; background: var(--muted); }
-  .progress-track span { display: block; height: 100%; background: var(--information); transition: width 180ms ease; }
+  .progress-track span { display: block; height: 100%; background: var(--agent-state-working); transition: width 180ms ease; }
   ol { display: grid; gap: 0; margin: 0; padding: 5px 14px; list-style: none; }
   li { display: grid; min-height: 42px; grid-template-columns: 24px minmax(0, 1fr); align-items: center; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); color: var(--muted-foreground); }
   li:last-child { border-bottom: 0; }
@@ -75,7 +75,7 @@
   li small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs)/1.35 var(--terminal-font-family); }
   li[data-status='completed'], li[data-status='skipped'] { color: var(--success); }
   li[data-status='completed'] strong, li[data-status='skipped'] strong { color: var(--foreground); }
-  li[data-status='running'] { color: var(--information); }
+  li[data-status='running'] { color: var(--agent-state-working); }
   li[data-status='running'] strong { color: var(--foreground); }
   li[data-status='failed'] { color: var(--destructive); }
   li[data-status='failed'] strong { color: var(--destructive); }
