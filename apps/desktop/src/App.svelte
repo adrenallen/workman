@@ -3012,6 +3012,7 @@
           <TodoBrowser
             project={selectedProject}
             todos={coordination?.todos ?? []}
+            processes={treeProcesses}
             onSelect={(todo, navigationIds) => {
               todoNavigationIds = navigationIds;
               void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
@@ -3047,8 +3048,10 @@
             todos={coordination?.todos ?? []}
             navigationIds={todoNavigationIds}
             projectOptions={projects.filter((project) => project.id !== selectedProject.id).map((project) => ({ id: project.id, name: project.display_name ?? project.name }))}
+            processes={treeProcesses}
             onBack={openTodosBrowser}
             onNavigateTodo={(todoId) => void navigateToTodo(todoId)}
+            onNavigateClaimant={selectProcessById}
             onUpdate={updateTodo}
             onComplete={(completed) => void completeTodo(completed)}
             onComment={(body) => void commentTodo(body)}

@@ -11,6 +11,7 @@
   import UnlockIcon from '@lucide/svelte/icons/unlock';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import AgentStatusIndicator from '$lib/components/ds/AgentStatusIndicator.svelte';
   import TodoStatusIndicator from '$lib/components/ds/TodoStatusIndicator.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import * as Popover from '$lib/components/ui/popover';
@@ -26,10 +27,12 @@
     TodoSummary,
     UpdateTodoInput
   } from './coordination';
+  import type { ProcessView } from './daemon';
   import { submitOnEnter } from './formInputConventions';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
   import MarkdownView from './MarkdownView.svelte';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
+  import { resolveTodoClaimant } from './todoClaimant';
 
   interface ProjectOption {
     id: number;
@@ -44,8 +47,10 @@
     todos?: TodoSummary[];
     navigationIds?: number[];
     projectOptions?: ProjectOption[];
+    processes?: ProcessView[];
     onBack?: () => void;
     onNavigateTodo?: (todoId: number) => void;
+    onNavigateClaimant?: (processId: number) => void;
     onUpdate?: (update: UpdateTodoInput) => Promise<void> | void;
     onComplete: (completed: boolean) => void;
     onComment: (body: string) => void;
@@ -63,8 +68,10 @@
     todos = [],
     navigationIds = [],
     projectOptions = [],
+    processes = [],
     onBack,
     onNavigateTodo,
+    onNavigateClaimant,
     onUpdate = () => {},
     onComplete,
     onComment,
@@ -94,6 +101,7 @@
   let blockingTodos = $derived(
     detail ? todos.filter((todo) => todo.blocker_ids.includes(detail!.todo.id)) : []
   );
+  let claimant = $derived(detail ? resolveTodoClaimant(detail.todo, processes) : null);
   let activityItems = $derived.by(() => {
     if (!detail) return [] as Array<
       | { type: 'event'; timestamp: number; event: TodoActivity }
@@ -324,6 +332,28 @@
           </select>
         </label>
 
+        {#if claimant?.process}
+          <button
+            class="metadata-chip claimant-chip"
+            type="button"
+            aria-label={`Claimed by ${claimant.name}. Jump to ${claimant.name}`}
+            title={`Jump to ${claimant.name}`}
+            onclick={() => onNavigateClaimant?.(claimant!.process!.id)}
+          >
+            <strong>{claimant.name}</strong>
+            <AgentStatusIndicator process={claimant.process} showLabel />
+          </button>
+        {:else if claimant}
+          <span
+            class="metadata-chip claimant-chip external"
+            aria-label={`Claimed by ${claimant.name}`}
+            title="This claimant is not attached to a Workman process"
+          >
+            <LockIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+            <strong>{claimant.name}</strong>
+          </span>
+        {/if}
+
         <button class="metadata-chip" type="button" aria-expanded={tagsOpen} onclick={() => (tagsOpen = !tagsOpen)}>
           <TagIcon size={13} strokeWidth={1.8} aria-hidden="true" />
           {detail.todo.tags.length} tag{detail.todo.tags.length === 1 ? '' : 's'}
@@ -437,6 +467,9 @@
   .metadata-chip { display: inline-flex; min-height: 28px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; background: var(--card); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
   .metadata-chip:disabled { cursor: default; opacity: 0.68; }
   .metadata-chip.blocked { border-color: color-mix(in srgb, var(--destructive) 45%, var(--border)); color: var(--destructive); }
+  .claimant-chip { border-color: color-mix(in srgb, var(--todo-state-claimed) 38%, var(--border)); }
+  .claimant-chip strong { overflow: hidden; max-width: 150px; color: var(--todo-state-claimed); font-size: inherit; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+  .claimant-chip.external { cursor: default; }
   .metadata-chip select { max-width: 132px; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   .priority-chip > span { width: 7px; height: 7px; border-radius: 2px; background: var(--muted-foreground); }
   .priority-chip.high { color: var(--destructive); }

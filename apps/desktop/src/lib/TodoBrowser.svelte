@@ -6,10 +6,10 @@
 
   import TodoStatusIndicator from './components/ds/TodoStatusIndicator.svelte';
   import SectionOverview from './SectionOverview.svelte';
-  import type { Project } from './daemon';
+  import type { ProcessView, Project } from './daemon';
   import type { TodoPriority, TodoStatus, TodoSummary } from './coordination';
+  import { resolveTodoClaimant } from './todoClaimant';
   import {
-    shortTodoActor,
     todoClaimLabel,
     todoClaimState
   } from './todoPresentation';
@@ -19,6 +19,7 @@
     onSelect: (todo: TodoSummary, navigationIds: number[]) => void;
     onCreate: () => void;
     project?: Project | null;
+    processes?: ProcessView[];
   }
 
   type StatusFilter = 'active' | TodoStatus | 'all';
@@ -27,7 +28,7 @@
   type PriorityFilter = 'all' | TodoPriority;
   type SortMode = 'state' | 'priority' | 'newest' | 'title';
 
-  let { todos, onSelect, onCreate, project = null }: Props = $props();
+  let { todos, onSelect, onCreate, project = null, processes = [] }: Props = $props();
   let query = $state('');
   let status = $state<StatusFilter>('active');
   let claim = $state<ClaimFilter>('all');
@@ -39,9 +40,15 @@
   const priorityRank: Record<TodoPriority, number> = { high: 0, medium: 1, low: 2 };
   const stateRank = { blocked: 0, claimed: 1, open: 2, completed: 3 } as const;
 
-  let actors = $derived(
-    [...new Set(todos.flatMap((todo) => (todo.locked_by ? [todo.locked_by] : [])))].sort()
-  );
+  let actors = $derived.by(() => {
+    const options = new Map<string, string>();
+    for (const todo of todos) {
+      const claimant = resolveTodoClaimant(todo, processes);
+      if (claimant) options.set(claimant.actorId, claimant.name);
+    }
+    return [...options].map(([actorId, name]) => ({ actorId, name }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  });
   let tags = $derived([...new Set(todos.flatMap((todo) => todo.tags))].sort());
   let filteredTodos = $derived.by(() => {
     const needle = query.trim().toLowerCase();
@@ -58,7 +65,7 @@
         if (priority !== 'all' && todo.priority !== priority) return false;
         if (
           needle &&
-          !`${todo.id} ${todo.title} ${todo.tags.join(' ')} ${todo.locked_by ?? ''}`
+          !`${todo.id} ${todo.title} ${todo.tags.join(' ')} ${todo.locked_by ?? ''} ${resolveTodoClaimant(todo, processes)?.name ?? ''}`
             .toLowerCase()
             .includes(needle)
         ) return false;
@@ -134,7 +141,7 @@
         {/if}
       </label>
       <label><span>Status</span><select bind:value={status} aria-label="Filter todos by status"><option value="active">Active</option><option value="all">All</option><option value="backlog">Backlog</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Done</option></select></label>
-      <label><span>Claimed by</span><select bind:value={claim} aria-label="Filter todos by claimant"><option value="all">Anyone</option><option value="claimed">Claimed</option><option value="unclaimed">Unclaimed</option>{#each actors as actor}<option value={`actor:${actor}`}>{shortTodoActor(actor)}</option>{/each}</select></label>
+      <label><span>Claimed by</span><select bind:value={claim} aria-label="Filter todos by claimant"><option value="all">Anyone</option><option value="claimed">Claimed</option><option value="unclaimed">Unclaimed</option>{#each actors as actor}<option value={`actor:${actor.actorId}`}>{actor.name}</option>{/each}</select></label>
       <label><span>Dependency</span><select bind:value={blocked} aria-label="Filter blocked todos"><option value="all">Any</option><option value="blocked">Blocked</option><option value="unblocked">Not blocked</option></select></label>
       <label><span>Tag</span><select bind:value={tag} aria-label="Filter todos by tag"><option value="all">Any tag</option>{#each tags as item}<option value={item}>{item}</option>{/each}</select></label>
       <label><span>Priority</span><select bind:value={priority} aria-label="Filter todos by priority"><option value="all">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
@@ -149,11 +156,12 @@
 
   <div class="todo-ledger" aria-live="polite">
     {#each filteredTodos as todo (todo.id)}
+      {@const claimant = resolveTodoClaimant(todo, processes)}
       <button
         type="button"
         class="todo-row"
         data-state={todoClaimState(todo)}
-        title={`${todoClaimLabel(todo)} · ${statusCopy(todo)} · ${todo.priority} priority`}
+        title={`${todoClaimLabel(todo)}${claimant ? ` · Claimed by ${claimant.name}` : ''} · ${statusCopy(todo)} · ${todo.priority} priority`}
         onclick={() => onSelect(todo, filteredTodos.map((candidate) => candidate.id))}
       >
         <span class="state-rail" aria-hidden="true"></span>
@@ -169,7 +177,7 @@
         </span>
         <span class="claim-copy">
           <strong>{todoClaimState(todo)}</strong>
-          <small>{todo.locked_by ? shortTodoActor(todo.locked_by) : todo.is_blocked ? `${todo.unresolved_blocker_count} blockers` : '—'}</small>
+          <small>{claimant ? claimant.name : todo.is_blocked ? `${todo.unresolved_blocker_count} blockers` : '—'}</small>
         </span>
         <span class={`priority ${todo.priority}`}>{todo.priority}</span>
         <span class="signals">{#if todo.comment_count > 0}<span title={`${todo.comment_count} comments`}>◌ {todo.comment_count}</span>{/if}{#if todo.blocker_ids.length > 0}<span title={`Depends on ${todo.blocker_ids.map((id) => `#${id}`).join(', ')}`}>↳ {todo.blocker_ids.length}</span>{/if}</span>
