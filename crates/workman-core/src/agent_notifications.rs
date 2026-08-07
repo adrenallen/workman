@@ -77,9 +77,9 @@ impl Store {
     /// Observe the latest attention state and persist an unread completion edge.
     ///
     /// A newly discovered process establishes a baseline rather than notifying.
-    /// Thereafter, working-to-idle and first entry into exited are completion
-    /// edges. Watched completions are intentionally suppressed because a timer
-    /// will wake an agent to react. Starting work clears any older unread edge.
+    /// Thereafter, working-to-idle and working-to-exited are completion edges.
+    /// Watched completions are intentionally suppressed because a timer will
+    /// wake an agent to react. Starting work clears any older unread edge.
     pub fn observe_agent_attention(
         &self,
         process_id: ProcessId,
@@ -166,7 +166,9 @@ impl Store {
             let completed_turn = previous == ObservedState::Working
                 && current == ObservedState::Idle
                 && turn_started;
-            let exited = current == ObservedState::Exited && previous != ObservedState::Exited;
+            let exited = previous == ObservedState::Working
+                && current == ObservedState::Exited
+                && turn_started;
             let cooldown_elapsed = last_notified_at.map_or(true, |notified_at| {
                 now_ms.saturating_sub(notified_at) >= AGENT_DONE_NOTIFICATION_COOLDOWN_MS
             });
@@ -498,6 +500,30 @@ mod tests {
                 .unwrap()
                 .unread
         );
+    }
+
+    #[test]
+    fn exiting_from_an_existing_idle_period_does_not_renotify() {
+        let store = fixture();
+        store
+            .observe_agent_attention(7, AttentionState::Working, false, true, 10)
+            .unwrap();
+        store
+            .observe_agent_attention(7, AttentionState::Idle, false, true, 20)
+            .unwrap();
+        assert!(store.mark_agent_read(7).unwrap());
+
+        let exited = store
+            .observe_agent_attention(
+                7,
+                AttentionState::Exited,
+                false,
+                true,
+                20 + AGENT_DONE_NOTIFICATION_COOLDOWN_MS,
+            )
+            .unwrap();
+        assert!(!exited.unread);
+        assert_eq!(store.list_notifications(None, 10).unwrap().len(), 1);
     }
 
     #[test]

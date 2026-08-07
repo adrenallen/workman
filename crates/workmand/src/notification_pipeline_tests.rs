@@ -403,6 +403,61 @@ fn garrett_click_in_click_out_selection_resize_replay_and_focus_reports_are_atte
 }
 
 #[test]
+fn idle_repaint_no_alert() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    pipeline.submit_at(1_000);
+    pipeline.frame_at(1_100, CLAUDE_RESTING);
+
+    let baseline = pipeline.observe_at(6_100);
+    assert_eq!(baseline.state, AttentionState::Idle);
+    assert!(pipeline.notifications().is_empty());
+
+    // Replay the same captured resting screen long after the original turn. A
+    // footer/hint repaint is still idle even though it contains real PTY bytes.
+    pipeline.frame_at(400_000, CLAUDE_RESTING);
+    assert_eq!(pipeline.observe_at(400_000).state, AttentionState::Idle);
+    assert_eq!(pipeline.observe_at(405_000).state, AttentionState::Idle);
+    assert!(pipeline.notifications().is_empty());
+    assert!(pipeline.native_emissions.is_empty());
+}
+
+#[test]
+fn working_then_idle_alerts_once() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    start_recorded_turn(&mut pipeline, CLAUDE_WORKING);
+
+    let done = finish_recorded_turn(&mut pipeline, CLAUDE_RESTING);
+    assert_eq!(done.state, AttentionState::Idle);
+    assert!(done.unread);
+    assert_eq!(pipeline.notifications().len(), 1);
+    assert_eq!(pipeline.native_emissions.len(), 1);
+
+    for now_ms in [7_100, 20_000, 300_000] {
+        assert_eq!(pipeline.observe_at(now_ms).state, AttentionState::Idle);
+    }
+    assert_eq!(pipeline.notifications().len(), 1);
+    assert_eq!(pipeline.native_emissions.len(), 1);
+}
+
+#[test]
+fn idle_repaint_after_alert_stays_quiet() {
+    let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
+    start_recorded_turn(&mut pipeline, CLAUDE_WORKING);
+    let done = finish_recorded_turn(&mut pipeline, CLAUDE_RESTING);
+    assert!(done.unread);
+    assert_eq!(pipeline.notifications().len(), 1);
+
+    // Cross the durable cooldown so a repaint-induced fake working episode
+    // would otherwise create a second persisted row.
+    pipeline.frame_at(307_001, CLAUDE_RESTING);
+    assert_eq!(pipeline.observe_at(307_001).state, AttentionState::Idle);
+    assert_eq!(pipeline.observe_at(312_001).state, AttentionState::Idle);
+    assert_eq!(pipeline.notifications().len(), 1);
+    assert_eq!(pipeline.unread_notifications().len(), 1);
+    assert_eq!(pipeline.native_emissions.len(), 1);
+}
+
+#[test]
 fn watched_completion_is_suppressed_for_row_dot_badge_and_os_delivery() {
     let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
     start_recorded_turn(&mut pipeline, CLAUDE_WORKING);

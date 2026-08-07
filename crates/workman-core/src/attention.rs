@@ -124,13 +124,13 @@ pub struct AgentState {
     pub planning: bool,
     /// Tool family used to select the adapter.
     pub tool_type: Option<String>,
-    /// Seconds since the last PTY output, with sub-second precision.
+    /// Seconds since the last attention-relevant PTY output, with sub-second precision.
     pub idle_seconds: f64,
-    /// Seconds since the last PTY output, with sub-second precision.
+    /// Seconds since the last attention-relevant PTY output, with sub-second precision.
     pub last_output_seconds: Option<f64>,
-    /// Unix timestamp in milliseconds for the newest PTY bytes.
+    /// Unix timestamp in milliseconds for the newest attention-relevant PTY bytes.
     pub last_output_at: Option<i64>,
-    /// Unix timestamp in milliseconds for the newest rendered-content change.
+    /// Unix timestamp in milliseconds for the newest attention-relevant content change.
     pub last_content_change_at: Option<i64>,
     /// Unix timestamp in milliseconds for the newest PTY input write.
     #[serde(default)]
@@ -245,6 +245,10 @@ struct AttentionEngine {
     last_alternate_screen: bool,
     flags: AdapterFlags,
     attention_neutral_until: Option<i64>,
+    /// Once a recognized resting prompt has become idle, control-only and
+    /// cosmetic prompt repaints remain idle until input or an explicit adapter
+    /// signal starts a new working episode.
+    idle_prompt_latched: bool,
     exited: bool,
 }
 
@@ -260,9 +264,18 @@ impl AttentionEngine {
             return;
         }
 
+        let flags = self.adapter.inspect(AdapterObservation {
+            rendered,
+            alternate_screen,
+        });
+        let explicit_attention = flags.busy || flags.needs_input;
+        if explicit_attention {
+            self.idle_prompt_latched = false;
+        }
         let attention_neutral = self
             .attention_neutral_until
-            .is_some_and(|until| now_ms <= until);
+            .is_some_and(|until| now_ms <= until)
+            || (self.idle_prompt_latched && !explicit_attention);
         if !attention_neutral {
             self.last_output_at = Some(now_ms);
         }
@@ -274,14 +287,14 @@ impl AttentionEngine {
                 self.last_content_change_at = Some(now_ms);
             }
         }
-        self.flags = self.adapter.inspect(AdapterObservation {
-            rendered,
-            alternate_screen,
-        });
+        self.flags = flags;
     }
 
-    fn snapshot(&self, now_ms: i64) -> AgentState {
+    fn snapshot(&mut self, now_ms: i64) -> AgentState {
         let state = self.derive_state(now_ms);
+        if state == AttentionState::Idle && self.flags.resting_prompt {
+            self.idle_prompt_latched = true;
+        }
         AgentState::from_snapshot(
             state,
             self.tool_type.clone(),
@@ -385,6 +398,7 @@ impl AttentionTracker {
                 last_alternate_screen: false,
                 flags: AdapterFlags::default(),
                 attention_neutral_until: None,
+                idle_prompt_latched: false,
                 exited: false,
             })),
         }
@@ -420,7 +434,9 @@ impl AttentionTracker {
 
     /// Deterministic form of [`Self::observe_input`].
     pub fn observe_input_at(&self, now_ms: i64) {
-        self.lock().last_input_at = Some(now_ms);
+        let mut engine = self.lock();
+        engine.last_input_at = Some(now_ms);
+        engine.idle_prompt_latched = false;
     }
 
     /// Keep UI-originated PTY writes and their immediate redraw output from
@@ -1031,6 +1047,33 @@ mod tests {
     }
 
     #[test]
+    fn idle_prompt_repaints_do_not_start_a_working_episode() {
+        let mut session = ScriptedSession::claude();
+        session.emit(2_000, b"finished\r\n\xe2\x9d\xaf ");
+        assert_eq!(
+            session.tracker.snapshot_at(7_000).state,
+            AttentionState::Idle
+        );
+
+        session.emit(
+            400_000,
+            b"\x1b[?2026h\x1b[H\x1b[2Kfinished\r\n\xe2\x9d\xaf \r\n1 agent\x1b[?2026l",
+        );
+        let repaint = session.tracker.snapshot_at(400_000);
+        assert_eq!(repaint.state, AttentionState::Idle);
+        assert_eq!(repaint.last_output_at, Some(2_000));
+        assert_eq!(repaint.last_content_change_at, Some(2_000));
+
+        session.emit(
+            401_000,
+            b"\x1b[2J\x1b[H\xe2\x9c\xbb Thinking\xe2\x80\xa6\r\nEsc to interrupt",
+        );
+        let working = session.tracker.snapshot_at(401_000);
+        assert_eq!(working.state, AttentionState::Working);
+        assert_eq!(working.last_output_at, Some(401_000));
+    }
+
+    #[test]
     fn completed_claude_timing_line_is_not_an_active_spinner() {
         let flags = ClaudeCodeAdapter.inspect(AdapterObservation {
             rendered: "✻ Cogitated for 1s",
@@ -1171,14 +1214,22 @@ mod tests {
         assert_eq!(focused.last_output_at, Some(2_000));
         assert_eq!(focused.last_content_change_at, Some(2_000));
 
-        session.emit(7_601, b"\x1b[2J\x1b[Hagent output\r\n\xe2\x9d\xaf ");
+        session.emit(7_601, b"\x1b[2J\x1b[Hstatus refresh\r\n\xe2\x9d\xaf ");
+        let cosmetic = session.tracker.snapshot_at(7_601);
+        assert_eq!(cosmetic.state, AttentionState::Idle);
+        assert_eq!(cosmetic.last_output_at, Some(2_000));
+
+        session.emit(
+            7_700,
+            b"\x1b[2J\x1b[H\xe2\x9c\xbb Thinking\xe2\x80\xa6\r\nEsc to interrupt",
+        );
         assert_eq!(
-            session.tracker.snapshot_at(7_601).state,
+            session.tracker.snapshot_at(7_700).state,
             AttentionState::Working
         );
         assert_eq!(
-            session.tracker.snapshot_at(7_601).last_output_at,
-            Some(7_601)
+            session.tracker.snapshot_at(7_700).last_output_at,
+            Some(7_700)
         );
     }
 
