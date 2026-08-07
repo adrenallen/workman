@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { moveOrderedId } from '../src/lib/reorder.ts';
+import { moveOrderedId, reorderItem } from '../src/lib/reorder.ts';
 import { initialFlatProjectOrder, worktreeParentLabel } from '../src/lib/worktrees.ts';
 
 function project(id, parentProjectId = null, name = `project-${id}`, displayName = null) {
@@ -50,4 +50,78 @@ test('labels a flat worktree with its parent and keeps an orphan fallback', () =
   assert.equal(worktreeParentLabel(project(2, 1, 'repository: topic'), [parent]), 'Client site');
   assert.equal(worktreeParentLabel(project(3, 99, 'repository: orphan'), [], 'Repository'), 'Repository');
   assert.equal(worktreeParentLabel(parent, [parent]), null);
+});
+
+test('shared row action handles text-only drag reorder without impersonating a file drop', () => {
+  class FakeRow {
+    dataset = {};
+    listeners = new Map();
+    draggable = false;
+    title = '';
+
+    addEventListener(type, listener) {
+      this.listeners.set(type, listener);
+    }
+    removeEventListener(type) {
+      this.listeners.delete(type);
+    }
+    setAttribute() {}
+    removeAttribute(name) {
+      if (name === 'data-reorder-dragging') delete this.dataset.reorderDragging;
+      if (name === 'data-reorder-drop') delete this.dataset.reorderDrop;
+    }
+    contains() {
+      return false;
+    }
+    getBoundingClientRect() {
+      return { top: 0, height: 24 };
+    }
+    dispatch(type, event) {
+      this.listeners.get(type)?.(event);
+    }
+  }
+
+  const source = new FakeRow();
+  const target = new FakeRow();
+  const dropped = [];
+  const options = (id) => ({
+    id,
+    group: 'scratchpad:1',
+    label: `Scratchpad ${id}`,
+    onDrop: (drop) => dropped.push(drop),
+    onKeyboardMove: () => {}
+  });
+  const destroySource = reorderItem(source, options(1));
+  const destroyTarget = reorderItem(target, options(2));
+  const values = new Map();
+  const transfer = {
+    types: [],
+    effectAllowed: 'none',
+    dropEffect: 'none',
+    setData(type, value) {
+      this.types.push(type);
+      values.set(type, value);
+    }
+  };
+
+  source.dispatch('dragstart', { dataTransfer: transfer });
+  target.dispatch('dragover', {
+    clientY: 20,
+    dataTransfer: transfer,
+    preventDefault() {}
+  });
+  target.dispatch('drop', {
+    clientY: 20,
+    dataTransfer: transfer,
+    preventDefault() {}
+  });
+  source.dispatch('dragend', {});
+
+  assert.deepEqual(dropped, [{ sourceId: 1, targetId: 2, placement: 'after' }]);
+  assert.equal(values.get('text/plain'), '1');
+  assert.deepEqual(transfer.types, ['text/plain']);
+  assert.equal(transfer.types.includes('Files'), false);
+
+  destroySource.destroy();
+  destroyTarget.destroy();
 });
