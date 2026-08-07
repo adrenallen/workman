@@ -15,6 +15,7 @@
   import { FOCUS_TERMINAL_EVENT } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
+  import { encodeTerminalKey } from './terminalKeys';
 
   let {
     client,
@@ -119,7 +120,7 @@
         if (event.type === 'keydown') onUnfocus?.();
         return false;
       }
-      const modifiedKey = negotiatedModifiedKey(event);
+      const modifiedKey = encodeTerminalKey(event, { kittyFlags: kittyKeyboardFlags, modifyOtherKeys });
       if (modifiedKey !== null) {
         if (event.type === 'keydown') queueInput(encoder.encode(modifiedKey));
         return false;
@@ -335,23 +336,6 @@
     modifyOtherKeys = modifyOtherKeysLevel === 1 || modifyOtherKeysLevel === 2
       ? modifyOtherKeysLevel
       : 0;
-  }
-
-  function negotiatedModifiedKey(event: KeyboardEvent): string | null {
-    const codepoint = event.key === 'Enter' ? 13 : event.key === 'Tab' ? 9 : null;
-    if (codepoint === null) return null;
-    if (!event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) return null;
-
-    const modifier = 1
-      + Number(event.shiftKey)
-      + 2 * Number(event.altKey)
-      + 4 * Number(event.ctrlKey)
-      + 8 * Number(event.metaKey);
-    if ((kittyKeyboardFlags & 1) !== 0) return `\x1b[${codepoint};${modifier}u`;
-
-    const modifyOtherKeysApplies = modifyOtherKeys === 2
-      || (modifyOtherKeys === 1 && (event.altKey || event.metaKey));
-    return modifyOtherKeysApplies ? `\x1b[27;${modifier};${codepoint}~` : null;
   }
 
   function finishReplayIfReady(state: TerminalReplayState): void {
