@@ -197,6 +197,8 @@ test("bootstrap deduplicates and replaces shadowing wrk, workmand, awm, and awmd
     const { fixture, result } = runInstallFixture(shell);
     try {
       assert.equal(result.status, 0, `${shell}: ${result.stderr}\n${result.stdout}`);
+      assert.doesNotMatch(result.stdout, /\bawm(?:d)?\b/i);
+      assert.doesNotMatch(result.stderr, /\bawm(?:d)?\b/i);
       assert.match(result.stdout, /Selected Workman 9\.9\.9 from the stable channel/);
       assert.match(result.stdout, /Verified fresh PATH resolution: .* reports workman 9\.9\.9/);
       assert.match(result.stdout, /Note: fresh PATH resolution uses .*old-bin\/wrk/);

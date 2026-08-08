@@ -26,8 +26,7 @@ pub(crate) fn migrate_default_paths_if_needed(data_dir: &Path) -> io::Result<()>
         let legacy = platform_data_dir(app_name);
         if migrate_legacy_data_dir(&legacy, data_dir)? {
             eprintln!(
-                "workman: migrated {app_name} data from {} to {}; daemon.json will be regenerated",
-                legacy.display(),
+                "workman: migrated pre-Workman data to {}; daemon.json will be regenerated",
                 data_dir.display()
             );
             break;
@@ -40,8 +39,7 @@ pub(crate) fn migrate_default_paths_if_needed(data_dir: &Path) -> io::Result<()>
             let legacy = user_config::default_user_config_path(app_name);
             if migrate_legacy_user_config(&legacy, &destination)? {
                 eprintln!(
-                    "workman: migrated {app_name} user config from {} to {}",
-                    legacy.display(),
+                    "workman: migrated a pre-Workman user config to {}",
                     destination.display()
                 );
                 break;

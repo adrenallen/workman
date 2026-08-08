@@ -9,6 +9,7 @@ daemon_was_running=false
 awm_daemon_was_running=false
 gbuild_daemon_was_running=false
 install_alias=${WORKMAN_INSTALL_ALIAS:-1}
+removed_stale_launchers=0
 
 if [[ -n "${WORKMAN_DATA_DIR:-}" ]]; then
   daemon_data_dir=$WORKMAN_DATA_DIR
@@ -122,9 +123,12 @@ for stale_binary in awm awmd awm-desktop gbuild gbuildd gbuild-desktop; do
   stale_link="$bin_dir/$stale_binary"
   if [[ -L "$stale_link" ]]; then
     unlink "$stale_link"
-    printf '  ✓ Removed stale %-8s %s\n' "$stale_binary" "$stale_link"
+    ((removed_stale_launchers += 1))
   fi
 done
+if ((removed_stale_launchers > 0)); then
+  printf '  ✓ Removed %s obsolete launcher(s)\n' "$removed_stale_launchers"
+fi
 
 if [[ "$install_alias" != 0 && "$install_alias" != false && "$install_alias" != no ]]; then
   alias_link="$bin_dir/workman"
@@ -143,8 +147,8 @@ if [[ "$daemon_was_running" == true ]]; then
   printf '    Restarting stops currently running project processes.\n'
 fi
 if [[ "$awm_daemon_was_running" == true ]]; then
-  printf '\n  ⚠ The legacy awm daemon is still running. It was not stopped.\n'
-  printf '    Start Workman when ready; first boot copies awm state into the Workman data directory.\n'
+  printf '\n  ⚠ A pre-Workman daemon is still running. It was not stopped.\n'
+  printf '    Start Workman when ready; first boot copies its state into the Workman data directory.\n'
 elif [[ "$gbuild_daemon_was_running" == true ]]; then
   printf '\n  ⚠ The legacy gbuild daemon is still running. It was not stopped.\n'
   printf '    Start Workman when ready; first boot copies gbuild state into the Workman data directory.\n'

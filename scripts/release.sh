@@ -115,7 +115,10 @@ clear_obsolete_artifacts() {
   # These split desktop assets were used before platform bundles became unified. Removing them
   # from a reused output directory prevents an old artifact from being uploaded accidentally.
   rm -f \
+    "$OUTPUT_DIR/awm-macos-arm64.tar.gz" \
     "$OUTPUT_DIR/awm-desktop-macos-arm64.zip" \
+    "$OUTPUT_DIR/awm-linux-x86_64.tar.gz" \
+    "$OUTPUT_DIR/awm-linux-arm64.tar.gz" \
     "$OUTPUT_DIR/awm-desktop-linux-x86_64.AppImage" \
     "$OUTPUT_DIR/awm-desktop-linux-x86_64.deb" \
     "$OUTPUT_DIR/awm-desktop-linux-arm64.AppImage" \
@@ -186,16 +189,6 @@ build_macos() {
     cd "$package_dir"
     COPYFILE_DISABLE=1 zip -qry --symlinks "$OUTPUT_DIR/workman-macos-arm64.zip" .
   )
-  cp "$OUTPUT_DIR/workman-macos-arm64.zip" "$OUTPUT_DIR/awm-desktop-macos-arm64.zip"
-
-  # One-release bridge: the updater shipped in v0.1.0 requests this old asset name and root
-  # layout. New updater builds consume bin/ from the unified ZIP above.
-  local legacy_dir="$WORK_DIR/macos-legacy-v0.1.0"
-  rm -rf "$legacy_dir"
-  mkdir -p "$legacy_dir"
-  install -m 755 "$target_dir/wrk" "$legacy_dir/awm"
-  install -m 755 "$target_dir/workmand" "$legacy_dir/awmd"
-  tar -C "$legacy_dir" -czf "$OUTPUT_DIR/awm-macos-arm64.tar.gz" awm awmd
   record_stage macos "$started"
 }
 
@@ -261,9 +254,6 @@ build_linux_desktop() {
       install -m 755 \
         "$destination/workman-desktop-linux-${label}.AppImage" \
         "$OUTPUT_DIR/workman-linux-${label}.AppImage"
-      install -m 755 \
-        "$destination/workman-desktop-linux-${label}.AppImage" \
-        "$OUTPUT_DIR/awm-desktop-linux-${label}.AppImage"
       install -m 644 \
         "$destination/workman-desktop-linux-${label}.deb" \
         "$OUTPUT_DIR/workman-linux-${label}.deb"
@@ -296,15 +286,6 @@ package_linux_bundles() {
     install -m 755 "$desktop_dir/Workman.AppImage" "$package_dir/Workman.AppImage"
     entries=(GETTING-STARTED.md install.sh bin Workman.AppImage)
     tar -C "$package_dir" -czf "$OUTPUT_DIR/workman-linux-${label}.tar.gz" "${entries[@]}"
-
-    # One-release bridge for v0.1.0 clients. The old updater requires root-level awm/awmd
-    # entries and requests awm-linux-<arch>.tar.gz from the redirected repository API.
-    local legacy_dir="$WORK_DIR/linux-$label-legacy-v0.1.0"
-    rm -rf "$legacy_dir"
-    mkdir -p "$legacy_dir"
-    install -m 755 "$package_dir/bin/wrk" "$legacy_dir/awm"
-    install -m 755 "$package_dir/bin/workmand" "$legacy_dir/awmd"
-    tar -C "$legacy_dir" -czf "$OUTPUT_DIR/awm-linux-${label}.tar.gz" awm awmd
   done
   record_stage packaging "$started"
 }
@@ -341,18 +322,6 @@ verify_bundle_layouts() {
     done
   done
 
-  for legacy_archive in \
-    awm-macos-arm64.tar.gz \
-    awm-linux-x86_64.tar.gz \
-    awm-linux-arm64.tar.gz; do
-    entries="$(tar -tzf "$OUTPUT_DIR/$legacy_archive" | sort)"
-    expected="$(printf '%s\n' awm awmd | sort)"
-    [[ "$entries" == "$expected" ]] || {
-      echo "$legacy_archive does not match the v0.1.0 root-level binary contract" >&2
-      printf '%s\n' "$entries" >&2
-      exit 1
-    }
-  done
   record_stage layouts "$started"
 }
 
@@ -367,12 +336,6 @@ write_release_metadata() {
     workman-linux-arm64.AppImage
     workman-linux-x86_64.deb
     workman-linux-arm64.deb
-    awm-macos-arm64.tar.gz
-    awm-desktop-macos-arm64.zip
-    awm-linux-x86_64.tar.gz
-    awm-linux-arm64.tar.gz
-    awm-desktop-linux-x86_64.AppImage
-    awm-desktop-linux-arm64.AppImage
   )
   local artifact
   for artifact in "${artifacts[@]}"; do test -f "$OUTPUT_DIR/$artifact"; done
@@ -399,7 +362,6 @@ write_release_metadata() {
     printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
     printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. After extracting, install the CLI and daemon with `./install.sh`.\n\n'
     printf '> **Unsigned macOS app:** if macOS quarantines the download, run `xattr -dr com.apple.quarantine Workman.app`, then Control-click Workman.app and choose Open.\n\n'
-    printf '> **Existing awm v0.1.0 users:** run `awm update` after this release is promoted, or `awm update --channel latest` while it is a prerelease. The `awm-*.tar.gz` and `awm-desktop-*` files are one-release compatibility aliases for that rename hop. New installs must use the `workman-*` assets.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"
   } > "$OUTPUT_DIR/release-notes.md"

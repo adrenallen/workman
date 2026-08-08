@@ -23,11 +23,7 @@ env:
   MACOS_TARGET: aarch64-apple-darwin
   LINUX_TARGET: x86_64-unknown-linux-gnu
   MACOS_ARCHIVE: workman-macos-arm64.zip
-  MACOS_LEGACY_ARCHIVE: awm-macos-arm64.tar.gz
-  MACOS_LEGACY_DESKTOP: awm-desktop-macos-arm64.zip
   LINUX_ARCHIVE: workman-linux-x86_64.tar.gz
-  LINUX_LEGACY_ARCHIVE: awm-linux-x86_64.tar.gz
-  LINUX_LEGACY_DESKTOP: awm-desktop-linux-x86_64.AppImage
   LINUX_APPIMAGE: workman-linux-x86_64.AppImage
   LINUX_DEB: workman-linux-x86_64.deb
 
@@ -129,7 +125,6 @@ jobs:
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/release"
           PACKAGE_DIR="$RUNNER_TEMP/workman-macos-bundle"
-          LEGACY_DIR="$RUNNER_TEMP/awm-macos-v0.1.0"
           BIN_TARGET_DIR="target/$MACOS_TARGET/dist"
           BUNDLE_TARGET_DIR="target/$MACOS_TARGET/release"
           APP="$BUNDLE_TARGET_DIR/bundle/macos/Workman.app"
@@ -141,8 +136,8 @@ jobs:
           codesign --force --deep --sign - --timestamp=none "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
 
-          rm -rf "$PACKAGE_DIR" "$LEGACY_DIR"
-          mkdir -p "$RELEASE_DIR" "$PACKAGE_DIR/bin" "$LEGACY_DIR"
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$RELEASE_DIR" "$PACKAGE_DIR/bin"
           install -m 755 "$BIN_TARGET_DIR/wrk" "$PACKAGE_DIR/bin/wrk"
           install -m 755 "$BIN_TARGET_DIR/workmand" "$PACKAGE_DIR/bin/workmand"
           install -m 755 scripts/release-assets/install.sh "$PACKAGE_DIR/install.sh"
@@ -152,22 +147,13 @@ jobs:
             cd "$PACKAGE_DIR"
             COPYFILE_DISABLE=1 zip -qry --symlinks "$RELEASE_DIR/$MACOS_ARCHIVE" .
           )
-          cp "$RELEASE_DIR/$MACOS_ARCHIVE" "$RELEASE_DIR/$MACOS_LEGACY_DESKTOP"
-
-          install -m 755 "$BIN_TARGET_DIR/wrk" "$LEGACY_DIR/awm"
-          install -m 755 "$BIN_TARGET_DIR/workmand" "$LEGACY_DIR/awmd"
-          tar -C "$LEGACY_DIR" -czf "$RELEASE_DIR/$MACOS_LEGACY_ARCHIVE" awm awmd
-
           unzip -l "$RELEASE_DIR/$MACOS_ARCHIVE"
-          tar -tzf "$RELEASE_DIR/$MACOS_LEGACY_ARCHIVE"
 
       - uses: actions/upload-artifact@v4
         with:
           name: workman-release-macos-arm64
           path: |
             release/${{ env.MACOS_ARCHIVE }}
-            release/${{ env.MACOS_LEGACY_ARCHIVE }}
-            release/${{ env.MACOS_LEGACY_DESKTOP }}
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -238,7 +224,6 @@ jobs:
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/release"
           PACKAGE_DIR="$RUNNER_TEMP/workman-linux-bundle"
-          LEGACY_DIR="$RUNNER_TEMP/awm-linux-v0.1.0"
           BIN_TARGET_DIR="target/$LINUX_TARGET/dist"
           BUNDLE_DIR="target/$LINUX_TARGET/release/bundle"
           APPIMAGE="$(find "$BUNDLE_DIR/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
@@ -249,8 +234,8 @@ jobs:
           test -n "$APPIMAGE"
           test -n "$DEB"
 
-          rm -rf "$PACKAGE_DIR" "$LEGACY_DIR"
-          mkdir -p "$RELEASE_DIR" "$PACKAGE_DIR/bin" "$LEGACY_DIR"
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$RELEASE_DIR" "$PACKAGE_DIR/bin"
           install -m 755 "$BIN_TARGET_DIR/wrk" "$PACKAGE_DIR/bin/wrk"
           install -m 755 "$BIN_TARGET_DIR/workmand" "$PACKAGE_DIR/bin/workmand"
           install -m 755 "$APPIMAGE" "$PACKAGE_DIR/Workman.AppImage"
@@ -259,15 +244,9 @@ jobs:
           tar -C "$PACKAGE_DIR" -czf "$RELEASE_DIR/$LINUX_ARCHIVE" \
             GETTING-STARTED.md install.sh bin Workman.AppImage
           install -m 755 "$APPIMAGE" "$RELEASE_DIR/$LINUX_APPIMAGE"
-          install -m 755 "$APPIMAGE" "$RELEASE_DIR/$LINUX_LEGACY_DESKTOP"
           install -m 644 "$DEB" "$RELEASE_DIR/$LINUX_DEB"
 
-          install -m 755 "$BIN_TARGET_DIR/wrk" "$LEGACY_DIR/awm"
-          install -m 755 "$BIN_TARGET_DIR/workmand" "$LEGACY_DIR/awmd"
-          tar -C "$LEGACY_DIR" -czf "$RELEASE_DIR/$LINUX_LEGACY_ARCHIVE" awm awmd
-
           tar -tzf "$RELEASE_DIR/$LINUX_ARCHIVE"
-          tar -tzf "$RELEASE_DIR/$LINUX_LEGACY_ARCHIVE"
           file "$RELEASE_DIR/$LINUX_APPIMAGE"
           dpkg-deb --info "$RELEASE_DIR/$LINUX_DEB"
 
@@ -276,8 +255,6 @@ jobs:
           name: workman-release-linux-x86_64
           path: |
             release/${{ env.LINUX_ARCHIVE }}
-            release/${{ env.LINUX_LEGACY_ARCHIVE }}
-            release/${{ env.LINUX_LEGACY_DESKTOP }}
             release/${{ env.LINUX_APPIMAGE }}
             release/${{ env.LINUX_DEB }}
           if-no-files-found: error
@@ -307,11 +284,7 @@ jobs:
 
           ASSETS=(
             "$MACOS_ARCHIVE"
-            "$MACOS_LEGACY_ARCHIVE"
-            "$MACOS_LEGACY_DESKTOP"
             "$LINUX_ARCHIVE"
-            "$LINUX_LEGACY_ARCHIVE"
-            "$LINUX_LEGACY_DESKTOP"
             "$LINUX_APPIMAGE"
             "$LINUX_DEB"
           )
@@ -357,9 +330,6 @@ jobs:
           Linux packages are provided as an AppImage, a Debian package, and a CLI/daemon archive.
           WebKitGTK rendering has not received end-to-end release testing yet.
 
-          The \`awm-*.tar.gz\` and \`awm-desktop-*\` files are one-release compatibility assets
-          for published v0.1.0 updaters. New installations must use the \`workman-*\` assets.
-
           ## Changes
 
           EOF
@@ -374,11 +344,7 @@ jobs:
           name: workman-release-candidate-${{ needs.metadata.outputs.tag }}
           path: |
             release/${{ env.MACOS_ARCHIVE }}
-            release/${{ env.MACOS_LEGACY_ARCHIVE }}
-            release/${{ env.MACOS_LEGACY_DESKTOP }}
             release/${{ env.LINUX_ARCHIVE }}
-            release/${{ env.LINUX_LEGACY_ARCHIVE }}
-            release/${{ env.LINUX_LEGACY_DESKTOP }}
             release/${{ env.LINUX_APPIMAGE }}
             release/${{ env.LINUX_DEB }}
             release/SHA256SUMS

@@ -260,11 +260,8 @@ pub fn project_config_path(root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn warn_legacy_config(path: &Path) {
-    eprintln!(
-        "workman: {} is deprecated; rename it to workman.yml",
-        path.display()
-    );
+fn warn_legacy_config(_path: &Path) {
+    eprintln!("workman: a predecessor project config is deprecated; rename it to workman.yml");
 }
 
 /// Resolve an add-command working directory to canonical absolute and project-relative paths.

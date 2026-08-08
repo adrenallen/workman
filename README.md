@@ -21,14 +21,15 @@ This builds the daemon, CLI, and desktop app in release mode and links them into
 `~/.local/bin` without sudo. Re-run it after pulling updates. Then run `wrk` in any
 project directory, `wrk app` for the desktop workspace, or `wrk mcp-setup` for Claude Code.
 The installer links `wrk`, `workmand`, and `workman-desktop`; it also creates a `workman → wrk`
-convenience symlink unless `WORKMAN_INSTALL_ALIAS=0` is set. Obsolete `awm*` and `gbuild*`
+convenience symlink unless `WORKMAN_INSTALL_ALIAS=0` is set. Obsolete pre-Workman and `gbuild*`
 symlinks are removed only after the new binaries link successfully, and running daemons are never
 stopped.
 
-On its first default-directory boot, Workman copies the `awm` data directory when present,
-otherwise it falls back to `gbuild`. SQLite state and `config.yml` are preserved while
+On its first default-directory boot, Workman copies data from the most recent pre-Workman identity
+when present, otherwise it falls back to `gbuild`. SQLite state and `config.yml` are preserved while
 `daemon.json` is regenerated; both source directories remain untouched. Repository commands
-belong in `workman.yml`; `awm.yml` and then `gbuild.yml` remain readable with deprecation warnings.
+belong in `workman.yml`; predecessor configuration and then `gbuild.yml` remain readable with
+deprecation warnings.
 
 ## Workspace
 
@@ -110,8 +111,6 @@ The command builds one portable archive per platform. `workman-macos-arm64.zip` 
 CLI, daemon, installer, and a human getting-started guide. Each `workman-linux-<arch>.tar.gz`
 contains the same pieces with an experimental AppImage; matching `.AppImage` and `.deb` files are
 also emitted as standalone alternatives.
-The `awm-*.tar.gz` and `awm-desktop-*` files are temporary compatibility aliases for the updater
-shipped in v0.1.0, not downloads for new users.
 
 Artifacts and release notes are written under `release/vX.Y.Z` and checksummed before the tag
 or GitHub prerelease is created. Re-running is safe and resumes from Cargo, npm, and container

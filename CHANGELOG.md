@@ -56,17 +56,18 @@ and completes the authenticated self-hosted release path from download through p
 
 ## 0.1.1 - 2026-08-05
 
-The first Workman release turns the awm preview into a more complete work manager, with a precise
-desktop design system, first-class Git worktrees, durable terminal history, and a migration-safe
-rename. Existing awm v0.1.0 installs can update directly to this release.
+The first Workman release turns the original preview into a more complete work manager, with a
+precise desktop design system, first-class Git worktrees, durable terminal history, and a
+migration-safe rename. Existing v0.1.0 preview installs can update directly to this release.
 
 ### Highlights
 
-- Renamed the product from awm to Workman: the terminal command is now `wrk`, the daemon is
+- Renamed the preview product to Workman: the terminal command is now `wrk`, the daemon is
   `workmand`, and runtime configuration uses `WORKMAN_*` with a `workman` MCP identity.
-- Added a non-destructive first-run migration chain that prefers existing awm state and falls back
-  to gbuild, while `workman.yml` retains warned read compatibility with `awm.yml` and `gbuild.yml`.
-- Added the one-release updater bridge and transitional awm-named assets required for real v0.1.0
+- Added a non-destructive first-run migration chain that prefers existing preview state and falls
+  back to gbuild, while `workman.yml` retains warned read compatibility with predecessor
+  configuration.
+- Added the one-release updater bridge and transitional pre-Workman assets required for real v0.1.0
   clients to discover, checksum, and install the renamed Workman binaries.
 - Rebuilt the desktop on shadcn-svelte, bits-ui, Tailwind, semantic tokens, shared primitives, and
   a legible dense type scale; added native macOS menus and a full Settings About/Updates section.
@@ -87,14 +88,14 @@ rename. Existing awm v0.1.0 installs can update directly to this release.
 
 ## 0.1.0 - 2026-08-05
 
-The first awm preview is a native, Solo-style workspace for running coding agents beside a
-development stack. A durable Rust daemon owns terminals and coordination state while the `awm`
-CLI and Tauri desktop app remain reconnectable clients.
+The first native preview is a Solo-style workspace for running coding agents beside a development
+stack. A durable Rust daemon owns terminals and coordination state while the CLI and Tauri desktop
+app remain reconnectable clients.
 
 ### Highlights
 
 - Project and PTY process management with server-rendered terminal history, readiness checks,
-  lifecycle automation, trust-gated `awm.yml` commands, and live resource status.
+  lifecycle automation, trust-gated repository commands, and live resource status.
 - A local MCP server for projects, processes, todos, scratchpads, locks, timers, agent spawning,
   attention states, and multi-agent coordination.
 - A desktop workspace with terminal panels, process trees, WYSIWYG scratchpads, settings, agent

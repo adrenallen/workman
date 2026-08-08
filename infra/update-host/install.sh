@@ -472,9 +472,13 @@ def label(record):
     return f"{record['program']}{version}: {record['path']}{arrow}"
 
 
+def is_current_launcher(record):
+    return record["program"] == PROGRAM_TARGET[record["program"]]
+
+
 def report(inventory):
-    launchers = inventory["launchers"]
-    historical = inventory["historical"]
+    launchers = [record for record in inventory["launchers"] if is_current_launcher(record)]
+    historical = [record for record in inventory["historical"] if is_current_launcher(record)]
     daemons = inventory["daemons"]
     if launchers:
         print("Existing Workman launchers (deduplicated):")
@@ -490,7 +494,10 @@ def report(inventory):
         print("Running Workman daemons:")
         for record in daemons:
             version = f"; {record['version']}" if record.get("version") else ""
-            print(f"  pid {record['pid']}: {record['path']}{version}")
+            if os.path.basename(record["path"]) == "workmand":
+                print(f"  pid {record['pid']}: {record['path']}{version}")
+            else:
+                print(f"  pid {record['pid']}: obsolete Workman daemon{version}")
 
 
 def action_count(inventory):
@@ -552,12 +559,26 @@ def apply(inventory):
         try:
             backup = replace_launcher(record["path"], target)
             if backup:
-                print(f"Replaced {record['path']} -> {target}")
-                print(f"  Backup: {backup}")
+                if is_current_launcher(record):
+                    print(f"Replaced {record['path']} -> {target}")
+                    print(f"  Backup: {backup}")
+                else:
+                    print(
+                        f"Replaced an obsolete Workman launcher with {PROGRAM_TARGET[record['program']]} "
+                        "and retained a neighboring backup."
+                    )
         except PermissionError as error:
-            needs_privilege.append(str(error))
+            needs_privilege.append(
+                str(error)
+                if is_current_launcher(record)
+                else "an obsolete Workman launcher is not writable; rerun with suitable permissions"
+            )
         except OSError as error:
-            failures.append(str(error))
+            failures.append(
+                str(error)
+                if is_current_launcher(record)
+                else f"could not replace an obsolete Workman launcher: {error.strerror or 'I/O error'}"
+            )
     if failures:
         for failure in failures:
             print(f"ERROR: {failure}", file=sys.stderr)
@@ -589,7 +610,7 @@ def restart_daemons(inventory):
             continue
         if not record.get("data_dir"):
             failures.append(
-                f"cannot safely restart pid {record['pid']}; its --data-dir could not be recovered: {record['command']}"
+                f"cannot safely restart pid {record['pid']}; its --data-dir could not be recovered"
             )
             continue
         print(

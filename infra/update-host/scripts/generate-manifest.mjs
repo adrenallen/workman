@@ -30,12 +30,6 @@ function releaseTarget(name) {
     ["workman-linux-arm64.AppImage", "linux-arm64-appimage"],
     ["workman-linux-x86_64.deb", "linux-x86_64-deb"],
     ["workman-linux-arm64.deb", "linux-arm64-deb"],
-    ["awm-macos-arm64.tar.gz", "legacy-macos-arm64"],
-    ["awm-desktop-macos-arm64.zip", "legacy-desktop-macos-arm64"],
-    ["awm-linux-x86_64.tar.gz", "legacy-linux-x86_64"],
-    ["awm-linux-arm64.tar.gz", "legacy-linux-arm64"],
-    ["awm-desktop-linux-x86_64.AppImage", "legacy-desktop-linux-x86_64"],
-    ["awm-desktop-linux-arm64.AppImage", "legacy-desktop-linux-arm64"],
     ["SHA256SUMS", "checksums"],
   ]);
   return targets.get(name) ?? `artifact-${name}`;
@@ -83,6 +77,9 @@ export async function generateManifest({
   const checksums = parseChecksums(await readFile(checksumPath, "utf8"));
   const assets = [];
   for (const [name, expectedSha256] of [...checksums].sort(([left], [right]) => left.localeCompare(right))) {
+    if (name.startsWith("awm-")) {
+      throw new Error(`obsolete pre-Workman release artifact is not publishable: ${name}`);
+    }
     const path = join(artifactsDir, name);
     const [metadata, actualSha256] = await Promise.all([stat(path), fileSha256(path)]);
     if (!metadata.isFile()) throw new Error(`${name} is not a regular file`);

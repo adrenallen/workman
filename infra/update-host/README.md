@@ -153,8 +153,8 @@ curl -fsSL https://workman.userdefined.io/install.sh | \
 
 The bootstrap prints the selected channel and the exact version that channel currently serves,
 sends the key as a Bearer token to both `/releases.json` and the selected artifact, and checks the
-manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand`, and historical
-`awm`/`awmd` launchers from PATH and known install locations. Versioned bundle directories remain
+manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand`, and obsolete
+pre-Workman launchers from PATH and known install locations. Versioned bundle directories remain
 available as rollback files; superseded launchers are backed up before being replaced.
 
 When old launchers or daemons are present, an interactive install reads confirmation from

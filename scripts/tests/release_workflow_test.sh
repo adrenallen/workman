@@ -21,10 +21,10 @@ grep -q 'workflow_dispatch:' "$WORKFLOW"
 grep -q 'workflow_dispatch:' "$CI_WORKFLOW"
 grep -q 'workman-macos-arm64.zip' "$WORKFLOW"
 grep -q 'workman-linux-x86_64.tar.gz' "$WORKFLOW"
-grep -q 'awm-macos-arm64.tar.gz' "$WORKFLOW"
-grep -q 'awm-desktop-macos-arm64.zip' "$WORKFLOW"
-grep -q 'awm-linux-x86_64.tar.gz' "$WORKFLOW"
-grep -q 'awm-desktop-linux-x86_64.AppImage' "$WORKFLOW"
+if grep -qi 'awm' "$WORKFLOW"; then
+  echo "release workflow must not expose pre-Workman asset names" >&2
+  exit 1
+fi
 if grep -Eq '(^|[[:space:]])(push|pull_request|tags):' "$WORKFLOW" "$CI_WORKFLOW"; then
   echo "repository workflows must be dispatch-only" >&2
   exit 1

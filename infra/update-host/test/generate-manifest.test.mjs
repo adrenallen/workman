@@ -70,3 +70,25 @@ test("rejects an artifact whose content does not match SHA256SUMS", async () => 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("rejects obsolete pre-Workman release aliases", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workman-manifest-test-"));
+  try {
+    const name = "awm-linux-x86_64.tar.gz";
+    const content = Buffer.from("obsolete alias");
+    await writeFile(join(directory, name), content);
+    await writeFile(join(directory, "SHA256SUMS"), `${sha256(content)}  ${name}\n`);
+
+    await assert.rejects(
+      generateManifest({
+        version: "1.2.3",
+        artifactsDir: directory,
+        publishedAt: "2026-08-06T12:34:56Z",
+        notesUrl: "https://example.com/v1.2.3",
+      }),
+      /obsolete pre-Workman release artifact is not publishable/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
