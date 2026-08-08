@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "${WORKMAN_TEST_GH_LOG:?}"
+[[ "$#" == 4 ]]
+[[ "$1" == api ]]
+[[ "$2" == repos/adrenallen/workman ]]
+[[ "$3" == --jq ]]
+[[ "$4" == .visibility ]]
+
+case "${WORKMAN_TEST_REPOSITORY_VISIBILITY:?}" in
+  public|private|internal) printf '%s\n' "$WORKMAN_TEST_REPOSITORY_VISIBILITY" ;;
+  unavailable)
+    echo "simulated GitHub API failure" >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected visibility fixture" >&2
+    exit 2
+    ;;
+esac

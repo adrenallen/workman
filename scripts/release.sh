@@ -36,6 +36,8 @@ fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+# shellcheck source=release-public-repository.sh
+source "$REPO_ROOT/scripts/release-public-repository.sh"
 TAG="v$VERSION"
 OUTPUT_DIR="${WORKMAN_RELEASE_OUTPUT_DIR:-$REPO_ROOT/release/$TAG}"
 WORK_DIR="$OUTPUT_DIR/.work"
@@ -71,6 +73,7 @@ preflight() {
   [[ "$(uname -s)" == Darwin ]] || { echo "local releases must run on macOS" >&2; exit 1; }
   [[ "$(uname -m)" == arm64 ]] || { echo "local releases require Apple silicon" >&2; exit 1; }
   [[ "$(git branch --show-current)" == main ]] || { echo "release must run from main" >&2; exit 1; }
+  verify_public_release_repository adrenallen/workman
 
   local dirty
   dirty="$(git status --porcelain)"
