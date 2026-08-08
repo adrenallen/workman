@@ -3,18 +3,23 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release.sh [--dry-run] <version>
+Usage: scripts/release.sh [--dry-run | --signing-test] <version>
 
 Build every Workman release artifact locally. --dry-run builds and verifies the complete artifact
 set but does not create a tag, push, or publish a GitHub Release or R2 update.
+
+--signing-test builds, signs, notarizes, staples, and verifies only the macOS bundle. It never
+creates a tag or publishes an artifact.
 EOF
 }
 
 DRY_RUN=false
+SIGNING_TEST=false
 VERSION=""
 while (($#)); do
   case "$1" in
     --dry-run) DRY_RUN=true ;;
+    --signing-test) DRY_RUN=true; SIGNING_TEST=true ;;
     --help|-h) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -47,10 +52,59 @@ RELEASE_ASSETS_DIR="$REPO_ROOT/scripts/release-assets"
 UPDATE_HOST_DIR="$REPO_ROOT/infra/update-host"
 MACOS_TARGET=aarch64-apple-darwin
 ZIGBUILD_VERSION=0.23.0
+RELEASE_ENV_FILE="${WORKMAN_RELEASE_ENV_FILE:-$HOME/.workman-release.env}"
+NOTARY_TIMEOUT="${WORKMAN_NOTARY_TIMEOUT:-2h}"
+
+if [[ -f "$RELEASE_ENV_FILE" ]]; then
+  # This is a trusted, local-only shell file so release credentials never enter git.
+  set -a
+  # shellcheck disable=SC1090
+  source "$RELEASE_ENV_FILE"
+  set +a
+fi
 
 log() { printf '\n==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 require() { command -v "$1" >/dev/null || { echo "required tool not found: $1" >&2; exit 1; }; }
+
+require_signing_credentials() {
+  local missing=() variable
+  for variable in \
+    APPLE_SIGNING_IDENTITY \
+    APPLE_API_KEY_PATH \
+    APPLE_API_KEY \
+    APPLE_API_ISSUER \
+    APPLE_TEAM_ID; do
+    [[ -n "${!variable:-}" ]] || missing+=("$variable")
+  done
+  if ((${#missing[@]})); then
+    echo "macOS signing configuration is incomplete." >&2
+    printf 'Missing %s\n' "${missing[@]}" >&2
+    echo "Set the variables in $RELEASE_ENV_FILE or the release environment." >&2
+    exit 1
+  fi
+  [[ -r "$APPLE_API_KEY_PATH" ]] || {
+    echo "App Store Connect key is missing or unreadable: $APPLE_API_KEY_PATH" >&2
+    exit 1
+  }
+
+  local identities
+  identities="$(security find-identity -v -p codesigning)"
+  grep -Fq "\"$APPLE_SIGNING_IDENTITY\"" <<<"$identities" || {
+    echo "Developer ID signing identity is not available: $APPLE_SIGNING_IDENTITY" >&2
+    printf '%s\n' "$identities" >&2
+    exit 1
+  }
+
+  xcrun notarytool history \
+    --key "$APPLE_API_KEY_PATH" \
+    --key-id "$APPLE_API_KEY" \
+    --issuer "$APPLE_API_ISSUER" \
+    --output-format json >/dev/null || {
+      echo "App Store Connect notarization credentials were rejected" >&2
+      exit 1
+    }
+}
 
 record_stage() {
   local name="$1" start="$2"
@@ -69,11 +123,12 @@ version_stamp() {
 
 preflight() {
   log "Preflight"
-  for tool in cargo rustup npm git gh jq tar ditto zip unzip file shasum awk; do require "$tool"; done
+  for tool in cargo rustup npm git gh jq tar ditto zip unzip file shasum awk security codesign xcrun spctl; do require "$tool"; done
   [[ "$(uname -s)" == Darwin ]] || { echo "local releases must run on macOS" >&2; exit 1; }
   [[ "$(uname -m)" == arm64 ]] || { echo "local releases require Apple silicon" >&2; exit 1; }
   [[ "$(git branch --show-current)" == main ]] || { echo "release must run from main" >&2; exit 1; }
   verify_public_release_repository adrenallen/workman
+  require_signing_credentials
 
   local dirty
   dirty="$(git status --porcelain)"
@@ -109,6 +164,85 @@ preflight() {
       exit 1
     }
   fi
+}
+
+sign_macos_binary() {
+  local binary="$1"
+  codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+  codesign --verify --strict --verbose=2 "$binary"
+}
+
+create_macos_zip() {
+  local package_dir="$1" destination="$2"
+  rm -f "$destination"
+  (
+    cd "$package_dir"
+    COPYFILE_DISABLE=1 zip -qry --symlinks "$destination" .
+  )
+}
+
+notarize_macos_package() {
+  local package_dir="$1"
+  local app="$package_dir/Workman.app"
+  local submission="$WORK_DIR/workman-macos-arm64-notary.zip"
+  local result="$LOG_DIR/macos-notarization.json"
+  create_macos_zip "$package_dir" "$submission"
+
+  log "Submit macOS bundle for notarization"
+  xcrun notarytool submit "$submission" \
+    --key "$APPLE_API_KEY_PATH" \
+    --key-id "$APPLE_API_KEY" \
+    --issuer "$APPLE_API_ISSUER" \
+    --wait \
+    --timeout "$NOTARY_TIMEOUT" \
+    --no-progress \
+    --output-format json >"$result"
+
+  local status submission_id
+  status="$(jq -r '.status // empty' "$result")"
+  submission_id="$(jq -r '.id // empty' "$result")"
+  if [[ "$status" != Accepted ]]; then
+    if [[ -n "$submission_id" ]]; then
+      xcrun notarytool log "$submission_id" \
+        --key "$APPLE_API_KEY_PATH" \
+        --key-id "$APPLE_API_KEY" \
+        --issuer "$APPLE_API_ISSUER" \
+        "$LOG_DIR/macos-notarization-log.json" || true
+    fi
+    cat "$result" >&2
+    echo "Apple notarization failed with status: ${status:-missing}" >&2
+    exit 1
+  fi
+  printf '    notarization accepted: %s\n' "$submission_id"
+
+  xcrun stapler staple -v "$app"
+  xcrun stapler validate -v "$app"
+}
+
+verify_signed_macos_package() {
+  local archive="$1"
+  local verify_dir="$WORK_DIR/macos-signature-verification"
+  rm -rf "$verify_dir"
+  mkdir -p "$verify_dir"
+  unzip -q "$archive" -d "$verify_dir"
+
+  codesign --verify --deep --strict --verbose=2 "$verify_dir/Workman.app"
+  codesign --verify --strict --verbose=2 "$verify_dir/bin/wrk"
+  codesign --verify --strict --verbose=2 "$verify_dir/bin/workmand"
+  xcrun stapler validate -v "$verify_dir/Workman.app"
+  spctl -a -vv --type execute "$verify_dir/Workman.app"
+
+  local team
+  for executable in \
+    "$verify_dir/Workman.app/Contents/MacOS/workman-desktop" \
+    "$verify_dir/bin/wrk" \
+    "$verify_dir/bin/workmand"; do
+    team="$(codesign -d --verbose=4 "$executable" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [[ "$team" == "$APPLE_TEAM_ID" ]] || {
+      echo "unexpected signing team for $executable: ${team:-missing}" >&2
+      exit 1
+    }
+  done
 }
 
 clear_obsolete_artifacts() {
@@ -165,8 +299,19 @@ build_macos() {
   npm --prefix apps/desktop ci
   npm --prefix apps/desktop run build
   cargo build --locked --profile dist --target "$MACOS_TARGET" -p workmand -p workman-cli
-  CARGO_TARGET_DIR="$REPO_ROOT/target" npm --prefix apps/desktop run tauri -- build --ci --no-sign \
-    --config '{"build":{"beforeBuildCommand":""}}' \
+  local tauri_signing_config
+  if [[ "$SIGNING_TEST" == true ]]; then
+    tauri_signing_config="$(jq -cn \
+      --arg identity "$APPLE_SIGNING_IDENTITY" \
+      --arg identifier "${WORKMAN_SIGNING_TEST_BUNDLE_ID:-com.workman.todo417}" \
+      '{"identifier":$identifier,"build":{"beforeBuildCommand":""},"bundle":{"macOS":{"signingIdentity":$identity,"hardenedRuntime":true}}}')"
+  else
+    tauri_signing_config="$(jq -cn --arg identity "$APPLE_SIGNING_IDENTITY" \
+      '{"build":{"beforeBuildCommand":""},"bundle":{"macOS":{"signingIdentity":$identity,"hardenedRuntime":true}}}')"
+  fi
+  env -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH \
+    CARGO_TARGET_DIR="$REPO_ROOT/target" npm --prefix apps/desktop run tauri -- build --ci \
+    --config "$tauri_signing_config" \
     --runner "$REPO_ROOT/scripts/tauri-dist-runner.sh" \
     --target "$MACOS_TARGET" --bundles app
 
@@ -175,6 +320,9 @@ build_macos() {
   "$target_dir/wrk" --version
   "$target_dir/workmand" --help >/dev/null
   test -d "$app"
+  sign_macos_binary "$target_dir/wrk"
+  sign_macos_binary "$target_dir/workmand"
+  codesign --verify --deep --strict --verbose=2 "$app"
 
   local package_dir="$WORK_DIR/macos-bundle"
   rm -rf "$package_dir"
@@ -184,12 +332,26 @@ build_macos() {
   ditto "$app" "$package_dir/Workman.app"
   add_bundle_guides "$package_dir" macos
 
-  rm -f "$OUTPUT_DIR/workman-macos-arm64.zip"
-  (
-    cd "$package_dir"
-    COPYFILE_DISABLE=1 zip -qry --symlinks "$OUTPUT_DIR/workman-macos-arm64.zip" .
-  )
+  notarize_macos_package "$package_dir"
+  create_macos_zip "$package_dir" "$OUTPUT_DIR/workman-macos-arm64.zip"
+  verify_signed_macos_package "$OUTPUT_DIR/workman-macos-arm64.zip"
   record_stage macos "$started"
+}
+
+verify_macos_bundle_layout() {
+  local roots expected mac_entries
+  mac_entries="$(unzip -Z1 "$OUTPUT_DIR/workman-macos-arm64.zip")"
+  roots="$(printf '%s\n' "$mac_entries" | awk -F/ 'NF { print $1 }' | sort -u)"
+  expected="$(printf '%s\n' GETTING-STARTED.md Workman.app bin install.sh | sort)"
+  [[ "$roots" == "$expected" ]] || {
+    echo "macOS bundle has unexpected top-level entries:" >&2
+    printf '%s\n' "$roots" >&2
+    exit 1
+  }
+  for entry in GETTING-STARTED.md install.sh bin/wrk bin/workmand; do
+    grep -qx "$entry" <<<"$mac_entries"
+  done
+  grep -q '^Workman\.app/' <<<"$mac_entries"
 }
 
 verify_static_linux_binary() {
@@ -293,20 +455,9 @@ package_linux_bundles() {
 verify_bundle_layouts() {
   local started=$SECONDS
   log "Platform bundle layouts"
-  local roots expected label entries mac_entries
+  local roots expected label entries
 
-  mac_entries="$(unzip -Z1 "$OUTPUT_DIR/workman-macos-arm64.zip")"
-  roots="$(printf '%s\n' "$mac_entries" | awk -F/ 'NF { print $1 }' | sort -u)"
-  expected="$(printf '%s\n' GETTING-STARTED.md Workman.app bin install.sh | sort)"
-  [[ "$roots" == "$expected" ]] || {
-    echo "macOS bundle has unexpected top-level entries:" >&2
-    printf '%s\n' "$roots" >&2
-    exit 1
-  }
-  for entry in GETTING-STARTED.md install.sh bin/wrk bin/workmand; do
-    grep -qx "$entry" <<<"$mac_entries"
-  done
-  grep -q '^Workman\.app/' <<<"$mac_entries"
+  verify_macos_bundle_layout
 
   for label in x86_64 arm64; do
     entries="$(tar -tzf "$OUTPUT_DIR/workman-linux-${label}.tar.gz")"
@@ -368,7 +519,7 @@ write_release_metadata() {
     printf -- '- **Linux arm64 (portable, experimental):** `workman-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
     printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
     printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. After extracting, install the CLI and daemon with `./install.sh`.\n\n'
-    printf '> **Unsigned macOS app:** if macOS quarantines the download, run `xattr -dr com.apple.quarantine Workman.app`, then Control-click Workman.app and choose Open.\n\n'
+    printf '> **macOS trust:** Workman.app, `wrk`, and `workmand` are Developer ID signed and notarized. Browser-downloaded builds should open normally. Versions 0.1.4 and earlier were unsigned and may still require the legacy Gatekeeper workaround in their bundled guide.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"
   } > "$OUTPUT_DIR/release-notes.md"
@@ -440,8 +591,17 @@ mkdir -p "$OUTPUT_DIR" "$WORK_DIR" "$LOG_DIR"
 TOTAL_STARTED=$SECONDS
 preflight
 clear_obsolete_artifacts
-ensure_linux_tools
+if [[ "$SIGNING_TEST" == false ]]; then
+  ensure_linux_tools
+fi
 build_macos
+if [[ "$SIGNING_TEST" == true ]]; then
+  verify_macos_bundle_layout
+  record_stage total "$TOTAL_STARTED"
+  log "Signed macOS test complete — publication skipped"
+  find "$OUTPUT_DIR" -maxdepth 1 -type f -print | sort
+  exit 0
+fi
 build_linux_binaries
 build_linux_desktop
 package_linux_bundles

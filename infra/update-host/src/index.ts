@@ -219,6 +219,17 @@ function formattedDate(value: string): string {
   }).format(date);
 }
 
+function hasNotarizedMacBundle(version: string): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (match === null) return false;
+  const parts = match.slice(1).map(Number);
+  const firstSigned = [0, 1, 5];
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index] !== firstSigned[index]) return parts[index] > firstSigned[index];
+  }
+  return true;
+}
+
 function releasePath(release: ReleaseManifest, asset: ReleaseAsset): string {
   return `/versions/${encodeURIComponent(release.version)}/${encodeURIComponent(asset.name)}`;
 }
@@ -275,6 +286,12 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
     const archiveName = escapeHtml(linuxArchive?.name ?? "the tar.gz archive");
     const version = escapeHtml(release.version);
     const publishedAt = escapeHtml(release.published_at);
+    const macFirstLaunch = hasNotarizedMacBundle(release.version)
+      ? `<p>Workman ${version} is Developer ID signed and notarized. Browser-downloaded copies should pass Gatekeeper and open normally.</p>
+            <p>Versions 0.1.4 and earlier were unsigned; use the legacy workaround in the guide bundled with those versions only.</p>`
+      : `<p>Browser-downloaded ZIPs are quarantined. If Gatekeeper blocks the unsigned app, run:</p>
+            <pre><code>xattr -dr com.apple.quarantine /Applications/Workman.app</code></pre>
+            <p>Or open <strong>System Settings &rarr; Privacy &amp; Security</strong> and choose <strong>Open Anyway</strong>. The CLI installer path does not apply browser quarantine.</p>`;
     const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -367,9 +384,7 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
           </section>
           <section>
             <h3>First launch on macOS</h3>
-            <p>Browser-downloaded ZIPs are quarantined. If Gatekeeper blocks the unsigned app, run:</p>
-            <pre><code>xattr -dr com.apple.quarantine /Applications/Workman.app</code></pre>
-            <p>Or open <strong>System Settings &rarr; Privacy &amp; Security</strong> and choose <strong>Open Anyway</strong>. The CLI installer path does not apply browser quarantine.</p>
+            ${macFirstLaunch}
           </section>
           <section>
             <h3>CLI + daemon</h3>

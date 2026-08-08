@@ -17,16 +17,11 @@ This download contains all three parts of Workman. Most people start with the ap
 1. Move this whole extracted folder somewhere permanent. The command-line installer creates
    links back to its `bin/` directory.
 2. Drag `Workman.app` into `/Applications`, then double-click it.
-3. Browser-downloaded ZIPs receive the `com.apple.quarantine` attribute. Because Workman is
-   unsigned, Gatekeeper may block the first launch. Remove the attribute in Terminal:
-
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Workman.app
-   ```
-
-   Or open **System Settings → Privacy & Security** and choose **Open Anyway** for Workman.
-   Installs run through the CLI installer path do not receive browser quarantine.
-4. Open `Workman.app` again. Choose a project directory and Workman will start its background
+3. Workman 0.1.5 and newer are Developer ID signed and notarized, so a browser-downloaded copy
+   should pass Gatekeeper and open normally. Releases 0.1.4 and earlier were unsigned; if you are
+   intentionally opening one of those older builds, follow the Gatekeeper note bundled with that
+   version rather than disabling quarantine for current releases.
+4. Choose a project directory and Workman will start its background
    daemon automatically.
 
 ## Add the terminal command

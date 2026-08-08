@@ -6,7 +6,14 @@ RELEASE_SCRIPT="$REPO_ROOT/scripts/release.sh"
 
 HELP="$($RELEASE_SCRIPT --help)"
 [[ "$HELP" == *"--dry-run"* ]]
+[[ "$HELP" == *"--signing-test"* ]]
 [[ "$HELP" == *"does not create a tag"* ]]
+grep -q 'APPLE_SIGNING_IDENTITY' "$RELEASE_SCRIPT"
+grep -q 'APPLE_API_KEY_PATH' "$RELEASE_SCRIPT"
+grep -q 'notarytool submit' "$RELEASE_SCRIPT"
+grep -q 'stapler staple' "$RELEASE_SCRIPT"
+grep -q 'codesign --verify --deep --strict' "$RELEASE_SCRIPT"
+grep -q 'spctl -a -vv' "$RELEASE_SCRIPT"
 grep -q 'cargo zigbuild --locked --profile dist' "$RELEASE_SCRIPT"
 grep -q 'workman-macos-arm64.zip' "$RELEASE_SCRIPT"
 grep -q 'workman-linux-x86_64.tar.gz' "$RELEASE_SCRIPT"
@@ -37,11 +44,9 @@ fi
 test -x "$REPO_ROOT/scripts/release-assets/install.sh"
 grep -q 'never run `workmand` by hand' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
-grep -Fq 'xattr -dr com.apple.quarantine /Applications/Workman.app' \
+grep -Fq 'Developer ID signed and notarized' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
-grep -Fq 'System Settings → Privacy & Security' \
-  "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
-grep -Fq 'CLI installer path do not receive browser quarantine' \
+grep -Fq 'Releases 0.1.4 and earlier were unsigned' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
 grep -q 'never run `workmand` by hand' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-linux.md"

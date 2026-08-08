@@ -126,15 +126,40 @@ test("renders the public stable download page entirely from its channel manifest
   assert.match(html, /80 MB/);
   assert.match(html, /WORKMAN_KEY='your-password'/);
   assert.match(html, /First launch on macOS/);
-  assert.match(html, /xattr -dr com\.apple\.quarantine \/Applications\/Workman\.app/);
-  assert.match(html, /System Settings &rarr; Privacy &amp; Security/);
-  assert.match(html, /Open Anyway/);
-  assert.match(html, /CLI installer path does not apply browser quarantine/);
+  assert.match(html, /Developer ID signed and notarized/);
+  assert.match(html, /should pass Gatekeeper and open normally/);
+  assert.match(html, /Versions 0\.1\.4 and earlier were unsigned/);
+  assert.doesNotMatch(html, /xattr -dr com\.apple\.quarantine/);
   assert.doesNotMatch(html, /app-key|friend-key/);
 
   const head = await worker.fetch(request("/download", { method: "HEAD" }), env);
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
+});
+
+test("keeps the Gatekeeper workaround on legacy unsigned release pages", async () => {
+  const legacyRelease = { ...release, version: "0.1.4" };
+  const legacyEnv = {
+    ...env,
+    RELEASES: {
+      ...env.RELEASES,
+      async get(key, options = {}) {
+        if (key === "channels/stable.json") {
+          const body = new TextEncoder().encode(JSON.stringify(legacyRelease));
+          return object(rangedBody(body, options.range), "application/json; charset=utf-8", body.byteLength);
+        }
+        return env.RELEASES.get(key, options);
+      },
+    },
+  };
+
+  const response = await worker.fetch(request("/download"), legacyEnv);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Gatekeeper blocks the unsigned app/);
+  assert.match(html, /xattr -dr com\.apple\.quarantine \/Applications\/Workman\.app/);
+  assert.match(html, /System Settings &rarr; Privacy &amp; Security/);
+  assert.match(html, /CLI installer path does not apply browser quarantine/);
 });
 
 test("returns contract-specific 401 responses before reading protected objects", async () => {
