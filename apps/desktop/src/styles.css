@@ -43,7 +43,7 @@
   --information-foreground: #e4efff;
   --agent-state-idle: var(--muted-foreground);
   --agent-state-working: var(--success);
-  --agent-state-needs-input: #b79add;
+  --agent-state-needs-input: var(--information);
   --agent-state-waiting: #e58a46;
   --agent-state-exited: var(--destructive);
   --notification-unread: #8fb8ff;
@@ -133,7 +133,7 @@
   --information-foreground: #102c57;
   --agent-state-idle: var(--muted-foreground);
   --agent-state-working: #1f7450;
-  --agent-state-needs-input: #715295;
+  --agent-state-needs-input: var(--information);
   --agent-state-waiting: #a94f1d;
   --agent-state-exited: #a94049;
   --notification-unread: #3765ad;

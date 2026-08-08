@@ -313,12 +313,12 @@
     return processActivity(process, stats).label;
   }
 
-  function lineageTone(rollup: AgentAttentionRollup): 'attention' | 'working' | 'waiting' | 'error' | 'idle' {
-    if (rollup.needsInput > 0) return 'attention';
+  function lineageTone(rollup: AgentAttentionRollup): 'needs-input' | 'working' | 'waiting' | 'error' | 'neutral' {
+    if (rollup.needsInput > 0) return 'needs-input';
     if (rollup.crashed > 0) return 'error';
     if (rollup.working > 0) return 'working';
     if (rollup.waiting > 0) return 'waiting';
-    return 'idle';
+    return 'neutral';
   }
 
   function lineageTitle(rollup: AgentAttentionRollup): string {
@@ -737,12 +737,7 @@
                             </TooltipLabel>
                           {/if}
                           {#if row.rollup.total > 0}
-                            <TooltipLabel label={lineageTitle(row.rollup)}>
-                              <span
-                                class={`lineage-rollup ${lineageTone(row.rollup)}`}
-                                aria-label={lineageTitle(row.rollup)}
-                              >↳{row.rollup.total}</span>
-                            </TooltipLabel>
+                            <CountBadge prefix="↳" value={row.rollup.total} tone={lineageTone(row.rollup)} title={lineageTitle(row.rollup)} />
                           {/if}
                           {#if row.rollup.unread > 0}
                             <TooltipLabel label={`${row.rollup.unread} unread finished descendant agent${row.rollup.unread === 1 ? '' : 's'}`}>
@@ -929,7 +924,7 @@
   .group-toggle { display: grid; place-items: center; }
   .group-title { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 4px; text-align: left; }
   .group-badges { display: flex; align-items: center; gap: 4px; }
-  .group-create { justify-self: center; }
+  .group-header :global(.group-create) { justify-self: center; }
   .group-header:hover { background: var(--popover); }
   .group-toggle:focus-visible, .group-title:focus-visible { position: relative; z-index: 1; }
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
@@ -977,11 +972,6 @@
   .row-copy small { margin-top: 1px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .row-badges { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 3px; }
   .lineage-glyph { color: #687e74; font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace; transform: translateY(-1px); }
-  .lineage-rollup { display: inline-flex; min-width: 20px; height: 18px; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; background: #19201d; color: #8ca297; font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
-  .lineage-rollup.attention { border-color: color-mix(in srgb, var(--agent-state-needs-input) 48%, var(--border)); color: var(--agent-state-needs-input); }
-  .lineage-rollup.working { border-color: color-mix(in srgb, var(--agent-state-working) 42%, var(--border)); color: var(--agent-state-working); }
-  .lineage-rollup.waiting { border-color: color-mix(in srgb, var(--agent-state-waiting) 42%, var(--border)); color: var(--agent-state-waiting); }
-  .lineage-rollup.error { border-color: color-mix(in srgb, var(--agent-state-exited) 42%, var(--border)); color: var(--agent-state-exited); }
   .agent-unread-dot { display: block; width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--notification-unread); box-shadow: 0 0 0 2px color-mix(in srgb, var(--notification-unread) 17%, transparent); }
   .unread-lineage-rollup, .unread-group-rollup { display: inline-flex; height: 18px; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .unread-lineage-rollup > span, .unread-group-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }

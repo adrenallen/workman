@@ -19,7 +19,9 @@
 </script>
 
 <TooltipLabel label={title ?? `Count: ${prefix}${value}`}>
-  <span class="badge {tone}" aria-label={title ?? `Count: ${prefix}${value}`}>{prefix}{value}</span>
+  <span class="badge {tone}" aria-label={title ?? `Count: ${prefix}${value}`}>
+    {#if tone === 'needs-input'}<span class="needs-input-dot" aria-hidden="true"></span>{/if}{prefix}{value}
+  </span>
 </TooltipLabel>
 
 <style>
@@ -43,7 +45,9 @@
   }
 
   .running, .working { border-color: color-mix(in srgb, var(--agent-state-working) 42%, var(--border)); color: var(--agent-state-working); }
-  .attention, .needs-input { border-color: color-mix(in srgb, var(--agent-state-needs-input) 42%, var(--border)); color: var(--agent-state-needs-input); }
+  .attention { border-color: color-mix(in srgb, var(--todo-state-blocked) 42%, var(--border)); color: var(--todo-state-blocked); }
+  .needs-input { border-color: color-mix(in srgb, var(--agent-state-needs-input) 42%, var(--border)); color: var(--agent-state-needs-input); }
+  .needs-input-dot { width: 5px; height: 5px; flex: none; margin-right: 4px; border-radius: 999px; background: currentColor; }
   .waiting { border-color: color-mix(in srgb, var(--agent-state-waiting) 42%, var(--border)); color: var(--agent-state-waiting); }
   .error { border-color: color-mix(in srgb, var(--agent-state-exited) 42%, var(--border)); color: var(--agent-state-exited); }
 </style>

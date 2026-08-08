@@ -1,9 +1,9 @@
 <script lang="ts">
-  import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import { onMount } from 'svelte';
 
   import { agentStatusPresentation } from './agentStatus';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
+  import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import { submitOnEnter } from './formInputConventions';
   import TerminalView from './TerminalView.svelte';
   import {
@@ -275,7 +275,7 @@
         <strong>{activeAgents} active</strong>
       </div>
       {#if attentionCount > 0}
-        <span class="attention-summary" title={`${attentionCount} agents need input`}><CircleAlertIcon size={12} aria-hidden="true" />{attentionCount} need input</span>
+        <span class="attention-summary"><StatusIndicator tone="needs-input" label={`${attentionCount} agents need input`} />{attentionCount} need input</span>
       {:else}
         <span class="quiet-summary">All clear</span>
       {/if}
@@ -692,7 +692,7 @@
   }
 
   .attention-summary {
-    color: #dfb46b;
+    color: var(--agent-state-needs-input);
   }
 
   .agent-row {

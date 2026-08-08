@@ -11,7 +11,6 @@
 
 <script lang="ts">
   import CircleIcon from '@lucide/svelte/icons/circle';
-  import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import CircleXIcon from '@lucide/svelte/icons/circle-x';
   import Clock3Icon from '@lucide/svelte/icons/clock-3';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
@@ -46,7 +45,7 @@
             {#if presentation.state === 'working'}
               <LoaderCircleIcon />
             {:else if presentation.state === 'needs_input'}
-              <CircleAlertIcon />
+              <CircleIcon />
             {:else if presentation.state === 'waiting'}
               <Clock3Icon />
             {:else if presentation.state === 'exited'}
@@ -106,6 +105,16 @@
   [data-state='idle'] { color: var(--agent-state-idle); }
   [data-state='working'] { color: var(--agent-state-working); }
   [data-state='needs_input'] { color: var(--agent-state-needs-input); }
+  [data-state='needs_input'] .status-glyph :global(svg) {
+    width: 8px;
+    height: 8px;
+    fill: currentColor;
+    stroke: none;
+  }
+  [data-state='needs_input'][data-size='lg'] .status-glyph :global(svg) {
+    width: 9px;
+    height: 9px;
+  }
   [data-state='waiting'] { color: var(--agent-state-waiting); }
   [data-state='waiting'] .status-glyph {
     width: 14px;
