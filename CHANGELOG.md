@@ -4,6 +4,22 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.4 - 2026-08-07
+
+Workman 0.1.4 repairs in-app updates and makes attention and release surfaces more truthful.
+
+### Fixes and release operations
+
+- Fixed updates started from a Dock-launched app so they discover versioned installs and active
+  launchers, refresh only a matching app identity, and guide app-only installs without a false
+  missing-binary refusal.
+- Added the Dock-launched app update hop to release verification, including matching-bundle,
+  missing-CLI, and rejected-bundle regression cases.
+- Rendered needs-input states as blue dots across agent surfaces, distinct from amber permission
+  prompts, and removed obsolete pre-Workman aliases from public release notes and artifacts.
+- Hardened local releases by rejecting private repositories and failing closed when a packaged
+  desktop build points at a development URL.
+
 ## 0.1.3 - 2026-08-07
 
 Workman 0.1.3 sharpens terminal and agent lifecycle behavior, adds native attention signals,
