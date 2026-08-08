@@ -4,6 +4,21 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.5 - 2026-08-08
+
+Workman 0.1.5 is the first signed and notarized release, removing the Gatekeeper workaround for
+current downloads while preserving accurate guidance for older unsigned versions.
+
+### Release operations
+
+- Signed the Workman app, `wrk`, and `workmand` with a Developer ID certificate and hardened
+  runtime, then added blocking notarization, stapling, and extracted-artifact verification before
+  any release may publish.
+- Added a publication-free signing test and documented certificate renewal, App Store Connect key
+  rotation, rejection handling, and the trusted local release environment.
+- Made the download and getting-started guidance version-aware so 0.1.5 and later use the signed
+  launch path while 0.1.4 and earlier retain their required legacy Gatekeeper note.
+
 ## 0.1.4 - 2026-08-07
 
 Workman 0.1.4 repairs in-app updates and makes attention and release surfaces more truthful.
