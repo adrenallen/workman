@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 use workman_core::{
     DEFAULT_RELEASES_API, LATEST_RELEASES_API, UPDATE_CHECK_INTERVAL_SECS, UpdateChannel,
-    UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, install_dir_from_executable,
+    UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, UpdateInstallTarget,
 };
 
 use crate::{RuntimeIdentity, user_config::resolve_update_key};
@@ -56,7 +56,7 @@ pub(crate) struct UpdateService {
     stable_client: UpdateClient,
     latest_client: UpdateClient,
     current_version: &'static str,
-    install_dir: PathBuf,
+    install_target: UpdateInstallTarget,
     cache_path: PathBuf,
     cache: Arc<Mutex<UpdateCache>>,
     operation: Arc<AsyncMutex<()>>,
@@ -76,9 +76,9 @@ impl UpdateService {
             .with_key(&update_key)?;
         let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?
             .with_key(&update_key)?;
-        let install_dir = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
-            Some(path) => PathBuf::from(path),
-            None => install_dir_from_executable(env::current_exe()?)?,
+        let install_target = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
+            Some(path) => UpdateInstallTarget::binary_directory(PathBuf::from(path)),
+            None => UpdateInstallTarget::discover(env::current_exe()?)?,
         };
         let cache_path = data_dir.join(CACHE_FILE);
         let updates_enabled = !RuntimeIdentity::current().is_dev();
@@ -92,7 +92,7 @@ impl UpdateService {
             stable_client,
             latest_client,
             current_version: env!("CARGO_PKG_VERSION"),
-            install_dir,
+            install_target,
             cache_path,
             cache: Arc::new(Mutex::new(cache)),
             operation: Arc::new(AsyncMutex::new(())),
@@ -190,7 +190,7 @@ impl UpdateService {
         override_client
             .as_ref()
             .unwrap_or_else(|| self.client(status.channel))
-            .install(&status.check, &self.install_dir)
+            .install_target(&status.check, &self.install_target)
             .await
     }
 

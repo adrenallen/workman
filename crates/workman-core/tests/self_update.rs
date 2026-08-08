@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{Cursor, Read, Write},
     net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::Arc,
     thread,
 };
@@ -10,7 +11,10 @@ use std::{
 use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use workman_core::{ReleaseTarget, UpdateChannel, UpdateClient, UpdateError};
+use workman_core::{
+    ApplicationInstallTarget, ReleaseTarget, UpdateChannel, UpdateClient, UpdateError,
+    UpdateInstallTarget,
+};
 
 const TEST_UPDATE_KEY: &str = "fixture-update-key";
 
@@ -44,6 +48,88 @@ fn unified_zip_archive() -> Vec<u8> {
         archive.write_all(body).unwrap();
     }
     archive.finish().unwrap().into_inner()
+}
+
+fn app_surface_zip_archive(bundle_identifier: &str) -> Vec<u8> {
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let executable = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    let regular = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+    for (name, body, options) in [
+        ("bin/wrk", b"new wrk".as_slice(), executable),
+        ("bin/workmand", b"new workmand".as_slice(), executable),
+        (
+            "Workman.app/Contents/MacOS/workman-desktop",
+            b"new desktop".as_slice(),
+            executable,
+        ),
+        (
+            "Workman.app/Contents/Resources/build-marker",
+            b"new app".as_slice(),
+            regular,
+        ),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(body).unwrap();
+    }
+    archive
+        .start_file("Workman.app/Contents/Info.plist", regular)
+        .unwrap();
+    archive
+        .write_all(
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{bundle_identifier}</string>
+<key>CFBundleExecutable</key><string>workman-desktop</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    archive.finish().unwrap().into_inner()
+}
+
+fn seed_app_bundle(root: &Path, bundle_identifier: &str) -> PathBuf {
+    let app = root.join("Applications/Workman Todo 467.app");
+    let contents = app.join("Contents");
+    fs::create_dir_all(contents.join("MacOS")).unwrap();
+    fs::create_dir_all(contents.join("Resources")).unwrap();
+    fs::write(
+        contents.join("Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{bundle_identifier}</string>
+<key>CFBundleExecutable</key><string>workman-desktop</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"#,
+        ),
+    )
+    .unwrap();
+    fs::write(contents.join("MacOS/workman-desktop"), "old desktop").unwrap();
+    fs::write(contents.join("Resources/build-marker"), "old app").unwrap();
+    app
+}
+
+fn app_install_target(root: &Path, app: PathBuf) -> ApplicationInstallTarget {
+    let home = root.join("home");
+    let launchers = home.join(".local/bin");
+    ApplicationInstallTarget::new(
+        app,
+        &home,
+        vec![launchers.clone()],
+        vec![launchers],
+        home.join(".local/share/workman"),
+    )
 }
 
 struct Fixture {
@@ -290,6 +376,162 @@ async fn unified_macos_zip_updates_binaries_from_bin_directory() {
             .unwrap()
             .contains("platform bundle workman-macos-arm64.zip")
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let app = seed_app_bundle(root.path(), "com.workman.todo467");
+    let target = app_install_target(root.path(), app.clone());
+    let old_bin = target.versioned_root.join("0.1.2/bin");
+    let launcher_dir = target.home_dir.join(".local/bin");
+    fs::create_dir_all(&old_bin).unwrap();
+    fs::create_dir_all(&launcher_dir).unwrap();
+    fs::write(old_bin.join("wrk"), "old wrk").unwrap();
+    fs::write(old_bin.join("workmand"), "old workmand").unwrap();
+    symlink(old_bin.join("wrk"), launcher_dir.join("wrk")).unwrap();
+    symlink(old_bin.join("workmand"), launcher_dir.join("workmand")).unwrap();
+
+    let archive = app_surface_zip_archive("com.workman.todo467");
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-app-fixture.zip",
+        "workman-app-fixture.zip",
+        2,
+    );
+    let client = UpdateClient::with_target(
+        format!("{}/latest", fixture.base),
+        ReleaseTarget {
+            binary_asset_name: "workman-app-fixture.zip".to_owned(),
+            desktop_asset_name: "workman-app-fixture.zip".to_owned(),
+            platform_label: "test app surface".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap();
+
+    let check = client.check("0.1.2").await.unwrap();
+    let report = client
+        .install_target(&check, &UpdateInstallTarget::Application(target.clone()))
+        .await
+        .unwrap();
+
+    let new_bin = target.versioned_root.join("9.0.0/bin");
+    assert_eq!(fs::read_to_string(new_bin.join("wrk")).unwrap(), "new wrk");
+    assert_eq!(
+        fs::read_to_string(new_bin.join("workmand")).unwrap(),
+        "new workmand"
+    );
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("wrk")).unwrap(),
+        fs::canonicalize(new_bin.join("wrk")).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("workmand")).unwrap(),
+        fs::canonicalize(new_bin.join("workmand")).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("Contents/Resources/build-marker")).unwrap(),
+        "new app"
+    );
+    let message = report.desktop_instruction.unwrap();
+    assert!(message.contains("Close and reopen Workman"));
+    assert!(message.contains("Updated 2 discovered launchers"));
+}
+
+#[tokio::test]
+async fn app_surface_without_cli_refreshes_app_and_reports_launcher_guidance() {
+    let root = tempfile::tempdir().unwrap();
+    let app = seed_app_bundle(root.path(), "com.workman.todo467");
+    let target = app_install_target(root.path(), app.clone());
+    let historical = target.versioned_root.join("0.1.2/bin");
+    fs::create_dir_all(&historical).unwrap();
+    fs::write(historical.join("wrk"), "old wrk").unwrap();
+    fs::write(historical.join("workmand"), "old workmand").unwrap();
+
+    let archive = app_surface_zip_archive("com.workman.todo467");
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-app-fixture.zip",
+        "workman-app-fixture.zip",
+        2,
+    );
+    let client = UpdateClient::with_target(
+        format!("{}/latest", fixture.base),
+        ReleaseTarget {
+            binary_asset_name: "workman-app-fixture.zip".to_owned(),
+            desktop_asset_name: "workman-app-fixture.zip".to_owned(),
+            platform_label: "test app surface".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap();
+
+    let check = client.check("0.1.2").await.unwrap();
+    let report = client
+        .install_target(&check, &UpdateInstallTarget::Application(target))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(app.join("Contents/Resources/build-marker")).unwrap(),
+        "new app"
+    );
+    let message = report.desktop_instruction.unwrap();
+    assert!(message.contains("No wrk launcher was found"));
+    assert!(message.contains("Found 1 older versioned install"));
+    assert!(message.contains("run the keyed installer"));
+}
+
+#[tokio::test]
+async fn app_surface_rejects_mismatched_bundle_identity_before_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let app = seed_app_bundle(root.path(), "com.workman.todo467");
+    let target = app_install_target(root.path(), app.clone());
+    let archive = app_surface_zip_archive("com.workman.desktop");
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-app-fixture.zip",
+        "workman-app-fixture.zip",
+        2,
+    );
+    let client = UpdateClient::with_target(
+        format!("{}/latest", fixture.base),
+        ReleaseTarget {
+            binary_asset_name: "workman-app-fixture.zip".to_owned(),
+            desktop_asset_name: "workman-app-fixture.zip".to_owned(),
+            platform_label: "test app surface".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap();
+
+    let check = client.check("0.1.2").await.unwrap();
+    let error = client
+        .install_target(&check, &UpdateInstallTarget::Application(target.clone()))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("bundle identifier"));
+    assert!(error.to_string().contains("com.workman.desktop"));
+    assert!(error.to_string().contains("com.workman.todo467"));
+    assert_eq!(
+        fs::read_to_string(app.join("Contents/Resources/build-marker")).unwrap(),
+        "old app"
+    );
+    assert!(!target.versioned_root.join("9.0.0").exists());
 }
 
 #[tokio::test]

@@ -6182,6 +6182,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "nix",
+ "plist",
  "portable-pty",
  "reqwest",
  "rusqlite",

@@ -26,7 +26,7 @@ use tokio_tungstenite::{
 };
 use workman_core::{
     DEFAULT_RELEASES_API, LATEST_RELEASES_API, Process, ProcessKind, ProcessSource, ProcessStatus,
-    ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, install_dir_from_executable,
+    ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, UpdateInstallTarget,
 };
 use workmand::{
     DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, RuntimeIdentity,
@@ -1977,11 +1977,11 @@ async fn self_update(
             .rpc("daemon.update_apply", json!({ "key": &update_key }))
             .await?
     } else {
-        let install_dir = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
-            Some(path) => PathBuf::from(path),
-            None => install_dir_from_executable(env::current_exe()?)?,
+        let install_target = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
+            Some(path) => UpdateInstallTarget::binary_directory(PathBuf::from(path)),
+            None => UpdateInstallTarget::discover(env::current_exe()?)?,
         };
-        updater.install(&check, install_dir).await?
+        updater.install_target(&check, &install_target).await?
     };
     print_update_report(&report);
     Ok(())

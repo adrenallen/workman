@@ -450,6 +450,8 @@ impl UpdateClient {
             let workmand_source = staged_binary(&staging, "workmand")?;
             ensure_staged_binary(&wrk_source, &staging)?;
             ensure_staged_binary(&workmand_source, &staging)?;
+            set_executable(&wrk_source)?;
+            set_executable(&workmand_source)?;
             let quarantine_cleared = clear_macos_quarantine(&staging);
             atomic_replace(&wrk_source, &wrk_target)?;
             atomic_replace(&workmand_source, &workmand_target)?;
@@ -475,6 +477,181 @@ impl UpdateClient {
                         )
                     }
                 }),
+                quarantine_cleared,
+            })
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    /// Install through either a CLI binary directory or a Dock-launched application layout.
+    pub async fn install_target(
+        &self,
+        check: &UpdateCheck,
+        target: &UpdateInstallTarget,
+    ) -> UpdateResult<UpdateInstallReport> {
+        match target {
+            UpdateInstallTarget::BinaryDirectory(directory) => self.install(check, directory).await,
+            UpdateInstallTarget::Application(application) => {
+                self.install_application(check, application).await
+            }
+        }
+    }
+
+    async fn install_application(
+        &self,
+        check: &UpdateCheck,
+        target: &ApplicationInstallTarget,
+    ) -> UpdateResult<UpdateInstallReport> {
+        if !check.available {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} is already current",
+                check.current
+            )));
+        }
+        let binary_asset = check
+            .binary_asset
+            .as_ref()
+            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
+        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
+        let archive = self.download(binary_asset).await?;
+        if archive.len() as u64 != binary_asset.size {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} size mismatch: expected {} bytes, got {}",
+                binary_asset.name,
+                binary_asset.size,
+                archive.len()
+            )));
+        }
+        let actual = sha256_hex(&archive);
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(UpdateError::ChecksumMismatch {
+                asset: binary_asset.name.clone(),
+                expected,
+                actual,
+            });
+        }
+
+        let inventory = discover_application_inventory(target);
+        fs::create_dir_all(&target.versioned_root)?;
+        let staging = unique_staging_dir(&target.versioned_root)?;
+        let result = (|| -> UpdateResult<UpdateInstallReport> {
+            extract_release_archive(&archive, &binary_asset.name, &staging)?;
+            let wrk_source = staged_binary(&staging, "wrk")?;
+            let workmand_source = staged_binary(&staging, "workmand")?;
+            ensure_staged_binary(&wrk_source, &staging)?;
+            ensure_staged_binary(&workmand_source, &staging)?;
+            set_executable(&wrk_source)?;
+            set_executable(&workmand_source)?;
+
+            let staged_app = staging.join("Workman.app");
+            let source_identifier = app_bundle_identifier(&staged_app).map_err(|error| {
+                UpdateError::InvalidRelease(format!(
+                    "the verified update cannot refresh the desktop app: {error}"
+                ))
+            })?;
+            let installed_identifier =
+                app_bundle_identifier(&target.app_bundle).map_err(|error| {
+                    UpdateError::InvalidRelease(format!(
+                        "the installed app cannot be refreshed safely: {error}"
+                    ))
+                })?;
+            if source_identifier != installed_identifier {
+                return Err(UpdateError::InvalidRelease(format!(
+                    "refusing to refresh {}: update bundle identifier {:?} does not match installed identifier {:?}",
+                    target.app_bundle.display(),
+                    source_identifier,
+                    installed_identifier
+                )));
+            }
+
+            let quarantine_cleared = clear_macos_quarantine(&staging);
+            let version = parse_version(&check.latest)?.to_string();
+            let install_dir = target.versioned_root.join(version);
+            commit_staging_directory(&staging, &install_dir)?;
+
+            let installed_app = install_dir.join("Workman.app");
+            refresh_application_bundle(&installed_app, &target.app_bundle, &installed_identifier)?;
+
+            let mut updated_files = vec![
+                install_dir.join("bin").join(executable_name("wrk")),
+                install_dir.join("bin").join(executable_name("workmand")),
+                target.app_bundle.clone(),
+            ];
+            let mut wrk_launcher_found = false;
+            for launcher in &inventory.launchers {
+                let binary = match launcher.binary {
+                    InstalledProgram::Wrk => {
+                        wrk_launcher_found = true;
+                        "wrk"
+                    }
+                    InstalledProgram::Workmand => "workmand",
+                };
+                let destination = install_dir.join("bin").join(executable_name(binary));
+                if replace_launcher(&launcher.path, &destination)?.is_some() {
+                    updated_files.push(launcher.path.clone());
+                }
+            }
+
+            let launcher_note = if wrk_launcher_found {
+                format!(
+                    "Updated {} discovered launcher{}.",
+                    inventory.launchers.len(),
+                    if inventory.launchers.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            } else {
+                let history = if inventory.versioned_installs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " Found {} older versioned install{}.",
+                        inventory.versioned_installs.len(),
+                        if inventory.versioned_installs.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                };
+                format!(
+                    "No wrk launcher was found in PATH or known launcher locations.{history} The new CLI is at {}; run the keyed installer to add a launcher.",
+                    install_dir
+                        .join("bin")
+                        .join(executable_name("wrk"))
+                        .display()
+                )
+            };
+            let incomplete_note = if inventory.incomplete_launchers.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Ignored {} incomplete launcher location{} without a wrk/workmand pair.",
+                    inventory.incomplete_launchers.len(),
+                    if inventory.incomplete_launchers.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            };
+
+            Ok(UpdateInstallReport {
+                current: check.current.clone(),
+                latest: check.latest.clone(),
+                install_dir: install_dir.to_string_lossy().into_owned(),
+                updated_files: updated_files
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                desktop_instruction: Some(format!(
+                    "Updated the Workman app at {}. Close and reopen Workman to run {}. {launcher_note}{incomplete_note}",
+                    target.app_bundle.display(),
+                    check.latest
+                )),
                 quarantine_cleared,
             })
         })();
@@ -511,6 +688,99 @@ pub struct UpdateInstallReport {
     pub quarantine_cleared: bool,
 }
 
+/// Destination selected for an update. Dock-launched apps require installation discovery because
+/// their executable lives inside the app bundle rather than beside wrk and workmand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpdateInstallTarget {
+    BinaryDirectory(PathBuf),
+    Application(ApplicationInstallTarget),
+}
+
+impl UpdateInstallTarget {
+    pub fn binary_directory(path: impl Into<PathBuf>) -> Self {
+        Self::BinaryDirectory(path.into())
+    }
+
+    /// Resolve the update destination from a process executable. Paths inside a macOS app bundle
+    /// use inventory-based discovery; ordinary CLI/daemon executables retain same-directory
+    /// replacement.
+    pub fn discover(executable: impl AsRef<Path>) -> UpdateResult<Self> {
+        let executable = executable.as_ref().canonicalize()?;
+        let Some(app_bundle) = application_bundle_from_executable(&executable) else {
+            return Ok(Self::BinaryDirectory(install_dir_from_executable(
+                executable,
+            )?));
+        };
+        Ok(Self::Application(
+            ApplicationInstallTarget::from_environment(app_bundle)?,
+        ))
+    }
+}
+
+/// Injectable app-surface discovery inputs used by both runtime installation and regression tests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicationInstallTarget {
+    pub app_bundle: PathBuf,
+    pub home_dir: PathBuf,
+    pub search_path: Vec<PathBuf>,
+    pub known_launcher_dirs: Vec<PathBuf>,
+    pub versioned_root: PathBuf,
+}
+
+impl ApplicationInstallTarget {
+    pub fn new(
+        app_bundle: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        search_path: Vec<PathBuf>,
+        known_launcher_dirs: Vec<PathBuf>,
+        versioned_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            app_bundle: app_bundle.into(),
+            home_dir: home_dir.into(),
+            search_path,
+            known_launcher_dirs,
+            versioned_root: versioned_root.into(),
+        }
+    }
+
+    fn from_environment(app_bundle: PathBuf) -> UpdateResult<Self> {
+        let home_dir = env::var_os("WORKMAN_UPDATE_HOME")
+            .or_else(|| env::var_os("HOME"))
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                UpdateError::InvalidRelease(
+                    "app-surface update cannot determine HOME; rerun the keyed installer"
+                        .to_owned(),
+                )
+            })?;
+        let search_path = env::var_os("WORKMAN_UPDATE_PATH")
+            .or_else(|| env::var_os("PATH"))
+            .map(|value| env::split_paths(&value).collect())
+            .unwrap_or_default();
+        let mut known_launcher_dirs = vec![home_dir.join(".local/bin")];
+        if let Some(test_root) = env::var_os("WORKMAN_INSTALL_TEST_ROOT") {
+            let test_root = PathBuf::from(test_root);
+            known_launcher_dirs.push(test_root.join("usr/local/bin"));
+            known_launcher_dirs.push(test_root.join("opt/homebrew/bin"));
+        } else {
+            known_launcher_dirs.push(PathBuf::from("/usr/local/bin"));
+            known_launcher_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        }
+        let versioned_root = env::var_os("WORKMAN_UPDATE_VERSION_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir.join(".local/share/workman"));
+        Ok(Self::new(
+            app_bundle,
+            &home_dir,
+            search_path,
+            known_launcher_dirs,
+            versioned_root,
+        ))
+    }
+}
+
 /// Resolve the directory containing the actual executable target. current_exe generally
 /// resolves launcher symlinks; canonicalization makes that behavior explicit for installers.
 pub fn install_dir_from_executable(executable: impl AsRef<Path>) -> UpdateResult<PathBuf> {
@@ -519,6 +789,18 @@ pub fn install_dir_from_executable(executable: impl AsRef<Path>) -> UpdateResult
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| UpdateError::InvalidRelease("executable has no parent directory".to_owned()))
+}
+
+fn application_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle
+            .extension()
+            .is_some_and(|extension| extension == "app"))
+    .then(|| bundle.to_path_buf())
 }
 
 fn parse_version(value: &str) -> UpdateResult<Version> {
@@ -614,6 +896,301 @@ fn installed_binary_targets(install_dir: &Path) -> UpdateResult<(PathBuf, PathBu
     ensure_existing_binary(&wrk)?;
     ensure_existing_binary(&workmand)?;
     unreachable!("existing Workman targets returned above")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstalledProgram {
+    Wrk,
+    Workmand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveredLauncher {
+    path: PathBuf,
+    binary: InstalledProgram,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ApplicationInventory {
+    launchers: Vec<DiscoveredLauncher>,
+    incomplete_launchers: Vec<PathBuf>,
+    versioned_installs: Vec<PathBuf>,
+}
+
+fn discover_application_inventory(target: &ApplicationInstallTarget) -> ApplicationInventory {
+    let mut directories = Vec::new();
+    let mut seen_directories = HashSet::new();
+    for directory in target
+        .search_path
+        .iter()
+        .chain(target.known_launcher_dirs.iter())
+    {
+        let directory = if directory.as_os_str().is_empty() {
+            target.home_dir.clone()
+        } else {
+            directory.clone()
+        };
+        if seen_directories.insert(directory.clone()) {
+            directories.push(directory);
+        }
+    }
+
+    let mut launchers = Vec::new();
+    let mut incomplete_launchers = Vec::new();
+    let mut seen_launchers = HashSet::new();
+    for directory in directories {
+        for (name, binary) in [
+            ("wrk", InstalledProgram::Wrk),
+            ("awm", InstalledProgram::Wrk),
+            ("workmand", InstalledProgram::Workmand),
+            ("awmd", InstalledProgram::Workmand),
+        ] {
+            let path = directory.join(executable_name(name));
+            if fs::symlink_metadata(&path).is_err() || !seen_launchers.insert(path.clone()) {
+                continue;
+            }
+            let Ok(resolved) = path.canonicalize() else {
+                incomplete_launchers.push(path);
+                continue;
+            };
+            if !resolved.is_file() || !resolved_binary_has_pair(&resolved, binary) {
+                incomplete_launchers.push(path);
+                continue;
+            }
+            launchers.push(DiscoveredLauncher { path, binary });
+        }
+    }
+
+    let mut versioned_installs = Vec::new();
+    if let Ok(entries) = fs::read_dir(&target.versioned_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let bin = path.join("bin");
+            if path.is_dir()
+                && bin.join(executable_name("wrk")).is_file()
+                && bin.join(executable_name("workmand")).is_file()
+            {
+                versioned_installs.push(path);
+            }
+        }
+    }
+    versioned_installs.sort();
+    launchers.sort_by(|left, right| left.path.cmp(&right.path));
+    incomplete_launchers.sort();
+    ApplicationInventory {
+        launchers,
+        incomplete_launchers,
+        versioned_installs,
+    }
+}
+
+fn resolved_binary_has_pair(path: &Path, binary: InstalledProgram) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let name = path.file_name().and_then(|name| name.to_str());
+    let sibling = match (binary, name) {
+        (InstalledProgram::Wrk, Some("awm")) => "awmd",
+        (InstalledProgram::Wrk, _) => "workmand",
+        (InstalledProgram::Workmand, Some("awmd")) => "awm",
+        (InstalledProgram::Workmand, _) => "wrk",
+    };
+    parent.join(executable_name(sibling)).is_file()
+}
+
+fn app_bundle_identifier(bundle: &Path) -> Result<String, String> {
+    let plist_path = bundle.join("Contents/Info.plist");
+    if !plist_path.is_file() {
+        return Err(format!("{} is missing", plist_path.display()));
+    }
+    let value = plist::Value::from_file(&plist_path)
+        .map_err(|error| format!("could not read {}: {error}", plist_path.display()))?;
+    value
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
+        .and_then(plist::Value::as_string)
+        .filter(|identifier| !identifier.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("{} has no CFBundleIdentifier", plist_path.display()))
+}
+
+fn commit_staging_directory(staging: &Path, destination: &Path) -> UpdateResult<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        UpdateError::InvalidRelease(format!("{} has no parent", destination.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    let backup = next_update_path(destination, "old")?;
+    let had_destination = fs::symlink_metadata(destination).is_ok();
+    if had_destination {
+        fs::rename(destination, &backup)?;
+    }
+    if let Err(error) = fs::rename(staging, destination) {
+        if had_destination {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error.into());
+    }
+    if had_destination {
+        remove_path(&backup)?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn refresh_application_bundle(
+    source: &Path,
+    destination: &Path,
+    expected_identifier: &str,
+) -> UpdateResult<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        UpdateError::InvalidRelease(format!("{} has no parent", destination.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    let temporary = next_update_path(destination, "new")?;
+    let backup = next_update_path(destination, "old")?;
+    copy_application_bundle(source, &temporary)?;
+    let copied_identifier = app_bundle_identifier(&temporary).map_err(|error| {
+        UpdateError::InvalidRelease(format!("copied desktop app is invalid: {error}"))
+    })?;
+    if copied_identifier != expected_identifier {
+        let _ = remove_path(&temporary);
+        return Err(UpdateError::InvalidRelease(format!(
+            "copied app bundle identifier {:?} does not match installed identifier {:?}",
+            copied_identifier, expected_identifier
+        )));
+    }
+
+    let had_destination = fs::symlink_metadata(destination).is_ok();
+    if had_destination {
+        fs::rename(destination, &backup)?;
+    }
+    if let Err(error) = fs::rename(&temporary, destination) {
+        if had_destination {
+            let _ = fs::rename(&backup, destination);
+        }
+        let _ = remove_path(&temporary);
+        return Err(error.into());
+    }
+    if had_destination {
+        remove_path(&backup)?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn copy_application_bundle(source: &Path, destination: &Path) -> UpdateResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("ditto")
+            .arg(source)
+            .arg(destination)
+            .status()?;
+        if !status.success() {
+            return Err(UpdateError::InvalidRelease(format!(
+                "ditto could not copy {} to {}",
+                source.display(),
+                destination.display()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        copy_directory_tree(source, destination)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_directory_tree(source: &Path, destination: &Path) -> UpdateResult<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_directory_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+            fs::set_permissions(&destination_path, fs::metadata(&source_path)?.permissions())?;
+        } else {
+            return Err(UpdateError::InvalidRelease(format!(
+                "desktop app contains an unsupported filesystem entry: {}",
+                source_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn replace_launcher(path: &Path, target: &Path) -> UpdateResult<Option<PathBuf>> {
+    if path.canonicalize().is_ok_and(|current| {
+        target
+            .canonicalize()
+            .is_ok_and(|expected| current == expected)
+    }) {
+        return Ok(None);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidRelease(format!("{} has no parent", path.display())))?;
+    let temporary = next_update_path(path, "link")?;
+    let backup = next_update_path(path, "backup")?;
+    create_launcher(&temporary, target)?;
+    fs::rename(path, &backup)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::rename(&backup, path);
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    sync_directory(parent)?;
+    Ok(Some(backup))
+}
+
+fn create_launcher(path: &Path, target: &Path) -> UpdateResult<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, path)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::copy(target, path)?;
+        set_executable(path)?;
+        Ok(())
+    }
+}
+
+fn next_update_path(path: &Path, label: &str) -> UpdateResult<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidRelease(format!("{} has no parent", path.display())))?;
+    let name = path.file_name().ok_or_else(|| {
+        UpdateError::InvalidRelease(format!("{} has no file name", path.display()))
+    })?;
+    for attempt in 0..100_u32 {
+        let candidate = parent.join(format!(
+            ".{}.workman-update-{label}-{}-{attempt}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        if fs::symlink_metadata(&candidate).is_err() {
+            return Ok(candidate);
+        }
+    }
+    Err(UpdateError::InvalidRelease(format!(
+        "could not allocate a temporary path beside {}",
+        path.display()
+    )))
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)
+    } else {
+        fs::remove_dir_all(path)
+    }
 }
 
 fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
@@ -718,6 +1295,11 @@ fn extract_zip(bytes: &[u8], destination: &Path) -> UpdateResult<()> {
         }
         let mut file = File::create(&output)?;
         io::copy(&mut entry, &mut file)?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&output, fs::Permissions::from_mode(mode))?;
+        }
     }
     Ok(())
 }
@@ -882,5 +1464,19 @@ mod tests {
         );
         assert!(validate_sha256(&"z".repeat(64), "asset").is_err());
         assert!(validate_sha256("abc", "asset").is_err());
+    }
+
+    #[test]
+    fn app_surface_detection_stops_at_the_bundle_root() {
+        let executable =
+            Path::new("/tmp/workman-todo467/Workman Todo 467.app/Contents/MacOS/workman-desktop");
+        assert_eq!(
+            application_bundle_from_executable(executable),
+            Some(PathBuf::from("/tmp/workman-todo467/Workman Todo 467.app"))
+        );
+        assert_eq!(
+            application_bundle_from_executable(Path::new("/tmp/workman/bin/workmand")),
+            None
+        );
     }
 }

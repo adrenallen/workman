@@ -325,6 +325,13 @@ verify_bundle_layouts() {
   record_stage layouts "$started"
 }
 
+verify_app_surface_update_hop() {
+  local started=$SECONDS
+  log "Dock-launched app update hop"
+  "$REPO_ROOT/scripts/verify-app-surface-update.sh"
+  record_stage app-surface-update "$started"
+}
+
 write_release_metadata() {
   local started=$SECONDS
   log "Checksums and release notes"
@@ -439,6 +446,7 @@ build_linux_binaries
 build_linux_desktop
 package_linux_bundles
 verify_bundle_layouts
+verify_app_surface_update_hop
 write_release_metadata
 publish_release
 prune_r2_releases
