@@ -5,6 +5,47 @@ set -euo pipefail
 # command. Compile the desktop in that environment while swapping only the profile to `dist`,
 # then mirror it to the release path where Tauri's bundler expects to find it. A desktop binary
 # compiled before Tauri starts retains the configured devUrl and produces a blank application.
+PRODUCTION_FEATURE=false
+EXPECT_FEATURE_LIST=false
+for argument in "$@"; do
+  if [[ "$EXPECT_FEATURE_LIST" == true ]]; then
+    feature_list="${argument//,/ }"
+    for feature in $feature_list; do
+      [[ "$feature" == tauri/custom-protocol ]] && PRODUCTION_FEATURE=true
+    done
+    EXPECT_FEATURE_LIST=false
+    continue
+  fi
+
+  case "$argument" in
+    --features|-F) EXPECT_FEATURE_LIST=true ;;
+    --features=*)
+      feature_list="${argument#--features=}"
+      feature_list="${feature_list//,/ }"
+      for feature in $feature_list; do
+        [[ "$feature" == tauri/custom-protocol ]] && PRODUCTION_FEATURE=true
+      done
+      ;;
+    -F*)
+      feature_list="${argument#-F}"
+      feature_list="${feature_list//,/ }"
+      for feature in $feature_list; do
+        [[ "$feature" == tauri/custom-protocol ]] && PRODUCTION_FEATURE=true
+      done
+      ;;
+  esac
+done
+
+if [[ "$PRODUCTION_FEATURE" != true ]]; then
+  cat >&2 <<'EOF'
+tauri dist runner: refusing to build a release desktop without `tauri/custom-protocol`.
+Without Tauri's production protocol feature, generate_context! selects build.devUrl and the
+packaged application opens a blank development WebView. Run this build through `tauri build`;
+do not package a desktop binary compiled by a plain Cargo invocation.
+EOF
+  exit 78
+fi
+
 TARGET=""
 CARGO_ARGS=()
 while (($#)); do
