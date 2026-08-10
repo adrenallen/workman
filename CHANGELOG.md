@@ -4,6 +4,20 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.6 - 2026-08-10
+
+Workman 0.1.6 makes release installs durable, so removing the original downloaded or extracted
+bundle no longer breaks the installed command-line tools.
+
+### Fixes
+
+- Copy `wrk` and `workmand` into a version-owned directory before linking their launchers, making
+  the bundled installer independent of its extraction location.
+- Move command-line and Dock-launched updates through durable versioned installs while preserving
+  and repairing discovered launchers, with regression coverage for installer and updater flows.
+- Clarify in the macOS and Linux getting-started guides that the extracted folder can be deleted
+  after installation.
+
 ## 0.1.5 - 2026-08-08
 
 Workman 0.1.5 is the first signed and notarized release, removing the Gatekeeper workaround for
