@@ -20,6 +20,7 @@
   import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
+  import { hasRetainedTerminalOutput } from './terminalFirstPaint';
   import { encodeTerminalKey } from './terminalKeys';
   import { installTerminalTransfers } from './terminalTransfers';
 
@@ -46,6 +47,10 @@
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
   let hasOutput = $state(false);
+  let liveOutputPreviewElement = $state<HTMLPreElement | null>(null);
+  let liveOutputPreview = $state('');
+  let liveOutputLoaded = $state(false);
+  let liveOutputRetained = $state(false);
   let linkHintVisible = $state(false);
   let transferDropActive = $state(false);
   let imagePasteSaving = $state(false);
@@ -256,6 +261,9 @@
     setKeyboardProtocol(0, 0);
     instance.reset();
     hasOutput = false;
+    liveOutputPreview = '';
+    liveOutputLoaded = false;
+    liveOutputRetained = false;
     linkHintVisible = false;
     if (!isConnected || processStatus !== 'running') {
       attachmentGeneration += 1;
@@ -277,6 +285,7 @@
       focusRequested: true
     };
     replayState = state;
+    void loadLiveOutputPreview(state);
     void (async () => {
       // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
       // resizing afterward reflows the active zsh prompt differently from a native terminal.
@@ -334,14 +343,19 @@
 
   function handleTerminalFrame(frame: TerminalFrame): void {
     if (frame.process_id !== process.id || process.status !== 'running' || !terminal) return;
-    if (frame.data.length > 0) hasOutput = true;
     const state = replayState;
+    const generation = attachmentGeneration;
     if (state) {
       state.kittyKeyboardFlags = frame.kitty_keyboard_flags;
       state.modifyOtherKeys = frame.modify_other_keys;
     }
     setKeyboardProtocol(frame.kitty_keyboard_flags, frame.modify_other_keys);
     terminal.write(Uint8Array.from(frame.data), () => {
+      if (
+        frame.data.length > 0
+        && generation === attachmentGeneration
+        && frame.process_id === process.id
+      ) hasOutput = true;
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
       state.parsedThrough = Math.max(
         state.parsedThrough,
@@ -349,6 +363,23 @@
       );
       finishReplayIfReady(state);
     });
+  }
+
+  async function loadLiveOutputPreview(state: TerminalReplayState): Promise<void> {
+    try {
+      const output = await client.renderedProcessOutput(state.processId);
+      if (replayState !== state || state.generation !== attachmentGeneration) return;
+      liveOutputPreview = output.text;
+      liveOutputRetained = hasRetainedTerminalOutput(output);
+      liveOutputLoaded = true;
+      if (!output.text) return;
+
+      await nextAnimationFrame();
+      if (replayState !== state || hasOutput || !liveOutputPreviewElement) return;
+      liveOutputPreviewElement.scrollTop = liveOutputPreviewElement.scrollHeight;
+    } catch (cause) {
+      if (replayState === state) onError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   function queueInput(bytes: Uint8Array): void {
@@ -490,7 +521,13 @@
     aria-hidden={process.status !== 'running'}
     aria-label={`${process.name} terminal`}
   ></div>
-  {#if process.status === 'running' && !hasOutput}
+  {#if process.status === 'running' && !hasOutput && liveOutputRetained && liveOutputPreview}
+    <pre
+      class="terminal-retained-preview"
+      bind:this={liveOutputPreviewElement}
+      aria-label={`Retained output from ${process.name}`}
+    >{liveOutputPreview}</pre>
+  {:else if process.status === 'running' && !hasOutput && liveOutputLoaded && !liveOutputRetained}
     <div class="terminal-starting" aria-live="polite">
       <span aria-hidden="true"></span>
       <strong>Waiting for first output…</strong>
@@ -600,6 +637,21 @@
   }
 
   @keyframes terminal-waiting-spin { to { transform: rotate(360deg); } }
+
+  .terminal-retained-preview {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    box-sizing: border-box;
+    margin: 0;
+    overflow: hidden;
+    padding: 7px 6px 5px 8px;
+    color: var(--terminal-foreground);
+    background: var(--terminal-background);
+    font: 430 var(--terminal-font-size)/1.18 var(--terminal-font-family);
+    white-space: pre;
+    pointer-events: none;
+  }
 
   .terminal-host {
     min-width: 0;
