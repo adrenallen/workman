@@ -14,8 +14,8 @@ This download contains all three parts of Workman. Most people start with the ap
 
 ## First run
 
-1. Move this whole extracted folder somewhere permanent. The command-line installer creates
-   links back to its `bin/` directory.
+1. Keep the extracted folder only as long as you need it. The command-line installer copies its
+   binaries to a durable location in your home directory.
 2. Drag `Workman.app` into `/Applications`, then double-click it.
 3. Workman 0.1.5 and newer are Developer ID signed and notarized, so a browser-downloaded copy
    should pass Gatekeeper and open normally. Releases 0.1.4 and earlier were unsigned; if you are
@@ -32,9 +32,11 @@ From this folder, run:
 ./install.sh
 ```
 
-The installer links `wrk` and `workmand` into `~/.local/bin`, prints a PATH hint when needed, and
-offers to copy `Workman.app` to `/Applications`. Afterward, try `wrk --help`. Again, `workmand` is
-an internal background service; do not launch it yourself.
+The installer copies `wrk` and `workmand` to
+`~/.local/share/workman/dist/<version>/bin/`, links them into `~/.local/bin`, prints a PATH hint
+when needed, and offers to copy `Workman.app` to `/Applications`. You can delete the extracted
+folder afterward. Then try `wrk --help`. Again, `workmand` is an internal background service; do
+not launch it yourself.
 
 ## Updates
 

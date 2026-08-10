@@ -16,8 +16,8 @@ Linux desktop support is experimental. If you prefer a system package, download 
 
 ## First run
 
-1. Extract the archive somewhere permanent. The command-line installer creates links back to
-   its `bin/` directory.
+1. Extract the archive anywhere convenient. The command-line installer copies its binaries to a
+   durable location in your home directory.
 2. Start the desktop app:
 
    ```sh
@@ -35,9 +35,10 @@ From this folder, run:
 ./install.sh
 ```
 
-The installer links `wrk` and `workmand` into `~/.local/bin` and prints a PATH hint when needed.
-Try `wrk --help` afterward. `workmand` is an internal background service; do not launch it
-yourself.
+The installer copies `wrk` and `workmand` to
+`~/.local/share/workman/dist/<version>/bin/`, links them into `~/.local/bin`, and prints a PATH
+hint when needed. You can delete the extracted folder afterward. Try `wrk --help`; `workmand` is
+an internal background service, so do not launch it yourself.
 
 ## Updates
 

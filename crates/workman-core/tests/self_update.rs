@@ -4,6 +4,7 @@ use std::{
     io::{Cursor, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     thread,
 };
@@ -43,6 +44,28 @@ fn unified_zip_archive() -> Vec<u8> {
     for (name, body) in [
         ("bin/wrk", b"new wrk".as_slice()),
         ("bin/workmand", b"new workmand".as_slice()),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(body).unwrap();
+    }
+    archive.finish().unwrap().into_inner()
+}
+
+#[cfg(unix)]
+fn executable_unified_zip_archive() -> Vec<u8> {
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    for (name, body) in [
+        (
+            "bin/wrk",
+            b"#!/bin/sh\nprintf 'workman 9.0.0\\n'\n".as_slice(),
+        ),
+        (
+            "bin/workmand",
+            b"#!/bin/sh\nprintf 'workmand 9.0.0\\n'\n".as_slice(),
+        ),
     ] {
         archive.start_file(name, options).unwrap();
         archive.write_all(body).unwrap();
@@ -128,7 +151,7 @@ fn app_install_target(root: &Path, app: PathBuf) -> ApplicationInstallTarget {
         &home,
         vec![launchers.clone()],
         vec![launchers],
-        home.join(".local/share/workman"),
+        home.join(".local/share/workman/dist"),
     )
 }
 
@@ -375,6 +398,139 @@ async fn unified_macos_zip_updates_binaries_from_bin_directory() {
             .desktop_instruction
             .unwrap()
             .contains("platform bundle workman-macos-arm64.zip")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn versioned_cli_update_honors_injected_layout_and_survives_old_source_removal() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let launcher_dir = root.path().join("injected-path");
+    let versioned_root = root.path().join("injected-dist");
+    let old_version = versioned_root.join("0.1.5");
+    let old_extraction = root.path().join("old-extraction");
+    let old_bin = old_extraction.join("bin");
+    fs::create_dir_all(&old_bin).unwrap();
+    fs::create_dir_all(old_version.join("bin")).unwrap();
+    fs::create_dir_all(&launcher_dir).unwrap();
+    fs::write(old_bin.join("wrk"), "old wrk").unwrap();
+    fs::write(old_bin.join("workmand"), "old workmand").unwrap();
+    fs::write(old_version.join("bin/wrk"), "historical wrk").unwrap();
+    fs::write(old_version.join("bin/workmand"), "historical workmand").unwrap();
+    symlink(old_bin.join("wrk"), launcher_dir.join("wrk")).unwrap();
+    symlink(old_bin.join("workmand"), launcher_dir.join("workmand")).unwrap();
+
+    let archive = executable_unified_zip_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-update-fixture.zip",
+        "workman-update-fixture.zip",
+        2,
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "versioned_cli_update_injected_environment_child",
+            "--nocapture",
+        ])
+        .env("WORKMAN_UPDATE_LAYOUT_CHILD", "1")
+        .env(
+            "WORKMAN_UPDATE_TEST_API",
+            format!("{}/latest", fixture.base),
+        )
+        .env("WORKMAN_UPDATE_TEST_EXECUTABLE", old_bin.join("wrk"))
+        .env("WORKMAN_UPDATE_TEST_OLD_EXTRACTION", &old_extraction)
+        .env("WORKMAN_UPDATE_TEST_OLD_VERSION", &old_version)
+        .env("WORKMAN_UPDATE_HOME", &home)
+        .env("WORKMAN_UPDATE_PATH", &launcher_dir)
+        .env("WORKMAN_UPDATE_VERSION_ROOT", &versioned_root)
+        .env("WORKMAN_INSTALL_TEST_ROOT", root.path().join("system-root"))
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "child updater regression failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!old_extraction.exists());
+    assert!(!old_version.exists());
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("wrk")).unwrap(),
+        fs::canonicalize(versioned_root.join("9.0.0/bin/wrk")).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn versioned_cli_update_injected_environment_child() {
+    if std::env::var_os("WORKMAN_UPDATE_LAYOUT_CHILD").is_none() {
+        return;
+    }
+
+    let home = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_HOME").unwrap());
+    let launcher_dir = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_PATH").unwrap());
+    let versioned_root = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_VERSION_ROOT").unwrap());
+    let executable = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_TEST_EXECUTABLE").unwrap());
+    let old_extraction =
+        PathBuf::from(std::env::var_os("WORKMAN_UPDATE_TEST_OLD_EXTRACTION").unwrap());
+    let old_version = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_TEST_OLD_VERSION").unwrap());
+    let target = UpdateInstallTarget::discover(&executable).unwrap();
+    let UpdateInstallTarget::VersionedBinary(discovered) = &target else {
+        panic!("CLI discovery did not choose the durable versioned target");
+    };
+    assert_eq!(
+        discovered.current_binary_dir,
+        fs::canonicalize(executable.parent().unwrap()).unwrap()
+    );
+    assert_eq!(discovered.home_dir, home);
+    assert_eq!(discovered.search_path, vec![launcher_dir.clone()]);
+    assert_eq!(discovered.versioned_root, versioned_root);
+
+    let client = UpdateClient::with_target(
+        std::env::var("WORKMAN_UPDATE_TEST_API").unwrap(),
+        ReleaseTarget {
+            binary_asset_name: "workman-update-fixture.zip".to_owned(),
+            desktop_asset_name: "workman-update-fixture.zip".to_owned(),
+            platform_label: "injected updater layout".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap();
+    let check = client.check("0.1.5").await.unwrap();
+    let report = client.install_target(&check, &target).await.unwrap();
+    let new_bin = versioned_root.join("9.0.0/bin");
+    assert_eq!(
+        report.install_dir,
+        versioned_root.join("9.0.0").display().to_string()
+    );
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("wrk")).unwrap(),
+        fs::canonicalize(new_bin.join("wrk")).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(home.join(".local/bin/workmand")).unwrap(),
+        fs::canonicalize(new_bin.join("workmand")).unwrap()
+    );
+
+    fs::remove_dir_all(old_extraction).unwrap();
+    fs::remove_dir_all(old_version).unwrap();
+    let version_output = Command::new(launcher_dir.join("wrk"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(version_output.status.success());
+    assert_eq!(
+        String::from_utf8(version_output.stdout).unwrap(),
+        "workman 9.0.0\n"
     );
 }
 

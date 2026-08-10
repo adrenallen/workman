@@ -492,10 +492,122 @@ impl UpdateClient {
     ) -> UpdateResult<UpdateInstallReport> {
         match target {
             UpdateInstallTarget::BinaryDirectory(directory) => self.install(check, directory).await,
+            UpdateInstallTarget::VersionedBinary(target) => {
+                self.install_versioned_binary(check, target).await
+            }
             UpdateInstallTarget::Application(application) => {
                 self.install_application(check, application).await
             }
         }
+    }
+
+    async fn install_versioned_binary(
+        &self,
+        check: &UpdateCheck,
+        target: &VersionedBinaryInstallTarget,
+    ) -> UpdateResult<UpdateInstallReport> {
+        if !check.available {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} is already current",
+                check.current
+            )));
+        }
+        let current_binary_dir = target.current_binary_dir.canonicalize()?;
+        installed_binary_targets(&current_binary_dir)?;
+        let binary_asset = check
+            .binary_asset
+            .as_ref()
+            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
+        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
+        let archive = self.download(binary_asset).await?;
+        if archive.len() as u64 != binary_asset.size {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} size mismatch: expected {} bytes, got {}",
+                binary_asset.name,
+                binary_asset.size,
+                archive.len()
+            )));
+        }
+        let actual = sha256_hex(&archive);
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(UpdateError::ChecksumMismatch {
+                asset: binary_asset.name.clone(),
+                expected,
+                actual,
+            });
+        }
+
+        let inventory = discover_versioned_binary_inventory(target);
+        fs::create_dir_all(&target.versioned_root)?;
+        let staging = unique_staging_dir(&target.versioned_root)?;
+        let result = (|| -> UpdateResult<UpdateInstallReport> {
+            extract_release_archive(&archive, &binary_asset.name, &staging)?;
+            let wrk_source = staged_binary(&staging, "wrk")?;
+            let workmand_source = staged_binary(&staging, "workmand")?;
+            ensure_staged_binary(&wrk_source, &staging)?;
+            ensure_staged_binary(&workmand_source, &staging)?;
+            set_executable(&wrk_source)?;
+            set_executable(&workmand_source)?;
+            let quarantine_cleared = clear_macos_quarantine(&staging);
+
+            let version = parse_version(&check.latest)?.to_string();
+            let install_dir = target.versioned_root.join(version);
+            commit_staging_directory(&staging, &install_dir)?;
+            let wrk_target = install_dir.join("bin").join(executable_name("wrk"));
+            let workmand_target = install_dir.join("bin").join(executable_name("workmand"));
+            ensure_existing_binary(&wrk_target)?;
+            ensure_existing_binary(&workmand_target)?;
+
+            let mut launchers = inventory.launchers;
+            let canonical_launcher_dir = target.home_dir.join(".local/bin");
+            for (name, binary) in [
+                ("wrk", InstalledProgram::Wrk),
+                ("workmand", InstalledProgram::Workmand),
+            ] {
+                let path = canonical_launcher_dir.join(executable_name(name));
+                if !launchers.iter().any(|launcher| launcher.path == path) {
+                    launchers.push(DiscoveredLauncher { path, binary });
+                }
+            }
+            launchers.sort_by(|left, right| left.path.cmp(&right.path));
+
+            let mut updated_files = vec![wrk_target.clone(), workmand_target.clone()];
+            for launcher in launchers {
+                let destination = match launcher.binary {
+                    InstalledProgram::Wrk => &wrk_target,
+                    InstalledProgram::Workmand => &workmand_target,
+                };
+                if ensure_launcher(&launcher.path, destination)? {
+                    updated_files.push(launcher.path);
+                }
+            }
+
+            Ok(UpdateInstallReport {
+                current: check.current.clone(),
+                latest: check.latest.clone(),
+                install_dir: install_dir.to_string_lossy().into_owned(),
+                updated_files: updated_files
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
+                    if asset.name == binary_asset.name {
+                        format!(
+                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            asset.name, asset.url
+                        )
+                    } else {
+                        format!(
+                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
+                            asset.name, asset.url
+                        )
+                    }
+                }),
+                quarantine_cleared,
+            })
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        result
     }
 
     async fn install_application(
@@ -688,11 +800,12 @@ pub struct UpdateInstallReport {
     pub quarantine_cleared: bool,
 }
 
-/// Destination selected for an update. Dock-launched apps require installation discovery because
-/// their executable lives inside the app bundle rather than beside wrk and workmand.
+/// Destination selected for an update. Installed CLI binaries hop to a new durable versioned
+/// directory, while Dock-launched apps also refresh the installed application bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UpdateInstallTarget {
     BinaryDirectory(PathBuf),
+    VersionedBinary(VersionedBinaryInstallTarget),
     Application(ApplicationInstallTarget),
 }
 
@@ -702,17 +815,59 @@ impl UpdateInstallTarget {
     }
 
     /// Resolve the update destination from a process executable. Paths inside a macOS app bundle
-    /// use inventory-based discovery; ordinary CLI/daemon executables retain same-directory
-    /// replacement.
+    /// use app-surface discovery; ordinary installed CLI/daemon executables hop to the durable
+    /// versioned layout and repoint their launchers.
     pub fn discover(executable: impl AsRef<Path>) -> UpdateResult<Self> {
         let executable = executable.as_ref().canonicalize()?;
-        let Some(app_bundle) = application_bundle_from_executable(&executable) else {
-            return Ok(Self::BinaryDirectory(install_dir_from_executable(
-                executable,
-            )?));
-        };
-        Ok(Self::Application(
-            ApplicationInstallTarget::from_environment(app_bundle)?,
+        if let Some(app_bundle) = application_bundle_from_executable(&executable) {
+            return Ok(Self::Application(
+                ApplicationInstallTarget::from_environment(app_bundle)?,
+            ));
+        }
+        let current_binary_dir = executable.parent().map(Path::to_path_buf).ok_or_else(|| {
+            UpdateError::InvalidRelease("executable has no parent directory".to_owned())
+        })?;
+        Ok(Self::VersionedBinary(
+            VersionedBinaryInstallTarget::from_environment(current_binary_dir)?,
+        ))
+    }
+}
+
+/// Injectable CLI discovery inputs used to migrate updates into a durable versioned directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionedBinaryInstallTarget {
+    pub current_binary_dir: PathBuf,
+    pub home_dir: PathBuf,
+    pub search_path: Vec<PathBuf>,
+    pub known_launcher_dirs: Vec<PathBuf>,
+    pub versioned_root: PathBuf,
+}
+
+impl VersionedBinaryInstallTarget {
+    pub fn new(
+        current_binary_dir: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        search_path: Vec<PathBuf>,
+        known_launcher_dirs: Vec<PathBuf>,
+        versioned_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            current_binary_dir: current_binary_dir.into(),
+            home_dir: home_dir.into(),
+            search_path,
+            known_launcher_dirs,
+            versioned_root: versioned_root.into(),
+        }
+    }
+
+    fn from_environment(current_binary_dir: PathBuf) -> UpdateResult<Self> {
+        let environment = UpdateInstallEnvironment::from_environment()?;
+        Ok(Self::new(
+            current_binary_dir,
+            environment.home_dir,
+            environment.search_path,
+            environment.known_launcher_dirs,
+            environment.versioned_root,
         ))
     }
 }
@@ -745,14 +900,33 @@ impl ApplicationInstallTarget {
     }
 
     fn from_environment(app_bundle: PathBuf) -> UpdateResult<Self> {
+        let environment = UpdateInstallEnvironment::from_environment()?;
+        Ok(Self::new(
+            app_bundle,
+            environment.home_dir,
+            environment.search_path,
+            environment.known_launcher_dirs,
+            environment.versioned_root,
+        ))
+    }
+}
+
+struct UpdateInstallEnvironment {
+    home_dir: PathBuf,
+    search_path: Vec<PathBuf>,
+    known_launcher_dirs: Vec<PathBuf>,
+    versioned_root: PathBuf,
+}
+
+impl UpdateInstallEnvironment {
+    fn from_environment() -> UpdateResult<Self> {
         let home_dir = env::var_os("WORKMAN_UPDATE_HOME")
             .or_else(|| env::var_os("HOME"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| {
                 UpdateError::InvalidRelease(
-                    "app-surface update cannot determine HOME; rerun the keyed installer"
-                        .to_owned(),
+                    "update cannot determine HOME; rerun the keyed installer".to_owned(),
                 )
             })?;
         let search_path = env::var_os("WORKMAN_UPDATE_PATH")
@@ -770,14 +944,13 @@ impl ApplicationInstallTarget {
         }
         let versioned_root = env::var_os("WORKMAN_UPDATE_VERSION_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir.join(".local/share/workman"));
-        Ok(Self::new(
-            app_bundle,
-            &home_dir,
+            .unwrap_or_else(|| home_dir.join(".local/share/workman/dist"));
+        Ok(Self {
+            home_dir,
             search_path,
             known_launcher_dirs,
             versioned_root,
-        ))
+        })
     }
 }
 
@@ -911,22 +1084,41 @@ struct DiscoveredLauncher {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ApplicationInventory {
+struct InstallInventory {
     launchers: Vec<DiscoveredLauncher>,
     incomplete_launchers: Vec<PathBuf>,
     versioned_installs: Vec<PathBuf>,
 }
 
-fn discover_application_inventory(target: &ApplicationInstallTarget) -> ApplicationInventory {
+fn discover_application_inventory(target: &ApplicationInstallTarget) -> InstallInventory {
+    discover_install_inventory(
+        &target.home_dir,
+        &target.search_path,
+        &target.known_launcher_dirs,
+        &target.versioned_root,
+    )
+}
+
+fn discover_versioned_binary_inventory(target: &VersionedBinaryInstallTarget) -> InstallInventory {
+    discover_install_inventory(
+        &target.home_dir,
+        &target.search_path,
+        &target.known_launcher_dirs,
+        &target.versioned_root,
+    )
+}
+
+fn discover_install_inventory(
+    home_dir: &Path,
+    search_path: &[PathBuf],
+    known_launcher_dirs: &[PathBuf],
+    versioned_root: &Path,
+) -> InstallInventory {
     let mut directories = Vec::new();
     let mut seen_directories = HashSet::new();
-    for directory in target
-        .search_path
-        .iter()
-        .chain(target.known_launcher_dirs.iter())
-    {
+    for directory in search_path.iter().chain(known_launcher_dirs.iter()) {
         let directory = if directory.as_os_str().is_empty() {
-            target.home_dir.clone()
+            home_dir.to_path_buf()
         } else {
             directory.clone()
         };
@@ -962,7 +1154,7 @@ fn discover_application_inventory(target: &ApplicationInstallTarget) -> Applicat
     }
 
     let mut versioned_installs = Vec::new();
-    if let Ok(entries) = fs::read_dir(&target.versioned_root) {
+    if let Ok(entries) = fs::read_dir(versioned_root) {
         for entry in entries.flatten() {
             let path = entry.path();
             let bin = path.join("bin");
@@ -977,7 +1169,7 @@ fn discover_application_inventory(target: &ApplicationInstallTarget) -> Applicat
     versioned_installs.sort();
     launchers.sort_by(|left, right| left.path.cmp(&right.path));
     incomplete_launchers.sort();
-    ApplicationInventory {
+    InstallInventory {
         launchers,
         incomplete_launchers,
         versioned_installs,
@@ -1121,6 +1313,30 @@ fn copy_directory_tree(source: &Path, destination: &Path) -> UpdateResult<()> {
         }
     }
     Ok(())
+}
+
+fn ensure_launcher(path: &Path, target: &Path) -> UpdateResult<bool> {
+    if path.canonicalize().is_ok_and(|current| {
+        target
+            .canonicalize()
+            .is_ok_and(|expected| current == expected)
+    }) {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidRelease(format!("{} has no parent", path.display())))?;
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(path).is_ok() {
+        replace_launcher(path, target)?;
+        return Ok(true);
+    }
+
+    let temporary = next_update_path(path, "link")?;
+    create_launcher(&temporary, target)?;
+    fs::rename(&temporary, path)?;
+    sync_directory(parent)?;
+    Ok(true)
 }
 
 fn replace_launcher(path: &Path, target: &Path) -> UpdateResult<Option<PathBuf>> {
