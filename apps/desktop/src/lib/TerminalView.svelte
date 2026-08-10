@@ -19,6 +19,7 @@
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
+  import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { encodeTerminalKey } from './terminalKeys';
   import { installTerminalTransfers } from './terminalTransfers';
 
@@ -64,6 +65,7 @@
   let appliedThemeSignature = '';
   let retainedOutput = $state('');
   let retainedOutputLoading = $state(false);
+  let retainedOutputSnapshotKey: string | null = null;
   let retainedOutputGeneration = 0;
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
@@ -307,7 +309,11 @@
 
   $effect(() => {
     const processId = process.id;
-    const shouldLoad = connected && processDead;
+    const snapshotKey = stoppedOutputSnapshotKey(process, connected);
+    if (snapshotKey === retainedOutputSnapshotKey) return;
+    retainedOutputSnapshotKey = snapshotKey;
+
+    const shouldLoad = snapshotKey !== null;
     const generation = ++retainedOutputGeneration;
     retainedOutput = '';
     retainedOutputLoading = shouldLoad;
