@@ -59,7 +59,7 @@ async fn wait_for_context(path: &Path) -> Result<(i64, String), Box<dyn Error>> 
 }
 
 #[tokio::test]
-async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
+async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_dir = temp.path().join("workspace");
@@ -306,41 +306,46 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
     )
     .await;
 
-    assert_eq!(
-        call(
-            &root,
-            "stop_process",
-            json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
-        )
-        .await["status"],
-        "stopped"
-    );
-    let after_parent_only = call(&root, "list_processes", json!({ "project_id": 7 })).await;
-    let after_parent_only = after_parent_only["processes"].as_array().unwrap();
-    for process_id in [first_child_id, second_child_id, grandchild_id, terminal_id] {
-        assert_eq!(
-            after_parent_only
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["status"],
-            "running"
-        );
+    // An already-exited child remains part of the durable lineage and must be finalized too.
+    {
+        let mut registry = registry.lock().await;
+        registry.stop(second_child_id)?;
+        let mut second_child = registry.get(second_child_id)?;
+        second_child.status = ProcessStatus::Exited;
+        registry.store().put_process(&second_child)?;
     }
-    for process_id in [first_child_id, second_child_id, terminal_id] {
-        assert_eq!(
-            after_parent_only
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["spawned_by_process_id"],
-            Value::Null
-        );
-    }
-    assert_eq!(
-        after_parent_only
+
+    // The legacy false field is deliberately ignored: cascade is the only behavior.
+    call(
+        &root,
+        "stop_process",
+        json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
+    )
+    .await;
+    let after_cascade = call(&root, "list_processes", json!({ "project_id": 7 })).await;
+    let after_cascade = after_cascade["processes"].as_array().unwrap();
+    for process_id in [
+        parent_id,
+        first_child_id,
+        second_child_id,
+        grandchild_id,
+        terminal_id,
+    ] {
+        let process = after_cascade
             .iter()
-            .find(|view| view["id"] == grandchild_id)
+            .find(|view| view["id"] == process_id)
+            .unwrap();
+        assert_eq!(
+            process["status"], "stopped",
+            "process {process_id} was not stopped"
+        );
+    }
+    assert_eq!(
+        after_cascade
+            .iter()
+            .find(|view| view["id"] == terminal_id)
             .unwrap()["spawned_by_process_id"],
-        first_child_id
+        parent_id
     );
     {
         let registry = registry.lock().await;
@@ -353,52 +358,6 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
         let observer_timer = registry.store().get_timer(900)?.unwrap();
         assert_eq!(observer_timer.watch_process_ids, vec![first_child_id]);
     }
-
-    // Rebuild the original lineage after proving the opt-out promotion path.
-    {
-        let mut registry = registry.lock().await;
-        for (process_id, spawner_id) in [
-            (first_child_id, parent_id),
-            (second_child_id, parent_id),
-            (grandchild_id, first_child_id),
-            (terminal_id, parent_id),
-        ] {
-            let mut process = registry.get(process_id)?;
-            process.spawned_by_process_id = Some(spawner_id);
-            registry.store().put_process(&process)?;
-        }
-    }
-    call(
-        &root,
-        "start_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
-    )
-    .await;
-
-    // Omitting cascade is the safe default: grandchild and both children stop first.
-    call(
-        &root,
-        "stop_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
-    )
-    .await;
-    let after_cascade = call(&root, "list_processes", json!({ "project_id": 7 })).await;
-    let after_cascade = after_cascade["processes"].as_array().unwrap();
-    for process_id in [parent_id, first_child_id, second_child_id, grandchild_id] {
-        assert_eq!(
-            after_cascade
-                .iter()
-                .find(|view| view["id"] == process_id)
-                .unwrap()["status"],
-            "stopped"
-        );
-    }
-    let terminal = after_cascade
-        .iter()
-        .find(|view| view["id"] == terminal_id)
-        .unwrap();
-    assert_eq!(terminal["status"], "running");
-    assert_eq!(terminal["spawned_by_process_id"], Value::Null);
     assert!(registry.lock().await.store().get_timer(900)?.is_some());
     assert!(
         registry
@@ -410,7 +369,13 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
         "user-initiated cascade emitted notification spam"
     );
 
-    for process_id in [parent_id, first_child_id, second_child_id, grandchild_id] {
+    for process_id in [
+        parent_id,
+        first_child_id,
+        second_child_id,
+        grandchild_id,
+        terminal_id,
+    ] {
         call(
             &root,
             "start_process",
@@ -421,7 +386,7 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
     let closed_parent = call(
         &root,
         "close_process",
-        json!({ "project_id": 7, "process_id": parent_id }),
+        json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
     )
     .await;
     assert_eq!(closed_parent["closed"], true);
@@ -431,18 +396,11 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
             .as_array()
             .unwrap()
             .len(),
-        3
+        4
     );
     let after_close = call(&root, "list_processes", json!({ "project_id": 7 })).await;
     let after_close = after_close["processes"].as_array().unwrap();
-    assert_eq!(after_close.len(), 3);
-    for process_id in [1, terminal_id] {
-        let survivor = after_close
-            .iter()
-            .find(|view| view["id"] == process_id)
-            .unwrap();
-        assert_eq!(survivor["spawned_by_process_id"], Value::Null);
-    }
+    assert_eq!(after_close.len(), 2);
     assert_eq!(
         after_close
             .iter()
@@ -454,29 +412,15 @@ async fn agent_parent_lifecycle_cascades_recursively_or_promotes_children()
     let closed = call(
         &root,
         "close_process",
-        json!({ "project_id": 7, "process_id": terminal_id, "cascade": false }),
-    )
-    .await;
-    assert_eq!(closed["closed"], true);
-    let closed = call(
-        &root,
-        "close_process",
-        json!({ "project_id": 7, "process_id": observer_id, "cascade": false }),
-    )
-    .await;
-    assert_eq!(closed["closed"], true);
-    let closed = call(
-        &root,
-        "close_process",
         json!({
             "project_id": 7,
             "process_id": 1,
-            "cascade": false,
             "confirm_self_close": true
         }),
     )
     .await;
     assert_eq!(closed["closed"], true);
+    assert_eq!(closed["cascaded_processes"].as_array().unwrap().len(), 1);
 
     let _ = first_child.cancel().await;
     let _ = parent.cancel().await;

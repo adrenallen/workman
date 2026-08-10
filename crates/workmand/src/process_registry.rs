@@ -39,6 +39,7 @@ use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
 };
+use crate::process_tree::TrackedProcessTree;
 use crate::user_config::user_config_path;
 use crate::user_environment::{ResolvedUserEnvironment, UserEnvironmentResolver};
 
@@ -891,7 +892,33 @@ impl ProcessRegistry {
         })
     }
 
+    /// Gracefully stop a process and every durable descendant child-first.
     pub fn stop(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
+        let descendants = self.descendant_processes(process_id)?;
+        let mut first_error = None;
+        for descendant in descendants {
+            if let Err(error) = self.stop_one(descendant.id)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        let process = match self.stop_one(process_id) {
+            Ok(process) => Some(process),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                None
+            }
+        };
+        match first_error {
+            Some(error) => Err(error),
+            None => process.ok_or(RegistryError::NotFound(process_id)),
+        }
+    }
+
+    fn stop_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
@@ -903,7 +930,7 @@ impl ProcessRegistry {
         };
         let _ = self.store.clear_process_mcp_token(process_id);
 
-        match hosted.terminate(self.stop_grace) {
+        match terminate_hosted_tree(&mut hosted, self.stop_grace, false) {
             Ok(status) => {
                 self.capture_agent_session_id(process_id)?;
                 apply_exit_info(&mut process, &status);
@@ -926,32 +953,33 @@ impl ProcessRegistry {
         }
     }
 
-    /// Gracefully stop an agent and, by default, every live descendant agent.
-    /// Descendants are stopped child-first. Surviving direct children are
-    /// promoted to roots so they remain visible and independently managed.
-    pub fn stop_with_descendants(
-        &mut self,
-        process_id: ProcessId,
-        cascade: bool,
-    ) -> RegistryResult<Process> {
-        let descendants = if cascade {
-            self.live_agent_descendants(process_id)?
-        } else {
-            Vec::new()
-        };
-        let mut stopped_ids = Vec::with_capacity(descendants.len() + 1);
-        for descendant in descendants {
-            self.stop(descendant.id)?;
-            stopped_ids.push(descendant.id);
-        }
-        let process = self.stop(process_id)?;
-        stopped_ids.push(process_id);
-        self.orphan_surviving_children(&stopped_ids)?;
-        Ok(process)
-    }
-
-    /// Immediately kill a live process group without a graceful shutdown window.
+    /// Immediately kill a process and every durable descendant child-first.
     pub fn kill(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
+        let descendants = self.descendant_processes(process_id)?;
+        let mut first_error = None;
+        for descendant in descendants {
+            if let Err(error) = self.kill_one(descendant.id)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        let process = match self.kill_one(process_id) {
+            Ok(process) => Some(process),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                None
+            }
+        };
+        match first_error {
+            Some(error) => Err(error),
+            None => process.ok_or(RegistryError::NotFound(process_id)),
+        }
+    }
+
+    fn kill_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
@@ -963,7 +991,7 @@ impl ProcessRegistry {
         };
         let _ = self.store.clear_process_mcp_token(process_id);
 
-        match hosted.kill() {
+        match terminate_hosted_tree(&mut hosted, self.stop_grace, true) {
             Ok(status) => {
                 apply_exit_info(&mut process, &status);
                 process.status = ProcessStatus::Stopped;
@@ -982,28 +1010,6 @@ impl ProcessRegistry {
                 })
             }
         }
-    }
-
-    /// Immediately kill an agent and every live descendant agent child-first.
-    pub fn kill_with_descendants(
-        &mut self,
-        process_id: ProcessId,
-        cascade: bool,
-    ) -> RegistryResult<Process> {
-        let descendants = if cascade {
-            self.live_agent_descendants(process_id)?
-        } else {
-            Vec::new()
-        };
-        let mut stopped_ids = Vec::with_capacity(descendants.len() + 1);
-        for descendant in descendants {
-            self.kill(descendant.id)?;
-            stopped_ids.push(descendant.id);
-        }
-        let process = self.kill(process_id)?;
-        stopped_ids.push(process_id);
-        self.orphan_surviving_children(&stopped_ids)?;
-        Ok(process)
     }
 
     pub fn restart(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
@@ -1015,11 +1021,36 @@ impl ProcessRegistry {
         self.start(process_id)
     }
 
-    /// Terminate a live process and remove its durable entry.
+    /// Terminate a process and every durable descendant, then remove their entries child-first.
     pub fn close(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
+        let descendants = self.descendant_processes(process_id)?;
+        let mut first_error = None;
+        for descendant in descendants {
+            if let Err(error) = self.close_one(descendant.id)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        let process = match self.close_one(process_id) {
+            Ok(process) => Some(process),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                None
+            }
+        };
+        match first_error {
+            Some(error) => Err(error),
+            None => process.ok_or(RegistryError::NotFound(process_id)),
+        }
+    }
+
+    fn close_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let process = if self.running.contains_key(&process_id) {
-            self.stop(process_id)?
+            self.stop_one(process_id)?
         } else {
             self.require(process_id)?
         };
@@ -1033,39 +1064,13 @@ impl ProcessRegistry {
         Ok(process)
     }
 
-    /// Close an agent and remove every live descendant agent child-first.
-    pub fn close_with_descendants(
-        &mut self,
-        process_id: ProcessId,
-        cascade: bool,
-    ) -> RegistryResult<Process> {
-        let descendants = if cascade {
-            self.live_agent_descendants(process_id)?
-        } else {
-            Vec::new()
-        };
-        for descendant in descendants {
-            self.close(descendant.id)?;
-        }
-        self.close(process_id)
-    }
-
-    /// Return live descendant agents in safe child-first lifecycle order.
-    pub fn live_agent_descendants(
-        &mut self,
-        process_id: ProcessId,
-    ) -> RegistryResult<Vec<Process>> {
+    /// Return every durable descendant in safe child-first lifecycle order.
+    pub fn descendant_processes(&mut self, process_id: ProcessId) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
-        let process = self.require(process_id)?;
-        if process.kind != ProcessKind::Agent {
-            return Ok(Vec::new());
-        }
-        let processes = self.store.list_processes(Some(process.project_id))?;
+        self.require(process_id)?;
+        let processes = self.store.list_processes(None)?;
         let mut children = HashMap::<ProcessId, Vec<Process>>::new();
-        for child in processes
-            .into_iter()
-            .filter(|candidate| candidate.kind == ProcessKind::Agent)
-        {
+        for child in processes {
             if let Some(parent_id) = child.spawned_by_process_id {
                 children.entry(parent_id).or_default().push(child);
             }
@@ -1075,23 +1080,8 @@ impl ProcessRegistry {
         }
         let mut visited = HashSet::new();
         let mut descendants = Vec::new();
-        collect_live_agent_descendants(process_id, &children, &mut visited, &mut descendants);
+        collect_descendants(process_id, &children, &mut visited, &mut descendants);
         Ok(descendants)
-    }
-
-    fn orphan_surviving_children(&mut self, stopped_ids: &[ProcessId]) -> RegistryResult<()> {
-        let stopped_ids = stopped_ids.iter().copied().collect::<HashSet<_>>();
-        for mut process in self.store.list_processes(None)? {
-            if !stopped_ids.contains(&process.id)
-                && process
-                    .spawned_by_process_id
-                    .is_some_and(|parent_id| stopped_ids.contains(&parent_id))
-            {
-                process.spawned_by_process_id = None;
-                self.store.put_process(&process)?;
-            }
-        }
-        Ok(())
     }
 
     fn cleanup_user_stopped_process(&mut self, process: &Process) -> RegistryResult<()> {
@@ -1820,7 +1810,7 @@ impl Drop for ProcessRegistry {
     fn drop(&mut self) {
         for (process_id, mut hosted) in self.running.drain() {
             let _ = self.store.clear_process_mcp_token(process_id);
-            let status = hosted.terminate(self.stop_grace).ok();
+            let status = terminate_hosted_tree(&mut hosted, self.stop_grace, false).ok();
             if let Some(pending) = self.agent_session_captures.remove(&process_id)
                 && let Ok(Some(session_id)) = pending.capture.discover()
             {
@@ -1959,7 +1949,29 @@ fn apply_exit_info(process: &mut Process, status: &ExitStatus) {
     process.exited_at = Some(now_millis());
 }
 
-fn collect_live_agent_descendants(
+fn terminate_hosted_tree(
+    hosted: &mut PtyProcess,
+    grace_period: Duration,
+    immediate: bool,
+) -> Result<ExitStatus, String> {
+    let tree = TrackedProcessTree::capture(hosted.pid());
+    let termination = if immediate {
+        hosted.kill()
+    } else {
+        hosted.terminate(grace_period)
+    }
+    .map_err(|error| error.to_string());
+    let cleanup = tree.kill_remaining();
+
+    match (termination, cleanup) {
+        (Ok(status), Ok(())) => Ok(status),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(termination), Err(cleanup)) => Err(format!("{termination}; {cleanup}")),
+    }
+}
+
+fn collect_descendants(
     process_id: ProcessId,
     children: &HashMap<ProcessId, Vec<Process>>,
     visited: &mut HashSet<ProcessId>,
@@ -1975,13 +1987,8 @@ fn collect_live_agent_descendants(
         if visited.contains(&child.id) {
             continue;
         }
-        collect_live_agent_descendants(child.id, children, visited, descendants);
-        if matches!(
-            child.status,
-            ProcessStatus::Starting | ProcessStatus::Running
-        ) {
-            descendants.push(child.clone());
-        }
+        collect_descendants(child.id, children, visited, descendants);
+        descendants.push(child.clone());
     }
 }
 

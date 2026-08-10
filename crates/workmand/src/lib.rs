@@ -46,6 +46,7 @@ mod migration;
 mod notification_pipeline_tests;
 mod process_registry;
 pub mod process_stats;
+mod process_tree;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;

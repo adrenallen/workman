@@ -6,7 +6,6 @@
 
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
-  import { Checkbox } from '$lib/components/ui/checkbox';
   import type { AgentCascadeAction } from './agentCascade';
   import type { ProcessView } from './daemon';
 
@@ -16,7 +15,7 @@
     action: AgentCascadeAction;
     busy?: boolean;
     error?: string | null;
-    onConfirm: (cascade: boolean) => void;
+    onConfirm: () => void;
     onClose: () => void;
   }
 
@@ -29,14 +28,13 @@
     onConfirm,
     onClose
   }: Props = $props();
-  let cascade = $state(true);
 
   let actionLabel = $derived(action === 'kill' ? 'Kill' : action === 'close' ? 'Close' : 'Stop');
   let description = $derived(
     action === 'kill'
       ? 'The parent will be killed immediately. Unsaved terminal state may be lost.'
       : action === 'close'
-        ? 'The parent’s saved agent entry will be removed.'
+        ? 'The parent and every descendant entry will be removed.'
         : 'The parent agent will stop gracefully.'
   );
 </script>
@@ -52,14 +50,14 @@
     </AlertDialog.Header>
 
     <section class="grid min-h-0 content-start gap-3 overflow-y-auto overscroll-contain px-4 py-4">
-      <label class="grid cursor-pointer grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded border border-border bg-card px-3 py-3">
-        <Checkbox class="mt-0.5" bind:checked={cascade} aria-label={`Also stop ${descendants.length} child agents`} />
-        <strong class="text-sm">Also stop {descendants.length} child {descendants.length === 1 ? 'agent' : 'agents'}</strong>
+      <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded border border-border bg-card px-3 py-3">
+        <NetworkIcon class="mt-0.5 text-muted-foreground" size={15} />
+        <strong class="text-sm">Includes {descendants.length} child {descendants.length === 1 ? 'agent' : 'agents'}</strong>
         <span></span>
         <small class="text-xs leading-relaxed text-muted-foreground">
-          {cascade ? 'Children stop before their parent.' : 'Children keep running as top-level agents.'}
+          Descendants always stop before their parent so no child agent is left running.
         </small>
-      </label>
+      </div>
 
       <div class="grid gap-1.5" aria-label="Child agents">
         <span class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground"><NetworkIcon size={13} />Child agents</span>
@@ -79,8 +77,8 @@
 
     <AlertDialog.Footer class="border-t border-border px-4 py-3">
       <Button variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
-      <Button variant="destructive" disabled={busy} onclick={() => onConfirm(cascade)}>
-        {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{actionLabel} {cascade ? `${descendants.length + 1} agents` : 'parent only'}
+      <Button variant="destructive" disabled={busy} onclick={onConfirm}>
+        {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{actionLabel} {descendants.length + 1} agents
       </Button>
     </AlertDialog.Footer>
   </AlertDialog.Content>

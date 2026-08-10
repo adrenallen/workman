@@ -1171,7 +1171,9 @@ pub async fn remove(
     {
         let mut registry = registry.lock().await;
         for process in processes {
-            registry.close(process.id)?;
+            if registry.store().get_process(process.id)?.is_some() {
+                registry.close(process.id)?;
+            }
         }
     }
     git_required(

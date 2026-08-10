@@ -45,7 +45,7 @@ struct ProcessTargetArgs {
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct CascadeProcessArgs {
+struct StopProcessArgs {
     /// Process ID. Omit with process_name to target this MCP session's own process.
     #[serde(default)]
     process_id: Option<ProcessId>,
@@ -55,9 +55,6 @@ struct CascadeProcessArgs {
     /// Optional project scope override.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Stop live descendant agents recursively. Defaults to true for safe parent cleanup.
-    #[serde(default)]
-    cascade: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -71,9 +68,6 @@ struct CloseProcessArgs {
     /// Required only when closing the process that owns this MCP session.
     #[serde(default)]
     confirm_self_close: bool,
-    /// Close live descendant agents recursively. Defaults to true for safe parent cleanup.
-    #[serde(default)]
-    cascade: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -210,30 +204,21 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<ProcessTargetArgs>,
     ) -> CallToolResult {
-        lifecycle(self, &parts, target(&args), LifecycleAction::Start, false).await
+        lifecycle(self, &parts, target(&args), LifecycleAction::Start).await
     }
 
-    #[tool(
-        description = "Gracefully stop one running process. Agent parents stop live descendant agents recursively by default; pass cascade=false to keep and orphan them"
-    )]
+    #[tool(description = "Gracefully stop a process and all descendants recursively")]
     async fn stop_process(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<CascadeProcessArgs>,
+        Parameters(args): Parameters<StopProcessArgs>,
     ) -> CallToolResult {
         let target = ProcessTarget {
             process_id: args.process_id,
             process_name: args.process_name.as_deref(),
             project_id: args.project_id,
         };
-        lifecycle(
-            self,
-            &parts,
-            target,
-            LifecycleAction::Stop,
-            args.cascade.unwrap_or(true),
-        )
-        .await
+        lifecycle(self, &parts, target, LifecycleAction::Stop).await
     }
 
     #[tool(description = "Restart an existing command, terminal, or agent")]
@@ -242,11 +227,11 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<ProcessTargetArgs>,
     ) -> CallToolResult {
-        lifecycle(self, &parts, target(&args), LifecycleAction::Restart, false).await
+        lifecycle(self, &parts, target(&args), LifecycleAction::Restart).await
     }
 
     #[tool(
-        description = "Remove a stored process. Agent parents close live descendant agents recursively by default; pass cascade=false to keep and orphan them. Closing this MCP session requires confirmation"
+        description = "Remove a stored process and all descendants recursively. Closing this MCP session requires confirmation"
     )]
     async fn close_process(
         &self,
@@ -269,37 +254,32 @@ impl WorkmanMcp {
                 "set confirm_self_close=true only when explicitly closing this MCP session's own process",
             );
         }
-        let cascade = args.cascade.unwrap_or(true);
-        let descendants = if cascade {
-            match registry.live_agent_descendants(process.id) {
-                Ok(descendants) => {
-                    if let Some(descendant) = descendants
-                        .iter()
-                        .find(|descendant| descendant.project_id != process.project_id)
-                    {
-                        return failure(
-                            "project_scope_error",
-                            format!(
-                                "agent identities are scoped to project {}; descendant process {} belongs to project {} and cannot be controlled by this request",
-                                process.project_id, descendant.id, descendant.project_id
-                            ),
-                        );
-                    }
-                    descendants
+        let descendants = match registry.descendant_processes(process.id) {
+            Ok(descendants) => {
+                if let Some(descendant) = descendants
+                    .iter()
+                    .find(|descendant| descendant.project_id != process.project_id)
+                {
+                    return failure(
+                        "project_scope_error",
+                        format!(
+                            "agent identities are scoped to project {}; descendant process {} belongs to project {} and cannot be controlled by this request",
+                            process.project_id, descendant.id, descendant.project_id
+                        ),
+                    );
                 }
-                Err(error) => return registry_failure(error),
+                descendants
             }
-        } else {
-            Vec::new()
+            Err(error) => return registry_failure(error),
         };
         let cascaded_processes = descendants
             .iter()
             .map(|descendant| json!({ "process_id": descendant.id, "name": descendant.name }))
             .collect::<Vec<_>>();
-        match registry.close_with_descendants(process.id, cascade) {
+        match registry.close(process.id) {
             Ok(process) => success(json!({
                 "closed": true,
-                "cascade": cascade,
+                "cascade": true,
                 "cascaded_processes": cascaded_processes,
                 "process": process,
             })),
@@ -746,15 +726,14 @@ async fn lifecycle(
     parts: &Parts,
     target: ProcessTarget<'_>,
     action: LifecycleAction,
-    cascade: bool,
 ) -> CallToolResult {
     let mut registry = service.registry.lock().await;
     let (process, _) = match resolve_process(&mut registry, parts, target) {
         Ok(resolved) => resolved,
         Err(error) => return target_failure(error),
     };
-    if matches!(action, LifecycleAction::Stop) && cascade {
-        let descendants = match registry.live_agent_descendants(process.id) {
+    if matches!(action, LifecycleAction::Stop | LifecycleAction::Restart) {
+        let descendants = match registry.descendant_processes(process.id) {
             Ok(descendants) => descendants,
             Err(error) => return registry_failure(error),
         };
@@ -773,7 +752,7 @@ async fn lifecycle(
     }
     let result = match action {
         LifecycleAction::Start => registry.start(process.id),
-        LifecycleAction::Stop => registry.stop_with_descendants(process.id, cascade),
+        LifecycleAction::Stop => registry.stop(process.id),
         LifecycleAction::Restart => registry.restart(process.id),
     }
     .and_then(|process| registry.get_status(process.id));

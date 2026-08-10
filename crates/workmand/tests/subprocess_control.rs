@@ -4,6 +4,7 @@ use std::{fs, path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use sysinfo::{Pid, System};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio_tungstenite::{
@@ -101,10 +102,10 @@ async fn wait_for_python_child(socket: &mut Socket, next_id: &mut u64, process_i
                 children.iter().find(|child| {
                     child["name"]
                         .as_str()
-                        .is_some_and(|name| name.contains("python"))
+                        .is_some_and(|name| name.to_ascii_lowercase().contains("python"))
                         || child["command"]
                             .as_str()
-                            .is_some_and(|command| command.contains("http.server"))
+                            .is_some_and(|command| command.to_ascii_lowercase().contains("python"))
                 })
             }) {
                 return child.clone();
@@ -230,6 +231,48 @@ async fn subprocess_rpc_lists_and_only_kills_live_descendants() {
     .await;
     next_id += 1;
     assert_eq!(root_status["status"], "running");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // A nested non-interactive shell lets Python create a new session, while ignored HUP/TERM
+    // ensures that PTY closure and the root process-group signal cannot clean it up by accident.
+    rpc(
+        &mut socket,
+        next_id,
+        "process.send_input",
+        json!({
+            "process_id": process_id,
+            "data": "c2ggLWMgJ3B5dGhvbjMgLWMgImltcG9ydCBvcyxzaWduYWwsdGltZTsgb3Muc2V0c2lkKCk7IHNpZ25hbC5zaWduYWwoc2lnbmFsLlNJR0hVUCxzaWduYWwuU0lHX0lHTik7IHNpZ25hbC5zaWduYWwoc2lnbmFsLlNJR1RFUk0sc2lnbmFsLlNJR19JR04pOyBwcmludChvcy5nZXRwaWQoKSxmbHVzaD1UcnVlKTsgdGltZS5zbGVlcCgzMCkiICYgd2FpdCc=",
+            "submit": true
+        }),
+    )
+    .await;
+    next_id += 1;
+    let detached = wait_for_python_child(&mut socket, &mut next_id, process_id).await;
+    let detached_pid = detached["pid"].as_u64().unwrap() as u32;
+
+    let stopped = rpc(
+        &mut socket,
+        next_id,
+        "process.stop",
+        json!({ "process_id": process_id }),
+    )
+    .await;
+    next_id += 1;
+    assert_eq!(stopped["status"], "stopped");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if System::new_all()
+                .process(Pid::from_u32(detached_pid))
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("detached process-group descendant survived parent stop");
+
     rpc(
         &mut socket,
         next_id,

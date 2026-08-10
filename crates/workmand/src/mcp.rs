@@ -568,8 +568,14 @@ impl WorkmanMcp {
             );
         }
         for process in processes {
-            if let Err(error) = registry.close(process.id) {
-                return failure(error.code(), error.to_string());
+            match registry.store().get_process(process.id) {
+                Ok(Some(_)) => {
+                    if let Err(error) = registry.close(process.id) {
+                        return failure(error.code(), error.to_string());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return failure("store_error", error.to_string()),
             }
         }
         match registry.store().delete_project(project.id) {
@@ -633,6 +639,9 @@ fn ensure_actor(
             .map_err(|error| error.to_string())?,
         None => None,
     };
+    if token.is_some() && token_process.is_none() {
+        return Err("process token is no longer active".to_owned());
+    }
     let session_id = parts
         .headers
         .get("mcp-session-id")

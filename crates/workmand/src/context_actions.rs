@@ -13,8 +13,6 @@ struct ProcessParams {
     process_id: ProcessId,
     #[serde(default)]
     confirm_kill: bool,
-    #[serde(default)]
-    cascade: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +44,7 @@ fn kill_process(params: Value, registry: &mut ProcessRegistry) -> ControlResult 
         ));
     }
     registry
-        .kill_with_descendants(params.process_id, params.cascade.unwrap_or(true))
+        .kill(params.process_id)
         .map(json_value)
         .map_err(registry_error)
 }
@@ -69,7 +67,14 @@ fn remove_project(params: Value, registry: &mut ProcessRegistry) -> ControlResul
         .list(Some(params.project_id))
         .map_err(registry_error)?;
     for process in processes {
-        registry.close(process.id).map_err(registry_error)?;
+        if registry
+            .store()
+            .get_process(process.id)
+            .map_err(store_error)?
+            .is_some()
+        {
+            registry.close(process.id).map_err(registry_error)?;
+        }
     }
     let deleted = registry
         .store()

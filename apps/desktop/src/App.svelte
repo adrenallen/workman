@@ -1566,7 +1566,7 @@
     if (openAgentCascadeDialog(process, 'stop')) return;
     processBusyId = process.id;
     try {
-      await client.stopProcess(process.id, true);
+      await client.stopProcess(process.id);
       await refreshProcesses(process.project_id);
     } catch (cause) {
       reportError(cause);
@@ -1587,7 +1587,7 @@
     return true;
   }
 
-  async function confirmAgentCascade(cascade: boolean): Promise<void> {
+  async function confirmAgentCascade(): Promise<void> {
     const request = agentCascadeRequest;
     if (!request || agentCascadeBusy || processBusyId !== null) return;
     agentCascadeBusy = true;
@@ -1595,15 +1595,14 @@
     agentCascadeError = null;
     try {
       if (request.action === 'stop') {
-        await client.stopProcess(request.process.id, cascade);
+        await client.stopProcess(request.process.id);
       } else if (request.action === 'kill') {
         await client.control('process.kill', {
           process_id: request.process.id,
-          confirm_kill: true,
-          cascade
+          confirm_kill: true
         });
       } else {
-        await client.closeProcess(request.process.id, cascade);
+        await client.closeProcess(request.process.id);
         if (selection?.id === request.process.id && isProcessSelection(selection)) clearSelection();
       }
       await refreshProcesses(request.process.project_id);
@@ -2903,13 +2902,13 @@
       case 'kill':
         if (openAgentCascadeDialog(process, 'kill')) return;
         if (!window.confirm(`Kill ${process.name} immediately? Unsaved terminal state may be lost.`)) return;
-        await client.control('process.kill', { process_id: process.id, confirm_kill: true, cascade: true });
+        await client.control('process.kill', { process_id: process.id, confirm_kill: true });
         await refreshProcesses(process.project_id);
         return;
       case 'close':
         if (openAgentCascadeDialog(process, 'close')) return;
         if (!window.confirm(`Close ${process.name}? Its saved terminal entry will be removed.`)) return;
-        await client.closeProcess(process.id, true);
+        await client.closeProcess(process.id);
         if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
         await refreshProcesses(process.project_id);
         return;
@@ -3619,7 +3618,7 @@
     action={agentCascadeRequest.action}
     busy={agentCascadeBusy}
     error={agentCascadeError}
-    onConfirm={(cascade) => void confirmAgentCascade(cascade)}
+    onConfirm={() => void confirmAgentCascade()}
     onClose={() => { if (!agentCascadeBusy) agentCascadeRequest = null; }}
   />
 {/if}
