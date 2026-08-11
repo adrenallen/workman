@@ -20,21 +20,28 @@ immutable cache policy. `/install.sh` is also public, but the bootstrap requires
 fetches `/releases.json` and `/versions/*`. Versioned responses keep their one-year immutable cache
 policy and byte-range support.
 
+Search indexing is temporarily disabled by the single `SITE_NOINDEX` variable in `wrangler.jsonc`.
+While it is `"true"`, every response carries `X-Robots-Tag: noindex, nofollow`, HTML pages include a
+robots meta tag, and `/robots.txt` disallows the entire site. Change that one value to `"false"` to
+remove all three blocks.
+
 ## Download keys
 
 The `DOWNLOAD_KEYS` Worker secret is a comma-separated list. Production currently uses one key
-compiled into the app updater and a second key that can be shared with friends. A protected request
-is authorized by any one of these forms:
+compiled into the app updater and a second key that can be shared with friends. The updater API
+(`/releases.json` and `/versions/*`) accepts either of these header forms:
 
 ```text
 Authorization: Bearer <key>
 X-Workman-Key: <key>
-?key=<key>
-Authorization: Basic <base64(any-username:key)>
 ```
 
-Browser navigations without a key receive `401` and `WWW-Authenticate: Basic realm="workman"`;
-the username may be anything and the password is the shared key. API requests receive a JSON 401.
+Browser navigation to `/download` accepts only Basic authentication and always challenges with
+`401` and `WWW-Authenticate: Basic realm="workman"` until valid credentials are entered. The
+username may be anything and the password is the shared key. Query-string keys, Bearer headers, and
+`X-Workman-Key` do not render the page. Once authenticated, the browser resends the Basic credentials
+for the page's `/versions/*` links. Unauthenticated API requests receive a JSON 401 unless they are
+browser artifact navigations, which receive the same Basic challenge.
 Keep the two keys in the Cloudflare secret rather than `wrangler.jsonc` or git:
 
 ```sh
@@ -125,9 +132,9 @@ GB-month free tier; see https://developers.cloudflare.com/r2/pricing/ for curren
 
 ## Friend flow
 
-To download in a browser, open a concrete artifact URL such as
-`https://workman.userdefined.io/versions/0.1.1/workman-macos-arm64.zip`. At the browser prompt, use
-any username and the friends key as the password.
+To download in a browser, open `https://workman.userdefined.io/download`. At the browser prompt, use
+any username and the friends key as the password. The authenticated page shows the current stable
+release, and its artifact links reuse those credentials.
 
 To install the stable bundle from a terminal, pass the same key without putting it in the URL:
 

@@ -5,6 +5,7 @@ const INSTALLER_CACHE = "public, max-age=300, must-revalidate";
 const PAGE_CACHE = "public, max-age=60, must-revalidate";
 const LOGO_PATH = "/workman-logo-wide-transparent.png";
 const LOGO_KEY = "branding/workman-logo-wide-transparent.png";
+const NOINDEX_HEADER = "noindex, nofollow";
 
 type WorkerEnv = Env & {
   DOWNLOAD_KEYS: string;
@@ -82,7 +83,25 @@ function escapeHtml(value: string): string {
   })[character] ?? character);
 }
 
-function pageResponse(request: Request, html: string, cacheControl = PAGE_CACHE): Response {
+function noindexEnabled(env: WorkerEnv): boolean {
+  return String(env.SITE_NOINDEX).toLowerCase() === "true";
+}
+
+function noindexMeta(env: WorkerEnv): string {
+  return noindexEnabled(env) ? '  <meta name="robots" content="noindex">\n' : "";
+}
+
+function applyIndexingPolicy(response: Response, env: WorkerEnv): Response {
+  if (noindexEnabled(env)) response.headers.set("x-robots-tag", NOINDEX_HEADER);
+  return response;
+}
+
+function pageResponse(
+  request: Request,
+  env: WorkerEnv,
+  html: string,
+  cacheControl = PAGE_CACHE,
+): Response {
   const response = new Response(html, {
     headers: {
       "cache-control": cacheControl,
@@ -95,44 +114,73 @@ function pageResponse(request: Request, html: string, cacheControl = PAGE_CACHE)
   return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
-function candidateKeys(request: Request): string[] {
+function basicPassword(request: Request): string | null {
+  const authorization = request.headers.get("authorization");
+  if (authorization === null) return null;
+  const basic = /^Basic\s+(.+)$/i.exec(authorization);
+  if (basic === null) return null;
+  try {
+    const decoded = atob(basic[1]);
+    const separator = decoded.indexOf(":");
+    return separator === -1 ? null : decoded.slice(separator + 1);
+  } catch {
+    return null;
+  }
+}
+
+function apiCandidateKeys(request: Request): string[] {
   const candidates: string[] = [];
   const authorization = request.headers.get("authorization");
   if (authorization !== null) {
     const bearer = /^Bearer\s+(.+)$/i.exec(authorization);
     if (bearer !== null) candidates.push(bearer[1].trim());
-
-    const basic = /^Basic\s+(.+)$/i.exec(authorization);
-    if (basic !== null) {
-      try {
-        const decoded = atob(basic[1]);
-        const separator = decoded.indexOf(":");
-        if (separator !== -1) candidates.push(decoded.slice(separator + 1));
-      } catch {
-        // A malformed Basic credential is simply not a valid download key.
-      }
-    }
   }
 
+  const password = basicPassword(request);
+  if (password !== null) candidates.push(password);
   const headerKey = request.headers.get("x-workman-key");
   if (headerKey !== null) candidates.push(headerKey.trim());
-
-  const queryKey = new URL(request.url).searchParams.get("key");
-  if (queryKey !== null) candidates.push(queryKey);
   return candidates;
 }
 
-function isAuthorized(request: Request, env: WorkerEnv): boolean {
-  const validKeys = new Set(
-    env.DOWNLOAD_KEYS.split(",")
-      .map((key) => key.trim())
-      .filter((key) => key.length > 0),
-  );
-  return validKeys.size > 0 && candidateKeys(request).some((key) => validKeys.has(key));
+async function matchesDownloadKey(candidates: string[], env: WorkerEnv): Promise<boolean> {
+  const validKeys = env.DOWNLOAD_KEYS.split(",")
+    .map((key) => key.trim())
+    .filter((key) => key.length > 0);
+  if (validKeys.length === 0 || candidates.length === 0) return false;
+
+  const encoder = new TextEncoder();
+  const [candidateHashes, validHashes] = await Promise.all([
+    Promise.all(candidates.map((key) => crypto.subtle.digest("SHA-256", encoder.encode(key)))),
+    Promise.all(validKeys.map((key) => crypto.subtle.digest("SHA-256", encoder.encode(key)))),
+  ]);
+  let match = 0;
+  for (const candidateHash of candidateHashes) {
+    const candidateBytes = new Uint8Array(candidateHash);
+    for (const validHash of validHashes) {
+      const validBytes = new Uint8Array(validHash);
+      let difference = 0;
+      for (let index = 0; index < candidateBytes.length; index += 1) {
+        difference |= candidateBytes[index] ^ validBytes[index];
+      }
+      match |= Number(difference === 0);
+    }
+  }
+  return match !== 0;
 }
 
-function unauthorized(request: Request): Response {
-  const browserRequest = request.headers.get("accept")?.toLowerCase().includes("text/html") ?? false;
+function isBasicAuthorized(request: Request, env: WorkerEnv): Promise<boolean> {
+  const password = basicPassword(request);
+  return matchesDownloadKey(password === null ? [] : [password], env);
+}
+
+function isApiAuthorized(request: Request, env: WorkerEnv): Promise<boolean> {
+  return matchesDownloadKey(apiCandidateKeys(request), env);
+}
+
+function unauthorized(request: Request, requireBasicChallenge = false): Response {
+  const browserRequest = requireBasicChallenge
+    || (request.headers.get("accept")?.toLowerCase().includes("text/html") ?? false);
   const response = browserRequest
     ? new Response("A Workman download key is required.\n", {
         status: 401,
@@ -146,13 +194,13 @@ function unauthorized(request: Request): Response {
   return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
-function serveLander(request: Request): Response {
+function serveLander(request: Request, env: WorkerEnv): Response {
   const html = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Workman</title>
+${noindexMeta(env)}  <title>Workman</title>
   <style>
     html, body { width: 100%; height: 100%; margin: 0; background: #000; }
     body { display: grid; place-items: center; color: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -171,7 +219,7 @@ function serveLander(request: Request): Response {
   </main>
 </body>
 </html>`;
-  return pageResponse(request, html, "public, max-age=300, must-revalidate");
+  return pageResponse(request, env, html, "public, max-age=300, must-revalidate");
 }
 
 function isReleaseManifest(value: unknown): value is ReleaseManifest {
@@ -297,7 +345,7 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Download Workman ${version}</title>
+${noindexMeta(env)}  <title>Download Workman ${version}</title>
   <style>
     :root { color-scheme: dark; --black: #000; --ink: #f6f6f3; --muted: #969696; --line: #2b2b2b; --panel: #0b0b0b; --hover: #151515; }
     * { box-sizing: border-box; }
@@ -373,7 +421,7 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
           ${checksumLink}
         </div>
       </section>
-      <p class="notice"><b>Access</b><span>Downloads require the access password. Your browser will ask once; use any username and enter the key as the password.</span></p>
+      <p class="notice"><b>Access granted</b><span>Download links reuse this browser session's access credentials.</span></p>
       <div class="downloads">${groups}</div>
       <section class="install" aria-labelledby="install-title">
         <h2 id="install-title">Install notes</h2>
@@ -401,7 +449,7 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
   </div>
 </body>
 </html>`;
-    return pageResponse(request, html);
+    return pageResponse(request, env, html, "no-store");
   } catch (cause) {
     console.error(JSON.stringify({
       event: "download_page_unavailable",
@@ -409,6 +457,20 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
     }));
     return errorResponse(503, "download page is temporarily unavailable");
   }
+}
+
+function serveRobots(request: Request, env: WorkerEnv): Response {
+  const body = noindexEnabled(env)
+    ? "User-agent: *\nDisallow: /\n"
+    : "User-agent: *\nAllow: /\n";
+  const response = new Response(body, {
+    headers: {
+      "cache-control": "public, max-age=300, must-revalidate",
+      "content-type": "text/plain; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    },
+  });
+  return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
 async function serveManifest(request: Request, env: WorkerEnv): Promise<Response> {
@@ -508,40 +570,48 @@ async function serveObject(
   }
 }
 
+async function routeRequest(request: Request, env: WorkerEnv): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: { allow: "GET, HEAD", "cache-control": "no-store" },
+    });
+  }
+
+  const pathname = new URL(request.url).pathname;
+  if (pathname === "/") return serveLander(request, env);
+  if (pathname === "/robots.txt") return serveRobots(request, env);
+  if (pathname === "/download") {
+    if (!(await isBasicAuthorized(request, env))) return unauthorized(request, true);
+    return serveDownload(request, env);
+  }
+  if (pathname === LOGO_PATH) {
+    return serveObject(request, env, LOGO_KEY, IMMUTABLE_CACHE);
+  }
+
+  if (
+    (pathname === "/releases.json" || pathname.startsWith("/versions/")) &&
+    !(await isApiAuthorized(request, env))
+  ) {
+    return unauthorized(request);
+  }
+
+  if (pathname === "/releases.json") return serveManifest(request, env);
+  if (pathname === "/install.sh") {
+    return serveObject(request, env, "install.sh", INSTALLER_CACHE);
+  }
+
+  const versioned = VERSIONED_PATH.exec(pathname);
+  if (versioned !== null) {
+    const [, version, asset] = versioned;
+    return serveObject(request, env, `versions/${version}/${asset}`, IMMUTABLE_CACHE);
+  }
+
+  return errorResponse(404, "not found");
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      return new Response("Method Not Allowed", {
-        status: 405,
-        headers: { allow: "GET, HEAD", "cache-control": "no-store" },
-      });
-    }
-
-    const pathname = new URL(request.url).pathname;
-    if (pathname === "/") return serveLander(request);
-    if (pathname === "/download") return serveDownload(request, env);
-    if (pathname === LOGO_PATH) {
-      return serveObject(request, env, LOGO_KEY, IMMUTABLE_CACHE);
-    }
-
-    if (
-      (pathname === "/releases.json" || pathname.startsWith("/versions/")) &&
-      !isAuthorized(request, env)
-    ) {
-      return unauthorized(request);
-    }
-
-    if (pathname === "/releases.json") return serveManifest(request, env);
-    if (pathname === "/install.sh") {
-      return serveObject(request, env, "install.sh", INSTALLER_CACHE);
-    }
-
-    const versioned = VERSIONED_PATH.exec(pathname);
-    if (versioned !== null) {
-      const [, version, asset] = versioned;
-      return serveObject(request, env, `versions/${version}/${asset}`, IMMUTABLE_CACHE);
-    }
-
-    return errorResponse(404, "not found");
+    return applyIndexingPolicy(await routeRequest(request, env), env);
   },
 } satisfies ExportedHandler<WorkerEnv>;

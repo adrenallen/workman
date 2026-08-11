@@ -5,6 +5,7 @@ import worker from "../src/index.ts";
 const artifact = Uint8Array.from({ length: 64 }, (_, index) => index);
 const logo = new TextEncoder().encode("fixture-logo");
 const installer = new TextEncoder().encode("#!/usr/bin/env bash\necho installer\n");
+const basicAuthorization = `Basic ${Buffer.from("friend:friend-key").toString("base64")}`;
 function releaseAsset(name, target, size) {
   return {
     name,
@@ -72,6 +73,7 @@ function storedObject(key) {
 
 const env = {
   DOWNLOAD_KEYS: "app-key, friend-key",
+  SITE_NOINDEX: "true",
   RELEASES: {
     async get(key, options = {}) {
       const stored = storedObject(key);
@@ -99,26 +101,34 @@ test("keeps the black logo lander and its R2 image public", async () => {
   assert.match(html, /background: #000/);
   assert.match(html, /src="\/workman-logo-wide-transparent\.png"/);
   assert.match(html, /href="\/download"/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
+  assert.equal(lander.headers.get("x-robots-tag"), "noindex, nofollow");
 
   const image = await worker.fetch(request("/workman-logo-wide-transparent.png"), env);
   assert.equal(image.status, 200);
   assert.equal(image.headers.get("content-type"), "image/png");
   assert.equal(image.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(image.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.deepEqual(new Uint8Array(await image.arrayBuffer()), logo);
 });
 
-test("renders the public stable download page entirely from its channel manifest", async () => {
-  const response = await worker.fetch(request("/download"), env);
+test("renders the Basic-authenticated stable download page entirely from its channel manifest", async () => {
+  const response = await worker.fetch(
+    request("/download", { headers: { authorization: basicAuthorization } }),
+    env,
+  );
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "public, max-age=60, must-revalidate");
+  assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy"), /default-src 'none'/);
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   const html = await response.text();
 
+  assert.match(html, /<meta name="robots" content="noindex">/);
   assert.match(html, /Current stable/);
   assert.match(html, /Workman <span>v1\.2\.3<\/span>/);
   assert.match(html, /Aug 6, 2026/);
-  assert.match(html, /Downloads require the access password/);
-  assert.match(html, /browser will ask once/);
+  assert.match(html, /Access granted/);
+  assert.match(html, /reuse this browser session's access credentials/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-macos-arm64\.zip"/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-x86_64\.AppImage"/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-arm64\.deb"/);
@@ -132,9 +142,36 @@ test("renders the public stable download page entirely from its channel manifest
   assert.doesNotMatch(html, /xattr -dr com\.apple\.quarantine/);
   assert.doesNotMatch(html, /app-key|friend-key/);
 
-  const head = await worker.fetch(request("/download", { method: "HEAD" }), env);
+  const head = await worker.fetch(
+    request("/download", { method: "HEAD", headers: { authorization: basicAuthorization } }),
+    env,
+  );
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
+});
+
+test("requires interactive Basic auth for the download page regardless of URL or API credentials", async () => {
+  for (const [path, headers] of [
+    ["/download", {}],
+    ["/download?key=friend-key", {}],
+    ["/download", { authorization: "Bearer app-key" }],
+    ["/download", { "x-workman-key": "friend-key" }],
+  ]) {
+    const response = await worker.fetch(request(path, { headers }), env);
+    assert.equal(response.status, 401, `${path} ${JSON.stringify(headers)}`);
+    assert.equal(response.headers.get("www-authenticate"), 'Basic realm="workman"');
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.doesNotMatch(await response.text(), /<title>Download Workman/);
+  }
+
+  const wrongPassword = await worker.fetch(
+    request("/download", {
+      headers: { authorization: `Basic ${Buffer.from("anyone:wrong-key").toString("base64")}` },
+    }),
+    env,
+  );
+  assert.equal(wrongPassword.status, 401);
+  assert.equal(wrongPassword.headers.get("www-authenticate"), 'Basic realm="workman"');
 });
 
 test("keeps the Gatekeeper workaround on legacy unsigned release pages", async () => {
@@ -153,7 +190,10 @@ test("keeps the Gatekeeper workaround on legacy unsigned release pages", async (
     },
   };
 
-  const response = await worker.fetch(request("/download"), legacyEnv);
+  const response = await worker.fetch(
+    request("/download", { headers: { authorization: basicAuthorization } }),
+    legacyEnv,
+  );
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Gatekeeper blocks the unsigned app/);
@@ -187,12 +227,11 @@ test("returns contract-specific 401 responses before reading protected objects",
   assert.equal(secondAsset.headers.get("www-authenticate"), 'Basic realm="workman"');
 });
 
-test("accepts Bearer, X-Workman-Key, query, and Basic credentials", async () => {
+test("accepts Bearer, X-Workman-Key, and Basic credentials for artifacts", async () => {
   const mechanisms = [
     { headers: { authorization: "Bearer app-key" } },
     { headers: { "x-workman-key": "friend-key" } },
-    { path: "/versions/1.2.3/fixture.zip?key=app-key" },
-    { headers: { authorization: `Basic ${Buffer.from("friend:friend-key").toString("base64")}` } },
+    { headers: { authorization: basicAuthorization } },
   ];
 
   for (const mechanism of mechanisms) {
@@ -205,20 +244,75 @@ test("accepts Bearer, X-Workman-Key, query, and Basic credentials", async () => 
   }
 });
 
-test("serves a protected manifest with an authorized channel response", async () => {
-  const response = await worker.fetch(
-    request("/releases.json", { headers: { authorization: "Bearer app-key" } }),
-    env,
-  );
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { channels: { stable: release, latest: release } });
+test("does not accept a URL query key for protected artifacts", async () => {
+  const response = await worker.fetch(request("/versions/1.2.3/fixture.zip?key=app-key"), env);
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "invalid or missing download key" });
+});
+
+test("keeps Bearer and X-Workman-Key manifest authorization compatible", async () => {
+  for (const headers of [
+    { authorization: "Bearer app-key" },
+    { "x-workman-key": "app-key" },
+  ]) {
+    const response = await worker.fetch(request("/releases.json", { headers }), env);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { channels: { stable: release, latest: release } });
+  }
 });
 
 test("keeps the bootstrap installer public", async () => {
   const response = await worker.fetch(request("/install.sh"), env);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/x-shellscript; charset=utf-8");
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), installer);
+});
+
+test("serves robots.txt and applies noindex to every response class", async () => {
+  const robots = await worker.fetch(request("/robots.txt"), env);
+  assert.equal(robots.status, 200);
+  assert.equal(robots.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(await robots.text(), "User-agent: *\nDisallow: /\n");
+
+  const cases = [
+    request("/"),
+    request("/download"),
+    request("/download", { headers: { authorization: basicAuthorization } }),
+    request("/robots.txt"),
+    request("/workman-logo-wide-transparent.png"),
+    request("/install.sh"),
+    request("/releases.json", { headers: { authorization: "Bearer app-key" } }),
+    request("/versions/1.2.3/fixture.zip", { headers: { authorization: "Bearer app-key" } }),
+    request("/missing"),
+    request("/", { method: "POST" }),
+  ];
+  for (const item of cases) {
+    const response = await worker.fetch(item, env);
+    assert.equal(
+      response.headers.get("x-robots-tag"),
+      "noindex, nofollow",
+      `${item.method} ${new URL(item.url).pathname}`,
+    );
+  }
+});
+
+test("disables every search-engine block with the single config flag", async () => {
+  const indexingEnv = { ...env, SITE_NOINDEX: "false" };
+  const lander = await worker.fetch(request("/"), indexingEnv);
+  assert.equal(lander.headers.get("x-robots-tag"), null);
+  assert.doesNotMatch(await lander.text(), /<meta name="robots"/);
+
+  const download = await worker.fetch(
+    request("/download", { headers: { authorization: basicAuthorization } }),
+    indexingEnv,
+  );
+  assert.equal(download.headers.get("x-robots-tag"), null);
+  assert.doesNotMatch(await download.text(), /<meta name="robots"/);
+
+  const robots = await worker.fetch(request("/robots.txt"), indexingEnv);
+  assert.equal(robots.headers.get("x-robots-tag"), null);
+  assert.equal(await robots.text(), "User-agent: *\nAllow: /\n");
 });
 
 test("serves authorized byte ranges with exact response headers", async () => {
