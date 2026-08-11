@@ -88,6 +88,12 @@
     type TrustReview
   } from './lib/daemon';
   import {
+    appendDaemonLogEntry,
+    isDaemonRequestTimeoutError,
+    type DaemonLogEntry,
+    type DaemonLogTone
+  } from './lib/daemonLog';
+  import {
     appNavigation,
     readRecentNavigationKeys,
     recordRecentNavigation,
@@ -222,6 +228,8 @@
   let projectActivationRequest = 0;
   let pendingProjectSelectionId: number | null = null;
   let error = $state<string | null>(null);
+  let daemonLog = $state<DaemonLogEntry[]>([]);
+  let daemonLogSequence = 0;
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
   let projectSettingsProject = $state<Project | null>(null);
@@ -520,7 +528,9 @@
     void client
       .start(
         (status) => { if (active) applyConnectionStatus(status); },
-        (message) => { if (active) error = message; }
+        (message) => {
+          if (active) recordDaemonLog('warning', 'Control message issue', message);
+        }
       )
       .then((status) => { if (active) applyConnectionStatus(status); })
       .catch(reportError);
@@ -539,8 +549,26 @@
   });
 
   function applyConnectionStatus(status: ConnectionStatus): void {
+    const previous = connection;
     const reconnected = connection.status !== 'connected' && status.status === 'connected';
     connection = status;
+    if (
+      previous.status !== status.status
+      || previous.port !== status.port
+      || previous.message !== status.message
+    ) {
+      if (status.status === 'connected') {
+        recordDaemonLog(
+          'info',
+          'Daemon connected',
+          status.port === null ? null : `Local control port ${status.port}`
+        );
+      } else if (status.status === 'disconnected') {
+        recordDaemonLog('error', 'Daemon disconnected', status.message);
+      } else {
+        recordDaemonLog('info', 'Connecting to daemon', status.message);
+      }
+    }
     if (status.status === 'connected') {
       console.info(
         `workman daemon: ${status.daemon_version ?? 'legacy'} ` +
@@ -3091,7 +3119,31 @@
 
   function reportError(cause: unknown): void {
     if (isUnsupportedControlMethod(cause)) return;
+    if (isDaemonRequestTimeoutError(cause)) {
+      const seconds = cause.timeoutMs / 1_000;
+      recordDaemonLog(
+        'warning',
+        `${cause.method} timed out`,
+        `No response after ${seconds} ${seconds === 1 ? 'second' : 'seconds'}${connection.status === 'connected' ? '; connection stayed online.' : '.'}`
+      );
+      console.warn('workman daemon request timed out', cause.method, cause.timeoutMs);
+      return;
+    }
     error = cause instanceof Error ? cause.message : String(cause);
+  }
+
+  function recordDaemonLog(tone: DaemonLogTone, title: string, detail: string | null): void {
+    daemonLog = appendDaemonLogEntry(daemonLog, {
+      id: ++daemonLogSequence,
+      tone,
+      title,
+      detail,
+      occurredAt: Date.now()
+    });
+  }
+
+  function clearDaemonLog(): void {
+    daemonLog = [];
   }
 
   async function restartOutdatedDaemon(): Promise<void> {
@@ -3557,8 +3609,10 @@
           processes={treeProcesses}
           connected={connection.status === 'connected'}
           daemonPort={connection.port}
+          daemonEvents={daemonLog}
           onUnfocus={unfocusSelectedProcess}
           onSelectProcess={selectProcessById}
+          onClearDaemonEvents={clearDaemonLog}
           onError={reportError}
         />
       {/if}

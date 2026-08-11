@@ -51,6 +51,7 @@ import {
   type WorktreeOperationAck
 } from './worktreeProgress';
 import type { ClaimedTodo } from './claimedTodos';
+import { DaemonRequestTimeoutError } from './daemonLog';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -726,7 +727,7 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
           : 5_000;
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error('The daemon did not answer in time'));
+        reject(new DaemonRequestTimeoutError(type, requestTimeout));
       }, requestTimeout);
       this.pending.set(id, {
         method: type,

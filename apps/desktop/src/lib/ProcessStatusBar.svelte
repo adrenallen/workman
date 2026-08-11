@@ -1,5 +1,6 @@
 <script module lang="ts">
   import type { DaemonClient, ProcessView, Project } from './daemon';
+  import type { DaemonLogEntry } from './daemonLog';
 
   export interface ProcessStatusBarProps {
     client: DaemonClient;
@@ -8,8 +9,10 @@
     processes: ProcessView[];
     connected: boolean;
     daemonPort?: number | null;
+    daemonEvents: DaemonLogEntry[];
     onUnfocus: () => void;
     onSelectProcess: (processId: number) => void;
+    onClearDaemonEvents: () => void;
     onError: (message: string) => void;
   }
 </script>
@@ -41,12 +44,15 @@
     processes,
     connected,
     daemonPort = null,
+    daemonEvents,
     onUnfocus,
     onSelectProcess,
+    onClearDaemonEvents,
     onError
   }: ProcessStatusBarProps = $props();
 
   let popoverOpen = $state(false);
+  let daemonPopoverOpen = $state(false);
   let overflowRoot = $state<HTMLElement>();
   let overflowOpen = $state(false);
   let freshChildren = $state<DescendantProcessStats[]>([]);
@@ -59,6 +65,9 @@
   const stats = $derived($liveStats.processes[process.id] ?? null);
   const activity = $derived(processActivity(process, stats ?? undefined));
   const childCount = $derived(popoverOpen ? freshChildren.length : (stats?.descendant_count ?? 0));
+  const daemonNoticeCount = $derived(
+    daemonEvents.reduce((count, event) => count + (event.tone === 'info' ? 0 : event.count), 0)
+  );
   const siblingIndex = $derived(processes.findIndex((candidate) => candidate.id === process.id));
   const timerDensity = $derived(statusWidth <= 680 ? 'hidden' : statusWidth <= 1_040 ? 'compact' : 'full');
 
@@ -67,9 +76,10 @@
       if (overflowOpen && !overflowRoot?.contains(event.target as Node)) closeOverflow();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && (popoverOpen || overflowOpen)) {
+      if (event.key === 'Escape' && (popoverOpen || daemonPopoverOpen || overflowOpen)) {
         event.preventDefault();
         closePopover();
+        daemonPopoverOpen = false;
         closeOverflow();
       }
     };
@@ -91,6 +101,7 @@
     if (nextProcessId === activeProcessId) return;
     activeProcessId = nextProcessId;
     popoverOpen = false;
+    daemonPopoverOpen = false;
     overflowOpen = false;
     freshChildren = [];
     confirmingPid = null;
@@ -205,6 +216,14 @@
       default:
         return '—';
     }
+  }
+
+  function formatDaemonEventTime(timestamp: number): string {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit'
+    }).format(timestamp);
   }
 </script>
 
@@ -362,14 +381,73 @@
       </span>
     {/if}
 
-    <span class="daemon-connection">
-      <ServerIcon size={13} strokeWidth={1.8} aria-hidden="true" />
-      <StatusIndicator
-        tone={connected ? 'success' : 'danger'}
-        label={connected ? `Daemon connected · port ${daemonPort ?? 'unknown'}` : 'Daemon disconnected'}
-      />
-      <span class="daemon-port">{connected ? `:${daemonPort ?? '—'}` : 'offline'}</span>
-    </span>
+    <Popover.Root bind:open={daemonPopoverOpen}>
+      <Popover.Trigger>
+        {#snippet child({ props })}
+          <button
+            {...props}
+            type="button"
+            class="daemon-connection"
+            class:active={daemonPopoverOpen}
+            aria-label={`${connected ? 'Daemon connected' : 'Daemon disconnected'}${daemonNoticeCount > 0 ? `, ${daemonNoticeCount} logged ${daemonNoticeCount === 1 ? 'notice' : 'notices'}` : ''}`}
+            title="Open daemon log"
+          >
+            <ServerIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+            <StatusIndicator
+              tone={connected ? 'success' : 'danger'}
+              label={connected ? `Daemon connected · port ${daemonPort ?? 'unknown'}` : 'Daemon disconnected'}
+            />
+            <span class="daemon-port">{connected ? `:${daemonPort ?? '—'}` : 'offline'}</span>
+            {#if daemonNoticeCount > 0}
+              <span class="daemon-notice-count" aria-hidden="true">{daemonNoticeCount}</span>
+            {/if}
+          </button>
+        {/snippet}
+      </Popover.Trigger>
+
+      {#if daemonPopoverOpen}
+        <Popover.Content side="top" align="end" sideOffset={7} class="w-auto gap-0 bg-transparent p-0 shadow-none ring-0">
+          <section class="daemon-log-popover" aria-label="Daemon activity log">
+            <header>
+              <div>
+                <span class="eyebrow">Local runtime</span>
+                <h2>Daemon log</h2>
+              </div>
+              <span class:connected class="daemon-log-state">
+                <i aria-hidden="true"></i>{connected ? `Connected · :${daemonPort ?? '—'}` : 'Disconnected'}
+              </span>
+            </header>
+
+            <div class="daemon-log-list" aria-live="polite">
+              {#each daemonEvents as event (event.id)}
+                <article data-tone={event.tone}>
+                  <i class="daemon-log-dot" aria-hidden="true"></i>
+                  <div>
+                    <strong>{event.title}</strong>
+                    {#if event.detail}<p>{event.detail}</p>{/if}
+                  </div>
+                  <time datetime={new Date(event.occurredAt).toISOString()} title={new Date(event.occurredAt).toLocaleString()}>
+                    {formatDaemonEventTime(event.occurredAt)}{#if event.count > 1}<span> ×{event.count}</span>{/if}
+                  </time>
+                </article>
+              {:else}
+                <div class="daemon-log-empty">
+                  <ServerIcon size={15} strokeWidth={1.7} aria-hidden="true" />
+                  <span>No daemon notices this session</span>
+                </div>
+              {/each}
+            </div>
+
+            {#if daemonEvents.length > 0}
+              <footer>
+                <span>Newest first · session only</span>
+                <button type="button" onclick={onClearDaemonEvents}>Clear log</button>
+              </footer>
+            {/if}
+          </section>
+        </Popover.Content>
+      {/if}
+    </Popover.Root>
 
     <div class="status-overflow-control" bind:this={overflowRoot}>
       <button
@@ -598,10 +676,23 @@
   }
 
   .daemon-connection {
+    display: flex;
+    min-width: 0;
+    align-items: center;
     gap: 3px;
+    border-left: 1px solid var(--border);
+    padding: 0 9px;
     color: var(--muted-foreground);
     font-size: var(--font-size-xs);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .daemon-connection:hover,
+  .daemon-connection.active,
+  .daemon-connection:focus-visible {
+    background: var(--popover);
+    color: var(--foreground);
   }
 
   .daemon-connection > :global(svg) {
@@ -610,6 +701,165 @@
 
   .daemon-port {
     color: var(--muted-foreground);
+  }
+
+  .daemon-notice-count {
+    display: grid;
+    min-width: 15px;
+    height: 15px;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--warning-token) 55%, var(--border));
+    border-radius: 999px;
+    padding: 0 3px;
+    background: color-mix(in srgb, var(--warning-token) 12%, var(--card));
+    color: var(--warning-token);
+    font-size: 9px;
+    font-weight: 750;
+    line-height: 1;
+  }
+
+  .daemon-log-popover {
+    width: min(440px, calc(100vw - 28px));
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    background: var(--popover);
+    box-shadow: 0 18px 48px rgb(0 0 0 / 48%);
+    color: var(--text-soft);
+    font: inherit;
+  }
+
+  .daemon-log-popover > header,
+  .daemon-log-popover > footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .daemon-log-popover > header {
+    min-height: 48px;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 11px 7px 14px;
+  }
+
+  .daemon-log-state {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--fault);
+    font-size: var(--font-size-xs);
+    font-weight: 650;
+  }
+
+  .daemon-log-state i,
+  .daemon-log-dot {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    border-radius: 999px;
+    background: currentColor;
+  }
+
+  .daemon-log-state.connected {
+    color: var(--success);
+  }
+
+  .daemon-log-list {
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .daemon-log-list article {
+    display: grid;
+    min-height: 48px;
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 11px;
+  }
+
+  .daemon-log-list article:last-child {
+    border-bottom: 0;
+  }
+
+  .daemon-log-dot {
+    margin-top: 5px;
+    color: var(--muted-foreground);
+  }
+
+  .daemon-log-list article[data-tone='info'] .daemon-log-dot { color: var(--success); }
+  .daemon-log-list article[data-tone='warning'] .daemon-log-dot { color: var(--warning-token); }
+  .daemon-log-list article[data-tone='error'] .daemon-log-dot { color: var(--fault); }
+
+  .daemon-log-list article > div {
+    min-width: 0;
+  }
+
+  .daemon-log-list strong,
+  .daemon-log-list p {
+    display: block;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .daemon-log-list strong {
+    color: var(--foreground);
+    font-family: 'Archivo Variable', sans-serif;
+    font-size: var(--font-size-sm);
+    font-weight: 650;
+  }
+
+  .daemon-log-list p {
+    margin: 3px 0 0;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
+    line-height: 1.35;
+  }
+
+  .daemon-log-list time {
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .daemon-log-list time span {
+    color: var(--warning-token);
+    font-weight: 700;
+  }
+
+  .daemon-log-empty {
+    display: flex;
+    min-height: 82px;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
+  }
+
+  .daemon-log-popover > footer {
+    min-height: 34px;
+    border-top: 1px solid var(--border);
+    padding: 5px 8px 5px 12px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
+  }
+
+  .daemon-log-popover > footer button {
+    border: 1px solid var(--border-strong);
+    border-radius: 2px;
+    padding: 4px 6px;
+    background: var(--accent);
+    color: var(--text-soft);
+    font-size: var(--font-size-xs);
+    font-weight: 650;
+    text-transform: uppercase;
+  }
+
+  .daemon-log-popover > footer button:hover {
+    color: var(--foreground);
   }
 
   .status-overflow-control {
@@ -995,6 +1245,7 @@
 
   .stage-medium .navigation button,
   .stage-medium .telemetry > span,
+  .stage-medium .daemon-connection,
   .stage-medium .subprocess-trigger {
     padding-right: 7px;
     padding-left: 7px;
@@ -1044,6 +1295,7 @@
   }
 
   @media (prefers-reduced-motion: no-preference) {
+    .daemon-log-popover,
     .subprocess-popover,
     .status-overflow-popover {
       animation: reveal 120ms ease-out;
