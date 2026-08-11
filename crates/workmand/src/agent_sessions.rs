@@ -1,7 +1,7 @@
 //! Passive discovery of conversation IDs written by supported agent CLIs.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     ffi::OsString,
     fs::{self, File},
@@ -10,8 +10,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionAdapter {
@@ -70,6 +74,27 @@ impl SessionCapture {
             SessionAdapter::OpenCode => discover_opencode(self),
         };
         result.map_err(|error| error.to_string())
+    }
+
+    /// Discover the session file that is owned by this Workman process tree.
+    ///
+    /// Codex keeps its active rollout JSONL open for the life of the TUI. That
+    /// OS-level ownership is the only reliable discriminator when several
+    /// sessions start in the same cwd at nearly the same time. Other adapters
+    /// retain their existing cwd-and-watermark discovery until they expose an
+    /// equally strong process-specific signal.
+    pub(crate) fn discover_for_process(&self, root_pid: u32) -> Result<Option<String>, String> {
+        let result = match self.adapter {
+            SessionAdapter::Codex => discover_codex_for_process(self, root_pid),
+            _ => return self.discover(),
+        };
+        result.map_err(|error| error.to_string())
+    }
+
+    /// Codex's `resume --last` can select a concurrently-created sibling in the
+    /// same cwd. Without an exact captured ID, a fresh launch is safer.
+    pub(crate) fn supports_continue_latest_fallback(&self) -> bool {
+        self.adapter != SessionAdapter::Codex
     }
 
     /// Resolve whether this CLI has any cwd-scoped session that its continue-latest
@@ -159,29 +184,152 @@ fn discover_claude(capture: &SessionCapture) -> io::Result<Option<String>> {
 }
 
 fn discover_codex(capture: &SessionCapture) -> io::Result<Option<String>> {
-    let root = capture
+    let root = codex_sessions_root(capture);
+    latest_session_file(&root, "jsonl", capture.started_at_ms, |path| {
+        codex_session_id(path, &capture.working_dir)
+    })
+}
+
+fn discover_codex_for_process(
+    capture: &SessionCapture,
+    root_pid: u32,
+) -> io::Result<Option<String>> {
+    let root = codex_sessions_root(capture);
+    let mut files = open_files_for_process_tree(root_pid)?
+        .into_iter()
+        .filter(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                && path_is_within(path, &root)
+        })
+        .filter_map(|path| {
+            let modified = modified_millis(&path).ok()?;
+            (modified >= capture.started_at_ms).then_some((path, modified))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|(_, modified)| *modified);
+    for (path, _) in files.into_iter().rev() {
+        if let Some(session_id) = codex_session_id(&path, &capture.working_dir)? {
+            return Ok(Some(session_id));
+        }
+    }
+    Ok(None)
+}
+
+fn codex_sessions_root(capture: &SessionCapture) -> PathBuf {
+    capture
         .codex_home
         .clone()
         .unwrap_or_else(|| capture.home.join(".codex"))
-        .join("sessions");
-    latest_session_file(&root, "jsonl", capture.started_at_ms, |path| {
-        let Some(value) = first_json_line(path)? else {
-            return Ok(None);
-        };
-        let payload = value.get("payload").unwrap_or(&value);
-        if !payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .is_some_and(|cwd| working_dirs_match(cwd, &capture.working_dir))
-        {
-            return Ok(None);
+        .join("sessions")
+}
+
+fn codex_session_id(path: &Path, working_dir: &Path) -> io::Result<Option<String>> {
+    let Some(value) = first_json_line(path)? else {
+        return Ok(None);
+    };
+    let payload = value.get("payload").unwrap_or(&value);
+    if !payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .is_some_and(|cwd| working_dirs_match(cwd, working_dir))
+    {
+        return Ok(None);
+    }
+    Ok(payload
+        .get("id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+        || path
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .is_some_and(|(path, root)| path.starts_with(root))
+}
+
+fn process_tree_pids(root_pid: u32) -> HashSet<u32> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    let parents = system
+        .processes()
+        .values()
+        .filter_map(|process| {
+            process
+                .parent()
+                .map(|parent| (process.pid().as_u32(), parent.as_u32()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut tree = HashSet::from([root_pid]);
+    loop {
+        let before = tree.len();
+        for (pid, parent) in &parents {
+            if tree.contains(parent) {
+                tree.insert(*pid);
+            }
         }
-        Ok(payload
-            .get("id")
-            .or_else(|| payload.get("session_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned))
-    })
+        if tree.len() == before {
+            return tree;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_files_for_process_tree(root_pid: u32) -> io::Result<HashSet<PathBuf>> {
+    let mut pids = process_tree_pids(root_pid).into_iter().collect::<Vec<_>>();
+    pids.sort_unstable();
+    let pid_list = pids
+        .into_iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = Command::new("/usr/sbin/lsof")
+        .args(["-w", "-a", "-Fn", "-p", &pid_list])
+        .output()?;
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.strip_prefix(b"n"))
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .map(PathBuf::from)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn open_files_for_process_tree(root_pid: u32) -> io::Result<HashSet<PathBuf>> {
+    let mut files = HashSet::new();
+    for pid in process_tree_pids(root_pid) {
+        let descriptors = match fs::read_dir(format!("/proc/{pid}/fd")) {
+            Ok(descriptors) => descriptors,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for descriptor in descriptors.flatten() {
+            if let Ok(path) = fs::read_link(descriptor.path()) {
+                files.insert(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn open_files_for_process_tree(_root_pid: u32) -> io::Result<HashSet<PathBuf>> {
+    Ok(HashSet::new())
 }
 
 fn discover_kimi(capture: &SessionCapture) -> io::Result<Option<String>> {

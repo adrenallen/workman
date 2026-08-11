@@ -176,14 +176,13 @@ impl KeyboardProtocolTracker {
             (b'>', b'n') if parameter(&parameters, 0, 2) == 4 => {
                 self.modify_other_keys = 0;
             }
-            (b'?', b'h') | (b'?', b'l') => {
+            (b'?', b'h') | (b'?', b'l')
                 if parameters
                     .iter()
                     .flatten()
-                    .any(|mode| matches!(*mode, 47 | 1047 | 1049))
-                {
-                    self.alternate_screen = final_byte == b'h';
-                }
+                    .any(|mode| matches!(*mode, 47 | 1047 | 1049)) =>
+            {
+                self.alternate_screen = final_byte == b'h';
             }
             _ => {}
         }

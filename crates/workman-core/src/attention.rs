@@ -146,6 +146,7 @@ pub struct AgentState {
 }
 
 impl AgentState {
+    #[allow(clippy::too_many_arguments)]
     fn from_snapshot(
         state: AttentionState,
         tool_type: Option<String>,
@@ -930,7 +931,7 @@ mod tests {
         assert!(idle.waiting);
         assert!(idle.idle);
         assert!(!idle.needs_input);
-        assert_eq!(idle.waiting_on, [reason.clone()]);
+        assert_eq!(idle.waiting_on, std::slice::from_ref(&reason));
 
         let mut working = tracker.snapshot_at(1_100);
         working.refine_waiting(vec![reason]);

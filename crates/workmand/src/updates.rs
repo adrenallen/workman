@@ -175,12 +175,12 @@ impl UpdateService {
         {
             cache.automatic_checks = enabled;
         }
-        if let Some(channel) = channel {
-            if channel != cache.channel {
-                cache.channel = channel;
-                cache.last_checked_at = None;
-                cache.last_check = None;
-            }
+        if let Some(channel) = channel
+            && channel != cache.channel
+        {
+            cache.channel = channel;
+            cache.last_checked_at = None;
+            cache.last_check = None;
         }
         write_cache(&self.cache_path, &cache)?;
         Ok(status_from_cache(

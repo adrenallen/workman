@@ -601,6 +601,7 @@ pub(crate) fn load_agent_tool(
         .ok_or_else(|| format!("agent tool {agent_tool_id} was not found"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_registered_agent(
     registry: &mut ProcessRegistry,
     project: &Project,
@@ -624,6 +625,7 @@ pub(crate) fn spawn_registered_agent(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_registered_agent_for(
     registry: &mut ProcessRegistry,
     project: &Project,
@@ -771,11 +773,11 @@ pub(crate) async fn deep_check_registered_agent(
             spawned_by_process_id,
             AgentLaunchPurpose::DeepCheck,
         )?;
-        if submit_prompt {
-            if let Err(error) = registry.submit_input(spawned.process_id, prompt.as_bytes()) {
-                let _ = registry.close(spawned.process_id);
-                return Err(error.to_string());
-            }
+        if submit_prompt
+            && let Err(error) = registry.submit_input(spawned.process_id, prompt.as_bytes())
+        {
+            let _ = registry.close(spawned.process_id);
+            return Err(error.to_string());
         }
         spawned.process_id
     };
@@ -896,6 +898,7 @@ fn auto_acknowledge_initial_dialog(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     registry: &mut ProcessRegistry,
     project: &Project,

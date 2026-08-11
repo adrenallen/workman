@@ -910,14 +910,14 @@ pub(crate) async fn create_with_progress(
                 .store()
                 .set_worktree_preference(repository.id, key, Some(value))?;
         }
-        if request.remember_env_policy {
-            if let Some(policy) = env_plan.policy {
-                registry.store().set_worktree_preference(
-                    repository.id,
-                    "copy_env",
-                    Some(policy.preference()),
-                )?;
-            }
+        if request.remember_env_policy
+            && let Some(policy) = env_plan.policy
+        {
+            registry.store().set_worktree_preference(
+                repository.id,
+                "copy_env",
+                Some(policy.preference()),
+            )?;
         }
         register_project(
             registry.store(),

@@ -347,13 +347,11 @@ fn parse_key_value(contents: &str, flavor: PlainFlavor) -> BTreeMap<String, Stri
             (fields.next().unwrap_or(""), fields.next().unwrap_or(""))
         };
         if matches!(flavor, PlainFlavor::Ghostty) && key == "palette" {
-            if let Some((index, value)) = value.split_once('=') {
-                if let (Ok(index), Some(color)) = (index.trim().parse::<usize>(), parse_hex(value))
-                {
-                    if let Some(name) = COLOR_NAMES.get(index) {
-                        colors.insert((*name).to_owned(), color);
-                    }
-                }
+            if let Some((index, value)) = value.split_once('=')
+                && let (Ok(index), Some(color)) = (index.trim().parse::<usize>(), parse_hex(value))
+                && let Some(name) = COLOR_NAMES.get(index)
+            {
+                colors.insert((*name).to_owned(), color);
             }
             continue;
         }
@@ -544,7 +542,6 @@ fn graphite_colors() -> BTreeMap<String, String> {
 
 fn parse_hex(value: &str) -> Option<String> {
     let value = value
-        .trim()
         .split_whitespace()
         .next()?
         .trim_matches(['\'', '"', ',']);

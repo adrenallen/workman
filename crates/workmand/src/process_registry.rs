@@ -297,6 +297,7 @@ impl Default for RawOutputProfile {
 #[derive(Clone, Debug)]
 struct PendingSessionCapture {
     capture: SessionCapture,
+    root_pid: u32,
     last_checked_at: i64,
 }
 
@@ -711,6 +712,9 @@ impl ProcessRegistry {
                 .is_some();
         let cwd_has_session = needs_continue_check.then(|| {
             capture.as_ref().and_then(|capture| {
+                if !capture.supports_continue_latest_fallback() {
+                    return Some(false);
+                }
                 capture
                     .latest_existing()
                     .map(|session| session.is_some())
@@ -828,6 +832,7 @@ impl ProcessRegistry {
                     process_id,
                     PendingSessionCapture {
                         capture,
+                        root_pid: hosted.pid(),
                         last_checked_at: started_at,
                     },
                 );
@@ -945,6 +950,7 @@ impl ProcessRegistry {
     fn stop_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             process.status = ProcessStatus::Stopped;
             process.pid = None;
@@ -1006,6 +1012,7 @@ impl ProcessRegistry {
     fn kill_one(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
+        self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
             process.status = ProcessStatus::Stopped;
             process.pid = None;
@@ -1668,11 +1675,18 @@ impl ProcessRegistry {
             return Ok(());
         };
         pending.last_checked_at = now;
-        match pending.capture.discover() {
+        match pending.capture.discover_for_process(pending.root_pid) {
             Ok(Some(session_id)) => {
-                self.store
-                    .set_agent_session_id(process_id, &session_id, now)?;
-                self.agent_session_captures.remove(&process_id);
+                if self
+                    .store
+                    .set_agent_session_id(process_id, &session_id, now)?
+                {
+                    self.agent_session_captures.remove(&process_id);
+                } else {
+                    eprintln!(
+                        "process {process_id}: agent session {session_id} is already attributed to another process"
+                    );
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -1795,10 +1809,10 @@ impl ProcessRegistry {
     }
 
     fn tool_type_for(&self, process: &Process) -> RegistryResult<Option<String>> {
-        if let Some(agent_tool_id) = process.agent_tool_id {
-            if let Some(tool) = self.store.get_agent_tool(agent_tool_id)? {
-                return Ok(Some(tool.tool_type));
-            }
+        if let Some(agent_tool_id) = process.agent_tool_id
+            && let Some(tool) = self.store.get_agent_tool(agent_tool_id)?
+        {
+            return Ok(Some(tool.tool_type));
         }
 
         let command_is_claude = process.command.as_deref().is_some_and(|command| {
@@ -1869,6 +1883,10 @@ struct ProcessOutput {
 
 impl Drop for ProcessRegistry {
     fn drop(&mut self) {
+        let process_ids = self.running.keys().copied().collect::<Vec<_>>();
+        for process_id in process_ids {
+            let _ = self.capture_agent_session_id(process_id);
+        }
         for (process_id, mut hosted) in self.running.drain() {
             let _ = self.store.clear_process_mcp_token(process_id);
             let status = terminate_hosted_tree(&mut hosted, self.stop_grace, false).ok();
@@ -1897,11 +1915,15 @@ impl Drop for ProcessRegistry {
 struct AgentStartCommand {
     command: String,
     mode: AgentLaunchMode,
+    missing_session_fallback: bool,
 }
 
 impl AgentStartCommand {
     const fn mode_message(&self) -> &'static str {
         match self.mode {
+            AgentLaunchMode::Fresh if self.missing_session_fallback => {
+                "Started a fresh agent conversation because no captured session ID was available"
+            }
             AgentLaunchMode::Fresh => "Started a fresh agent conversation",
             AgentLaunchMode::ContinuedLatest => {
                 "Continued the latest agent conversation for this working directory"
@@ -1922,6 +1944,7 @@ fn agent_start_command(
         return AgentStartCommand {
             command: base_command.to_owned(),
             mode: AgentLaunchMode::Fresh,
+            missing_session_fallback: false,
         };
     }
     if let (Some(session_id), Some(resume_args)) = (
@@ -1934,19 +1957,22 @@ fn agent_start_command(
                 &resume_args.replace("{session_id}", &shell_quote(session_id)),
             ),
             mode: AgentLaunchMode::ResumedSession,
+            missing_session_fallback: false,
         };
     }
-    if cwd_has_session != Some(false)
+    if cwd_has_session == Some(true)
         && let Some(continue_args) = tool.and_then(|tool| tool.continue_args.as_deref())
     {
         return AgentStartCommand {
             command: append_shell_args(base_command, continue_args),
             mode: AgentLaunchMode::ContinuedLatest,
+            missing_session_fallback: false,
         };
     }
     AgentStartCommand {
         command: base_command.to_owned(),
         mode: AgentLaunchMode::Fresh,
+        missing_session_fallback: true,
     }
 }
 

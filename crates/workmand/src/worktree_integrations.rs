@@ -136,7 +136,7 @@ pub(crate) fn site_url(site_name: &str, herd: &HerdView) -> Option<String> {
     herd.available
         .then_some(())
         .filter(|_| herd.parked)
-        .and_then(|_| herd.tld.as_ref())
+        .and(herd.tld.as_ref())
         .map(|tld| format!("http://{site_name}.{tld}"))
 }
 
@@ -155,12 +155,11 @@ async fn pull_requests_at(
     now: i64,
 ) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if !refresh {
-        if let Some(hit) = cache.lock().await.get(repository).cloned() {
-            if now.saturating_sub(hit.checked_at) < PR_CACHE_TTL_SECONDS {
-                return cache_result(hit);
-            }
-        }
+    if !refresh
+        && let Some(hit) = cache.lock().await.get(repository).cloned()
+        && now.saturating_sub(hit.checked_at) < PR_CACHE_TTL_SECONDS
+    {
+        return cache_result(hit);
     }
     let entry = match fetch_pull_requests(repository, environment).await {
         Ok(branches) => PrCacheEntry {

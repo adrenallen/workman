@@ -466,15 +466,15 @@ impl<'store> ScratchpadService<'store> {
     ) -> ScratchpadServiceResult<Scratchpad> {
         let mut scratchpad =
             self.require_revision(project_id, scratchpad_id, Some(expected_revision))?;
-        if let ScratchpadEditTarget::Section { heading } = &target {
-            if heading_matches(heading, &scratchpad.name) {
-                let (name, replacement) = split_leading_h1(scratchpad.name.clone(), content)?;
-                self.ensure_name_available(project_id, &name, Some(scratchpad_id))?;
-                scratchpad.name = name;
-                scratchpad.content = replacement;
-                let revision = scratchpad.revision;
-                return self.persist_update(scratchpad, revision);
-            }
+        if let ScratchpadEditTarget::Section { heading } = &target
+            && heading_matches(heading, &scratchpad.name)
+        {
+            let (name, replacement) = split_leading_h1(scratchpad.name.clone(), content)?;
+            self.ensure_name_available(project_id, &name, Some(scratchpad_id))?;
+            scratchpad.name = name;
+            scratchpad.content = replacement;
+            let revision = scratchpad.revision;
+            return self.persist_update(scratchpad, revision);
         }
         let mut lines = content_lines(&scratchpad.content);
         match target {
@@ -969,14 +969,14 @@ impl<'store> ScratchpadService<'store> {
         expected_revision: Option<i64>,
     ) -> ScratchpadServiceResult<Scratchpad> {
         let scratchpad = self.require_scratchpad(project_id, scratchpad_id)?;
-        if let Some(expected) = expected_revision {
-            if expected != scratchpad.revision {
-                return Err(ScratchpadServiceError::RevisionConflict {
-                    scratchpad_id,
-                    expected,
-                    current: scratchpad.revision,
-                });
-            }
+        if let Some(expected) = expected_revision
+            && expected != scratchpad.revision
+        {
+            return Err(ScratchpadServiceError::RevisionConflict {
+                scratchpad_id,
+                expected,
+                current: scratchpad.revision,
+            });
         }
         Ok(scratchpad)
     }

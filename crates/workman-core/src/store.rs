@@ -118,10 +118,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "actor_attribution",
         include_str!("../migrations/0022_actor_attribution.sql"),
     ),
+    (
+        23,
+        "unique_agent_sessions",
+        include_str!("../migrations/0023_unique_agent_sessions.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 22;
+pub const LATEST_SCHEMA_VERSION: i64 = 23;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -667,14 +672,19 @@ impl Store {
         process_id: ProcessId,
         session_id: &str,
         captured_at: i64,
-    ) -> StoreResult<()> {
-        self.connection.execute(
+    ) -> StoreResult<bool> {
+        let updated = self.connection.execute(
             "UPDATE process_agent_sessions
              SET session_id = ?2, captured_at = ?3
-             WHERE process_id = ?1",
+             WHERE process_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM process_agent_sessions AS claimed
+                   WHERE claimed.session_id = ?2
+                     AND claimed.process_id <> ?1
+               )",
             params![process_id, session_id, captured_at],
         )?;
-        Ok(())
+        Ok(updated > 0)
     }
 
     pub fn get_agent_session(&self, process_id: ProcessId) -> StoreResult<Option<AgentSession>> {

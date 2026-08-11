@@ -523,10 +523,10 @@ fn validate_native_visual_qa_environment(
     Ok(())
 }
 
-fn required_native_visual_qa_path<'a>(
+fn required_native_visual_qa_path(
     identifier: &str,
     name: &str,
-    value: Option<&'a std::ffi::OsStr>,
+    value: Option<&std::ffi::OsStr>,
     token: &str,
 ) -> Result<PathBuf, String> {
     let value =

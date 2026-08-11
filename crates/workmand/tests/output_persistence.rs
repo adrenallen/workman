@@ -289,11 +289,12 @@ async fn receive_terminal_frame(
         let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
             .await?
             .ok_or("websocket closed")??;
-        if let Message::Binary(bytes) = message {
-            if bytes.len() >= FRAME_HEADER_LEN && &bytes[..4] == b"WRK1" {
-                assert_eq!(i64::from_be_bytes(bytes[4..12].try_into()?), PROCESS_ID);
-                return Ok(bytes[FRAME_HEADER_LEN..].to_vec());
-            }
+        if let Message::Binary(bytes) = message
+            && bytes.len() >= FRAME_HEADER_LEN
+            && &bytes[..4] == b"WRK1"
+        {
+            assert_eq!(i64::from_be_bytes(bytes[4..12].try_into()?), PROCESS_ID);
+            return Ok(bytes[FRAME_HEADER_LEN..].to_vec());
         }
     }
 }

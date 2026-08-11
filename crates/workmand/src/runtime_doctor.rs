@@ -206,9 +206,7 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
         } else {
             "self_config".to_owned()
         },
-        configuration_note: if target.automatic_wiring {
-            capability.note.to_owned()
-        } else if !target.can_write {
+        configuration_note: if target.automatic_wiring || !target.can_write {
             capability.note.to_owned()
         } else {
             "Preview and approve a Workman MCP entry for this runtime.".to_owned()

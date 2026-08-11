@@ -169,7 +169,7 @@ impl Store {
             let exited = previous == ObservedState::Working
                 && current == ObservedState::Exited
                 && turn_started;
-            let cooldown_elapsed = last_notified_at.map_or(true, |notified_at| {
+            let cooldown_elapsed = last_notified_at.is_none_or(|notified_at| {
                 now_ms.saturating_sub(notified_at) >= AGENT_DONE_NOTIFICATION_COOLDOWN_MS
             });
             let viewed_since_notification = last_viewed_at

@@ -922,10 +922,11 @@ pub fn sync_user_agent_tools(
     }
 
     for tool in existing {
-        if tool.source == AgentToolSource::Config && !configured_names.contains(&tool.name) {
-            if store.delete_agent_tool(tool.id)? {
-                report.removed += 1;
-            }
+        if tool.source == AgentToolSource::Config
+            && !configured_names.contains(&tool.name)
+            && store.delete_agent_tool(tool.id)?
+        {
+            report.removed += 1;
         }
     }
 

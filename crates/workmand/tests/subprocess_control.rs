@@ -122,7 +122,7 @@ async fn subprocess_rpc_lists_and_only_kills_live_descendants() {
     let root = TempDir::new().unwrap();
     let project_path = fs::canonicalize(root.path()).unwrap();
     let server = TestServer::start(&root.path().join("state")).await;
-    let store = Store::open(&root.path().join("state").join(workmand::DATABASE_FILE)).unwrap();
+    let store = Store::open(root.path().join("state").join(workmand::DATABASE_FILE)).unwrap();
     store
         .put_project(&Project {
             id: 1,

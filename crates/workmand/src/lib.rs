@@ -477,6 +477,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn control_session(
     mut socket: WebSocket,
     mut shutdown: watch::Receiver<bool>,

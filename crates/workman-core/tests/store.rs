@@ -230,6 +230,51 @@ fn version_one_database_migrates_mcp_identity_schema() {
 }
 
 #[test]
+fn unique_agent_session_migration_clears_ambiguous_legacy_ids() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open connection");
+    connection
+        .execute_batch(
+            "CREATE TABLE process_agent_sessions (
+                process_id INTEGER PRIMARY KEY,
+                session_id TEXT,
+                launch_mode TEXT NOT NULL,
+                launched_at INTEGER NOT NULL,
+                captured_at INTEGER
+             );
+             INSERT INTO process_agent_sessions VALUES
+                (1, 'shared', 'fresh', 1, 2),
+                (2, 'shared', 'fresh', 1, 2),
+                (3, 'distinct', 'fresh', 1, 2);",
+        )
+        .expect("create legacy agent sessions");
+    connection
+        .execute_batch(include_str!("../migrations/0023_unique_agent_sessions.sql"))
+        .expect("apply unique agent session migration");
+
+    let sessions = connection
+        .prepare("SELECT process_id, session_id FROM process_agent_sessions ORDER BY process_id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        sessions,
+        [(1, None), (2, None), (3, Some("distinct".into()))]
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE process_agent_sessions SET session_id = 'distinct' WHERE process_id = 1",
+                [],
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn file_database_uses_wal() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -423,9 +468,11 @@ fn domain_records_round_trip_through_store() {
     store
         .set_agent_launch_mode(process.id, AgentLaunchMode::Fresh, 1_700_000_000_100)
         .expect("set agent launch mode");
-    store
-        .set_agent_session_id(process.id, "session-codex", 1_700_000_000_200)
-        .expect("capture agent session");
+    assert!(
+        store
+            .set_agent_session_id(process.id, "session-codex", 1_700_000_000_200)
+            .expect("capture agent session")
+    );
     let agent_session = store
         .get_agent_session(process.id)
         .unwrap()
@@ -442,6 +489,36 @@ fn domain_records_round_trip_through_store() {
     let agent_session = store.get_agent_session(process.id).unwrap().unwrap();
     assert_eq!(agent_session.session_id.as_deref(), Some("session-codex"));
     assert_eq!(agent_session.launch_mode, AgentLaunchMode::ResumedSession);
+
+    let competing_process = Process {
+        id: 30,
+        name: "codex-w2".into(),
+        pid: Some(5678),
+        ..process.clone()
+    };
+    store
+        .put_process(&competing_process)
+        .expect("put competing process");
+    store
+        .set_agent_launch_mode(
+            competing_process.id,
+            AgentLaunchMode::Fresh,
+            1_700_000_000_400,
+        )
+        .expect("set competing launch mode");
+    assert!(
+        !store
+            .set_agent_session_id(competing_process.id, "session-codex", 1_700_000_000_500,)
+            .expect("reject duplicate agent session")
+    );
+    assert_eq!(
+        store
+            .get_agent_session(competing_process.id)
+            .unwrap()
+            .unwrap()
+            .session_id,
+        None
+    );
     store
         .set_process_mcp_token(process.id, "process-secret", 1_700_000_000_000)
         .expect("set process token");

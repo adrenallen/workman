@@ -109,10 +109,12 @@ impl UserEnvironmentResolver {
             .filter(|path| executable_shell(path))
             .map(Path::to_owned);
         let active_shell = valid_override.as_deref().unwrap_or(&inferred.path);
-        let warning = if configured_path.is_some() && valid_override.is_none() {
+        let warning = if let Some(configured_path) =
+            configured_path.filter(|_| valid_override.is_none())
+        {
             Some(format!(
                 "Configured shell {} is not an executable absolute path; using inferred shell {}.",
-                configured_path.expect("checked above").display(),
+                configured_path.display(),
                 inferred.path.display()
             ))
         } else {
@@ -280,10 +282,8 @@ pub(crate) fn validate_shell_override(path: &Path) -> Result<PathBuf, String> {
 fn pty_environment(shell: &Path) -> BTreeMap<OsString, OsString> {
     let mut environment = BTreeMap::new();
     for (key, value) in env::vars_os() {
-        if key == "LANG" || key.to_string_lossy().starts_with("LC_") {
-            if !value.is_empty() {
-                environment.insert(key, value);
-            }
+        if (key == "LANG" || key.to_string_lossy().starts_with("LC_")) && !value.is_empty() {
+            environment.insert(key, value);
         }
     }
     environment

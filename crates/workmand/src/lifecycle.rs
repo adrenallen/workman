@@ -372,11 +372,11 @@ impl LifecycleSupervisor {
             }
             let attempts = self.restart_attempts.entry(process_id).or_insert(0);
             *attempts = attempts.saturating_add(1);
-            if let Ok(process) = registry.start(process_id) {
-                if is_active(process.status) {
-                    self.running_since
-                        .insert(process_id, (process.pid, Instant::now()));
-                }
+            if let Ok(process) = registry.start(process_id)
+                && is_active(process.status)
+            {
+                self.running_since
+                    .insert(process_id, (process.pid, Instant::now()));
             }
         }
     }
