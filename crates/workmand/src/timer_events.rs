@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::Serialize;
+use tokio::sync::watch;
 use workman_core::{ProcessId, ProjectId, TimerId};
 
 use crate::timers::{TimerFireReason, TimerView};
@@ -83,9 +84,20 @@ struct TimerEventBuffer {
 }
 
 /// A synchronous publisher with a per-WS-client cursor over a bounded retained event log.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TimerLifecycleHub {
     inner: Arc<Mutex<TimerEventBuffer>>,
+    changed: watch::Sender<u64>,
+}
+
+impl Default for TimerLifecycleHub {
+    fn default() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            inner: Arc::new(Mutex::new(TimerEventBuffer::default())),
+            changed,
+        }
+    }
 }
 
 impl TimerLifecycleHub {
@@ -97,7 +109,10 @@ impl TimerLifecycleHub {
         while inner.events.len() > MAX_RETAINED_TIMER_EVENTS {
             inner.events.pop_front();
         }
-        inner.next_sequence
+        let sequence = inner.next_sequence;
+        drop(inner);
+        self.changed.send_replace(sequence);
+        sequence
     }
 
     pub(crate) fn latest_sequence(&self) -> u64 {
@@ -114,6 +129,10 @@ impl TimerLifecycleHub {
             .cloned()
             .collect();
         (latest, events)
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     fn lock(&self) -> MutexGuard<'_, TimerEventBuffer> {
@@ -149,5 +168,16 @@ mod tests {
         let (_, second_client) = hub.events_since(1);
         assert_eq!(second_client.len(), 1);
         assert_eq!(second_client[0].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn subscribers_wake_for_new_timer_activity() {
+        let hub = TimerLifecycleHub::default();
+        let mut changed = hub.subscribe();
+
+        hub.publish(immediate(10));
+
+        changed.changed().await.unwrap();
+        assert_eq!(*changed.borrow_and_update(), 1);
     }
 }

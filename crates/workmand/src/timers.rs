@@ -724,6 +724,18 @@ impl<'a> TimerService<'a> {
         Ok(timer_ids)
     }
 
+    fn has_pending_timers(&self) -> TimerResult<bool> {
+        self.registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM timers WHERE paused = 0 AND fired = 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(persistence)
+    }
+
     fn process_is_idle(&mut self, process_id: ProcessId) -> TimerResult<bool> {
         match self.registry.get_status(process_id) {
             Ok(status) => Ok(matches!(
@@ -824,16 +836,56 @@ pub(crate) fn spawn_timer_scheduler(
     tokio::spawn(async move {
         let mut ticker = interval(TIMER_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut timer_activity = events.subscribe();
+        let mut has_pending_timers = {
+            let mut registry = registry.lock().await;
+            TimerService::new(&mut registry).has_pending_timers()
+        }
+        .unwrap_or(true);
         loop {
+            if !has_pending_timers {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    changed = timer_activity.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let mut registry = registry.lock().await;
+                        has_pending_timers = TimerService::new(&mut registry)
+                            .has_pending_timers()
+                            .unwrap_or(true);
+                    }
+                }
+                continue;
+            }
+
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
                     }
                 }
+                changed = timer_activity.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let mut registry = registry.lock().await;
+                    has_pending_timers = TimerService::new(&mut registry)
+                        .has_pending_timers()
+                        .unwrap_or(true);
+                }
                 _ = ticker.tick() => {
                     let mut registry = registry.lock().await;
                     if let Ok(fires) = TimerService::new(&mut registry).tick(now_millis()) {
+                        if !fires.is_empty() {
+                            has_pending_timers = TimerService::new(&mut registry)
+                                .has_pending_timers()
+                                .unwrap_or(true);
+                        }
                         for fire in fires {
                             events.publish(TimerLifecycleEvent::for_timer(
                                 TimerLifecycleKind::Fired,
