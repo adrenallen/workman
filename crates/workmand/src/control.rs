@@ -19,6 +19,7 @@ use crate::{
     SharedProcessRegistry,
 };
 
+mod agent_icons;
 mod project_icons;
 mod terminal_theme;
 
@@ -267,6 +268,12 @@ struct AgentToolIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentToolIconParams {
+    agent_tool_id: AgentToolId,
+    source_path: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentToolOrderParams {
     agent_tool_ids: Vec<AgentToolId>,
 }
@@ -314,6 +321,7 @@ pub(crate) async fn handle_text(
     text: &str,
     registry: &SharedProcessRegistry,
     mcp_url: &str,
+    data_dir: &Path,
 ) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return text.to_owned();
@@ -323,7 +331,7 @@ pub(crate) async fn handle_text(
     };
 
     let id = request.id;
-    let result = dispatch(&request.method, request.params, registry, mcp_url).await;
+    let result = dispatch(&request.method, request.params, registry, mcp_url, data_dir).await;
     match result {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
         Err((code, message)) => json!({
@@ -340,6 +348,7 @@ async fn dispatch(
     params: Value,
     registry: &SharedProcessRegistry,
     mcp_url: &str,
+    data_dir: &Path,
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
@@ -527,6 +536,28 @@ async fn dispatch(
             .await
             .map(json_value)
             .map_err(|error| ("deep_check_failed", error));
+        }
+        "agent_tools.set_icon" => {
+            let params: AgentToolIconParams = params_as(params)?;
+            let tool = {
+                let registry = registry.lock().await;
+                crate::mcp::agent_spawning::load_agent_tool(&registry, params.agent_tool_id)
+                    .map_err(|error| ("agent_tool_error", error))?
+            };
+            return agent_icons::set_override(tool, data_dir, Path::new(&params.source_path))
+                .map(json_value)
+                .map_err(|error| ("invalid_agent_tool_icon", error.to_string()));
+        }
+        "agent_tools.remove_icon" => {
+            let params: AgentToolIdParams = params_as(params)?;
+            let tool = {
+                let registry = registry.lock().await;
+                crate::mcp::agent_spawning::load_agent_tool(&registry, params.agent_tool_id)
+                    .map_err(|error| ("agent_tool_error", error))?
+            };
+            return agent_icons::remove_override(tool, data_dir)
+                .map(json_value)
+                .map_err(|error| ("agent_tool_icon_error", error.to_string()));
         }
         "settings.terminal_theme_import" => {
             return Ok(json_value(terminal_theme::import_terminal_theme()));
@@ -755,7 +786,7 @@ async fn dispatch(
     match method {
         "agent_tools.list" => {
             return crate::mcp::agent_spawning::load_agent_tools(&registry)
-                .map(json_value)
+                .map(|tools| json_value(agent_icons::views(tools, data_dir)))
                 .map_err(|error| ("agent_tool_error", error));
         }
         "agent_tools.save" => {
@@ -768,17 +799,21 @@ async fn dispatch(
                 params.tool.tool_type,
                 params.tool.enabled,
             )
-            .map(json_value)
+            .map(|tool| json_value(agent_icons::view(tool, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
         }
         "agent_tools.delete" => {
             let params: AgentToolIdParams = params_as(params)?;
-            return crate::mcp::agent_spawning::delete_agent_tool_from_settings(
+            let deleted = crate::mcp::agent_spawning::delete_agent_tool_from_settings(
                 &registry,
                 params.agent_tool_id,
             )
-            .map(|deleted| json!({ "agent_tool_id": params.agent_tool_id, "deleted": deleted }))
-            .map_err(|error| ("agent_tool_error", error));
+            .map_err(|error| ("agent_tool_error", error))?;
+            if deleted {
+                agent_icons::delete_override(data_dir, params.agent_tool_id)
+                    .map_err(|error| ("agent_tool_icon_error", error.to_string()))?;
+            }
+            return Ok(json!({ "agent_tool_id": params.agent_tool_id, "deleted": deleted }));
         }
         "agent_tools.reorder" => {
             let params: AgentToolOrderParams = params_as(params)?;
@@ -786,7 +821,7 @@ async fn dispatch(
                 &registry,
                 &params.agent_tool_ids,
             )
-            .map(json_value)
+            .map(|tools| json_value(agent_icons::views(tools, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
         }
         "agents.spawn" => {

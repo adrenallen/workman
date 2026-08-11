@@ -18,6 +18,7 @@
   import type { Component } from 'svelte';
 
   import CountBadge from './CountBadge.svelte';
+  import AgentBrandMark from './AgentBrandMark.svelte';
   import InlineTreeRename from './InlineTreeRename.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
@@ -30,6 +31,7 @@
     type AgentAttentionRollup
   } from './agentLineage';
   import type { ProcessKind, ProcessView, Project } from './daemon';
+  import type { AgentTool } from './agentTools';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
   import {
     contextMenuRequest,
@@ -60,6 +62,7 @@
   interface Props {
     project: Project;
     processes: ProcessView[];
+    agentTools: AgentTool[];
     todos: TodoSummary[];
     scratchpads: ScratchpadSummary[];
     selection: ProjectTreeSelection | null;
@@ -92,6 +95,7 @@
   let {
     project,
     processes,
+    agentTools,
     todos,
     scratchpads,
     selection,
@@ -199,6 +203,12 @@
   function matchesQuery(value: string): boolean {
     const needle = query.trim().toLowerCase();
     return !needle || value.toLowerCase().includes(needle);
+  }
+
+  function agentTool(process: ProcessView): AgentTool | null {
+    return process.agent_tool_id === null
+      ? null
+      : agentTools.find((tool) => tool.id === process.agent_tool_id) ?? null;
   }
 
   function toggleGroup(group: ProjectTreeGroup): void {
@@ -729,8 +739,7 @@
                       {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
                       <AgentStatusIndicator {process} />
                       <span class="row-copy"><strong>{process.name}</strong></span>
-                      {#if process.agent_state.unread || row.rollup.total > 0 || stats}
-                        <span class="row-badges">
+                      <span class="row-badges">
                           {#if process.agent_state.unread}
                             <TooltipLabel label="Unread: agent finished while no timer was watching">
                               <span class="agent-unread-dot" aria-label={`${process.name} has unread finished output`}></span>
@@ -746,12 +755,12 @@
                               </span>
                             </TooltipLabel>
                           {/if}
+                          <AgentBrandMark tool={agentTool(process)} fallbackName={process.name} fallbackToolType={process.agent_state.tool_type} />
                           {#if stats?.descendant_count}
                             <CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />
                           {/if}
                           {#if stats}<MemoryBadge bytes={stats.memory_bytes} />{/if}
                         </span>
-                      {/if}
                     </button>
                     {#if !isRunning(process)}
                       <div class="process-actions" aria-label={`${process.name} actions`}>

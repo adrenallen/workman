@@ -9,6 +9,7 @@ export interface AgentTool {
   source: 'local' | 'config';
   resume_args: string | null;
   continue_args: string | null;
+  icon_data_url: string | null;
 }
 
 export interface AgentToolInput {
@@ -104,6 +105,8 @@ export interface AgentToolsClient {
   ): Promise<AgentToolConfigWrite>;
   deepCheckAgentTool(projectId: number, agentToolId: number): Promise<AgentToolDeepCheck>;
   saveAgentTool(tool: AgentToolInput): Promise<AgentTool>;
+  setAgentToolIcon(agentToolId: number, sourcePath: string): Promise<AgentTool>;
+  removeAgentToolIcon(agentToolId: number): Promise<AgentTool>;
   deleteAgentTool(agentToolId: number): Promise<DeleteAgentToolResult>;
   reorderAgentTools(agentToolIds: number[]): Promise<AgentTool[]>;
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult>;
@@ -167,6 +170,14 @@ export class AgentToolsStore {
     return saved;
   }
 
+  async setIcon(agentToolId: number, sourcePath: string): Promise<AgentTool> {
+    return this.replace(await this.client.setAgentToolIcon(agentToolId, sourcePath));
+  }
+
+  async removeIcon(agentToolId: number): Promise<AgentTool> {
+    return this.replace(await this.client.removeAgentToolIcon(agentToolId));
+  }
+
   async remove(agentToolId: number): Promise<DeleteAgentToolResult> {
     const result = await this.client.deleteAgentTool(agentToolId);
     if (result.deleted) {
@@ -188,6 +199,15 @@ export class AgentToolsStore {
   private publish(snapshot: AgentToolsSnapshot): void {
     this.snapshot = snapshot;
     for (const subscriber of this.subscribers) subscriber(snapshot);
+  }
+
+  private replace(saved: AgentTool): AgentTool {
+    const index = this.snapshot.tools.findIndex((tool) => tool.id === saved.id);
+    const tools = [...this.snapshot.tools];
+    if (index >= 0) tools[index] = saved;
+    else tools.push(saved);
+    this.publish({ tools, loading: false, error: null });
+    return saved;
   }
 }
 

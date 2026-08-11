@@ -587,6 +587,17 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('agent_tools.save', { tool });
   }
 
+  setAgentToolIcon(agentToolId: number, sourcePath: string): Promise<AgentTool> {
+    return this.request('agent_tools.set_icon', {
+      agent_tool_id: agentToolId,
+      source_path: sourcePath
+    });
+  }
+
+  removeAgentToolIcon(agentToolId: number): Promise<AgentTool> {
+    return this.request('agent_tools.remove_icon', { agent_tool_id: agentToolId });
+  }
+
   deleteAgentTool(agentToolId: number): Promise<DeleteAgentToolResult> {
     return this.request('agent_tools.delete', { agent_tool_id: agentToolId });
   }

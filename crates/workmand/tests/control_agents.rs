@@ -4,6 +4,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
+use image::{Rgba, RgbaImage};
 use serde_json::{Value, json};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_tungstenite::{
@@ -78,9 +79,10 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     std::fs::create_dir(&project_dir)?;
     let fake_agent = temp.path().join("fake-agent.sh");
     write_fake_agent(&fake_agent)?;
+    let data_dir = temp.path().join("state");
 
     let server = DaemonServer::bind(DaemonConfig {
-        data_dir: temp.path().join("state"),
+        data_dir: data_dir.clone(),
         port: 0,
     })
     .await?;
@@ -127,6 +129,46 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
+
+    let source_icon = temp.path().join("source-icon.png");
+    RgbaImage::from_pixel(96, 32, Rgba([19, 42, 77, 255])).save(&source_icon)?;
+    let icon = rpc(
+        &mut socket,
+        20,
+        "agent_tools.set_icon",
+        json!({ "agent_tool_id": tool_id, "source_path": source_icon }),
+    )
+    .await;
+    assert!(
+        icon["result"]["icon_data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    assert!(
+        data_dir
+            .join(format!("agent-icons/{tool_id}.png"))
+            .is_file()
+    );
+    let listed = rpc(&mut socket, 21, "agent_tools.list", json!({})).await;
+    assert!(
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["id"] == tool_id)
+            .unwrap()["icon_data_url"]
+            .is_string()
+    );
+    let removed_icon = rpc(
+        &mut socket,
+        22,
+        "agent_tools.remove_icon",
+        json!({ "agent_tool_id": tool_id }),
+    )
+    .await;
+    assert!(removed_icon["result"]["icon_data_url"].is_null());
+    assert!(!data_dir.join(format!("agent-icons/{tool_id}.png")).exists());
 
     let disabled = rpc(
         &mut socket,

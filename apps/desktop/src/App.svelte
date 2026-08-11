@@ -51,7 +51,7 @@
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
-  import type { AgentTool } from './lib/agentTools';
+  import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
   import {
     liveAgentDescendants,
     type AgentCascadeAction,
@@ -190,6 +190,7 @@
   } from './lib/worktreeProgress';
 
   const client = new DaemonClient();
+  const agentToolsStore = getAgentToolsStore(client);
   const projectRailBounds = { min: 176, max: 340 };
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
@@ -257,7 +258,13 @@
   let todoBlockerIds = $state<number[]>([]);
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
+  let registeredAgentTools = $state<AgentTool[]>([]);
   let agentToolsLoading = $state(false);
+
+  $effect(() => agentToolsStore.subscribe((snapshot) => {
+    registeredAgentTools = snapshot.tools;
+    agentTools = snapshot.tools.filter((tool) => tool.enabled);
+  }));
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
@@ -1120,6 +1127,7 @@
         )
       ]);
       if (request !== navigationIndexRequest) return;
+      registeredAgentTools = tools;
       agentTools = tools.filter((tool) => tool.enabled);
       navigationIndex = Object.fromEntries(snapshots);
     } finally {
@@ -1170,6 +1178,7 @@
           let tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           if (!tool) {
             const tools = await client.listAgentTools();
+            registeredAgentTools = tools;
             agentTools = tools.filter((candidate) => candidate.enabled);
             tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           }
@@ -1802,7 +1811,8 @@
     dialog = 'agent';
     agentToolsLoading = true;
     try {
-      agentTools = (await client.listAgentTools()).filter((tool) => tool.enabled);
+      registeredAgentTools = await client.listAgentTools();
+      agentTools = registeredAgentTools.filter((tool) => tool.enabled);
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -3463,6 +3473,7 @@
       <ProjectTree
         project={selectedProject}
         {processes}
+        agentTools={registeredAgentTools}
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
         {selection}

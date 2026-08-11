@@ -526,7 +526,13 @@ async fn control_session(
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
-                                None => control::handle_text(&text, &registry, &mcp_url).await,
+                                None => control::handle_text(
+                                    &text,
+                                    &registry,
+                                    &mcp_url,
+                                    settings.data_dir(),
+                                )
+                                .await,
                             };
                             Message::Text(response.into())
                         } else {

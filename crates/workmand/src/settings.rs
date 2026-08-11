@@ -1,6 +1,6 @@
 //! Daemon runtime and MCP connection details exposed to authenticated local clients.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::json;
@@ -117,6 +117,10 @@ pub(crate) struct DaemonRuntimeSettings {
 }
 
 impl DaemonRuntimeSettings {
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub(crate) fn new(
         data_dir: PathBuf,
         discovery: Discovery,

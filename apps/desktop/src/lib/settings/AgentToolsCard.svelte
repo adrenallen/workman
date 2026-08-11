@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
+
+  import AgentBrandMark from '../AgentBrandMark.svelte';
   import {
     getAgentToolsStore,
     type AgentTool,
@@ -22,6 +25,11 @@
   let saving = $state(false);
   let busyId = $state<number | null>(null);
   let healthById = $state<Record<number, AgentToolHealth>>({});
+  let editedTool = $derived(
+    typeof editing === 'number'
+      ? snapshot.tools.find((tool) => tool.id === editing) ?? null
+      : null
+  );
 
   $effect(() => {
     snapshot = store.current();
@@ -93,6 +101,38 @@
       await store.remove(tool.id);
       if (editing === tool.id) editing = null;
       await refreshHealth();
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      busyId = null;
+    }
+  }
+
+  async function chooseIcon(tool: AgentTool): Promise<void> {
+    const sourcePath = await open({
+      directory: false,
+      multiple: false,
+      title: `Choose an icon for ${tool.name}`,
+      filters: [{
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'ico']
+      }]
+    });
+    if (typeof sourcePath !== 'string') return;
+    busyId = tool.id;
+    try {
+      await store.setIcon(tool.id, sourcePath);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      busyId = null;
+    }
+  }
+
+  async function removeIcon(tool: AgentTool): Promise<void> {
+    busyId = tool.id;
+    try {
+      await store.removeIcon(tool.id);
     } catch (cause) {
       onError(message(cause));
     } finally {
@@ -173,7 +213,7 @@
             <button type="button" aria-label={`Move ${tool.name} up`} title="Move up" disabled={!connected || busyId !== null || index === 0} onclick={() => void move(tool, -1)}>↑</button>
             <button type="button" aria-label={`Move ${tool.name} down`} title="Move down" disabled={!connected || busyId !== null || index === snapshot.tools.length - 1} onclick={() => void move(tool, 1)}>↓</button>
           </div>
-          <div class="tool-mark" aria-hidden="true">{tool.name.slice(0, 1).toUpperCase()}</div>
+          <div class="tool-mark"><AgentBrandMark {tool} size={20} /></div>
           <div class="tool-copy">
             <div><strong>{tool.name}</strong><span>{tool.tool_type}</span>{#if tool.source === 'config'}<span>config</span>{/if}</div>
             <code>{tool.command}</code>
@@ -216,6 +256,14 @@
         <label class="command"><span>Command and arguments</span><input type="text" bind:value={draft.command} placeholder="claude --dangerously-skip-permissions" autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
         <datalist id="agent-tool-types"><option value="claude"></option><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="kimi"></option><option value="custom"></option></datalist>
         <label class="enabled-check"><input type="checkbox" bind:checked={draft.enabled} /><span>Available for new agents</span></label>
+        <div class="icon-override">
+          <span class="icon-preview"><AgentBrandMark tool={editedTool} fallbackName={draft.name || 'Agent'} fallbackToolType={draft.tool_type} size={26} /></span>
+          <span class="icon-copy"><strong>List icon</strong><small>{editedTool?.icon_data_url ? 'Custom image override' : 'Automatic brand mark or monogram'}</small></span>
+          <span class="icon-actions">
+            <button type="button" disabled={!editedTool || busyId !== null} onclick={() => editedTool && void chooseIcon(editedTool)}>Choose image…</button>
+            {#if editedTool?.icon_data_url}<button class="remove-icon" type="button" disabled={busyId !== null} onclick={() => void removeIcon(editedTool)}>Use default</button>{/if}
+          </span>
+        </div>
       </div>
       <footer>
         <p>Saved to the per-user config; unknown top-level settings remain untouched.</p>
@@ -243,7 +291,7 @@
   article { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px; }
   article:last-child { border-bottom: 0; }
   article.disabled { opacity: 0.58; }
-  .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid #36535e; background: #102832; color: var(--signal); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); font-weight: 700; }
+  .tool-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid var(--border-strong); background: var(--background); color: var(--text-soft); }
   .tool-copy { min-width: 0; }
   .tool-copy > div { gap: 7px; }
   .tool-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); }
@@ -289,6 +337,14 @@
   .enabled-check { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; }
   .enabled-check input { accent-color: var(--signal); }
   .enabled-check span { margin: 0 !important; }
+  .icon-override { display: grid; grid-column: 1 / -1; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--border); border-radius: 3px; padding: 8px; background: var(--card); }
+  .icon-preview { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--background); color: var(--text-soft); }
+  .icon-copy strong, .icon-copy small { display: block; }
+  .icon-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); }
+  .icon-copy small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .icon-actions { display: flex; align-items: center; gap: 5px; }
+  .icon-actions button { border: 1px solid var(--border-strong); border-radius: 2px; padding: 6px 8px; background: transparent; color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
+  .icon-actions .remove-icon { color: var(--muted-foreground); }
   .editor footer { justify-content: space-between; gap: 12px; border-top: 1px solid #29444f; padding: 11px 15px; }
   .editor footer p { margin: 0; color: #607984; font-size: var(--font-size-xs); }
   .editor footer > div { gap: 6px; }
@@ -296,5 +352,5 @@
   .cancel { background: transparent; color: #899da5; }
   .save { background: var(--signal); color: #071a20; font-weight: 680; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 860px) { article { grid-template-columns: auto auto minmax(0, 1fr); } .health-badge, .toggle, .row-actions { grid-column: 3; justify-self: start; } .fields { grid-template-columns: 1fr; } .command, .enabled-check { grid-column: auto; } .editor footer { align-items: flex-start; flex-direction: column; } }
+  @media (max-width: 860px) { article { grid-template-columns: auto auto minmax(0, 1fr); } .health-badge, .toggle, .row-actions { grid-column: 3; justify-self: start; } .fields { grid-template-columns: 1fr; } .command, .enabled-check, .icon-override { grid-column: auto; } .icon-override { grid-template-columns: 36px minmax(0, 1fr); } .icon-actions { grid-column: 2; } .editor footer { align-items: flex-start; flex-direction: column; } }
 </style>
