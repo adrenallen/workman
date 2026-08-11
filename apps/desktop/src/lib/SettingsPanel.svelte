@@ -136,9 +136,13 @@
     updateMessage = null;
     try {
       info = { ...info, update: await checkForUpdates(client, true) };
-      updateMessage = info.update.check.available
-        ? `Workman ${info.update.check.latest} is available.`
-        : `Workman ${info.update.check.current} is current.`;
+      updateMessage = info.update.cli_recovery_required
+        ? info.update.check.available
+          ? `The command-line tools need repair. Workman ${info.update.check.latest} is also available.`
+          : 'The command-line tools need repair. The desktop app can reinstall them.'
+        : info.update.check.available
+          ? `Workman ${info.update.check.latest} is available.`
+          : `Workman ${info.update.check.current} is current.`;
     } catch (cause) {
       updateMessage = message(cause);
     } finally {
@@ -177,10 +181,16 @@
   async function updateNow(): Promise<void> {
     if (!info || updateBusy) return;
     updateBusy = 'apply';
-    updateMessage = 'Downloading and verifying the update…';
+    const recovery = info.update.cli_recovery_required;
+    updateMessage = recovery
+      ? 'Downloading and verifying the release before repairing the command-line tools…'
+      : 'Downloading and verifying the update…';
     try {
       const report: UpdateInstallReport = await applyUpdate(client);
-      updateMessage = report.desktop_instruction ?? `Updated to Workman ${report.latest}. Reconnecting…`;
+      updateMessage = report.desktop_instruction
+        ?? (recovery
+          ? `Repaired the command-line tools with Workman ${report.latest}. Reconnecting…`
+          : `Updated to Workman ${report.latest}. Reconnecting…`);
       restarting = true;
       sawRestartDisconnect = false;
     } catch (cause) {

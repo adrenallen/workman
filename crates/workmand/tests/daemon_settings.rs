@@ -96,6 +96,7 @@ async fn settings_report_mcp_setup_data_and_restart_the_isolated_daemon() {
     assert_eq!(info["update"]["automatic_checks"], true);
     assert_eq!(info["update"]["channel"], "stable");
     assert_eq!(info["update"]["last_checked_at"], Value::Null);
+    assert_eq!(info["update"]["cli_recovery_required"], false);
     assert_eq!(
         info["update"]["check"]["current"],
         env!("CARGO_PKG_VERSION")

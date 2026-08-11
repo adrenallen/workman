@@ -24,6 +24,7 @@ pub struct UpdateStatus {
     pub channel: UpdateChannel,
     pub last_checked_at: Option<i64>,
     pub check: UpdateCheck,
+    pub cli_recovery_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,7 +103,11 @@ impl UpdateService {
 
     pub(crate) fn status(&self) -> UpdateStatus {
         let cache = self.cache.lock().expect("update cache lock poisoned");
-        status_from_cache(&cache, self.current_version)
+        status_from_cache(
+            &cache,
+            self.current_version,
+            self.install_target.cli_recovery_required(),
+        )
     }
 
     pub(crate) async fn check(&self, force: bool) -> Result<UpdateStatus, UpdateError> {
@@ -121,7 +126,11 @@ impl UpdateService {
         {
             let cache = self.cache.lock().expect("update cache lock poisoned");
             if !force && !automatic_check_due(&cache, now()) {
-                return Ok(status_from_cache(&cache, self.current_version));
+                return Ok(status_from_cache(
+                    &cache,
+                    self.current_version,
+                    self.install_target.cli_recovery_required(),
+                ));
             }
         }
 
@@ -139,12 +148,20 @@ impl UpdateService {
         let check = client.check(self.current_version).await?;
         let mut cache = self.cache.lock().expect("update cache lock poisoned");
         if cache.channel != channel {
-            return Ok(status_from_cache(&cache, self.current_version));
+            return Ok(status_from_cache(
+                &cache,
+                self.current_version,
+                self.install_target.cli_recovery_required(),
+            ));
         }
         cache.last_checked_at = Some(check.checked_at);
         cache.last_check = Some(check);
         write_cache(&self.cache_path, &cache)?;
-        Ok(status_from_cache(&cache, self.current_version))
+        Ok(status_from_cache(
+            &cache,
+            self.current_version,
+            self.install_target.cli_recovery_required(),
+        ))
     }
 
     pub(crate) fn set_preferences(
@@ -166,7 +183,11 @@ impl UpdateService {
             }
         }
         write_cache(&self.cache_path, &cache)?;
-        Ok(status_from_cache(&cache, self.current_version))
+        Ok(status_from_cache(
+            &cache,
+            self.current_version,
+            self.install_target.cli_recovery_required(),
+        ))
     }
 
     pub(crate) async fn install(&self) -> Result<UpdateInstallReport, UpdateError> {
@@ -209,7 +230,11 @@ fn automatic_check_due(cache: &UpdateCache, current_time: i64) -> bool {
         })
 }
 
-fn status_from_cache(cache: &UpdateCache, current_version: &str) -> UpdateStatus {
+fn status_from_cache(
+    cache: &UpdateCache,
+    current_version: &str,
+    cli_recovery_required: bool,
+) -> UpdateStatus {
     UpdateStatus {
         automatic_checks: cache.automatic_checks,
         channel: cache.channel,
@@ -218,6 +243,7 @@ fn status_from_cache(cache: &UpdateCache, current_version: &str) -> UpdateStatus
             .last_check
             .clone()
             .unwrap_or_else(|| UpdateCheck::current_for(current_version, cache.channel)),
+        cli_recovery_required,
     }
 }
 
@@ -303,5 +329,12 @@ mod tests {
         ));
         cache.automatic_checks = false;
         assert!(!automatic_check_due(&cache, i64::MAX));
+    }
+
+    #[test]
+    fn status_exposes_cli_recovery_independently_of_release_availability() {
+        let status = status_from_cache(&UpdateCache::default(), "0.1.6", true);
+        assert!(status.cli_recovery_required);
+        assert!(!status.check.available);
     }
 }

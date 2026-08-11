@@ -615,7 +615,12 @@ impl UpdateClient {
         check: &UpdateCheck,
         target: &ApplicationInstallTarget,
     ) -> UpdateResult<UpdateInstallReport> {
-        if !check.available {
+        let inventory = discover_application_inventory(target);
+        let cli_recovery_required = install_inventory_requires_cli_recovery(&inventory);
+        if !check.available
+            && (!cli_recovery_required
+                || parse_version(&check.latest)? != parse_version(&check.current)?)
+        {
             return Err(UpdateError::InvalidRelease(format!(
                 "{} is already current",
                 check.current
@@ -644,7 +649,6 @@ impl UpdateClient {
             });
         }
 
-        let inventory = discover_application_inventory(target);
         fs::create_dir_all(&target.versioned_root)?;
         let staging = unique_staging_dir(&target.versioned_root)?;
         let result = (|| -> UpdateResult<UpdateInstallReport> {
@@ -685,60 +689,69 @@ impl UpdateClient {
             let installed_app = install_dir.join("Workman.app");
             refresh_application_bundle(&installed_app, &target.app_bundle, &installed_identifier)?;
 
+            let wrk_target = install_dir.join("bin").join(executable_name("wrk"));
+            let workmand_target = install_dir.join("bin").join(executable_name("workmand"));
+            ensure_existing_binary(&wrk_target)?;
+            ensure_existing_binary(&workmand_target)?;
+
+            let mut launchers = inventory.launchers.clone();
+            let canonical_launcher_dir = target.home_dir.join(".local/bin");
+            for (name, binary) in [
+                ("wrk", InstalledProgram::Wrk),
+                ("workmand", InstalledProgram::Workmand),
+            ] {
+                let path = canonical_launcher_dir.join(executable_name(name));
+                if !launchers.iter().any(|launcher| launcher.path == path) {
+                    launchers.push(DiscoveredLauncher { path, binary });
+                }
+            }
+            launchers.sort_by(|left, right| left.path.cmp(&right.path));
+
             let mut updated_files = vec![
-                install_dir.join("bin").join(executable_name("wrk")),
-                install_dir.join("bin").join(executable_name("workmand")),
+                wrk_target.clone(),
+                workmand_target.clone(),
                 target.app_bundle.clone(),
             ];
-            let mut wrk_launcher_found = false;
-            for launcher in &inventory.launchers {
-                let binary = match launcher.binary {
-                    InstalledProgram::Wrk => {
-                        wrk_launcher_found = true;
-                        "wrk"
-                    }
-                    InstalledProgram::Workmand => "workmand",
+            let mut updated_launcher_count = 0;
+            for launcher in launchers {
+                let destination = match launcher.binary {
+                    InstalledProgram::Wrk => &wrk_target,
+                    InstalledProgram::Workmand => &workmand_target,
                 };
-                let destination = install_dir.join("bin").join(executable_name(binary));
-                if replace_launcher(&launcher.path, &destination)?.is_some() {
-                    updated_files.push(launcher.path.clone());
+                if ensure_launcher(&launcher.path, destination)? {
+                    updated_launcher_count += 1;
+                    updated_files.push(launcher.path);
                 }
             }
 
-            let launcher_note = if wrk_launcher_found {
+            let launcher_note = if cli_recovery_required {
                 format!(
-                    "Updated {} discovered launcher{}.",
-                    inventory.launchers.len(),
-                    if inventory.launchers.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
+                    "Reinstalled the command-line tools and repaired the wrk and workmand launchers in {}.",
+                    canonical_launcher_dir.display()
+                )
+            } else if updated_launcher_count > 0 {
+                format!(
+                    "Updated {updated_launcher_count} command-line launcher{}.",
+                    if updated_launcher_count == 1 { "" } else { "s" }
                 )
             } else {
-                let history = if inventory.versioned_installs.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " Found {} older versioned install{}.",
-                        inventory.versioned_installs.len(),
-                        if inventory.versioned_installs.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
-                    )
-                };
                 format!(
-                    "No wrk launcher was found in PATH or known launcher locations.{history} The new CLI is at {}; run the keyed installer to add a launcher.",
-                    install_dir
-                        .join("bin")
-                        .join(executable_name("wrk"))
-                        .display()
+                    "The command-line tools remain available through {}.",
+                    canonical_launcher_dir.display()
                 )
             };
             let incomplete_note = if inventory.incomplete_launchers.is_empty() {
                 String::new()
+            } else if cli_recovery_required {
+                format!(
+                    " Found {} incomplete launcher entr{} while repairing the canonical pair.",
+                    inventory.incomplete_launchers.len(),
+                    if inventory.incomplete_launchers.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                )
             } else {
                 format!(
                     " Ignored {} incomplete launcher location{} without a wrk/workmand pair.",
@@ -830,6 +843,15 @@ impl UpdateInstallTarget {
         Ok(Self::VersionedBinary(
             VersionedBinaryInstallTarget::from_environment(current_binary_dir)?,
         ))
+    }
+
+    /// Report whether a Dock-launched app is the only usable Workman surface because no complete
+    /// CLI launcher pair can be found. The app updater uses this to offer a verified reinstall.
+    pub fn cli_recovery_required(&self) -> bool {
+        let Self::Application(target) = self else {
+            return false;
+        };
+        install_inventory_requires_cli_recovery(&discover_application_inventory(target))
     }
 }
 
@@ -1087,7 +1109,17 @@ struct DiscoveredLauncher {
 struct InstallInventory {
     launchers: Vec<DiscoveredLauncher>,
     incomplete_launchers: Vec<PathBuf>,
-    versioned_installs: Vec<PathBuf>,
+}
+
+fn install_inventory_requires_cli_recovery(inventory: &InstallInventory) -> bool {
+    !inventory
+        .launchers
+        .iter()
+        .any(|launcher| launcher.binary == InstalledProgram::Wrk)
+        || !inventory
+            .launchers
+            .iter()
+            .any(|launcher| launcher.binary == InstalledProgram::Workmand)
 }
 
 fn discover_application_inventory(target: &ApplicationInstallTarget) -> InstallInventory {
@@ -1095,7 +1127,6 @@ fn discover_application_inventory(target: &ApplicationInstallTarget) -> InstallI
         &target.home_dir,
         &target.search_path,
         &target.known_launcher_dirs,
-        &target.versioned_root,
     )
 }
 
@@ -1104,7 +1135,6 @@ fn discover_versioned_binary_inventory(target: &VersionedBinaryInstallTarget) ->
         &target.home_dir,
         &target.search_path,
         &target.known_launcher_dirs,
-        &target.versioned_root,
     )
 }
 
@@ -1112,7 +1142,6 @@ fn discover_install_inventory(
     home_dir: &Path,
     search_path: &[PathBuf],
     known_launcher_dirs: &[PathBuf],
-    versioned_root: &Path,
 ) -> InstallInventory {
     let mut directories = Vec::new();
     let mut seen_directories = HashSet::new();
@@ -1153,26 +1182,11 @@ fn discover_install_inventory(
         }
     }
 
-    let mut versioned_installs = Vec::new();
-    if let Ok(entries) = fs::read_dir(versioned_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let bin = path.join("bin");
-            if path.is_dir()
-                && bin.join(executable_name("wrk")).is_file()
-                && bin.join(executable_name("workmand")).is_file()
-            {
-                versioned_installs.push(path);
-            }
-        }
-    }
-    versioned_installs.sort();
     launchers.sort_by(|left, right| left.path.cmp(&right.path));
     incomplete_launchers.sort();
     InstallInventory {
         launchers,
         incomplete_launchers,
-        versioned_installs,
     }
 }
 

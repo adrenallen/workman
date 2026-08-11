@@ -5,6 +5,7 @@
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import PackageIcon from '@lucide/svelte/icons/package';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import WrenchIcon from '@lucide/svelte/icons/wrench';
 
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Badge } from '$lib/components/ui/badge';
@@ -18,6 +19,7 @@
   import MarkdownView from '../MarkdownView.svelte';
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
+  import { updateActionAvailable, updateActionCopy } from '../updateRecovery';
   import workmanLogo from '../../../../../assets/branding/workman-logo-wide.png';
 
   const repositoryUrl = 'https://github.com/adrenallen/workman';
@@ -49,6 +51,9 @@
   let updateDialogOpen = $state(false);
   let update = $derived(info.update);
   let check = $derived(update.check);
+  let recoveryRequired = $derived(update.cli_recovery_required);
+  let actionAvailable = $derived(updateActionAvailable(update));
+  let actionCopy = $derived(updateActionCopy(update));
   let hasChecked = $derived(update.last_checked_at !== null && check.checked_at > 0);
   let connected = $derived(connection.status === 'connected');
   let currentReleaseUrl = $derived(`${releasesUrl}/tag/v${encodeURIComponent(check.current)}`);
@@ -160,8 +165,8 @@
     <div
       class={cn(
         'rounded-md border p-3',
-        hasChecked && !check.available && 'border-success bg-success/5',
-        check.available && 'border-warning bg-warning/5'
+        hasChecked && !check.available && !recoveryRequired && 'border-success bg-success/5',
+        (check.available || recoveryRequired) && 'border-warning bg-warning/5'
       )}
       aria-live="polite"
     >
@@ -170,11 +175,13 @@
           <span
             class={cn(
               'grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground',
-              hasChecked && !check.available && 'bg-success/10 text-success',
-              check.available && 'bg-warning/10 text-warning'
+              hasChecked && !check.available && !recoveryRequired && 'bg-success/10 text-success',
+              (check.available || recoveryRequired) && 'bg-warning/10 text-warning'
             )}
           >
-            {#if check.available}
+            {#if recoveryRequired}
+              <WrenchIcon class="size-4" aria-hidden="true" />
+            {:else if check.available}
               <DownloadIcon class="size-4" aria-hidden="true" />
             {:else if hasChecked}
               <CheckCircle2Icon class="size-4" aria-hidden="true" />
@@ -183,7 +190,19 @@
             {/if}
           </span>
           <div class="min-w-0">
-            {#if check.available}
+            {#if recoveryRequired}
+              <div class="flex flex-wrap items-center gap-2">
+                <strong class="text-sm">
+                  {check.available
+                    ? `Command-line tools need repair before updating to ${check.latest}`
+                    : 'Command-line tools need repair'}
+                </strong>
+                {#if check.prerelease}<Badge variant="secondary">Prerelease</Badge>{/if}
+              </div>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                The wrk and workmand launchers are missing or incomplete. Workman can reinstall them in the durable versioned layout and repair ~/.local/bin.
+              </p>
+            {:else if check.available}
               <div class="flex flex-wrap items-center gap-2">
                 <strong class="text-sm">Workman {check.latest} is available</strong>
                 {#if check.prerelease}<Badge variant="secondary">Prerelease</Badge>{/if}
@@ -214,14 +233,18 @@
             <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
             {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
           </Button>
-          {#if check.available}
+          {#if actionAvailable}
             <Button
               size="sm"
               disabled={!connected || updateBusy !== null}
               onclick={() => (updateDialogOpen = true)}
             >
-              <DownloadIcon aria-hidden="true" />
-              {updateBusy === 'apply' ? 'Updating…' : 'Update now'}
+              {#if recoveryRequired}
+                <WrenchIcon aria-hidden="true" />
+              {:else}
+                <DownloadIcon aria-hidden="true" />
+              {/if}
+              {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
             </Button>
           {/if}
         </div>
@@ -288,16 +311,20 @@
 <AlertDialog.Root bind:open={updateDialogOpen}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title>Update to Workman {check.latest}?</AlertDialog.Title>
+      <AlertDialog.Title>{actionCopy.dialogTitle}</AlertDialog.Title>
       <AlertDialog.Description>
-        Workman will download and verify the release, replace the CLI and daemon in the configured install directory, then restart the daemon. Running project processes will stop.
+        {actionCopy.dialogDescription}
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action onclick={confirmUpdate}>
-        <DownloadIcon aria-hidden="true" />
-        Update and restart
+        {#if recoveryRequired}
+          <WrenchIcon aria-hidden="true" />
+        {:else}
+          <DownloadIcon aria-hidden="true" />
+        {/if}
+        {actionCopy.confirmLabel}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

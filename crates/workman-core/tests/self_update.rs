@@ -74,6 +74,23 @@ fn executable_unified_zip_archive() -> Vec<u8> {
 }
 
 fn app_surface_zip_archive(bundle_identifier: &str) -> Vec<u8> {
+    app_surface_zip_archive_with_binaries(bundle_identifier, b"new wrk", b"new workmand")
+}
+
+#[cfg(unix)]
+fn executable_app_surface_zip_archive(bundle_identifier: &str) -> Vec<u8> {
+    app_surface_zip_archive_with_binaries(
+        bundle_identifier,
+        b"#!/bin/sh\nprintf 'workman 9.0.0\\n'\n",
+        b"#!/bin/sh\nprintf 'workmand 9.0.0\\n'\n",
+    )
+}
+
+fn app_surface_zip_archive_with_binaries(
+    bundle_identifier: &str,
+    wrk: &[u8],
+    workmand: &[u8],
+) -> Vec<u8> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let executable = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
@@ -82,8 +99,8 @@ fn app_surface_zip_archive(bundle_identifier: &str) -> Vec<u8> {
         .compression_method(zip::CompressionMethod::Stored)
         .unix_permissions(0o644);
     for (name, body, options) in [
-        ("bin/wrk", b"new wrk".as_slice(), executable),
-        ("bin/workmand", b"new workmand".as_slice(), executable),
+        ("bin/wrk", wrk, executable),
+        ("bin/workmand", workmand, executable),
         (
             "Workman.app/Contents/MacOS/workman-desktop",
             b"new desktop".as_slice(),
@@ -120,7 +137,7 @@ fn app_surface_zip_archive(bundle_identifier: &str) -> Vec<u8> {
 }
 
 fn seed_app_bundle(root: &Path, bundle_identifier: &str) -> PathBuf {
-    let app = root.join("Applications/Workman Todo 467.app");
+    let app = root.join("Applications/Workman QA.app");
     let contents = app.join("Contents");
     fs::create_dir_all(contents.join("MacOS")).unwrap();
     fs::create_dir_all(contents.join("Resources")).unwrap();
@@ -535,6 +552,167 @@ async fn versioned_cli_update_injected_environment_child() {
 }
 
 #[cfg(unix)]
+#[test]
+fn app_surface_recovery_honors_todo66_identity_and_injected_durable_layout() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::Builder::new()
+        .prefix("workman-todo66-recovery-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = root.path().join("home");
+    let data_dir = root.path().join("com.workman.todo66-data");
+    let config = root.path().join("com.workman.todo66-config/config.yml");
+    let launcher_dir = home.join(".local/bin");
+    let versioned_root = home.join(".local/share/workman/dist");
+    let missing_bin = versioned_root.join("0.1.2/bin");
+    fs::create_dir_all(&launcher_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    symlink(missing_bin.join("wrk"), launcher_dir.join("wrk")).unwrap();
+    symlink(missing_bin.join("workmand"), launcher_dir.join("workmand")).unwrap();
+    assert!(
+        !versioned_root.exists(),
+        "the simulated install directory must be missing"
+    );
+
+    let app = seed_app_bundle(root.path(), "com.workman.todo66");
+    let app_executable = app.join("Contents/MacOS/workman-desktop");
+    let archive = executable_app_surface_zip_archive("com.workman.todo66");
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-app-fixture.zip",
+        "workman-app-fixture.zip",
+        2,
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "app_surface_recovery_injected_environment_child",
+            "--nocapture",
+        ])
+        .env("WORKMAN_APP_RECOVERY_CHILD", "1")
+        .env(
+            "WORKMAN_UPDATE_TEST_API",
+            format!("{}/latest", fixture.base),
+        )
+        .env("WORKMAN_UPDATE_TEST_EXECUTABLE", &app_executable)
+        .env("WORKMAN_DATA_DIR", &data_dir)
+        .env("WORKMAN_CONFIG", &config)
+        .env("WORKMAN_UPDATE_HOME", &home)
+        .env("WORKMAN_UPDATE_PATH", &launcher_dir)
+        .env("WORKMAN_UPDATE_VERSION_ROOT", &versioned_root)
+        .env("WORKMAN_INSTALL_TEST_ROOT", root.path().join("system-root"))
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "isolated app recovery failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let durable_bin = versioned_root.join("9.0.0/bin");
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("wrk")).unwrap(),
+        fs::canonicalize(durable_bin.join("wrk")).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("workmand")).unwrap(),
+        fs::canonicalize(durable_bin.join("workmand")).unwrap()
+    );
+    let version = Command::new(launcher_dir.join("wrk"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap(),
+        "workman 9.0.0\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn app_surface_recovery_injected_environment_child() {
+    if std::env::var_os("WORKMAN_APP_RECOVERY_CHILD").is_none() {
+        return;
+    }
+
+    let executable = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_TEST_EXECUTABLE").unwrap());
+    let home = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_HOME").unwrap());
+    let launcher_dir = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_PATH").unwrap());
+    let versioned_root = PathBuf::from(std::env::var_os("WORKMAN_UPDATE_VERSION_ROOT").unwrap());
+    let target = UpdateInstallTarget::discover(&executable).unwrap();
+    let UpdateInstallTarget::Application(application) = &target else {
+        panic!("the isolated desktop executable did not select the app update surface");
+    };
+    assert_eq!(
+        application.app_bundle,
+        fs::canonicalize(
+            executable
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+        )
+        .unwrap()
+    );
+    assert_eq!(application.home_dir, home);
+    assert_eq!(application.search_path, vec![launcher_dir.clone()]);
+    assert_eq!(application.versioned_root, versioned_root);
+    assert!(
+        target.cli_recovery_required(),
+        "dangling launchers must offer recovery"
+    );
+
+    let client = UpdateClient::with_target(
+        std::env::var("WORKMAN_UPDATE_TEST_API").unwrap(),
+        ReleaseTarget {
+            binary_asset_name: "workman-app-fixture.zip".to_owned(),
+            desktop_asset_name: "workman-app-fixture.zip".to_owned(),
+            platform_label: "todo 66 isolated app recovery".to_owned(),
+        },
+    )
+    .unwrap()
+    .with_key(TEST_UPDATE_KEY)
+    .unwrap();
+    let check = client.check("0.1.2").await.unwrap();
+    assert!(check.available);
+    let report = client.install_target(&check, &target).await.unwrap();
+
+    assert_eq!(
+        report.install_dir,
+        versioned_root.join("9.0.0").display().to_string()
+    );
+    assert!(
+        report
+            .desktop_instruction
+            .as_deref()
+            .unwrap()
+            .contains("Reinstalled the command-line tools")
+    );
+    assert!(
+        !target.cli_recovery_required(),
+        "a repaired install must not keep prompting"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            application
+                .app_bundle
+                .join("Contents/Resources/build-marker")
+        )
+        .unwrap(),
+        "new app"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
     use std::os::unix::fs::symlink;
@@ -550,6 +728,11 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
     fs::write(old_bin.join("workmand"), "old workmand").unwrap();
     symlink(old_bin.join("wrk"), launcher_dir.join("wrk")).unwrap();
     symlink(old_bin.join("workmand"), launcher_dir.join("workmand")).unwrap();
+    let install_target = UpdateInstallTarget::Application(target.clone());
+    assert!(
+        !install_target.cli_recovery_required(),
+        "a complete durable CLI install must not trigger recovery"
+    );
 
     let archive = app_surface_zip_archive("com.workman.todo467");
     let checksum = format!("{:x}", Sha256::digest(&archive));
@@ -574,7 +757,7 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
 
     let check = client.check("0.1.2").await.unwrap();
     let report = client
-        .install_target(&check, &UpdateInstallTarget::Application(target.clone()))
+        .install_target(&check, &install_target)
         .await
         .unwrap();
 
@@ -598,18 +781,17 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
     );
     let message = report.desktop_instruction.unwrap();
     assert!(message.contains("Close and reopen Workman"));
-    assert!(message.contains("Updated 2 discovered launchers"));
+    assert!(message.contains("Updated 2 command-line launchers"));
+    assert!(!install_target.cli_recovery_required());
 }
 
 #[tokio::test]
-async fn app_surface_without_cli_refreshes_app_and_reports_launcher_guidance() {
+async fn current_app_surface_reinstalls_a_missing_cli_in_the_durable_layout() {
     let root = tempfile::tempdir().unwrap();
     let app = seed_app_bundle(root.path(), "com.workman.todo467");
     let target = app_install_target(root.path(), app.clone());
-    let historical = target.versioned_root.join("0.1.2/bin");
-    fs::create_dir_all(&historical).unwrap();
-    fs::write(historical.join("wrk"), "old wrk").unwrap();
-    fs::write(historical.join("workmand"), "old workmand").unwrap();
+    let install_target = UpdateInstallTarget::Application(target.clone());
+    assert!(install_target.cli_recovery_required());
 
     let archive = app_surface_zip_archive("com.workman.todo467");
     let checksum = format!("{:x}", Sha256::digest(&archive));
@@ -632,20 +814,31 @@ async fn app_surface_without_cli_refreshes_app_and_reports_launcher_guidance() {
     .with_key(TEST_UPDATE_KEY)
     .unwrap();
 
-    let check = client.check("0.1.2").await.unwrap();
+    let check = client.check("9.0.0").await.unwrap();
+    assert!(!check.available);
     let report = client
-        .install_target(&check, &UpdateInstallTarget::Application(target))
+        .install_target(&check, &install_target)
         .await
         .unwrap();
 
+    let durable_bin = target.versioned_root.join("9.0.0/bin");
+    let launcher_dir = target.home_dir.join(".local/bin");
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("wrk")).unwrap(),
+        fs::canonicalize(durable_bin.join("wrk")).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(launcher_dir.join("workmand")).unwrap(),
+        fs::canonicalize(durable_bin.join("workmand")).unwrap()
+    );
     assert_eq!(
         fs::read_to_string(app.join("Contents/Resources/build-marker")).unwrap(),
         "new app"
     );
     let message = report.desktop_instruction.unwrap();
-    assert!(message.contains("No wrk launcher was found"));
-    assert!(message.contains("Found 1 older versioned install"));
-    assert!(message.contains("run the keyed installer"));
+    assert!(message.contains("Reinstalled the command-line tools"));
+    assert!(message.contains(".local/bin"));
+    assert!(!install_target.cli_recovery_required());
 }
 
 #[tokio::test]

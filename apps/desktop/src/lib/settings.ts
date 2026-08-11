@@ -62,6 +62,7 @@ export interface UpdateStatus {
   channel: UpdateChannel;
   last_checked_at: number | null;
   check: UpdateCheckInfo;
+  cli_recovery_required: boolean;
 }
 
 export type UpdateChannel = 'stable' | 'latest';

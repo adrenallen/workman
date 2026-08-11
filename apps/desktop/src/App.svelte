@@ -36,6 +36,7 @@
   import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
+  import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
   import TerminalView from './lib/TerminalView.svelte';
   import TodoBrowser from './lib/TodoBrowser.svelte';
   import TodoBlockerPicker from './lib/TodoBlockerPicker.svelte';
@@ -381,7 +382,9 @@
     connection.status === 'connected' && !connection.version_compatible
   );
   let updateAvailable = $derived(startupUpdate?.check.available === true);
-  let showVersionBanner = $derived(versionSkew || updateAvailable);
+  let cliRecoveryRequired = $derived(startupUpdate?.cli_recovery_required === true);
+  let startupUpdateCopy = $derived(startupUpdate ? updateActionCopy(startupUpdate) : null);
+  let showVersionBanner = $derived(versionSkew || updateAvailable || cliRecoveryRequired);
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
@@ -3159,8 +3162,9 @@
   }
 
   async function applyAvailableUpdate(): Promise<void> {
-    if (versionRestarting || !startupUpdate?.check.available) return;
-    if (!window.confirm('Update Workman and restart the daemon? All running project processes will stop.')) return;
+    if (versionRestarting || !startupUpdate || !updateActionAvailable(startupUpdate)) return;
+    const copy = updateActionCopy(startupUpdate);
+    if (!window.confirm(copy.dialogDescription)) return;
     versionRestarting = true;
     try {
       const report = await applyUpdate(client);
@@ -3182,12 +3186,12 @@
 {#if showVersionBanner}
   <section class="version-banner" aria-live="assertive">
     <div>
-      <strong>{versionSkew ? 'Workman daemon is running an older version' : `Workman ${startupUpdate?.check.latest} is available`}</strong>
-      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : 'The release is downloaded and SHA256 verified before workman and workmand are replaced.'} All running project processes will stop.</span>
+      <strong>{versionSkew ? 'Workman daemon is running an older version' : startupUpdateCopy?.bannerTitle}</strong>
+      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : startupUpdateCopy?.bannerDescription} All running project processes will stop.</span>
     </div>
-    <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
+    <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : cliRecoveryRequired && !updateAvailable ? `Workman ${startupUpdate?.check.current}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
     <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
-      {versionRestarting ? 'Restarting daemon…' : versionSkew ? 'Restart daemon' : 'Update now'}
+      {versionRestarting ? (versionSkew ? 'Restarting daemon…' : startupUpdateCopy?.busyLabel) : versionSkew ? 'Restart daemon' : startupUpdateCopy?.buttonLabel}
     </Button>
   </section>
 {/if}
