@@ -1180,24 +1180,15 @@ impl ProcessRegistry {
             });
         };
 
-        let snapshot = output.raw.snapshot();
-        let ring_copy_bytes = snapshot.len();
-        let total_bytes = output.raw.total_bytes_seen();
-        let retained_start = total_bytes.saturating_sub(snapshot.len() as u64);
-        let requested = offset.unwrap_or(retained_start);
-        let start_offset = requested.clamp(retained_start, total_bytes);
-        let start = usize::try_from(start_offset - retained_start).unwrap_or(snapshot.len());
-        let end = start.saturating_add(max_bytes).min(snapshot.len());
-        let data = snapshot[start..end].to_vec();
-        let end_offset = start_offset.saturating_add(data.len() as u64);
-        self.record_raw_output_profile(process_id, ring_copy_bytes, data.len());
+        let read = output.raw.read(offset, max_bytes);
+        self.record_raw_output_profile(process_id, read.data.len(), 0);
 
         Ok(RawOutputChunk {
-            data,
-            start_offset,
-            end_offset,
-            total_bytes,
-            truncated: requested < retained_start || end_offset < total_bytes,
+            data: read.data,
+            start_offset: read.start_offset,
+            end_offset: read.end_offset,
+            total_bytes: read.total_bytes,
+            truncated: read.truncated,
             status: process.status,
         })
     }

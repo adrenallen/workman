@@ -73,6 +73,16 @@ pub struct RawSearchMatch {
     pub stream_offset: u64,
 }
 
+/// A bounded read from the retained raw stream with absolute stream offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawOutputRead {
+    pub data: Vec<u8>,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
 impl RawRingBuffer {
     /// Allocate a ring retaining at most `capacity` bytes.
     pub fn new(capacity: usize) -> Self {
@@ -130,6 +140,33 @@ impl RawRingBuffer {
         bytes.extend_from_slice(&self.storage[self.start..self.start + first_len]);
         bytes.extend_from_slice(&self.storage[..self.len - first_len]);
         bytes
+    }
+
+    /// Copy only the requested retained range, preserving absolute stream offsets.
+    pub fn read(&self, offset: Option<u64>, max_bytes: usize) -> RawOutputRead {
+        let retained_start = self
+            .total_bytes_seen
+            .saturating_sub(u64::try_from(self.len).unwrap_or(u64::MAX));
+        let requested = offset.unwrap_or(retained_start);
+        let start_offset = requested.clamp(retained_start, self.total_bytes_seen);
+        let start = usize::try_from(start_offset - retained_start).unwrap_or(self.len);
+        let data_len = max_bytes.min(self.len.saturating_sub(start));
+        let mut data = Vec::with_capacity(data_len);
+        if data_len > 0 {
+            let physical_start = (self.start + start) % self.capacity();
+            let first_len = data_len.min(self.capacity() - physical_start);
+            data.extend_from_slice(&self.storage[physical_start..physical_start + first_len]);
+            data.extend_from_slice(&self.storage[..data_len - first_len]);
+        }
+        let end_offset = start_offset.saturating_add(data.len() as u64);
+
+        RawOutputRead {
+            data,
+            start_offset,
+            end_offset,
+            total_bytes: self.total_bytes_seen,
+            truncated: requested < retained_start || end_offset < self.total_bytes_seen,
+        }
     }
 
     /// Discard all retained bytes without reallocating the ring.
@@ -215,6 +252,11 @@ impl RawOutput {
     /// Copy the retained output, oldest byte first.
     pub fn snapshot(&self) -> Vec<u8> {
         self.lock().snapshot()
+    }
+
+    /// Copy only a bounded absolute range from the retained output.
+    pub fn read(&self, offset: Option<u64>, max_bytes: usize) -> RawOutputRead {
+        self.lock().read(offset, max_bytes)
     }
 
     /// Discard retained output while keeping the allocation for reuse.
@@ -1243,6 +1285,16 @@ mod tests {
         assert_eq!(ring.capacity(), 5);
         assert_eq!(ring.total_bytes_seen(), 7);
         assert_eq!(
+            ring.read(Some(3), 3),
+            RawOutputRead {
+                data: b"def".to_vec(),
+                start_offset: 3,
+                end_offset: 6,
+                total_bytes: 7,
+                truncated: true,
+            }
+        );
+        assert_eq!(
             ring.search(b"de", 10),
             vec![RawSearchMatch {
                 retained_offset: 1,
@@ -1261,6 +1313,37 @@ mod tests {
                 stream_offset: 14,
             }]
         );
+
+        assert_eq!(
+            ring.read(Some(13), 3),
+            RawOutputRead {
+                data: b"678".to_vec(),
+                start_offset: 13,
+                end_offset: 16,
+                total_bytes: 17,
+                truncated: true,
+            }
+        );
+        assert_eq!(
+            ring.read(Some(17), usize::MAX),
+            RawOutputRead {
+                data: Vec::new(),
+                start_offset: 17,
+                end_offset: 17,
+                total_bytes: 17,
+                truncated: false,
+            }
+        );
+        assert_eq!(
+            ring.read(Some(0), usize::MAX),
+            RawOutputRead {
+                data: b"56789".to_vec(),
+                start_offset: 12,
+                end_offset: 17,
+                total_bytes: 17,
+                truncated: true,
+            }
+        );
     }
 
     #[test]
@@ -1271,6 +1354,16 @@ mod tests {
         assert!(ring.is_empty());
         assert_eq!(ring.snapshot(), b"");
         assert_eq!(ring.total_bytes_seen(), 9);
+        assert_eq!(
+            ring.read(Some(0), usize::MAX),
+            RawOutputRead {
+                data: Vec::new(),
+                start_offset: 9,
+                end_offset: 9,
+                total_bytes: 9,
+                truncated: true,
+            }
+        );
     }
 
     #[test]
