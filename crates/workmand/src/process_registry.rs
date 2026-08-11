@@ -7,7 +7,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use workman_core::{
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
         PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
+        WORKMAN_PTY_PROFILE_ENV,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
 };
@@ -269,6 +270,28 @@ pub struct ProcessRegistry {
     output_persistence: Option<OutputPersistence>,
     user_environment: UserEnvironmentResolver,
     agent_session_captures: HashMap<ProcessId, PendingSessionCapture>,
+    raw_output_profiles: Option<HashMap<ProcessId, RawOutputProfile>>,
+}
+
+#[derive(Debug)]
+struct RawOutputProfile {
+    window_started: Instant,
+    calls: u64,
+    ring_copy_bytes: u64,
+    response_copy_bytes: u64,
+    empty_calls: u64,
+}
+
+impl Default for RawOutputProfile {
+    fn default() -> Self {
+        Self {
+            window_started: Instant::now(),
+            calls: 0,
+            ring_copy_bytes: 0,
+            response_copy_bytes: 0,
+            empty_calls: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -366,6 +389,7 @@ impl ProcessRegistry {
             output_persistence,
             user_environment,
             agent_session_captures: HashMap::new(),
+            raw_output_profiles: profile_enabled().then(HashMap::new),
         };
         registry.reconcile_stale_processes()?;
         registry.reload_persisted_outputs()?;
@@ -1157,6 +1181,7 @@ impl ProcessRegistry {
         };
 
         let snapshot = output.raw.snapshot();
+        let ring_copy_bytes = snapshot.len();
         let total_bytes = output.raw.total_bytes_seen();
         let retained_start = total_bytes.saturating_sub(snapshot.len() as u64);
         let requested = offset.unwrap_or(retained_start);
@@ -1165,6 +1190,7 @@ impl ProcessRegistry {
         let end = start.saturating_add(max_bytes).min(snapshot.len());
         let data = snapshot[start..end].to_vec();
         let end_offset = start_offset.saturating_add(data.len() as u64);
+        self.record_raw_output_profile(process_id, ring_copy_bytes, data.len());
 
         Ok(RawOutputChunk {
             data,
@@ -1174,6 +1200,41 @@ impl ProcessRegistry {
             truncated: requested < retained_start || end_offset < total_bytes,
             status: process.status,
         })
+    }
+
+    fn record_raw_output_profile(
+        &mut self,
+        process_id: ProcessId,
+        ring_copy_bytes: usize,
+        response_copy_bytes: usize,
+    ) {
+        let Some(profiles) = &mut self.raw_output_profiles else {
+            return;
+        };
+        let profile = profiles.entry(process_id).or_default();
+        profile.calls = profile.calls.saturating_add(1);
+        profile.ring_copy_bytes = profile
+            .ring_copy_bytes
+            .saturating_add(ring_copy_bytes as u64);
+        profile.response_copy_bytes = profile
+            .response_copy_bytes
+            .saturating_add(response_copy_bytes as u64);
+        profile.empty_calls = profile
+            .empty_calls
+            .saturating_add(u64::from(response_copy_bytes == 0));
+        let elapsed = profile.window_started.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        eprintln!(
+            "raw-output-profile process_id={process_id} window_ms={} calls={} ring_copy_bytes={} response_copy_bytes={} empty_calls={}",
+            elapsed.as_millis(),
+            profile.calls,
+            profile.ring_copy_bytes,
+            profile.response_copy_bytes,
+            profile.empty_calls,
+        );
+        *profile = RawOutputProfile::default();
     }
 
     /// Read the daemon-rendered terminal buffer without ANSI escape sequences.
@@ -1772,6 +1833,15 @@ pub fn output_spill_capacity_from_env() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_OUTPUT_SPILL_CAPACITY)
+}
+
+fn profile_enabled() -> bool {
+    std::env::var(WORKMAN_PTY_PROFILE_ENV).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn output_path(persistence: &OutputPersistence, process_id: ProcessId) -> PathBuf {

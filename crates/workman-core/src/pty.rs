@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, MutexGuard,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::thread::{self, JoinHandle};
@@ -31,6 +31,9 @@ pub const WORKMAN_PROCESS_ID_ENV: &str = "WORKMAN_PROCESS_ID";
 
 /// Environment variable carrying the per-process MCP bearer token.
 pub const WORKMAN_MCP_TOKEN_ENV: &str = "WORKMAN_MCP_TOKEN";
+
+/// Enable once-per-second per-process PTY parse/render and raw-copy diagnostics.
+pub const WORKMAN_PTY_PROFILE_ENV: &str = "WORKMAN_PTY_PROFILE";
 
 /// Default amount of raw PTY output retained for a process.
 pub const DEFAULT_RAW_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
@@ -511,6 +514,7 @@ impl PtyProcess {
             .name(format!("workman-pty-{}-reader", options.process_id))
             .spawn(move || {
                 capture_output(
+                    options.process_id,
                     reader,
                     reader_output,
                     reader_terminal,
@@ -981,6 +985,7 @@ fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
 }
 
 fn capture_output(
+    process_id: i64,
     mut reader: Box<dyn Read + Send>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
@@ -988,13 +993,20 @@ fn capture_output(
     output_spill: Option<OutputSpillSink>,
     response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
 ) {
+    let metrics = PtyCaptureMetrics::default();
+    let mut profiler = PtyCaptureProfiler::new(process_id, &metrics);
     let mut chunk = [0_u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
+                metrics.parse_calls.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .parsed_bytes
+                    .fetch_add(count as u64, Ordering::Relaxed);
                 let (rendered, replies) =
                     terminal_output.feed_and_read_viewport_with_replies(&chunk[..count]);
+                metrics.render_calls.fetch_add(1, Ordering::Relaxed);
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
@@ -1018,12 +1030,90 @@ fn capture_output(
                     &rendered.text(),
                     rendered.alternate_screen,
                 );
+                profiler.report_if_due();
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // Unix PTYs commonly report EIO when their final slave closes.
             Err(_) => break,
         }
     }
+    profiler.report_final();
+}
+
+#[derive(Default)]
+struct PtyCaptureMetrics {
+    parse_calls: AtomicU64,
+    parsed_bytes: AtomicU64,
+    render_calls: AtomicU64,
+}
+
+struct PtyCaptureProfiler<'a> {
+    process_id: i64,
+    metrics: &'a PtyCaptureMetrics,
+    enabled: bool,
+    window_started: Instant,
+    parse_calls: u64,
+    parsed_bytes: u64,
+    render_calls: u64,
+}
+
+impl<'a> PtyCaptureProfiler<'a> {
+    fn new(process_id: i64, metrics: &'a PtyCaptureMetrics) -> Self {
+        Self {
+            process_id,
+            metrics,
+            enabled: profile_enabled(),
+            window_started: Instant::now(),
+            parse_calls: 0,
+            parsed_bytes: 0,
+            render_calls: 0,
+        }
+    }
+
+    fn report_if_due(&mut self) {
+        if self.enabled && self.window_started.elapsed() >= Duration::from_secs(1) {
+            self.report(false);
+        }
+    }
+
+    fn report_final(&mut self) {
+        if self.enabled {
+            self.report(true);
+        }
+    }
+
+    fn report(&mut self, final_report: bool) {
+        let elapsed = self.window_started.elapsed();
+        let parse_calls = self.metrics.parse_calls.load(Ordering::Relaxed);
+        let parsed_bytes = self.metrics.parsed_bytes.load(Ordering::Relaxed);
+        let render_calls = self.metrics.render_calls.load(Ordering::Relaxed);
+        let window_parse_calls = parse_calls.saturating_sub(self.parse_calls);
+        let window_parsed_bytes = parsed_bytes.saturating_sub(self.parsed_bytes);
+        let window_render_calls = render_calls.saturating_sub(self.render_calls);
+        if window_parse_calls > 0 || window_render_calls > 0 {
+            eprintln!(
+                "pty-profile process_id={} window_ms={} parse_calls={} parsed_bytes={} render_calls={} final={final_report}",
+                self.process_id,
+                elapsed.as_millis(),
+                window_parse_calls,
+                window_parsed_bytes,
+                window_render_calls,
+            );
+        }
+        self.window_started = Instant::now();
+        self.parse_calls = parse_calls;
+        self.parsed_bytes = parsed_bytes;
+        self.render_calls = render_calls;
+    }
+}
+
+fn profile_enabled() -> bool {
+    std::env::var(WORKMAN_PTY_PROFILE_ENV).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn signal_process_group(pid: u32, signal: Signal) -> Result<()> {
