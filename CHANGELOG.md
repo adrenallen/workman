@@ -4,6 +4,25 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.7 - 2026-08-11
+
+Workman 0.1.7 makes active and resumed sessions feel immediate while reducing background work and
+hardening process, update, and concurrent-agent behavior.
+
+### Desktop and terminal experience
+
+- Eliminate stopped-view flicker, paint idle-attached sessions immediately, and add project rail
+  drag-and-drop reordering.
+- Prevent terminal typing stalls, coalesce PTY renders, and serve range reads without taking full
+  terminal snapshots.
+
+### Runtime and lifecycle
+
+- Cascade parent termination to child processes and coalesce dormant lifecycle work.
+- Park idle timers and quiesce hidden sessions to reduce unnecessary CPU and battery use.
+- Recover the CLI during app updates and make concurrent agent attribution and resume fallback
+  reliable.
+
 ## 0.1.6 - 2026-08-10
 
 Workman 0.1.6 makes release installs durable, so removing the original downloaded or extracted
