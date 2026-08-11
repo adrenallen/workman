@@ -12,7 +12,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
-    time::{Instant, MissedTickBehavior, interval},
+    time::{Instant, sleep},
 };
 use workman_core::{ProcessId, ProcessStatus, Project, ProjectId};
 
@@ -118,8 +118,8 @@ struct LifecycleSupervisor {
 
 impl LifecycleSupervisor {
     async fn run(mut self) {
-        let mut reconcile = interval(self.options.reconcile_interval);
-        reconcile.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let reconcile = sleep(self.reconcile_delay());
+        tokio::pin!(reconcile);
 
         loop {
             tokio::select! {
@@ -131,13 +131,27 @@ impl LifecycleSupervisor {
                 event = self.event_rx.recv() => {
                     if let Some(Ok(event)) = event {
                         self.record_file_event(event).await;
+                        let next = Instant::now() + self.reconcile_delay();
+                        if next < reconcile.deadline() {
+                            reconcile.as_mut().reset(next);
+                        }
                     }
                 }
-                _ = reconcile.tick() => {
+                _ = &mut reconcile => {
                     self.reconcile().await;
+                    reconcile.as_mut().reset(Instant::now() + self.reconcile_delay());
                 }
             }
         }
+    }
+
+    fn reconcile_delay(&self) -> Duration {
+        let timing_sensitive = !self.pending_config_syncs.is_empty()
+            || !self.pending_changes.is_empty()
+            || !self.restart_attempts.is_empty()
+            || !self.restart_due.is_empty()
+            || !self.running_since.is_empty();
+        adaptive_reconcile_interval(self.options.reconcile_interval, timing_sensitive)
     }
 
     async fn reconcile(&mut self) {
@@ -433,6 +447,14 @@ fn backoff_delay(initial: Duration, maximum: Duration, attempt: u32) -> Duration
     initial.saturating_mul(multiplier).min(maximum)
 }
 
+fn adaptive_reconcile_interval(base: Duration, timing_sensitive: bool) -> Duration {
+    if timing_sensitive {
+        base
+    } else {
+        base.saturating_mul(10)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +478,15 @@ mod tests {
         );
         assert_eq!(backoff_delay(initial, maximum, 2), Duration::from_secs(1));
         assert_eq!(backoff_delay(initial, maximum, 20), maximum);
+    }
+
+    #[test]
+    fn idle_reconciliation_coalesces_ten_ticks() {
+        let base = Duration::from_millis(100);
+        assert_eq!(adaptive_reconcile_interval(base, true), base);
+        assert_eq!(
+            adaptive_reconcile_interval(base, false),
+            Duration::from_secs(1)
+        );
     }
 }
