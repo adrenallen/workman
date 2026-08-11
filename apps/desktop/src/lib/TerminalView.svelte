@@ -29,6 +29,7 @@
     client,
     process,
     connected,
+    visible = true,
     busy = false,
     onStart,
     onError,
@@ -37,6 +38,7 @@
     client: DaemonClient;
     process: ProcessView;
     connected: boolean;
+    visible?: boolean;
     busy?: boolean;
     onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
@@ -65,6 +67,7 @@
   let attachedProcessPid: number | null = null;
   let attachedConnected = false;
   let attachedStatus = '';
+  let attachedVisible = true;
   let attachmentGeneration = 0;
   let inputEnabled = false;
   let replayState: TerminalReplayState | null = null;
@@ -259,18 +262,21 @@
     const processPid = process.pid;
     const isConnected = connected;
     const processStatus = process.status;
+    const isVisible = visible;
     if (!instance) return;
     if (
       attachedProcessId === processId
       && attachedProcessPid === processPid
       && attachedConnected === isConnected
       && attachedStatus === processStatus
+      && attachedVisible === isVisible
     ) return;
 
     attachedProcessId = processId;
     attachedProcessPid = processPid;
     attachedConnected = isConnected;
     attachedStatus = processStatus;
+    attachedVisible = isVisible;
 
     flushInput();
     inputEnabled = false;
@@ -282,7 +288,7 @@
     liveOutputLoaded = false;
     liveOutputRetained = false;
     linkHintVisible = false;
-    if (!isConnected || processStatus !== 'running') {
+    if (!isVisible || !isConnected || processStatus !== 'running') {
       attachmentGeneration += 1;
       void client.detachTerminal().catch(() => undefined);
       if (isConnected) scheduleFit();
@@ -360,7 +366,12 @@
   });
 
   function handleTerminalFrame(frame: TerminalFrame): void {
-    if (frame.process_id !== process.id || process.status !== 'running' || !terminal) return;
+    if (
+      !visible
+      || frame.process_id !== process.id
+      || process.status !== 'running'
+      || !terminal
+    ) return;
     const state = replayState;
     const generation = attachmentGeneration;
     if (state) {
@@ -652,7 +663,6 @@
   .terminal-frame.is-drop-target {
     border-color: var(--ring);
   }
-
   .terminal-starting {
     position: absolute;
     top: 12px;

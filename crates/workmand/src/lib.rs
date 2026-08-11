@@ -488,9 +488,8 @@ async fn control_session(
     worktree_operations: worktree_operations::WorktreeOperationHub,
 ) {
     let mcp_url = settings.info().mcp.endpoint;
-    let _live_stats_client = live_stats.client_connected();
     let mut terminal = TerminalSubscription::default();
-    let mut status_subscribed = false;
+    let mut status_subscription = ProcessStatusSubscription::new(live_stats.clone());
     let mut timer_event_cursor = timer_events.latest_sequence();
     let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
     terminal_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -522,7 +521,7 @@ async fn control_session(
                                 &settings,
                                 &shutdown_request,
                                 &mut terminal,
-                                &mut status_subscribed,
+                                &mut status_subscription,
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
@@ -571,7 +570,7 @@ async fn control_session(
                     }
                 }
             }
-            _ = status_tick.tick(), if status_subscribed => {
+            _ = status_tick.tick(), if status_subscription.subscribed => {
                 let (statuses, timers) = {
                     let mut registry = registry.lock().await;
                     let statuses = registry.list_statuses(None);
@@ -593,7 +592,9 @@ async fn control_session(
                         "timer_events": lifecycle_events,
                         "worktree_operations": worktree_operations,
                     });
-                    if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                    if let Some(event) = status_event_if_changed(&mut status_subscription.last_event, event)
+                        && socket.send(Message::Text(event.into())).await.is_err()
+                    {
                         break;
                     }
                 }
@@ -609,13 +610,44 @@ struct TerminalSubscription {
     replay_end_offset: u64,
 }
 
+struct ProcessStatusSubscription {
+    subscribed: bool,
+    live_stats: process_stats::LiveStatsHub,
+    live_stats_client: Option<process_stats::LiveStatsClientGuard>,
+    last_event: Option<String>,
+}
+
+impl ProcessStatusSubscription {
+    fn new(live_stats: process_stats::LiveStatsHub) -> Self {
+        Self {
+            subscribed: false,
+            live_stats,
+            live_stats_client: None,
+            last_event: None,
+        }
+    }
+
+    fn set_subscribed(&mut self, subscribed: bool) {
+        if subscribed && !self.subscribed {
+            self.last_event = None;
+        }
+        self.subscribed = subscribed;
+        if subscribed {
+            self.live_stats_client
+                .get_or_insert_with(|| self.live_stats.client_connected());
+        } else {
+            self.live_stats_client.take();
+        }
+    }
+}
+
 async fn handle_session_control(
     text: &str,
     registry: &SharedProcessRegistry,
     settings: &settings::DaemonRuntimeSettings,
     shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
-    status_subscribed: &mut bool,
+    status_subscription: &mut ProcessStatusSubscription,
     worktree_operations: &worktree_operations::WorktreeOperationHub,
 ) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -787,12 +819,12 @@ async fn handle_session_control(
         method,
         "process.status_subscribe" | "process.status_unsubscribe"
     ) {
-        *status_subscribed = method == "process.status_subscribe";
+        status_subscription.set_subscribed(method == "process.status_subscribe");
         return Some(
             json!({
                 "id": id,
                 "ok": true,
-                "result": { "subscribed": *status_subscribed }
+                "result": { "subscribed": status_subscription.subscribed }
             })
             .to_string(),
         );
@@ -905,6 +937,18 @@ async fn handle_session_control(
             .to_string(),
         ),
     }
+}
+
+fn status_event_if_changed(
+    previous: &mut Option<String>,
+    event: serde_json::Value,
+) -> Option<String> {
+    let event = event.to_string();
+    if previous.as_deref() == Some(event.as_str()) {
+        return None;
+    }
+    *previous = Some(event.clone());
+    Some(event)
 }
 
 fn update_error_reply(id: serde_json::Value, error: workman_core::UpdateError) -> String {
@@ -1316,6 +1360,28 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn identical_status_events_are_suppressed() {
+        let mut previous = None;
+        assert_eq!(
+            status_event_if_changed(&mut previous, json!({ "event": "process.statuses" })),
+            Some("{\"event\":\"process.statuses\"}".to_owned())
+        );
+        assert_eq!(
+            status_event_if_changed(&mut previous, json!({ "event": "process.statuses" })),
+            None
+        );
+    }
+
+    #[test]
+    fn changed_status_events_are_emitted() {
+        let mut previous = Some("{\"processes\":[]}".to_owned());
+        assert_eq!(
+            status_event_if_changed(&mut previous, json!({ "processes": [1] })),
+            Some("{\"processes\":[1]}".to_owned())
+        );
+    }
 
     struct TestServer {
         discovery: Discovery,

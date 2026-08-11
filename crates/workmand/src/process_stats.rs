@@ -80,7 +80,7 @@ pub struct LiveStatsSnapshot {
     pub counts: BTreeMap<ProjectId, ProjectCounts>,
 }
 
-/// Shared latest-value cache and connected-client activation signal.
+/// Shared latest-value cache and subscribed-client activation signal.
 #[derive(Clone)]
 pub(crate) struct LiveStatsHub {
     latest: Arc<RwLock<LiveStatsSnapshot>>,
@@ -115,6 +115,11 @@ impl LiveStatsHub {
     fn client_count_receiver(&self) -> watch::Receiver<usize> {
         self.client_count_tx.subscribe()
     }
+
+    #[cfg(test)]
+    fn client_count(&self) -> usize {
+        self.client_count.load(Ordering::Acquire)
+    }
 }
 
 pub(crate) struct LiveStatsClientGuard {
@@ -131,7 +136,7 @@ impl Drop for LiveStatsClientGuard {
     }
 }
 
-/// Run one sampler for the daemon, sleeping completely while no WS client is connected.
+/// Run one sampler for the daemon, sleeping completely while no status client is subscribed.
 pub(crate) fn spawn_live_stats_sampler(
     hub: LiveStatsHub,
     registry: SharedProcessRegistry,
@@ -469,6 +474,21 @@ mod tests {
     use workman_core::{NewTodo, Project, ScratchpadService, TodoPriority, TodoService};
 
     use super::*;
+
+    #[test]
+    fn live_stats_sampler_clients_are_reference_counted() {
+        let hub = LiveStatsHub::new();
+        assert_eq!(hub.client_count(), 0);
+
+        let first = hub.client_connected();
+        let second = hub.client_connected();
+        assert_eq!(hub.client_count(), 2);
+
+        drop(first);
+        assert_eq!(hub.client_count(), 1);
+        drop(second);
+        assert_eq!(hub.client_count(), 0);
+    }
 
     #[test]
     fn counts_include_open_todos_visible_scratchpads_and_process_kinds() {

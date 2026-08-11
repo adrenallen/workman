@@ -198,6 +198,7 @@
 
   let projects = $state<Project[]>([]);
   let processes = $state<ProcessView[]>([]);
+  let documentVisible = $state(true);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
   let coordination = $state<CoordinationSnapshot | null>(null);
@@ -476,6 +477,48 @@
     treeRailCollapsed = treePreference.collapsed;
 
     let active = true;
+    let visibilityRequest = 0;
+    const applyDocumentVisibility = (visible: boolean): void => {
+      if (documentVisible === visible) return;
+      documentVisible = visible;
+      document.documentElement.classList.toggle('workman-document-hidden', !documentVisible);
+      if (connection.status !== 'connected') return;
+      if (!documentVisible) {
+        void client.unsubscribeProcessStatuses().catch(reportError);
+        return;
+      }
+      void client.subscribeProcessStatuses().catch(reportError);
+      if (!busy) void refreshProjects();
+      if (selectedProject) {
+        void refreshProcesses(selectedProject.id);
+        if (connection.version_compatible) {
+          void refreshCoordination(selectedProject.id, false);
+        }
+      }
+      if (connection.version_compatible) void refreshNotifications();
+    };
+    const updateDocumentVisibility = (): void => {
+      const request = ++visibilityRequest;
+      if (document.hidden) {
+        applyDocumentVisibility(false);
+        return;
+      }
+      void getCurrentWindow().isMinimized().then((minimized) => {
+        if (active && request === visibilityRequest) applyDocumentVisibility(!minimized);
+      }).catch(reportError);
+    };
+    updateDocumentVisibility();
+    document.addEventListener('visibilitychange', updateDocumentVisibility);
+    let stopWindowResize = (): void => {};
+    void getCurrentWindow().onResized(updateDocumentVisibility).then((stop) => {
+      if (active) stopWindowResize = stop;
+      else stop();
+    }).catch(reportError);
+    let stopWindowFocus = (): void => {};
+    void getCurrentWindow().onFocusChanged(updateDocumentVisibility).then((stop) => {
+      if (active) stopWindowFocus = stop;
+      else stop();
+    }).catch(reportError);
     const stopStatuses = client.onProcessStatuses((next) => {
       if (!active) return;
       cacheProcessStatuses(next);
@@ -506,11 +549,14 @@
     }).catch(reportError);
     void refreshNativeNotificationPermission();
     const projectTimer = setInterval(() => {
-      if (active && connection.status === 'connected' && !busy) void refreshProjects();
+      if (active && documentVisible && connection.status === 'connected' && !busy) {
+        void refreshProjects();
+      }
     }, 5000);
     const coordinationTimer = setInterval(() => {
       if (
         active &&
+        documentVisible &&
         connection.status === 'connected' &&
         connection.version_compatible &&
         selectedProject
@@ -521,6 +567,7 @@
     const notificationTimer = setInterval(() => {
       if (
         active
+        && documentVisible
         && connection.status === 'connected'
         && connection.version_compatible
       ) {
@@ -540,6 +587,10 @@
 
     return () => {
       active = false;
+      document.removeEventListener('visibilitychange', updateDocumentVisibility);
+      stopWindowResize();
+      stopWindowFocus();
+      document.documentElement.classList.remove('workman-document-hidden');
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
       clearInterval(notificationTimer);
@@ -586,9 +637,11 @@
       startupUpdatePort = null;
     }
     if (reconnected) {
-      void client.subscribeProcessStatuses().catch(reportError);
-      void refreshProjects();
-      if (status.version_compatible) void refreshNotifications();
+      if (documentVisible) {
+        void client.subscribeProcessStatuses().catch(reportError);
+        void refreshProjects();
+        if (status.version_compatible) void refreshNotifications();
+      }
     }
   }
 
@@ -3494,6 +3547,7 @@
                 {client}
                 process={selectedProcess}
                 connected={connection.status === 'connected'}
+                visible={documentVisible}
                 busy={processBusyId === selectedProcess.id}
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}

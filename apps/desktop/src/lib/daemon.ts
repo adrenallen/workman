@@ -460,6 +460,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.requestOptional('process.status_subscribe', {}, { subscribed: false });
   }
 
+  unsubscribeProcessStatuses(): Promise<{ subscribed: boolean }> {
+    return this.requestOptional('process.status_unsubscribe', {}, { subscribed: false });
+  }
+
   syncConfig(projectId: number): Promise<{ project_id: number; synced: boolean }> {
     return this.requestOptional(
       'config.sync',

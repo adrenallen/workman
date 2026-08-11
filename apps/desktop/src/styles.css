@@ -259,6 +259,12 @@ body.resizing-panel {
   user-select: none;
 }
 
+html.workman-document-hidden *,
+html.workman-document-hidden *::before,
+html.workman-document-hidden *::after {
+  animation-play-state: paused !important;
+}
+
 [data-slot='button'],
 [data-slot$='-item'],
 [data-slot='input'],
