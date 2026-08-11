@@ -2,7 +2,7 @@
 
 use std::{
     env, fmt,
-    future::Future,
+    future::{Future, pending},
     io,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -109,7 +109,6 @@ const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"WRK1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
 const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
-const TERMINAL_STREAM_TICK: Duration = Duration::from_millis(16);
 const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
 
 /// The name of the secure daemon discovery file in the workman data directory.
@@ -492,14 +491,13 @@ async fn control_session(
     let mut terminal = TerminalSubscription::default();
     let mut status_subscription = ProcessStatusSubscription::new(live_stats.clone());
     let mut timer_event_cursor = timer_events.latest_sequence();
-    let mut terminal_tick = interval(TERMINAL_STREAM_TICK);
-    terminal_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    terminal_tick.tick().await;
     let mut status_tick = interval(PROCESS_STATUS_STREAM_TICK);
     status_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     status_tick.tick().await;
 
     loop {
+        let output_ready = terminal.output_ready();
+        tokio::pin!(output_ready);
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
@@ -555,7 +553,7 @@ async fn control_session(
                     break;
                 }
             }
-            _ = terminal_tick.tick(), if terminal.process_id.is_some() => {
+            _ = &mut output_ready => {
                 match terminal_output_frames(&registry, &mut terminal).await {
                     Ok(frames) => {
                         for frame in frames {
@@ -565,7 +563,8 @@ async fn control_session(
                         }
                     }
                     Err(error) => {
-                        let process_id = terminal.process_id.take();
+                        let process_id = terminal.process_id;
+                        terminal.detach();
                         let event = json!({
                             "event": "terminal.error",
                             "process_id": process_id,
@@ -613,8 +612,35 @@ async fn control_session(
 #[derive(Default)]
 struct TerminalSubscription {
     process_id: Option<workman_core::ProcessId>,
+    output: Option<workman_core::pty::RawOutput>,
     offset: u64,
     replay_end_offset: u64,
+}
+
+impl TerminalSubscription {
+    fn detach(&mut self) {
+        self.process_id = None;
+        self.output = None;
+        self.offset = 0;
+        self.replay_end_offset = 0;
+    }
+
+    fn output_ready(&self) -> impl Future<Output = ()> + Send + 'static {
+        let output = self.output.clone();
+        let offset = self.offset;
+        async move {
+            let Some(output) = output else {
+                pending::<()>().await;
+                return;
+            };
+            // Register first, then inspect the condition. If output lands between these two
+            // operations the listener is notified; if it landed earlier the offset check wins.
+            let listener = output.listen();
+            if output.total_bytes_seen() <= offset {
+                listener.await;
+            }
+        }
+    }
 }
 
 struct ProcessStatusSubscription {
@@ -837,9 +863,7 @@ async fn handle_session_control(
         );
     }
     if method == "terminal.detach" {
-        terminal.process_id = None;
-        terminal.offset = 0;
-        terminal.replay_end_offset = 0;
+        terminal.detach();
         return Some(
             json!({
                 "id": id,
@@ -912,8 +936,25 @@ async fn handle_session_control(
                     );
                 }
             };
+            let output = match registry.raw_output_source(process_id) {
+                Ok(output) => output,
+                Err(error) => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        })
+                        .to_string(),
+                    );
+                }
+            };
             terminal.process_id = Some(process_id);
-            terminal.offset = offset;
+            terminal.output = output;
+            // `raw_output` clamps stale or future offsets to the retained stream. Start the
+            // readiness cursor at that effective offset; otherwise a client-supplied offset past
+            // the current end could wait forever for bytes that were never part of the replay.
+            terminal.offset = replay.start_offset;
             terminal.replay_end_offset = replay.total_bytes;
             Some(
                 json!({
@@ -1387,6 +1428,28 @@ mod tests {
         assert_eq!(
             status_event_if_changed(&mut previous, json!({ "processes": [1] })),
             Some("{\"processes\":[1]}".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_subscription_drains_backlog_then_parks_when_quiet() {
+        let output = workman_core::pty::RawOutput::from_replay(64, b"retained output");
+        let mut terminal = TerminalSubscription {
+            process_id: Some(7),
+            output: Some(output.clone()),
+            offset: 0,
+            replay_end_offset: output.total_bytes_seen(),
+        };
+
+        timeout(Duration::from_secs(1), terminal.output_ready())
+            .await
+            .expect("retained output should be immediately ready");
+        terminal.offset = output.total_bytes_seen();
+        assert!(
+            timeout(Duration::from_millis(25), terminal.output_ready())
+                .await
+                .is_err(),
+            "a caught-up quiet subscription must remain parked"
         );
     }
 

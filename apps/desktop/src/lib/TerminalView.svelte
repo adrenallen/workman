@@ -111,7 +111,7 @@
     const instance = new Terminal({
       allowTransparency: false,
       convertEol: false,
-      cursorBlink: true,
+      cursorBlink: false,
       cursorStyle: 'bar',
       fontFamily: terminalFontCss(initialAppearance.terminalFont),
       fontSize: initialAppearance.terminalFontSize,

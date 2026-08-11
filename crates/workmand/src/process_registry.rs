@@ -1200,6 +1200,19 @@ impl ProcessRegistry {
         })
     }
 
+    /// Clone the process-local raw stream used to await output without polling the registry.
+    pub fn raw_output_source(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<RawOutput>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        Ok(self
+            .outputs
+            .get(&process_id)
+            .map(|output| output.raw.clone()))
+    }
+
     fn record_raw_output_profile(
         &mut self,
         process_id: ProcessId,

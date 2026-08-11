@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
+event-listener = "5.4.2"
 flate2 = "1"
 nix = { version = "0.28", features = ["process", "signal", "term"] }
 portable-pty = "0.9"

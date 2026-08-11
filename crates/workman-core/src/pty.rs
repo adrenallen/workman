@@ -3,17 +3,21 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
+use std::task::{Context as TaskContext, Poll};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use event_listener::{Event, EventListener};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -220,15 +224,38 @@ impl RawRingBuffer {
 }
 
 /// Thread-safe view of a process's raw output ring.
+#[derive(Debug)]
+struct RawOutputInner {
+    ring: Mutex<RawRingBuffer>,
+    ready: Event,
+}
+
+/// One async notification that new raw PTY output may be available.
+#[derive(Debug)]
+pub struct RawOutputListener {
+    inner: EventListener,
+}
+
+impl Future for RawOutputListener {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner).poll(context)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RawOutput {
-    inner: Arc<Mutex<RawRingBuffer>>,
+    inner: Arc<RawOutputInner>,
 }
 
 impl RawOutput {
     fn new(capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(RawRingBuffer::new(capacity))),
+            inner: Arc::new(RawOutputInner {
+                ring: Mutex::new(RawRingBuffer::new(capacity)),
+                ready: Event::new(),
+            }),
         }
     }
 
@@ -241,12 +268,27 @@ impl RawOutput {
 
     fn lock(&self) -> MutexGuard<'_, RawRingBuffer> {
         self.inner
+            .ring
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn push(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         self.lock().push(bytes);
+        // A process can be attached by more than one client. Wake every current listener;
+        // clients independently drain from their absolute stream offsets.
+        self.inner.ready.notify(usize::MAX);
+    }
+
+    /// Listen for the next append. Callers should register before checking the stream offset,
+    /// then skip awaiting when bytes are already available, so an append cannot be missed.
+    pub fn listen(&self) -> RawOutputListener {
+        RawOutputListener {
+            inner: self.inner.ready.listen(),
+        }
     }
 
     /// Copy the retained output, oldest byte first.
@@ -1366,6 +1408,21 @@ mod tests {
                 truncated: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn raw_output_append_wakes_every_current_listener() {
+        let output = RawOutput::new(64);
+        let first = output.listen();
+        let second = output.listen();
+        output.push(b"ready");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .expect("raw output listeners were not notified");
+        assert_eq!(output.snapshot(), b"ready");
     }
 
     #[test]
