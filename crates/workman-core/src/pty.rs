@@ -555,7 +555,10 @@ impl PtyProcess {
         let reader_spill = output_spill.as_ref().map(OutputSpill::sink);
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_flag = Arc::clone(&reader_finished);
-        let capture_metrics = Arc::new(PtyCaptureMetrics::default());
+        let capture_metrics = Arc::new(PtyCaptureMetrics {
+            process_id: options.process_id,
+            ..PtyCaptureMetrics::default()
+        });
         let (attention_render_tx, attention_render_rx) = mpsc::sync_channel(1);
         let attention_terminal = terminal_output.clone();
         let attention_tracker = attention.clone();
@@ -582,7 +585,6 @@ impl PtyProcess {
             .name(format!("workman-pty-{}-reader", options.process_id))
             .spawn(move || {
                 capture_output(
-                    options.process_id,
                     reader,
                     reader_output,
                     reader_terminal,
@@ -1060,7 +1062,6 @@ fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
 }
 
 fn capture_output(
-    process_id: i64,
     mut reader: Box<dyn Read + Send>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
@@ -1069,7 +1070,7 @@ fn capture_output(
     attention_render_tx: mpsc::SyncSender<()>,
     metrics: Arc<PtyCaptureMetrics>,
 ) {
-    let mut profiler = PtyCaptureProfiler::new(process_id, Arc::clone(&metrics));
+    let mut profiler = PtyCaptureProfiler::new(Arc::clone(&metrics));
     let mut chunk = [0_u8; 8192];
     loop {
         match reader.read(&mut chunk) {
@@ -1134,6 +1135,7 @@ fn render_attention(
 
 #[derive(Default)]
 struct PtyCaptureMetrics {
+    process_id: i64,
     parse_calls: AtomicU64,
     parsed_bytes: AtomicU64,
     render_calls: AtomicU64,
@@ -1150,9 +1152,9 @@ struct PtyCaptureProfiler {
 }
 
 impl PtyCaptureProfiler {
-    fn new(process_id: i64, metrics: Arc<PtyCaptureMetrics>) -> Self {
+    fn new(metrics: Arc<PtyCaptureMetrics>) -> Self {
         Self {
-            process_id,
+            process_id: metrics.process_id,
             metrics,
             enabled: profile_enabled(),
             window_started: Instant::now(),
