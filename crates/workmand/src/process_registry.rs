@@ -41,6 +41,7 @@ use crate::config::{
     validate_process_working_dir,
 };
 use crate::process_tree::TrackedProcessTree;
+use crate::status_invalidation::StatusInvalidationHub;
 use crate::user_config::user_config_path;
 use crate::user_environment::{ResolvedUserEnvironment, UserEnvironmentResolver};
 
@@ -258,6 +259,7 @@ pub struct ProcessEvent {
 /// Owns persisted process records and live PTY handles.
 pub struct ProcessRegistry {
     store: Store,
+    status_invalidations: StatusInvalidationHub,
     running: HashMap<ProcessId, PtyProcess>,
     /// Last geometry measured by a desktop terminal surface, including while stopped.
     /// Keeping this process-local lets the next spawn start at the correct size before the
@@ -381,6 +383,7 @@ impl ProcessRegistry {
             .collect();
         let mut registry = Self {
             store,
+            status_invalidations: StatusInvalidationHub::default(),
             running: HashMap::new(),
             pty_sizes: HashMap::new(),
             outputs: HashMap::new(),
@@ -403,6 +406,10 @@ impl ProcessRegistry {
 
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    pub(crate) fn status_invalidations(&self) -> StatusInvalidationHub {
+        self.status_invalidations.clone()
     }
 
     pub fn resolved_user_environment(&self) -> ResolvedUserEnvironment {
@@ -433,6 +440,7 @@ impl ProcessRegistry {
             process.trust_hash = None;
         }
         self.store.put_process(&process)?;
+        self.status_invalidations.invalidate();
         Ok(process)
     }
 
@@ -455,6 +463,7 @@ impl ProcessRegistry {
             && current_hash == updated_hash;
         process.trust_hash = trust_still_applies.then_some(current_hash);
         self.store.put_process(&process)?;
+        self.status_invalidations.invalidate();
         Ok(process)
     }
 
@@ -486,10 +495,13 @@ impl ProcessRegistry {
         &mut self,
         project_id: Option<ProjectId>,
     ) -> RegistryResult<Vec<ProcessStatusView>> {
-        self.list(project_id)?
+        let statuses = self
+            .list(project_id)?
             .into_iter()
             .map(|process| self.status_view(process))
-            .collect()
+            .collect();
+        self.arm_attention_deadline();
+        statuses
     }
 
     /// Attach attention state to an already-loaded process record.
@@ -659,6 +671,7 @@ impl ProcessRegistry {
         self.refresh_exits()?;
         let process = self.require(process_id)?;
         self.store.mark_agent_read(process_id)?;
+        self.status_invalidations.invalidate();
         self.status_view(process)
     }
 
@@ -804,6 +817,7 @@ impl ProcessRegistry {
                 process.status = ProcessStatus::Crashed;
                 process.exited_at = Some(now_millis());
                 self.store.put_process(&process)?;
+                self.status_invalidations.invalidate();
                 return Err(RegistryError::Pty {
                     process_id,
                     message: format!("{error:#}"),
@@ -843,12 +857,14 @@ impl ProcessRegistry {
             kind: "agent_launch".into(),
             message: launch_message.into(),
         });
+        let attention = hosted.attention_tracker();
+        self.connect_attention_invalidation(&attention);
         self.outputs.insert(
             process_id,
             ProcessOutput {
                 raw: hosted.raw_output(),
                 terminal: hosted.terminal_output(),
-                attention: hosted.attention_tracker(),
+                attention,
                 events: launch_event.into_iter().collect(),
             },
         );
@@ -891,6 +907,7 @@ impl ProcessRegistry {
         }
         process.trust_hash = Some(actual);
         self.store.put_process(&process)?;
+        self.status_invalidations.invalidate();
         self.trust_snapshots
             .insert(process_id, TrustFields::from_process(&process));
         if process.auto_start && !self.running.contains_key(&process_id) {
@@ -975,6 +992,7 @@ impl ProcessRegistry {
                 process.pid = None;
                 process.exited_at = Some(now_millis());
                 self.store.put_process(&process)?;
+                self.status_invalidations.invalidate();
                 Err(RegistryError::Pty {
                     process_id,
                     message: error.to_string(),
@@ -1035,6 +1053,7 @@ impl ProcessRegistry {
                 process.pid = None;
                 process.exited_at = Some(now_millis());
                 self.store.put_process(&process)?;
+                self.status_invalidations.invalidate();
                 Err(RegistryError::Pty {
                     process_id,
                     message: error.to_string(),
@@ -1127,6 +1146,7 @@ impl ProcessRegistry {
                 [process.id],
             )
             .map_err(StoreError::from)?;
+        self.status_invalidations.invalidate();
         if process.kind != ProcessKind::Agent {
             return Ok(());
         }
@@ -1153,6 +1173,7 @@ impl ProcessRegistry {
         let mut process = self.get(process_id)?;
         process.name = name;
         self.store.put_process(&process)?;
+        self.status_invalidations.invalidate();
         Ok(process)
     }
 
@@ -1331,6 +1352,7 @@ impl ProcessRegistry {
         if let Some(output) = self.outputs.get_mut(&process_id) {
             output.events.push(event.clone());
         }
+        self.status_invalidations.invalidate();
         eprintln!("process {process_id}: {}", event.message);
         Ok(Some(dialog))
     }
@@ -1664,6 +1686,7 @@ impl ProcessRegistry {
                 ProcessStatus::Crashed
             };
             self.store.put_process(&process)?;
+            self.status_invalidations.invalidate();
         }
         Ok(())
     }
@@ -1695,6 +1718,7 @@ impl ProcessRegistry {
                     .set_agent_session_id(process_id, &session_id, now)?
                 {
                     self.agent_session_captures.remove(&process_id);
+                    self.status_invalidations.invalidate();
                 } else {
                     eprintln!(
                         "process {process_id}: agent session {session_id} is already attributed to another process"
@@ -1720,6 +1744,7 @@ impl ProcessRegistry {
                     .map(|event| (*process_id, event))
             })
             .collect::<Vec<_>>();
+        let changed = !events.is_empty();
         for (process_id, event) in events {
             let (kind, message) = match event.kind {
                 PtySubmissionEventKind::Retried => (
@@ -1748,6 +1773,9 @@ impl ProcessRegistry {
                 output.events.push(process_event.clone());
             }
             eprintln!("process {process_id}: {}", process_event.message);
+        }
+        if changed {
+            self.status_invalidations.invalidate();
         }
     }
 
@@ -1819,6 +1847,28 @@ impl ProcessRegistry {
         self.store
             .get_process(process_id)?
             .ok_or(RegistryError::NotFound(process_id))
+    }
+
+    fn connect_attention_invalidation(&self, attention: &AttentionTracker) {
+        let invalidations = self.status_invalidations.clone();
+        attention.set_invalidation_callback(move |next_transition_at| {
+            invalidations.invalidate();
+            if let Some(at) = next_transition_at {
+                invalidations.arm_deadline(at);
+            }
+        });
+    }
+
+    fn arm_attention_deadline(&self) {
+        let now = now_millis();
+        if let Some(at) = self
+            .outputs
+            .values()
+            .filter_map(|output| output.attention.next_transition_at(now))
+            .min()
+        {
+            self.status_invalidations.arm_deadline(at);
+        }
     }
 
     fn tool_type_for(&self, process: &Process) -> RegistryResult<Option<String>> {

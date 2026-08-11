@@ -18,7 +18,10 @@ use tokio::{
 };
 use workman_core::{Process, ProcessId, ProcessKind, ProcessStatus, ProjectId, Store, StoreError};
 
-use crate::{RegistryError, RegistryResult, SharedProcessRegistry};
+use crate::{
+    RegistryError, RegistryResult, SharedProcessRegistry,
+    status_invalidation::StatusInvalidationHub,
+};
 
 /// Process telemetry is intentionally coarser than the terminal stream.
 pub const LIVE_STATS_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
@@ -86,15 +89,17 @@ pub(crate) struct LiveStatsHub {
     latest: Arc<RwLock<LiveStatsSnapshot>>,
     client_count: Arc<AtomicUsize>,
     client_count_tx: watch::Sender<usize>,
+    status_invalidations: StatusInvalidationHub,
 }
 
 impl LiveStatsHub {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(status_invalidations: StatusInvalidationHub) -> Self {
         let (client_count_tx, _) = watch::channel(0);
         Self {
             latest: Arc::new(RwLock::new(LiveStatsSnapshot::default())),
             client_count: Arc::new(AtomicUsize::new(0)),
             client_count_tx,
+            status_invalidations,
         }
     }
 
@@ -110,6 +115,7 @@ impl LiveStatsHub {
 
     async fn publish(&self, snapshot: LiveStatsSnapshot) {
         *self.latest.write().await = snapshot;
+        self.status_invalidations.invalidate();
     }
 
     fn client_count_receiver(&self) -> watch::Receiver<usize> {
@@ -477,7 +483,7 @@ mod tests {
 
     #[test]
     fn live_stats_sampler_clients_are_reference_counted() {
-        let hub = LiveStatsHub::new();
+        let hub = LiveStatsHub::new(StatusInvalidationHub::default());
         assert_eq!(hub.client_count(), 0);
 
         let first = hub.client_connected();
@@ -488,6 +494,17 @@ mod tests {
         assert_eq!(hub.client_count(), 1);
         drop(second);
         assert_eq!(hub.client_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn publishing_live_stats_invalidates_status_once() {
+        let invalidations = StatusInvalidationHub::default();
+        let hub = LiveStatsHub::new(invalidations.clone());
+        assert_eq!(invalidations.version_at(0), 0);
+
+        hub.publish(LiveStatsSnapshot::default()).await;
+
+        assert_eq!(invalidations.version_at(0), 1);
     }
 
     #[test]

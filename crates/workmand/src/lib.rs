@@ -50,6 +50,7 @@ mod process_tree;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;
+mod status_invalidation;
 mod subprocesses;
 mod timer_events;
 mod timers;
@@ -360,16 +361,18 @@ impl DaemonServer {
         F: Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status_invalidations = self.registry.lock().await.status_invalidations();
         let lifecycle_task =
             spawn_lifecycle_supervisor(self.registry.clone(), shutdown_rx.clone())?;
-        let timer_events = timer_events::TimerLifecycleHub::default();
-        let worktree_operations = worktree_operations::WorktreeOperationHub::default();
+        let timer_events = timer_events::TimerLifecycleHub::new(status_invalidations.clone());
+        let worktree_operations =
+            worktree_operations::WorktreeOperationHub::new(status_invalidations.clone());
         let timer_task = timers::spawn_timer_scheduler(
             self.registry.clone(),
             timer_events.clone(),
             shutdown_rx.clone(),
         );
-        let live_stats = process_stats::LiveStatsHub::new();
+        let live_stats = process_stats::LiveStatsHub::new(status_invalidations.clone());
         let live_stats_task = process_stats::spawn_live_stats_sampler(
             live_stats.clone(),
             self.registry.clone(),
@@ -390,6 +393,7 @@ impl DaemonServer {
             shutdown_request: shutdown_tx.clone(),
             settings: runtime_settings,
             registry: self.registry,
+            status_invalidations,
             live_stats,
             timer_events,
             worktree_operations,
@@ -427,6 +431,7 @@ struct AppState {
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    status_invalidations: status_invalidation::StatusInvalidationHub,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
     worktree_operations: worktree_operations::WorktreeOperationHub,
@@ -444,6 +449,10 @@ fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             mcp_sessions,
             mcp::require_known_session,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.status_invalidations.clone(),
+            invalidate_status_after_mcp_request,
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -469,6 +478,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
             state.shutdown_request,
             state.settings,
             state.registry,
+            state.status_invalidations,
             state.live_stats,
             state.timer_events,
             state.worktree_operations,
@@ -483,13 +493,15 @@ async fn control_session(
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    status_invalidations: status_invalidation::StatusInvalidationHub,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
     worktree_operations: worktree_operations::WorktreeOperationHub,
 ) {
     let mcp_url = settings.info().mcp.endpoint;
     let mut terminal = TerminalSubscription::default();
-    let mut status_subscription = ProcessStatusSubscription::new(live_stats.clone());
+    let mut status_subscription =
+        ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
     let mut timer_event_cursor = timer_events.latest_sequence();
     let mut status_tick = interval(PROCESS_STATUS_STREAM_TICK);
     status_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -532,6 +544,7 @@ async fn control_session(
                                 )
                                 .await,
                             };
+                            status_subscription.status_invalidations.invalidate();
                             Message::Text(response.into())
                         } else {
                             Message::Text(json!({
@@ -577,6 +590,11 @@ async fn control_session(
                 }
             }
             _ = status_tick.tick(), if status_subscription.subscribed => {
+                let Some(status_version) =
+                    status_subscription.pending_version(timers::now_millis())
+                else {
+                    continue;
+                };
                 let (statuses, timers) = {
                     let mut registry = registry.lock().await;
                     let statuses = registry.list_statuses(None);
@@ -585,6 +603,7 @@ async fn control_session(
                     (statuses, timers)
                 };
                 if let (Ok(processes), Ok(timers)) = (statuses, timers) {
+                    status_subscription.last_version = Some(status_version);
                     let stats = live_stats.snapshot().await;
                     let (latest_timer_event, lifecycle_events) =
                         timer_events.events_since(timer_event_cursor);
@@ -646,16 +665,23 @@ impl TerminalSubscription {
 struct ProcessStatusSubscription {
     subscribed: bool,
     live_stats: process_stats::LiveStatsHub,
+    status_invalidations: status_invalidation::StatusInvalidationHub,
     live_stats_client: Option<process_stats::LiveStatsClientGuard>,
+    last_version: Option<u64>,
     last_event: Option<String>,
 }
 
 impl ProcessStatusSubscription {
-    fn new(live_stats: process_stats::LiveStatsHub) -> Self {
+    fn new(
+        live_stats: process_stats::LiveStatsHub,
+        status_invalidations: status_invalidation::StatusInvalidationHub,
+    ) -> Self {
         Self {
             subscribed: false,
             live_stats,
+            status_invalidations,
             live_stats_client: None,
+            last_version: None,
             last_event: None,
         }
     }
@@ -663,6 +689,7 @@ impl ProcessStatusSubscription {
     fn set_subscribed(&mut self, subscribed: bool) {
         if subscribed && !self.subscribed {
             self.last_event = None;
+            self.last_version = None;
         }
         self.subscribed = subscribed;
         if subscribed {
@@ -671,6 +698,11 @@ impl ProcessStatusSubscription {
         } else {
             self.live_stats_client.take();
         }
+    }
+
+    fn pending_version(&self, now: i64) -> Option<u64> {
+        let version = self.status_invalidations.version_at(now);
+        (self.last_version != Some(version)).then_some(version)
     }
 }
 
@@ -1095,6 +1127,22 @@ async fn authorize_local_request(
     next.run(request).await
 }
 
+async fn invalidate_status_after_mcp_request(
+    State(invalidations): State<status_invalidation::StatusInvalidationHub>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let invalidates = request.method() == axum::http::Method::POST
+        && (request.uri().path() == "/mcp" || request.uri().path().starts_with("/mcp/"));
+    let response = next.run(request).await;
+    if invalidates {
+        // MCP tools mutate several status-adjacent store tables directly. Conservatively
+        // coalesce one dirty edge after a completed request; idle connections do no work.
+        invalidations.invalidate();
+    }
+    response
+}
+
 async fn valid_process_token(headers: &HeaderMap, registry: &SharedProcessRegistry) -> bool {
     let Some(token) = headers
         .get(WORKMAN_MCP_TOKEN_HEADER)
@@ -1431,6 +1479,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clean_status_ticks_skip_snapshot_assembly() {
+        let invalidations = status_invalidation::StatusInvalidationHub::default();
+        let live_stats = process_stats::LiveStatsHub::new(invalidations.clone());
+        let mut subscription = ProcessStatusSubscription::new(live_stats, invalidations.clone());
+
+        let initial = subscription.pending_version(10).unwrap();
+        subscription.last_version = Some(initial);
+        assert_eq!(subscription.pending_version(10), None);
+
+        invalidations.invalidate();
+        assert_eq!(subscription.pending_version(10), Some(initial + 1));
+    }
+
+    #[test]
+    fn attention_deadline_marks_a_clean_subscription_dirty() {
+        let invalidations = status_invalidation::StatusInvalidationHub::default();
+        let live_stats = process_stats::LiveStatsHub::new(invalidations.clone());
+        let mut subscription = ProcessStatusSubscription::new(live_stats, invalidations.clone());
+        subscription.last_version = subscription.pending_version(10);
+
+        invalidations.arm_deadline(20);
+        assert_eq!(subscription.pending_version(19), None);
+        assert_eq!(subscription.pending_version(20), Some(1));
+    }
+
     #[tokio::test]
     async fn terminal_subscription_drains_backlog_then_parks_when_quiet() {
         let output = workman_core::pty::RawOutput::from_replay(64, b"retained output");
@@ -1527,6 +1601,153 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(response["id"], id);
         response
+    }
+
+    #[tokio::test]
+    async fn status_stream_delivers_time_driven_working_to_idle_edge_promptly() {
+        let server = TestServer::start().await;
+        server
+            .registry
+            .lock()
+            .await
+            .store()
+            .put_project(&workman_core::Project {
+                id: 1,
+                path: "/tmp/workman-status-invalidation-test".into(),
+                name: "status-invalidation".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        rpc(
+            &mut socket,
+            1,
+            "process.create",
+            process_params(101, "agent", "idle-edge", "printf 'ready\\n$ '; sleep 30"),
+        )
+        .await;
+        rpc(
+            &mut socket,
+            2,
+            "process.start",
+            json!({ "process_id": 101 }),
+        )
+        .await;
+        rpc(&mut socket, 3, "process.status_subscribe", json!({})).await;
+
+        let edge = timeout(Duration::from_secs(8), async {
+            let mut saw_working = false;
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(&message).unwrap();
+                if event["event"] != "process.statuses" {
+                    continue;
+                }
+                let Some(process) = event["processes"]
+                    .as_array()
+                    .and_then(|processes| processes.iter().find(|process| process["id"] == 101))
+                else {
+                    continue;
+                };
+                match process["agent_state"]["state"].as_str() {
+                    Some("working") => saw_working = true,
+                    Some("idle") if saw_working => {
+                        let idle_at = process["agent_state"]["last_content_change_at"]
+                            .as_i64()
+                            .unwrap()
+                            + 5_000;
+                        break timers::now_millis().saturating_sub(idle_at);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("working-to-idle status edge was not delivered");
+        eprintln!("working_to_idle_status_edge_latency_ms={edge}");
+        assert!(
+            (0..=750).contains(&edge),
+            "working-to-idle edge arrived {edge} ms after its attention deadline"
+        );
+
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn status_stream_delivers_silent_process_exit_before_next_stats_sample() {
+        let server = TestServer::start().await;
+        server
+            .registry
+            .lock()
+            .await
+            .store()
+            .put_project(&workman_core::Project {
+                id: 1,
+                path: "/tmp/workman-status-lifecycle-test".into(),
+                name: "status-lifecycle".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        rpc(
+            &mut socket,
+            1,
+            "process.create",
+            process_params(102, "command", "silent-exit", "sleep 1"),
+        )
+        .await;
+        let started_at = Instant::now();
+        rpc(
+            &mut socket,
+            2,
+            "process.start",
+            json!({ "process_id": 102 }),
+        )
+        .await;
+        rpc(&mut socket, 3, "process.status_subscribe", json!({})).await;
+
+        let delivered_after = timeout(Duration::from_secs(3), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(&message).unwrap();
+                if event["event"] != "process.statuses" {
+                    continue;
+                }
+                let exited = event["processes"]
+                    .as_array()
+                    .and_then(|processes| processes.iter().find(|process| process["id"] == 102))
+                    .is_some_and(|process| process["status"] == "exited");
+                if exited {
+                    break started_at.elapsed();
+                }
+            }
+        })
+        .await
+        .expect("silent process exit was not delivered");
+        eprintln!(
+            "silent_process_exit_status_delivery_ms={}",
+            delivered_after.as_millis()
+        );
+        assert!(
+            delivered_after <= Duration::from_millis(1_800),
+            "silent exit took {delivered_after:?} to reach the status stream"
+        );
+
+        socket.close(None).await.unwrap();
+        server.stop().await;
     }
 
     fn process_params(id: i64, kind: &str, name: &str, command: &str) -> serde_json::Value {

@@ -9,7 +9,10 @@ use serde::Serialize;
 use tokio::sync::watch;
 use workman_core::{ProcessId, ProjectId, TimerId};
 
-use crate::timers::{TimerFireReason, TimerView};
+use crate::{
+    status_invalidation::StatusInvalidationHub,
+    timers::{TimerFireReason, TimerView},
+};
 
 const MAX_RETAINED_TIMER_EVENTS: usize = 256;
 
@@ -88,19 +91,25 @@ struct TimerEventBuffer {
 pub(crate) struct TimerLifecycleHub {
     inner: Arc<Mutex<TimerEventBuffer>>,
     changed: watch::Sender<u64>,
+    status_invalidations: StatusInvalidationHub,
 }
 
 impl Default for TimerLifecycleHub {
     fn default() -> Self {
-        let (changed, _) = watch::channel(0);
-        Self {
-            inner: Arc::new(Mutex::new(TimerEventBuffer::default())),
-            changed,
-        }
+        Self::new(StatusInvalidationHub::default())
     }
 }
 
 impl TimerLifecycleHub {
+    pub(crate) fn new(status_invalidations: StatusInvalidationHub) -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            inner: Arc::new(Mutex::new(TimerEventBuffer::default())),
+            changed,
+            status_invalidations,
+        }
+    }
+
     pub(crate) fn publish(&self, mut event: TimerLifecycleEvent) -> u64 {
         let mut inner = self.lock();
         inner.next_sequence = inner.next_sequence.saturating_add(1);
@@ -111,6 +120,7 @@ impl TimerLifecycleHub {
         }
         let sequence = inner.next_sequence;
         drop(inner);
+        self.status_invalidations.invalidate();
         self.changed.send_replace(sequence);
         sequence
     }
@@ -172,12 +182,14 @@ mod tests {
 
     #[tokio::test]
     async fn subscribers_wake_for_new_timer_activity() {
-        let hub = TimerLifecycleHub::default();
+        let invalidations = StatusInvalidationHub::default();
+        let hub = TimerLifecycleHub::new(invalidations.clone());
         let mut changed = hub.subscribe();
 
         hub.publish(immediate(10));
 
         changed.changed().await.unwrap();
         assert_eq!(*changed.borrow_and_update(), 1);
+        assert_eq!(invalidations.version_at(10), 1);
     }
 }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use workman_core::ProjectId;
 
-use crate::{SharedProcessRegistry, worktrees};
+use crate::{SharedProcessRegistry, status_invalidation::StatusInvalidationHub, worktrees};
 
 const MAX_OPERATIONS: usize = 64;
 
@@ -82,12 +82,26 @@ pub(crate) struct WorktreeOperationAck {
     pub accepted: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct WorktreeOperationHub {
     inner: Arc<Mutex<VecDeque<WorktreeOperation>>>,
+    status_invalidations: StatusInvalidationHub,
+}
+
+impl Default for WorktreeOperationHub {
+    fn default() -> Self {
+        Self::new(StatusInvalidationHub::default())
+    }
 }
 
 impl WorktreeOperationHub {
+    pub(crate) fn new(status_invalidations: StatusInvalidationHub) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+            status_invalidations,
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<WorktreeOperation> {
         self.inner
             .lock()
@@ -113,6 +127,8 @@ impl WorktreeOperationHub {
         }
         operations.push_front(operation);
         operations.truncate(MAX_OPERATIONS);
+        drop(operations);
+        self.status_invalidations.invalidate();
         Ok(())
     }
 
@@ -121,9 +137,17 @@ impl WorktreeOperationHub {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(operation) = operations.iter_mut().find(|candidate| candidate.id == id) {
-            mutate(operation);
-            operation.updated_at = now_millis();
+        let changed =
+            if let Some(operation) = operations.iter_mut().find(|candidate| candidate.id == id) {
+                mutate(operation);
+                operation.updated_at = now_millis();
+                true
+            } else {
+                false
+            };
+        drop(operations);
+        if changed {
+            self.status_invalidations.invalidate();
         }
     }
 }
@@ -509,7 +533,8 @@ mod tests {
 
     #[test]
     fn hub_tracks_steps_and_failure_on_the_active_step() {
-        let hub = WorktreeOperationHub::default();
+        let invalidations = StatusInvalidationHub::default();
+        let hub = WorktreeOperationHub::new(invalidations.clone());
         hub.begin(new_operation(
             "fixture-op".into(),
             WorktreeOperationMode::Create,
@@ -532,6 +557,7 @@ mod tests {
         assert_eq!(operation.steps[0].status, WorktreeStepStatus::Completed);
         assert_eq!(operation.steps[1].status, WorktreeStepStatus::Failed);
         assert_eq!(operation.error.as_deref(), Some("git worktree add failed"));
+        assert_eq!(invalidations.version_at(0), 4);
     }
 
     #[test]

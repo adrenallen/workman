@@ -597,6 +597,7 @@ impl PtyProcess {
         let reader_spill = output_spill.as_ref().map(OutputSpill::sink);
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_flag = Arc::clone(&reader_finished);
+        let reader_attention = attention.clone();
         let capture_metrics = Arc::new(PtyCaptureMetrics {
             process_id: options.process_id,
             ..PtyCaptureMetrics::default()
@@ -636,6 +637,7 @@ impl PtyProcess {
                     capture_metrics,
                 );
                 reader_finished_flag.store(true, Ordering::Release);
+                reader_attention.notify_change();
             }) {
             Ok(thread) => thread,
             Err(error) => {

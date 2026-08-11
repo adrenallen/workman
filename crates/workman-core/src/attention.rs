@@ -357,12 +357,46 @@ impl AttentionEngine {
             AttentionState::Working
         }
     }
+
+    fn next_transition_at(&self, now_ms: i64) -> Option<i64> {
+        if self.exited {
+            return None;
+        }
+
+        if let Some(last_input_at) = self.last_input_at {
+            let recent_input_ends_at =
+                last_input_at.saturating_add(duration_millis(RECENT_INPUT_GRACE));
+            if recent_input_ends_at > now_ms {
+                return Some(recent_input_ends_at);
+            }
+        }
+        if self.flags.needs_input || self.flags.busy {
+            return None;
+        }
+
+        let stable_since = [
+            Some(self.started_at),
+            self.last_output_at,
+            self.last_content_change_at,
+            self.last_input_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(self.started_at);
+        let confirmation = self.adapter.idle_confirmation().max(self.config.quiescence);
+        let idle_at = stable_since.saturating_add(duration_millis(confirmation));
+        (idle_at > now_ms).then_some(idle_at)
+    }
 }
+
+type AttentionInvalidation = Arc<dyn Fn(Option<i64>) + Send + Sync>;
 
 /// Cloneable, thread-safe attention tracker for one hosted process.
 #[derive(Clone)]
 pub struct AttentionTracker {
     inner: Arc<Mutex<AttentionEngine>>,
+    invalidation: Arc<Mutex<Option<AttentionInvalidation>>>,
 }
 
 impl AttentionTracker {
@@ -402,6 +436,7 @@ impl AttentionTracker {
                 idle_prompt_latched: false,
                 exited: false,
             })),
+            invalidation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -424,8 +459,12 @@ impl AttentionTracker {
         alternate_screen: bool,
         now_ms: i64,
     ) {
-        self.lock()
-            .observe_output(bytes, rendered, alternate_screen, now_ms);
+        let next_transition_at = {
+            let mut engine = self.lock();
+            engine.observe_output(bytes, rendered, alternate_screen, now_ms);
+            engine.next_transition_at(now_ms)
+        };
+        self.notify_invalidation(next_transition_at);
     }
 
     /// Record input delivered to the process PTY.
@@ -435,9 +474,13 @@ impl AttentionTracker {
 
     /// Deterministic form of [`Self::observe_input`].
     pub fn observe_input_at(&self, now_ms: i64) {
-        let mut engine = self.lock();
-        engine.last_input_at = Some(now_ms);
-        engine.idle_prompt_latched = false;
+        let next_transition_at = {
+            let mut engine = self.lock();
+            engine.last_input_at = Some(now_ms);
+            engine.idle_prompt_latched = false;
+            engine.next_transition_at(now_ms)
+        };
+        self.notify_invalidation(next_transition_at);
     }
 
     /// Keep UI-originated PTY writes and their immediate redraw output from
@@ -470,6 +513,7 @@ impl AttentionTracker {
     /// Deterministic form of [`Self::mark_exited`] for recorded sessions.
     pub fn mark_exited_at(&self, _now_ms: i64) {
         self.lock().exited = true;
+        self.notify_invalidation(None);
     }
 
     /// Read the current derived and raw state.
@@ -480,6 +524,40 @@ impl AttentionTracker {
     /// Deterministic form of [`Self::snapshot`] for recorded sessions.
     pub fn snapshot_at(&self, now_ms: i64) -> AgentState {
         self.lock().snapshot(now_ms)
+    }
+
+    /// Return the next Unix-millisecond time-only state edge, if no activity arrives.
+    pub fn next_transition_at(&self, now_ms: i64) -> Option<i64> {
+        self.lock().next_transition_at(now_ms)
+    }
+
+    /// Notify a host when PTY classification/input changes can affect status.
+    /// The optional value is the next Unix-millisecond time-only edge.
+    pub fn set_invalidation_callback(
+        &self,
+        callback: impl Fn(Option<i64>) + Send + Sync + 'static,
+    ) {
+        *self
+            .invalidation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(callback));
+        self.notify_invalidation(self.next_transition_at(now_millis()));
+    }
+
+    /// Wake the registered host after an external lifecycle signal such as PTY EOF.
+    pub(crate) fn notify_change(&self) {
+        self.notify_invalidation(self.next_transition_at(now_millis()));
+    }
+
+    fn notify_invalidation(&self, next_transition_at: Option<i64>) {
+        let callback = self
+            .invalidation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(callback) = callback {
+            callback(next_transition_at);
+        }
     }
 }
 
@@ -512,6 +590,10 @@ fn normalize_tool_type(tool_type: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace([' ', '-'], "_")
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+    duration.as_millis().try_into().unwrap_or(i64::MAX)
 }
 
 /// Claude Code adapter for busy, permission, planning, and resting-prompt UI.
@@ -1142,6 +1224,30 @@ mod tests {
             session.tracker.snapshot_at(12_100).state,
             AttentionState::Idle
         );
+    }
+
+    #[test]
+    fn invalidation_callback_reports_output_and_time_driven_edges() {
+        let tracker = AttentionTracker::new_at(
+            Some("claude_code".into()),
+            AttentionConfig::default(),
+            1_000,
+        );
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let callback_observed = observed.clone();
+        tracker.set_invalidation_callback(move |deadline| {
+            callback_observed.lock().unwrap().push(deadline);
+        });
+        observed.lock().unwrap().clear();
+
+        tracker.observe_output_at(b"done\r\n\xe2\x9d\xaf ", "done\r\n\u{276f} ", false, 2_000);
+        assert_eq!(*observed.lock().unwrap(), [Some(7_000)]);
+
+        tracker.observe_input_at(7_100);
+        assert_eq!(observed.lock().unwrap().last(), Some(&Some(9_100)));
+
+        tracker.mark_exited_at(8_000);
+        assert_eq!(observed.lock().unwrap().last(), Some(&None));
     }
 
     #[test]
