@@ -5,8 +5,15 @@ import {
   localPathsFromUriList,
   pointIsInsideRect,
   shellEscapePath,
-  shellEscapePaths
+  shellEscapePaths,
+  shouldForwardTerminalInput
 } from '../src/lib/terminalInput.ts';
+
+test('accepts physical input during replay without forwarding replay-generated replies', () => {
+  assert.equal(shouldForwardTerminalInput(false, true), true);
+  assert.equal(shouldForwardTerminalInput(false, false), false);
+  assert.equal(shouldForwardTerminalInput(true, false), true);
+});
 
 test('accepts only local file URLs from a URI list', () => {
   assert.deepEqual(

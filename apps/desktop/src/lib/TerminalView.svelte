@@ -21,6 +21,7 @@
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { hasRetainedTerminalOutput } from './terminalFirstPaint';
+  import { shouldForwardTerminalInput } from './terminalInput';
   import { encodeTerminalKey } from './terminalKeys';
   import { installTerminalTransfers } from './terminalTransfers';
 
@@ -58,6 +59,8 @@
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
   let inputProcessId: number | null = null;
   let inputBytes: number[] = [];
+  let nextUserKeyToken = 0;
+  let pendingUserKeyTokens: number[] = [];
   let attachedProcessId: number | null = null;
   let attachedProcessPid: number | null = null;
   let attachedConnected = false;
@@ -134,7 +137,7 @@
       element: frame,
       canInsert: () => inputEnabled && process.status === 'running',
       insert: (text) => {
-        queueInput(encoder.encode(text));
+        queueInput(encoder.encode(text), true);
         flushInput();
       },
       focus: () => instance.focus(),
@@ -154,6 +157,12 @@
     }
 
     instance.attachCustomKeyEventHandler((event) => {
+      let userKeyToken: number | null = null;
+      if (event.type === 'keydown') {
+        userKeyToken = ++nextUserKeyToken;
+        pendingUserKeyTokens.push(userKeyToken);
+        setTimeout(() => removePendingUserKeyToken(userKeyToken), 0);
+      }
       if (
         event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
         && event.key.toLowerCase() === 'u'
@@ -163,14 +172,22 @@
       }
       const modifiedKey = encodeTerminalKey(event, { kittyFlags: kittyKeyboardFlags, modifyOtherKeys });
       if (modifiedKey !== null) {
-        if (event.type === 'keydown') queueInput(encoder.encode(modifiedKey));
+        if (event.type === 'keydown') {
+          removePendingUserKeyToken(userKeyToken);
+          queueInput(encoder.encode(modifiedKey), true);
+        }
         return false;
       }
       return true;
     });
-    const dataDisposable = instance.onData((data) => queueInput(encoder.encode(data)));
+    const dataDisposable = instance.onData((data) => {
+      queueInput(encoder.encode(data), consumePendingUserKeyToken());
+    });
     const binaryDisposable = instance.onBinary((data) => {
-      queueInput(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff));
+      queueInput(
+        Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff),
+        consumePendingUserKeyToken()
+      );
     });
     const removeTerminalListener = client.onTerminal(handleTerminalFrame);
     const resizeObserver = new ResizeObserver(scheduleFit);
@@ -285,6 +302,7 @@
       focusRequested: true
     };
     replayState = state;
+    instance.focus();
     void loadLiveOutputPreview(state);
     void (async () => {
       // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
@@ -382,15 +400,28 @@
     }
   }
 
-  function queueInput(bytes: Uint8Array): void {
+  function queueInput(bytes: Uint8Array, userInitiated = false): void {
     // xterm emits both physical keyboard data and terminal-protocol replies through onData.
     // Retained output is replayed into xterm on every attach, so its DA/DSR/XTVERSION/OSC and
-    // focus replies must not be routed into the live shell until replay parsing is complete.
-    if (!inputEnabled || process.status !== 'running') return;
+    // focus replies must not be routed into the live shell until replay parsing is complete. Real
+    // user input remains lossless while replay catches up, just as it is in a native terminal.
+    if (!shouldForwardTerminalInput(inputEnabled, userInitiated) || process.status !== 'running') {
+      return;
+    }
     if (inputProcessId !== null && inputProcessId !== process.id) flushInput();
     inputProcessId = process.id;
     for (const byte of bytes) inputBytes.push(byte);
     if (!inputTimer) inputTimer = setTimeout(flushInput, 4);
+  }
+
+  function consumePendingUserKeyToken(): boolean {
+    return pendingUserKeyTokens.shift() !== undefined;
+  }
+
+  function removePendingUserKeyToken(token: number | null): void {
+    if (token === null) return;
+    const index = pendingUserKeyTokens.indexOf(token);
+    if (index >= 0) pendingUserKeyTokens.splice(index, 1);
   }
 
   function flushInput(): void {
@@ -457,8 +488,15 @@
 
     const activate = () => {
       if (replayState !== state || state.generation !== attachmentGeneration) return;
+      const alreadyFocused = document.activeElement !== null && host.contains(document.activeElement);
       inputEnabled = true;
-      if (state.focusRequested) terminal?.focus();
+      if (!state.focusRequested) return;
+      if (alreadyFocused && state.focusReporting) {
+        // Replay enabled mode 1004 after the DOM focus event, so xterm has no new event to report.
+        queueInput(encoder.encode('\x1b[I'), true);
+      } else {
+        terminal?.focus();
+      }
     };
 
     // Both emulators consume the same stream, but the daemon's Alacritty state is the durable

@@ -8,8 +8,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -28,6 +31,8 @@ struct Shared {
     capacity: usize,
     state: Mutex<State>,
     wake: Condvar,
+    #[cfg(test)]
+    snapshot_writes: AtomicUsize,
 }
 
 struct State {
@@ -64,6 +69,8 @@ impl OutputSpill {
                 error: None,
             }),
             wake: Condvar::new(),
+            #[cfg(test)]
+            snapshot_writes: AtomicUsize::new(0),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -104,6 +111,11 @@ impl OutputSpill {
             let _ = worker.join();
         }
         flush_result
+    }
+
+    #[cfg(test)]
+    fn snapshot_writes(&self) -> usize {
+        self.sink.shared.snapshot_writes.load(Ordering::Relaxed)
     }
 }
 
@@ -159,20 +171,33 @@ impl OutputSpillSink {
 fn writer_loop(shared: Arc<Shared>) {
     let mut retained = VecDeque::with_capacity(shared.capacity.min(1024 * 1024));
     let mut clear_generation = 0_u64;
+    let mut next_periodic_flush = Instant::now() + FLUSH_INTERVAL;
 
     loop {
         let (pending, overflowed, requested, shutdown, next_clear_generation) = {
             let mut state = lock_state(&shared);
-            while !state.dirty
-                && state.clear_generation == clear_generation
-                && state.flush_requested == state.flush_completed
-                && !state.shutdown
-            {
-                let waited = shared
+            loop {
+                let flush_required = state.clear_generation != clear_generation
+                    || state.flush_requested != state.flush_completed
+                    || state.shutdown;
+                if flush_required {
+                    break;
+                }
+
+                let wait = if state.dirty {
+                    next_periodic_flush.saturating_duration_since(Instant::now())
+                } else {
+                    FLUSH_INTERVAL
+                };
+                if wait.is_zero() {
+                    break;
+                }
+
+                state = shared
                     .wake
-                    .wait_timeout(state, FLUSH_INTERVAL)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state = waited.0;
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
             }
 
             let pending = state.pending.drain(..).collect::<Vec<_>>();
@@ -201,6 +226,9 @@ fn writer_loop(shared: Arc<Shared>) {
         }
 
         let result = write_snapshot(&shared.path, &retained);
+        #[cfg(test)]
+        shared.snapshot_writes.fetch_add(1, Ordering::Relaxed);
+        next_periodic_flush = Instant::now() + FLUSH_INTERVAL;
         {
             let mut state = lock_state(&shared);
             state.error = result.err().map(|error| error.to_string());
@@ -259,7 +287,10 @@ fn write_snapshot(path: &Path, retained: &VecDeque<u8>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Instant,
+    };
 
     use super::*;
 
@@ -302,5 +333,43 @@ mod tests {
             fs::metadata(temp.path().join("2.raw")).unwrap().len(),
             CAPACITY as u64
         );
+    }
+
+    #[test]
+    fn continuous_output_coalesces_periodic_snapshot_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut spill = OutputSpill::start(temp.path().join("3.raw"), 64 * 1024).unwrap();
+        let sink = spill.sink();
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer_stop = Arc::clone(&stop);
+        let producer = thread::spawn(move || {
+            let chunk = [b'x'; 8192];
+            while !producer_stop.load(Ordering::Relaxed) {
+                sink.push(&chunk);
+                thread::yield_now();
+            }
+        });
+
+        let first_write_deadline = Instant::now() + Duration::from_secs(2);
+        while spill.snapshot_writes() == 0 && Instant::now() < first_write_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let first_write_count = spill.snapshot_writes();
+        thread::sleep(FLUSH_INTERVAL * 3);
+        stop.store(true, Ordering::Relaxed);
+        producer.join().unwrap();
+
+        let snapshot_writes = spill.snapshot_writes();
+        assert!(
+            first_write_count > 0,
+            "spill worker did not write within 2s"
+        );
+        assert!(
+            snapshot_writes.saturating_sub(first_write_count) <= 4,
+            "continuous output caused {} additional snapshots in {:?}",
+            snapshot_writes.saturating_sub(first_write_count),
+            FLUSH_INTERVAL * 3
+        );
+        spill.shutdown().unwrap();
     }
 }

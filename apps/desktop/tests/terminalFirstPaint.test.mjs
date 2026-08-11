@@ -41,3 +41,18 @@ test('the retained preview stays visible until xterm parses replay bytes', async
   assert.ok(write >= 0 && parsed > write);
   assert.doesNotMatch(handler.slice(0, write), /hasOutput = true/);
 });
+
+test('retained replay focuses immediately and preserves physical input', async () => {
+  const source = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
+  const replayStart = source.indexOf('replayState = state;');
+  const earlyFocus = source.indexOf('instance.focus();', replayStart);
+  const attach = source.indexOf('await client.attachTerminal(processId)', replayStart);
+  const queueInput = source.slice(
+    source.indexOf('function queueInput'),
+    source.indexOf('function flushInput')
+  );
+
+  assert.ok(replayStart >= 0 && earlyFocus > replayStart && earlyFocus < attach);
+  assert.match(source, /consumePendingUserKeyToken\(\)/);
+  assert.match(queueInput, /shouldForwardTerminalInput\(inputEnabled, userInitiated\)/);
+});

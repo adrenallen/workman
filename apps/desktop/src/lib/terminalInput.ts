@@ -1,5 +1,13 @@
 const safePathCharacter = /^[\p{L}\p{N}_./-]$/u;
 
+/** Keep replay-generated terminal replies gated without dropping physical user input. */
+export function shouldForwardTerminalInput(
+  inputEnabled: boolean,
+  userInitiated: boolean
+): boolean {
+  return inputEnabled || userInitiated;
+}
+
 /** Match Terminal.app's unquoted, backslash-escaped file-path insertion. */
 export function shellEscapePath(path: string): string {
   if (!path) throw new Error('Dropped file path is empty.');
