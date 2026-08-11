@@ -528,6 +528,16 @@ impl TerminalOutput {
         (terminal.read_rows(viewport_start..usize::MAX), replies)
     }
 
+    pub(crate) fn feed_with_replies(&self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.lock().feed_with_replies(bytes)
+    }
+
+    pub(crate) fn read_viewport(&self) -> RenderedRows {
+        let terminal = self.lock();
+        let viewport_start = terminal.history_rows();
+        terminal.read_rows(viewport_start..usize::MAX)
+    }
+
     pub fn read_rows(&self, range: Range<usize>) -> RenderedRows {
         self.lock().read_rows(range)
     }

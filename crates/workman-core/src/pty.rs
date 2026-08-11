@@ -49,6 +49,9 @@ pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
     pixel_height: 0,
 };
 
+/// Maximum cadence for the rendered viewport used by daemon-side attention classification.
+const ATTENTION_RENDER_CADENCE: Duration = Duration::from_millis(16);
+
 /// A fixed-capacity byte ring that always retains the newest bytes.
 ///
 /// Storage is allocated once at construction, so a noisy process cannot grow
@@ -398,6 +401,7 @@ pub struct PtyProcess {
     output_spill: Option<OutputSpill>,
     reader_finished: Arc<AtomicBool>,
     reader_thread: Option<JoinHandle<()>>,
+    attention_thread: Option<JoinHandle<()>>,
     submission_thread: Option<JoinHandle<()>>,
 }
 
@@ -493,7 +497,6 @@ impl PtyProcess {
         let reader_terminal = terminal_output.clone();
         let reader_response_writer = Arc::clone(&writer);
         let attention = AttentionTracker::new(options.tool_type);
-        let reader_attention = attention.clone();
         let output_spill = match options
             .output_spill
             .map(|spill| OutputSpill::start(spill.path, spill.capacity))
@@ -510,6 +513,29 @@ impl PtyProcess {
         let reader_spill = output_spill.as_ref().map(OutputSpill::sink);
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_flag = Arc::clone(&reader_finished);
+        let capture_metrics = Arc::new(PtyCaptureMetrics::default());
+        let (attention_render_tx, attention_render_rx) = mpsc::sync_channel(1);
+        let attention_terminal = terminal_output.clone();
+        let attention_tracker = attention.clone();
+        let attention_metrics = Arc::clone(&capture_metrics);
+        let attention_thread = match thread::Builder::new()
+            .name(format!("workman-pty-{}-attention", options.process_id))
+            .spawn(move || {
+                render_attention(
+                    attention_render_rx,
+                    attention_terminal,
+                    attention_tracker,
+                    attention_metrics,
+                )
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("spawn PTY attention renderer");
+            }
+        };
         let reader_thread = match thread::Builder::new()
             .name(format!("workman-pty-{}-reader", options.process_id))
             .spawn(move || {
@@ -518,9 +544,10 @@ impl PtyProcess {
                     reader,
                     reader_output,
                     reader_terminal,
-                    reader_attention,
                     reader_spill,
                     reader_response_writer,
+                    attention_render_tx,
+                    capture_metrics,
                 );
                 reader_finished_flag.store(true, Ordering::Release);
             }) {
@@ -529,6 +556,7 @@ impl PtyProcess {
                 let _ = signal_process_group(pid, Signal::SIGKILL);
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = attention_thread.join();
                 return Err(error).context("spawn PTY output reader");
             }
         };
@@ -572,6 +600,7 @@ impl PtyProcess {
             output_spill,
             reader_finished,
             reader_thread: Some(reader_thread),
+            attention_thread: Some(attention_thread),
             submission_thread: Some(submission_thread),
         })
     }
@@ -843,8 +872,12 @@ impl Drop for PtyProcess {
             if let Some(reader_thread) = self.reader_thread.take() {
                 let _ = reader_thread.join();
             }
+            if let Some(attention_thread) = self.attention_thread.take() {
+                let _ = attention_thread.join();
+            }
         } else {
             drop(self.reader_thread.take());
+            drop(self.attention_thread.take());
         }
         if let Some(mut spill) = self.output_spill.take() {
             let _ = spill.shutdown();
@@ -989,12 +1022,12 @@ fn capture_output(
     mut reader: Box<dyn Read + Send>,
     raw_output: RawOutput,
     terminal_output: TerminalOutput,
-    attention: AttentionTracker,
     output_spill: Option<OutputSpillSink>,
     response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    attention_render_tx: mpsc::SyncSender<()>,
+    metrics: Arc<PtyCaptureMetrics>,
 ) {
-    let metrics = PtyCaptureMetrics::default();
-    let mut profiler = PtyCaptureProfiler::new(process_id, &metrics);
+    let mut profiler = PtyCaptureProfiler::new(process_id, Arc::clone(&metrics));
     let mut chunk = [0_u8; 8192];
     loop {
         match reader.read(&mut chunk) {
@@ -1004,9 +1037,7 @@ fn capture_output(
                 metrics
                     .parsed_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
-                let (rendered, replies) =
-                    terminal_output.feed_and_read_viewport_with_replies(&chunk[..count]);
-                metrics.render_calls.fetch_add(1, Ordering::Relaxed);
+                let replies = terminal_output.feed_with_replies(&chunk[..count]);
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
@@ -1025,11 +1056,7 @@ fn capture_output(
                     }
                     let _ = writer.flush();
                 }
-                attention.observe_output(
-                    &chunk[..count],
-                    &rendered.text(),
-                    rendered.alternate_screen,
-                );
+                let _ = attention_render_tx.try_send(());
                 profiler.report_if_due();
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -1040,6 +1067,29 @@ fn capture_output(
     profiler.report_final();
 }
 
+fn render_attention(
+    attention_render_rx: mpsc::Receiver<()>,
+    terminal_output: TerminalOutput,
+    attention: AttentionTracker,
+    metrics: Arc<PtyCaptureMetrics>,
+) {
+    let mut last_rendered_at = Instant::now()
+        .checked_sub(ATTENTION_RENDER_CADENCE)
+        .unwrap_or_else(Instant::now);
+    while attention_render_rx.recv().is_ok() {
+        let delay = ATTENTION_RENDER_CADENCE.saturating_sub(last_rendered_at.elapsed());
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        while attention_render_rx.try_recv().is_ok() {}
+
+        let rendered = terminal_output.read_viewport();
+        metrics.render_calls.fetch_add(1, Ordering::Relaxed);
+        attention.observe_output(b"\0", &rendered.text(), rendered.alternate_screen);
+        last_rendered_at = Instant::now();
+    }
+}
+
 #[derive(Default)]
 struct PtyCaptureMetrics {
     parse_calls: AtomicU64,
@@ -1047,9 +1097,9 @@ struct PtyCaptureMetrics {
     render_calls: AtomicU64,
 }
 
-struct PtyCaptureProfiler<'a> {
+struct PtyCaptureProfiler {
     process_id: i64,
-    metrics: &'a PtyCaptureMetrics,
+    metrics: Arc<PtyCaptureMetrics>,
     enabled: bool,
     window_started: Instant,
     parse_calls: u64,
@@ -1057,8 +1107,8 @@ struct PtyCaptureProfiler<'a> {
     render_calls: u64,
 }
 
-impl<'a> PtyCaptureProfiler<'a> {
-    fn new(process_id: i64, metrics: &'a PtyCaptureMetrics) -> Self {
+impl PtyCaptureProfiler {
+    fn new(process_id: i64, metrics: Arc<PtyCaptureMetrics>) -> Self {
         Self {
             process_id,
             metrics,
@@ -1221,6 +1271,51 @@ mod tests {
         assert!(ring.is_empty());
         assert_eq!(ring.snapshot(), b"");
         assert_eq!(ring.total_bytes_seen(), 9);
+    }
+
+    #[test]
+    fn attention_rendering_coalesces_bursts_and_flushes_the_final_viewport() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(None);
+        let metrics = Arc::new(PtyCaptureMetrics::default());
+        let (render_tx, render_rx) = mpsc::sync_channel(1);
+        let render_thread = thread::spawn({
+            let terminal = terminal.clone();
+            let attention = attention.clone();
+            let metrics = Arc::clone(&metrics);
+            move || render_attention(render_rx, terminal, attention, metrics)
+        });
+
+        for _ in 0..1_000 {
+            terminal.feed_with_replies(b"burst output\r\n");
+            metrics.parse_calls.fetch_add(1, Ordering::Relaxed);
+            metrics.parsed_bytes.fetch_add(14, Ordering::Relaxed);
+            let _ = render_tx.try_send(());
+        }
+        let final_viewport = b"\x1b[2J\x1b[HFINAL-VIEWPORT-72";
+        terminal.feed_with_replies(final_viewport);
+        metrics.parse_calls.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .parsed_bytes
+            .fetch_add(final_viewport.len() as u64, Ordering::Relaxed);
+        let _ = render_tx.try_send(());
+        drop(render_tx);
+        render_thread.join().expect("join attention renderer");
+
+        let parse_calls = metrics.parse_calls.load(Ordering::Relaxed);
+        let render_calls = metrics.render_calls.load(Ordering::Relaxed);
+        assert!(render_calls > 0);
+        assert!(
+            render_calls < parse_calls / 10,
+            "reader burst was not coalesced: parses={parse_calls}, renders={render_calls}"
+        );
+        assert!(
+            terminal
+                .read_viewport()
+                .text()
+                .contains("FINAL-VIEWPORT-72")
+        );
+        assert!(attention.snapshot().last_output_at.is_some());
     }
 
     #[test]
