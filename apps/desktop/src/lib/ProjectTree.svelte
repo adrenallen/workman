@@ -944,7 +944,7 @@
   .todo-row .row-copy strong { font-size: var(--font-size-xs); font-weight: 570; }
   .todo-assigned-marker { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--text-soft); }
   .project-tree :global(.tree-row[data-reorderable='true']) { cursor: grab; }
-  .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; }
+  .project-tree :global(.tree-row[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
   .project-tree :global(.tree-row[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 4px; left: 4px; height: 2px; border-radius: 1px; background: var(--ring); content: ''; pointer-events: none; }
   .project-tree :global(.tree-row[data-reorder-drop='before']::after) { top: -1px; }
   .project-tree :global(.tree-row[data-reorder-drop='after']::after) { bottom: -1px; }

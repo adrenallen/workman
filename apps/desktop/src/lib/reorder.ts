@@ -25,10 +25,17 @@ interface ActiveDrag {
   id: number;
   group: string;
   node: HTMLElement;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  dragging: boolean;
 }
 
 let activeDrag: ActiveDrag | null = null;
+let suppressClickAfterDrag = false;
 const markedTargets = new Set<HTMLElement>();
+const reorderItems = new Map<HTMLElement, () => ReorderItemOptions>();
+const dragThreshold = 5;
 
 /** Move one ID before or after another while preserving every other relative position. */
 export function moveOrderedId(
@@ -102,7 +109,9 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
 
   function configure(): void {
     const enabled = !options.disabled;
-    node.draggable = enabled;
+    // Native HTML drag does not reliably start on buttons in WKWebView. Pointer capture below owns
+    // only gestures that cross the movement threshold, leaving ordinary button clicks unchanged.
+    node.draggable = false;
     node.dataset.reorderable = enabled ? 'true' : 'false';
     if (enabled) {
       node.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
@@ -115,45 +124,68 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     }
   }
 
-  function dragStart(event: DragEvent): void {
-    if (options.disabled) {
-      event.preventDefault();
-      return;
+  function pointerDown(event: PointerEvent): void {
+    if (options.disabled || event.button !== 0 || !event.isPrimary) return;
+    suppressClickAfterDrag = false;
+    activeDrag = {
+      id: options.id,
+      group: options.group,
+      node,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false
+    };
+    node.setPointerCapture(event.pointerId);
+  }
+
+  function pointerMove(event: PointerEvent): void {
+    const drag = activeDrag;
+    if (!drag || drag.node !== node || drag.pointerId !== event.pointerId) return;
+    if (!drag.dragging) {
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (distance < dragThreshold) return;
+      drag.dragging = true;
+      suppressClickAfterDrag = true;
+      node.dataset.reorderDragging = 'true';
     }
-    activeDrag = { id: options.id, group: options.group, node };
-    node.dataset.reorderDragging = 'true';
-    event.dataTransfer?.setData('text/plain', String(options.id));
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-  }
-
-  function dragOver(event: DragEvent): void {
-    if (!canAccept(options)) return;
     event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-    mark(node, placementFor(node, event.clientY));
+    const target = pointerTarget(drag, event.clientX, event.clientY);
+    if (target) mark(target, placementFor(target, event.clientY));
+    else clearDropMarks();
   }
 
-  function dragLeave(event: DragEvent): void {
-    if (!node.contains(event.relatedTarget as Node | null)) clearMark(node);
+  function pointerUp(event: PointerEvent): void {
+    const drag = activeDrag;
+    if (!drag || drag.node !== node || drag.pointerId !== event.pointerId) return;
+    const target = drag.dragging ? pointerTarget(drag, event.clientX, event.clientY) : null;
+    const targetOptions = target ? reorderItems.get(target)?.() : null;
+    const placement = target
+      ? ((target.dataset.reorderDrop as DropPlacement | undefined) ??
+        placementFor(target, event.clientY))
+      : null;
+    if (drag.dragging) event.preventDefault();
+    finishPointerDrag(drag);
+    if (targetOptions && placement) {
+      options.onDrop({ sourceId: drag.id, targetId: targetOptions.id, placement });
+    }
   }
 
-  function drop(event: DragEvent): void {
-    if (!activeDrag || !canAccept(options)) return;
+  function pointerCancel(event: PointerEvent): void {
+    const drag = activeDrag;
+    if (!drag || drag.node !== node || drag.pointerId !== event.pointerId) return;
+    finishPointerDrag(drag);
+  }
+
+  function click(event: MouseEvent): void {
+    if (!suppressClickAfterDrag) return;
+    suppressClickAfterDrag = false;
     event.preventDefault();
-    const placement = (node.dataset.reorderDrop as DropPlacement | undefined) ??
-      placementFor(node, event.clientY);
-    const sourceId = activeDrag.id;
-    clearAllMarks();
-    options.onDrop({ sourceId, targetId: options.id, placement });
-  }
-
-  function dragEnd(): void {
-    node.removeAttribute('data-reorder-dragging');
-    clearAllMarks();
-    activeDrag = null;
+    event.stopImmediatePropagation();
   }
 
   function keyDown(event: KeyboardEvent): void {
+    if (!activeDrag) suppressClickAfterDrag = false;
     if (options.disabled || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
     const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : null;
     if (direction === null) return;
@@ -162,11 +194,12 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     options.onKeyboardMove(options.id, direction);
   }
 
-  node.addEventListener('dragstart', dragStart);
-  node.addEventListener('dragover', dragOver);
-  node.addEventListener('dragleave', dragLeave);
-  node.addEventListener('drop', drop);
-  node.addEventListener('dragend', dragEnd);
+  reorderItems.set(node, () => options);
+  node.addEventListener('pointerdown', pointerDown);
+  node.addEventListener('pointermove', pointerMove);
+  node.addEventListener('pointerup', pointerUp);
+  node.addEventListener('pointercancel', pointerCancel);
+  node.addEventListener('click', click, true);
   node.addEventListener('keydown', keyDown);
   configure();
 
@@ -176,13 +209,14 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
       configure();
     },
     destroy() {
-      node.removeEventListener('dragstart', dragStart);
-      node.removeEventListener('dragover', dragOver);
-      node.removeEventListener('dragleave', dragLeave);
-      node.removeEventListener('drop', drop);
-      node.removeEventListener('dragend', dragEnd);
+      reorderItems.delete(node);
+      node.removeEventListener('pointerdown', pointerDown);
+      node.removeEventListener('pointermove', pointerMove);
+      node.removeEventListener('pointerup', pointerUp);
+      node.removeEventListener('pointercancel', pointerCancel);
+      node.removeEventListener('click', click, true);
       node.removeEventListener('keydown', keyDown);
-      if (activeDrag?.node === node) activeDrag = null;
+      if (activeDrag?.node === node) finishPointerDrag(activeDrag);
       clearMark(node);
     }
   };
@@ -203,13 +237,30 @@ function descendantBlock(items: TreeOrderItem[], rootId: number): number[] {
   return items.filter((item) => descendants.has(item.id)).map((item) => item.id);
 }
 
-function canAccept(options: ReorderItemOptions): boolean {
-  return Boolean(
-    !options.disabled &&
-    activeDrag &&
-    activeDrag.group === options.group &&
-    activeDrag.id !== options.id
-  );
+function pointerTarget(drag: ActiveDrag, clientX: number, clientY: number): HTMLElement | null {
+  for (const [candidate, readOptions] of reorderItems) {
+    const candidateOptions = readOptions();
+    if (
+      candidate === drag.node ||
+      candidateOptions.disabled ||
+      candidateOptions.group !== drag.group
+    ) continue;
+    const bounds = candidate.getBoundingClientRect();
+    if (
+      clientX >= bounds.left &&
+      clientX <= bounds.right &&
+      clientY >= bounds.top &&
+      clientY <= bounds.bottom
+    ) return candidate;
+  }
+  return null;
+}
+
+function finishPointerDrag(drag: ActiveDrag): void {
+  clearAllMarks();
+  drag.node.removeAttribute('data-reorder-dragging');
+  if (drag.node.hasPointerCapture(drag.pointerId)) drag.node.releasePointerCapture(drag.pointerId);
+  if (activeDrag === drag) activeDrag = null;
 }
 
 function placementFor(node: HTMLElement, clientY: number): DropPlacement {
@@ -231,6 +282,10 @@ function clearMark(node: HTMLElement): void {
 }
 
 function clearAllMarks(): void {
-  for (const target of [...markedTargets]) clearMark(target);
+  clearDropMarks();
   activeDrag?.node.removeAttribute('data-reorder-dragging');
+}
+
+function clearDropMarks(): void {
+  for (const target of [...markedTargets]) clearMark(target);
 }

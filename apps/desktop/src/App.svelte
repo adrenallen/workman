@@ -3754,7 +3754,7 @@
   .project-select { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
-  .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; }
+  .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }

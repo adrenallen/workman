@@ -52,18 +52,29 @@ test('labels a flat worktree with its parent and keeps an orphan fallback', () =
   assert.equal(worktreeParentLabel(parent, [parent]), null);
 });
 
-test('shared row action handles text-only drag reorder without impersonating a file drop', () => {
+test('shared row action uses a pointer threshold, reorders, and never turns a drag into a click', () => {
   class FakeRow {
     dataset = {};
     listeners = new Map();
     draggable = false;
     title = '';
+    capturedPointer = null;
 
-    addEventListener(type, listener) {
-      this.listeners.set(type, listener);
+    constructor(top) {
+      this.top = top;
     }
-    removeEventListener(type) {
-      this.listeners.delete(type);
+
+    addEventListener(type, listener, capture = false) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push({ listener, capture: capture === true });
+      this.listeners.set(type, listeners);
+    }
+    removeEventListener(type, listener, capture = false) {
+      const listeners = this.listeners.get(type) ?? [];
+      this.listeners.set(
+        type,
+        listeners.filter((entry) => entry.listener !== listener || entry.capture !== (capture === true))
+      );
     }
     setAttribute() {}
     removeAttribute(name) {
@@ -73,16 +84,29 @@ test('shared row action handles text-only drag reorder without impersonating a f
     contains() {
       return false;
     }
+    setPointerCapture(pointerId) {
+      this.capturedPointer = pointerId;
+    }
+    hasPointerCapture(pointerId) {
+      return this.capturedPointer === pointerId;
+    }
+    releasePointerCapture(pointerId) {
+      if (this.capturedPointer === pointerId) this.capturedPointer = null;
+    }
     getBoundingClientRect() {
-      return { top: 0, height: 24 };
+      return { top: this.top, bottom: this.top + 24, left: 0, right: 200, height: 24 };
     }
     dispatch(type, event) {
-      this.listeners.get(type)?.(event);
+      const listeners = this.listeners.get(type) ?? [];
+      for (const { listener } of [...listeners].sort((left, right) => Number(right.capture) - Number(left.capture))) {
+        listener(event);
+        if (event.immediatePropagationStopped) break;
+      }
     }
   }
 
-  const source = new FakeRow();
-  const target = new FakeRow();
+  const source = new FakeRow(0);
+  const target = new FakeRow(24);
   const dropped = [];
   const options = (id) => ({
     id,
@@ -93,34 +117,72 @@ test('shared row action handles text-only drag reorder without impersonating a f
   });
   const destroySource = reorderItem(source, options(1));
   const destroyTarget = reorderItem(target, options(2));
-  const values = new Map();
-  const transfer = {
-    types: [],
-    effectAllowed: 'none',
-    dropEffect: 'none',
-    setData(type, value) {
-      this.types.push(type);
-      values.set(type, value);
+  let navigationCount = 0;
+  target.addEventListener('click', () => navigationCount += 1);
+  source.dispatch('pointerdown', {
+    button: 0,
+    isPrimary: true,
+    pointerId: 7,
+    clientX: 20,
+    clientY: 12
+  });
+  source.dispatch('pointermove', {
+    pointerId: 7,
+    clientX: 20,
+    clientY: 15,
+    preventDefault() {}
+  });
+  assert.equal(source.dataset.reorderDragging, undefined, 'small movement remains an ordinary click');
+
+  source.dispatch('pointermove', {
+    pointerId: 7,
+    clientX: 20,
+    clientY: 44,
+    preventDefault() {}
+  });
+  source.dispatch('pointerup', {
+    pointerId: 7,
+    clientX: 20,
+    clientY: 44,
+    preventDefault() {}
+  });
+
+  const postDragClick = {
+    defaultPrevented: false,
+    immediatePropagationStopped: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopImmediatePropagation() {
+      this.immediatePropagationStopped = true;
     }
   };
-
-  source.dispatch('dragstart', { dataTransfer: transfer });
-  target.dispatch('dragover', {
-    clientY: 20,
-    dataTransfer: transfer,
-    preventDefault() {}
-  });
-  target.dispatch('drop', {
-    clientY: 20,
-    dataTransfer: transfer,
-    preventDefault() {}
-  });
-  source.dispatch('dragend', {});
+  target.dispatch('click', postDragClick);
 
   assert.deepEqual(dropped, [{ sourceId: 1, targetId: 2, placement: 'after' }]);
-  assert.equal(values.get('text/plain'), '1');
-  assert.deepEqual(transfer.types, ['text/plain']);
-  assert.equal(transfer.types.includes('Files'), false);
+  assert.equal(source.draggable, false, 'the action never creates an HTML/file drag payload');
+  assert.equal(source.capturedPointer, null);
+  assert.equal(postDragClick.defaultPrevented, true);
+  assert.equal(navigationCount, 0, 'the click directly following a drag must not navigate');
+
+  target.dispatch('pointerdown', {
+    button: 0,
+    isPrimary: true,
+    pointerId: 8,
+    clientX: 20,
+    clientY: 36
+  });
+  target.dispatch('pointerup', {
+    pointerId: 8,
+    clientX: 20,
+    clientY: 36,
+    preventDefault() {}
+  });
+  target.dispatch('click', {
+    preventDefault() {},
+    stopImmediatePropagation() {}
+  });
+  assert.equal(navigationCount, 1, 'a later intentional click still activates the row');
 
   destroySource.destroy();
   destroyTarget.destroy();
