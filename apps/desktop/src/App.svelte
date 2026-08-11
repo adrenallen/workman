@@ -53,7 +53,7 @@
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
   import {
-    liveAgentDescendants,
+    planAgentCascade,
     type AgentCascadeAction,
     type AgentCascadeRequest
   } from './lib/agentCascade';
@@ -154,6 +154,11 @@
     type ProjectTreeSelection
   } from './lib/projectTree';
   import {
+    bulkFailureMessage,
+    type ProjectTreeBulkAction,
+    type ProjectTreeMultiSelection
+  } from './lib/projectTreeMultiSelect';
+  import {
     moveOrderedId,
     reorderItem,
     type ReorderDirection,
@@ -216,6 +221,7 @@
     version_compatible: false
   });
   let selection = $state<ProjectTreeSelection | null>(null);
+  let treeMultiSelection = $state<ProjectTreeMultiSelection | null>(null);
   let todoDetail = $state<TodoDetail | null>(null);
   let todoCommentFocusId = $state<number | null>(null);
   let pendingTodoCommentFocus = $state<{ todoId: number; commentId: number } | null>(null);
@@ -282,6 +288,7 @@
   let agentCascadeRequest = $state<AgentCascadeRequest | null>(null);
   let agentCascadeBusy = $state(false);
   let agentCascadeError = $state<string | null>(null);
+  let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
@@ -702,6 +709,11 @@
       return;
     }
     if (quickJumpOpen || shortcutsOpen) return;
+    if (event.key === 'Escape' && (treeMultiSelection?.ids.length ?? 0) > 0) {
+      event.preventDefault();
+      treeMultiSelection = null;
+      return;
+    }
     if (isTextEditingTarget(target)) return;
     if (
       selection?.kind === 'todo' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
@@ -1244,6 +1256,7 @@
     processes = cached?.processes ?? [];
     optimisticProcesses = [];
     coordination = cached?.coordination ?? null;
+    treeMultiSelection = null;
     applyRememberedProjectPane(projectId);
   }
 
@@ -1498,6 +1511,7 @@
 
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
+    treeMultiSelection = null;
     todoCommentFocusId = next.kind === 'todo' && pendingTodoCommentFocus?.todoId === next.id
       ? pendingTodoCommentFocus.commentId
       : null;
@@ -1673,38 +1687,224 @@
     action: AgentCascadeAction
   ): boolean {
     if (process.kind !== 'agent') return false;
-    const descendants = liveAgentDescendants(processes, process.id);
-    if (descendants.length === 0) return false;
+    const plan = planAgentCascade(processes, [process], action === 'close');
+    if (plan.additionalDescendants.length === 0) return false;
     agentCascadeError = null;
-    agentCascadeRequest = { process, action, descendants };
+    agentCascadeRequest = {
+      processes: plan.selected,
+      actionRoots: plan.actionRoots,
+      action,
+      descendants: plan.additionalDescendants
+    };
     return true;
+  }
+
+  function openBulkProcessDialog(
+    selectedProcesses: ProcessView[],
+    action: Extract<AgentCascadeAction, 'stop' | 'close'>
+  ): void {
+    const plan = planAgentCascade(processes, selectedProcesses, action === 'close');
+    if (plan.selected.length === 0) return;
+    agentCascadeError = null;
+    agentCascadeRequest = {
+      processes: plan.selected,
+      actionRoots: plan.actionRoots,
+      action,
+      descendants: plan.additionalDescendants
+    };
   }
 
   async function confirmAgentCascade(): Promise<void> {
     const request = agentCascadeRequest;
     if (!request || agentCascadeBusy || processBusyId !== null) return;
     agentCascadeBusy = true;
-    processBusyId = request.process.id;
+    processBusyId = request.actionRoots[0]?.id ?? null;
     agentCascadeError = null;
+    const failures: Array<{ label: string; message: string }> = [];
     try {
-      if (request.action === 'stop') {
-        await client.stopProcess(request.process.id);
-      } else if (request.action === 'kill') {
-        await client.control('process.kill', {
-          process_id: request.process.id,
-          confirm_kill: true
-        });
-      } else {
-        await client.closeProcess(request.process.id);
-        if (selection?.id === request.process.id && isProcessSelection(selection)) clearSelection();
+      for (const process of request.actionRoots) {
+        try {
+          if (request.action === 'stop') {
+            await client.stopProcess(process.id);
+          } else if (request.action === 'kill') {
+            await client.control('process.kill', {
+              process_id: process.id,
+              confirm_kill: true
+            });
+          } else {
+            await client.closeProcess(process.id);
+            if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
+          }
+        } catch (cause) {
+          failures.push({
+            label: process.name,
+            message: cause instanceof Error ? cause.message : String(cause)
+          });
+        }
       }
-      await refreshProcesses(request.process.project_id);
-      agentCascadeRequest = null;
-    } catch (cause) {
-      agentCascadeError = cause instanceof Error ? cause.message : String(cause);
+      if (
+        request.action === 'close'
+        && selection
+        && isProcessSelection(selection)
+        && [...request.processes, ...request.descendants].some((process) => process.id === selection?.id)
+      ) clearSelection();
+      const projectId = request.processes[0]?.project_id;
+      if (projectId !== undefined) await refreshProcesses(projectId);
+      if (failures.length === 0) {
+        treeMultiSelection = null;
+        agentCascadeRequest = null;
+      } else {
+        const actionLabel = request.action === 'close' ? 'close' : request.action === 'kill' ? 'kill' : 'stop';
+        const message = `Bulk ${actionLabel} finished with ${failures.length} failure${failures.length === 1 ? '' : 's'} for ${request.processes.length} selected ${request.processes[0]?.kind ?? 'process'}${request.processes.length === 1 ? '' : 's'}. ${failures.map((failure) => `${failure.label}: ${failure.message}`).join(' · ')}`;
+        if (request.processes.length === 1) {
+          agentCascadeError = message;
+        } else {
+          agentCascadeRequest = null;
+          treeMultiSelection = null;
+          reportError(new Error(message));
+        }
+      }
     } finally {
       processBusyId = null;
       agentCascadeBusy = false;
+    }
+  }
+
+  async function runTreeBulkAction(action: ProjectTreeBulkAction): Promise<void> {
+    const selected = treeMultiSelection;
+    const projectId = selectedProject?.id;
+    if (!selected || selected.ids.length < 2 || projectId === undefined || treeBulkBusy) return;
+
+    if (selected.group === 'agents' || selected.group === 'terminals') {
+      if (action !== 'stop' && action !== 'close') return;
+      const kind = selected.group === 'agents' ? 'agent' : 'terminal';
+      const selectedProcesses: ProcessView[] = [];
+      const missingIds: number[] = [];
+      for (const id of selected.ids) {
+        const process = processes.find((candidate) => candidate.id === id && candidate.kind === kind);
+        if (process) selectedProcesses.push(process);
+        else missingIds.push(id);
+      }
+      if (missingIds.length > 0) {
+        treeMultiSelection = selectedProcesses.length > 0
+          ? { group: selected.group, ids: selectedProcesses.map((process) => process.id) }
+          : null;
+        reportError(new Error(
+          `${missingIds.length} selected ${kind}${missingIds.length === 1 ? ' is' : 's are'} no longer available. Refresh the selection and try again.`
+        ));
+        return;
+      }
+      openBulkProcessDialog(selectedProcesses, action);
+      return;
+    }
+
+    if (action === 'delete') {
+      const noun = selected.group === 'todos' ? 'todos' : 'scratchpads';
+      if (!window.confirm(`Delete ${selected.ids.length} ${noun}? This cannot be undone.`)) return;
+    }
+
+    treeBulkBusy = true;
+    const failures: Array<{ id: number; label: string; message: string }> = [];
+    let actionPast = '';
+    let actionInfinitive = '';
+    try {
+      if (selected.group === 'todos') {
+        if (action !== 'complete' && action !== 'delete') return;
+        actionPast = action === 'complete' ? 'were completed' : 'were deleted';
+        actionInfinitive = action === 'complete' ? 'complete' : 'delete';
+        for (const id of selected.ids) {
+          const todo = coordination?.todos.find((candidate) => candidate.id === id);
+          if (!todo) {
+            failures.push({ id, label: `Todo #${id}`, message: 'No longer available' });
+            continue;
+          }
+          try {
+            if (action === 'complete') {
+              await client.coordinationTodoComplete(projectId, todo.id, true);
+            } else {
+              await client.control('coordination.todo_delete', {
+                project_id: projectId,
+                todo_id: todo.id
+              });
+            }
+          } catch (cause) {
+            failures.push({
+              id: todo.id,
+              label: `#${todo.id} ${todo.title}`,
+              message: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      } else {
+        if (action !== 'archive' && action !== 'delete') return;
+        actionPast = action === 'archive' ? 'were archived' : 'were deleted';
+        actionInfinitive = action === 'archive' ? 'archive' : 'delete';
+        for (const id of selected.ids) {
+          const scratchpad = coordination?.scratchpads.find((candidate) => candidate.id === id);
+          if (!scratchpad) {
+            failures.push({ id, label: `Scratchpad #${id}`, message: 'No longer available' });
+            continue;
+          }
+          try {
+            await client.control(
+              action === 'archive'
+                ? 'coordination.scratchpad_archive'
+                : 'coordination.scratchpad_delete',
+              {
+                project_id: projectId,
+                scratchpad_id: scratchpad.id,
+                expected_revision: scratchpad.revision
+              }
+            );
+          } catch (cause) {
+            failures.push({
+              id: scratchpad.id,
+              label: scratchpad.name,
+              message: cause instanceof Error ? cause.message : String(cause)
+            });
+          }
+        }
+      }
+
+      await refreshCoordination(projectId, false);
+      const availableIds = new Set(
+        selected.group === 'todos'
+          ? (coordination?.todos ?? []).map((todo) => todo.id)
+          : (coordination?.scratchpads ?? []).map((scratchpad) => scratchpad.id)
+      );
+      const selectedDetailSucceeded = selection !== null
+        && selected.ids.includes(selection.id)
+        && !failures.some((failure) => failure.id === selection?.id);
+      if (
+        selectedDetailSucceeded
+        && selected.group === 'todos'
+        && action === 'complete'
+        && selection?.kind === 'todo'
+      ) {
+        try {
+          await loadTodo(selection.id);
+        } catch (cause) {
+          reportError(cause);
+        }
+      }
+      const selectedDetailWasRemoved = selectedDetailSucceeded
+        && (
+          (selected.group === 'todos' && action === 'delete' && selection?.kind === 'todo')
+          || (
+            selected.group === 'scratchpads'
+            && (action === 'archive' || action === 'delete')
+            && selection?.kind === 'scratchpad'
+          )
+        );
+      if (selectedDetailWasRemoved) clearSelection();
+      const retryIds = failures.map((failure) => failure.id).filter((id) => availableIds.has(id));
+      treeMultiSelection = retryIds.length > 0
+        ? { group: selected.group, ids: retryIds }
+        : null;
+      const message = bulkFailureMessage(actionPast, actionInfinitive, selected.ids.length, failures);
+      if (message) reportError(new Error(message));
+    } finally {
+      treeBulkBusy = false;
     }
   }
 
@@ -2113,6 +2313,7 @@
   }
 
   function clearSelection(): void {
+    treeMultiSelection = null;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
@@ -2124,6 +2325,7 @@
 
   function openTodosBrowser(): void {
     if (!selectedProject) return;
+    treeMultiSelection = null;
     settingsOpen = false;
     todoBrowserOpen = true;
     scratchpadBrowserOpen = false;
@@ -2141,6 +2343,7 @@
 
   function openScratchpadsBrowser(): void {
     if (!selectedProject) return;
+    treeMultiSelection = null;
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = true;
@@ -2153,6 +2356,7 @@
 
   function openProcessOverview(kind: ProcessKind): void {
     if (!selectedProject) return;
+    treeMultiSelection = null;
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
@@ -3477,8 +3681,12 @@
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
         {selection}
+        multiSelection={treeMultiSelection}
         collapsed={treeRailCollapsed}
         onSelect={(next) => void selectTreeItem(next)}
+        onMultiSelectionChange={(next) => (treeMultiSelection = next)}
+        onBulkAction={(action) => void runTreeBulkAction(action)}
+        bulkBusy={treeBulkBusy || agentCascadeBusy}
         onCreateTodo={() => (dialog = 'todo')}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
@@ -3736,7 +3944,7 @@
 
 {#if agentCascadeRequest}
   <AgentCascadeDialog
-    process={agentCascadeRequest.process}
+    processes={agentCascadeRequest.processes}
     descendants={agentCascadeRequest.descendants}
     action={agentCascadeRequest.action}
     busy={agentCascadeBusy}

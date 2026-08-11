@@ -45,6 +45,13 @@
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
+  import {
+    selectedInTreeGroup,
+    updateProjectTreeMultiSelection,
+    type ProjectTreeBulkAction,
+    type ProjectTreeMultiSelectGroup,
+    type ProjectTreeMultiSelection
+  } from './projectTreeMultiSelect';
   import { processActivity, processActivityTone } from './processActivity';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
   import { projectDisplayName } from './worktrees';
@@ -66,8 +73,12 @@
     todos: TodoSummary[];
     scratchpads: ScratchpadSummary[];
     selection: ProjectTreeSelection | null;
+    multiSelection: ProjectTreeMultiSelection | null;
     collapsed: boolean;
     onSelect: (selection: ProjectTreeSelection) => void;
+    onMultiSelectionChange: (selection: ProjectTreeMultiSelection | null) => void;
+    onBulkAction: (action: ProjectTreeBulkAction) => void;
+    bulkBusy: boolean;
     onCreateTodo: () => void;
     onBrowseTodos: () => void;
     onBrowseScratchpads: () => void;
@@ -99,8 +110,12 @@
     todos,
     scratchpads,
     selection,
+    multiSelection,
     collapsed,
     onSelect,
+    onMultiSelectionChange,
+    onBulkAction,
+    bulkBusy,
     onCreateTodo,
     onBrowseTodos,
     onBrowseScratchpads,
@@ -152,6 +167,7 @@
   const sidebarTodoLimit = 7;
 
   let query = $state('');
+  let selectionAnchors = $state<Partial<Record<ProjectTreeMultiSelectGroup, number>>>({});
   let openGroups = $state<Record<ProjectTreeGroup, boolean>>({
     todos: true,
     agents: true,
@@ -258,6 +274,57 @@
     onSelect(
       projectTreeSelection(process.kind, process.id, project.id, processLabel(process))
     );
+  }
+
+  function selectGroupItem(
+    event: MouseEvent,
+    group: ProjectTreeMultiSelectGroup,
+    id: number,
+    orderedIds: number[],
+    open: () => void
+  ): void {
+    const modifier = event.metaKey || event.ctrlKey || event.shiftKey;
+    if (!modifier) {
+      selectionAnchors[group] = id;
+      onMultiSelectionChange(null);
+      open();
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const next = updateProjectTreeMultiSelection(multiSelection, {
+      group,
+      id,
+      orderedIds,
+      anchorId: selectionAnchors[group] ?? null,
+      toggle: event.metaKey || event.ctrlKey,
+      range: event.shiftKey
+    });
+    selectionAnchors[group] = id;
+    onMultiSelectionChange(next);
+  }
+
+  function openSelectablePointerMenu(
+    event: MouseEvent,
+    target: ContextMenuTarget,
+    group: ProjectTreeMultiSelectGroup,
+    id: number,
+    orderedIds: number[]
+  ): void {
+    if (event.ctrlKey) {
+      selectGroupItem(event, group, id, orderedIds, () => undefined);
+      return;
+    }
+    openPointerMenu(event, target);
+  }
+
+  function multiSelected(group: ProjectTreeMultiSelectGroup, id: number): boolean {
+    return selectedInTreeGroup(multiSelection, group, id);
+  }
+
+  function selectedCount(group: ProjectTreeGroup): number {
+    return multiSelection?.group === group ? multiSelection.ids.length : 0;
   }
 
   function processTarget(process: ProcessView): ContextMenuTarget {
@@ -663,19 +730,38 @@
 
         {#if openGroups[group] && !collapsed}
           <div class="group-rows">
+            {#if group !== 'commands' && selectedCount(group) > 1}
+              <div class="bulk-action-bar" role="toolbar" aria-label={`${selectedCount(group)} selected ${group}`}>
+                <strong>{selectedCount(group)} selected</strong>
+                <span class="bulk-action-buttons">
+                  {#if group === 'agents' || group === 'terminals'}
+                    <button type="button" disabled={bulkBusy} onclick={() => onBulkAction('stop')}>Stop</button>
+                    <button class="destructive" type="button" disabled={bulkBusy} onclick={() => onBulkAction('close')}>Close</button>
+                  {:else if group === 'todos'}
+                    <button type="button" disabled={bulkBusy} onclick={() => onBulkAction('complete')}>Complete</button>
+                    <button class="destructive" type="button" disabled={bulkBusy} onclick={() => onBulkAction('delete')}>Delete</button>
+                  {:else}
+                    <button type="button" disabled={bulkBusy} onclick={() => onBulkAction('archive')}>Archive</button>
+                    <button class="destructive" type="button" disabled={bulkBusy} onclick={() => onBulkAction('delete')}>Delete</button>
+                  {/if}
+                  <button class="clear" type="button" disabled={bulkBusy} aria-label="Clear selection" title="Clear selection · Esc" onclick={() => onMultiSelectionChange(null)}><XIcon size={12} /></button>
+                </span>
+              </div>
+            {/if}
             {#if group === 'todos'}
               {#each visibleTodos as todo (todo.id)}
                 <button
                   type="button"
                   class="tree-row todo-row"
                   class:selected={selection?.key === `todo:${todo.id}`}
+                  class:multi-selected={multiSelected('todos', todo.id)}
                   data-todo-state={todoClaimState(todo)}
                   data-tree-row
                   data-context-kind="todo"
                   data-context-id={todo.id}
                   use:reorderItem={todoReorderOptions(todo)}
-                  onclick={() => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title))}
-                  oncontextmenu={(event) => openPointerMenu(event, todoTarget(todo))}
+                  onclick={(event) => selectGroupItem(event, 'todos', todo.id, visibleTodos.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title)))}
+                  oncontextmenu={(event) => openSelectablePointerMenu(event, todoTarget(todo), 'todos', todo.id, visibleTodos.map((candidate) => candidate.id))}
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
                   <span class="todo-state-rail" aria-hidden="true"></span>
@@ -722,6 +808,7 @@
                     class:has-actions={!isRunning(process)}
                     class:agent-child={row.depth > 0}
                     class:selected={selection?.key === `agent:${process.id}`}
+                    class:multi-selected={multiSelected('agents', process.id)}
                     style={`--agent-depth: ${row.depth}`}
                     aria-busy={processBusyId === process.id}
                   >
@@ -732,8 +819,8 @@
                       data-context-kind="agent"
                       data-context-id={process.id}
                       use:reorderItem={reorderOptions(process)}
-                      onclick={() => selectProcess(process)}
-                      oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                      onclick={(event) => selectGroupItem(event, 'agents', process.id, visibleAgentRows.map((candidate) => candidate.process.id), () => selectProcess(process))}
+                      oncontextmenu={(event) => openSelectablePointerMenu(event, processTarget(process), 'agents', process.id, visibleAgentRows.map((candidate) => candidate.process.id))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
                       {#if row.depth > 0}<span class="lineage-glyph" aria-hidden="true">└</span>{/if}
@@ -792,6 +879,7 @@
                     class="process-row-shell"
                     class:has-actions={!isRunning(process)}
                     class:selected={selection?.key === `terminal:${process.id}`}
+                    class:multi-selected={multiSelected('terminals', process.id)}
                     aria-busy={processBusyId === process.id}
                   >
                     <button
@@ -801,8 +889,8 @@
                       data-context-kind="terminal"
                       data-context-id={process.id}
                       use:reorderItem={reorderOptions(process)}
-                      onclick={() => selectProcess(process)}
-                      oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
+                      onclick={(event) => selectGroupItem(event, 'terminals', process.id, visibleTerminals.map((candidate) => candidate.id), () => selectProcess(process))}
+                      oncontextmenu={(event) => openSelectablePointerMenu(event, processTarget(process), 'terminals', process.id, visibleTerminals.map((candidate) => candidate.id))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
                       <StatusIndicator tone={processStatusTone(process, stats)} label={processStatusLabel(process, stats)} />
@@ -886,12 +974,13 @@
                     type="button"
                     class="tree-row scratchpad-row"
                     class:selected={selection?.key === `scratchpad:${scratchpad.id}`}
+                    class:multi-selected={multiSelected('scratchpads', scratchpad.id)}
                     data-tree-row
                     data-context-kind="scratchpad"
                     data-context-id={scratchpad.id}
                     use:reorderItem={scratchpadReorderOptions(scratchpad)}
-                    onclick={() => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name))}
-                    oncontextmenu={(event) => openPointerMenu(event, scratchpadTarget(scratchpad))}
+                    onclick={(event) => selectGroupItem(event, 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name)))}
+                    oncontextmenu={(event) => openSelectablePointerMenu(event, scratchpadTarget(scratchpad), 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
                   >
                     <span class="scratchpad-ref" title={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
@@ -941,6 +1030,14 @@
   .group-icon { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; text-align: center; }
   .row-meta { flex: none; border: 1px solid var(--border-strong); border-radius: 3px; padding: 1px 4px; color: var(--text-soft); background: var(--popover); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .group-rows { padding: 0 4px 4px 13px; }
+  .bulk-action-bar { display: flex; min-height: 26px; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 2px; padding: 2px 3px 2px 6px; border-block: 1px solid var(--border); color: var(--text-soft); background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
+  .bulk-action-bar > strong { font: 650 var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .bulk-action-buttons { display: flex; min-width: 0; align-items: center; gap: 1px; }
+  .bulk-action-buttons button { height: 21px; border: 0; border-radius: 2px; padding: 0 5px; background: transparent; color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
+  .bulk-action-buttons button:hover:not(:disabled) { background: var(--popover); color: var(--foreground); }
+  .bulk-action-buttons button.destructive { color: var(--destructive); }
+  .bulk-action-buttons button.clear { display: grid; width: 21px; place-items: center; padding: 0; color: var(--muted-foreground); }
+  .bulk-action-buttons button:disabled { opacity: 0.5; cursor: default; }
   .tree-row, .add-row, .show-all { display: grid; width: 100%; min-height: 28px; align-items: center; border: 0; border-radius: 3px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .tree-row { position: relative; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; padding: 3px 5px; }
   .todo-row { min-height: 24px; grid-template-columns: 2px 15px minmax(0, 1fr) auto; gap: 3px; padding-block: 1px; }
@@ -961,10 +1058,13 @@
   .agent-row-shell.agent-child .agent-row { grid-template-columns: 12px 17px minmax(0, 1fr) auto; }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
   .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .tree-row.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
   .process-row-shell { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-radius: 3px; }
   .process-row-shell.has-actions { grid-template-columns: minmax(0, 1fr) 28px; }
   .process-row-shell:hover { background: var(--popover); }
   .process-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .process-row-shell.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
+  .process-row-shell.multi-selected .tree-row { color: var(--foreground); }
   .process-row-shell .tree-row:hover { background: transparent; }
   .process-row-shell.selected .tree-row { color: #fff; }
   .process-actions { display: flex; width: 28px; align-items: center; justify-content: center; opacity: 0; transition: opacity 120ms ease; }

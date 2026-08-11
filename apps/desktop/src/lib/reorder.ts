@@ -125,7 +125,10 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
   }
 
   function pointerDown(event: PointerEvent): void {
-    if (options.disabled || event.button !== 0 || !event.isPrimary) return;
+    if (
+      options.disabled || event.button !== 0 || !event.isPrimary
+      || event.metaKey || event.ctrlKey || event.shiftKey
+    ) return;
     suppressClickAfterDrag = false;
     activeDrag = {
       id: options.id,

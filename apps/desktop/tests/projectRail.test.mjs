@@ -187,3 +187,50 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
   destroySource.destroy();
   destroyTarget.destroy();
 });
+
+test('shared row action leaves modifier-click gestures entirely to list selection', () => {
+  class FakeRow {
+    dataset = {};
+    listeners = new Map();
+    draggable = false;
+    title = '';
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+    removeEventListener() {}
+    setAttribute() {}
+    removeAttribute() {}
+    dispatch(type, event) {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+  }
+
+  const row = new FakeRow();
+  let captured = false;
+  row.setPointerCapture = () => { captured = true; };
+  const action = reorderItem(row, {
+    id: 1,
+    group: 'todo:1',
+    label: 'Todo 1',
+    onDrop() {},
+    onKeyboardMove() {}
+  });
+
+  for (const modifier of ['metaKey', 'ctrlKey', 'shiftKey']) {
+    row.dispatch('pointerdown', {
+      button: 0,
+      isPrimary: true,
+      pointerId: 1,
+      clientX: 10,
+      clientY: 10,
+      metaKey: modifier === 'metaKey',
+      ctrlKey: modifier === 'ctrlKey',
+      shiftKey: modifier === 'shiftKey'
+    });
+  }
+  assert.equal(captured, false);
+  action.destroy();
+});
