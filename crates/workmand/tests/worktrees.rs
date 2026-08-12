@@ -29,7 +29,9 @@ struct GitFixture {
 
 impl GitFixture {
     fn new() -> Result<Self, Box<dyn Error>> {
-        let temp = TempDir::new_in("/tmp")?;
+        let temp = tempfile::Builder::new()
+            .prefix("com.workman.todo101.")
+            .tempdir_in("/tmp")?;
         let main = temp.path().join("sample-repo");
         let origin = temp.path().join("origin.git");
         let managed = temp.path().join("managed");
@@ -40,9 +42,13 @@ impl GitFixture {
         git(temp.path(), &["init", "-b", "main", main.to_str().unwrap()])?;
         git(
             &main,
-            &["config", "user.email", "com.workman.todo88@example.invalid"],
+            &[
+                "config",
+                "user.email",
+                "com.workman.todo101@example.invalid",
+            ],
         )?;
-        git(&main, &["config", "user.name", "com.workman.todo88"])?;
+        git(&main, &["config", "user.name", "com.workman.todo101"])?;
         git(&main, &["config", "branch.autoSetupMerge", "false"])?;
         std::fs::write(main.join("README.md"), "fixture\n")?;
         git(&main, &["add", "README.md"])?;
@@ -123,24 +129,21 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     assert_eq!(initial.worktrees[0].kind, "main");
     assert_eq!(initial.worktrees[0].branch, "main");
 
-    for delete_from_disk in [false, true] {
-        let primary = worktrees::remove(
-            &fixture.registry,
-            RemoveWorktree {
-                project_id: 1,
-                confirm_remove: true,
-                confirm_stop_running: true,
-                delete_from_disk,
-                force_dirty: true,
-                confirm_branch: Some("main".into()),
-            },
-        )
-        .await
-        .expect_err("the primary checkout is not a removable linked worktree");
-        assert_eq!(primary.code(), "foreign_worktree");
-        assert!(primary.to_string().contains("primary repository checkout"));
-        assert!(fixture.main.exists());
-    }
+    let unconfirmed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: false,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: Some("main".into()),
+        },
+    )
+    .await
+    .expect_err("every project removal requires explicit confirmation");
+    assert_eq!(unconfirmed.code(), "confirmation_required");
+    assert!(fixture.main.exists());
 
     let created = worktrees::create(
         &fixture.registry,
@@ -344,7 +347,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     .await?;
     assert_eq!(adopted.project.project.name, "sample-repo: outside-branch");
     assert_eq!(adopted.worktree.kind, "adopted");
-    let foreign = worktrees::remove(
+    let unregistered_adopted = worktrees::remove(
         &fixture.registry,
         RemoveWorktree {
             project_id: adopted.project.project.id,
@@ -355,10 +358,31 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             confirm_branch: Some("outside-branch".into()),
         },
     )
-    .await
-    .expect_err("adopted worktree removal must be refused");
-    assert_eq!(foreign.code(), "foreign_worktree");
+    .await?;
+    assert!(unregistered_adopted.project_unregistered);
+    assert!(!unregistered_adopted.deleted_from_disk);
     assert!(fixture.external.exists());
+    fixture
+        .registry
+        .lock()
+        .await
+        .store()
+        .put_project(&adopted.project.project)?;
+    let deleted_adopted = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: adopted.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(deleted_adopted.deleted_from_disk && deleted_adopted.metadata_pruned);
+    assert!(deleted_adopted.branch_kept);
+    assert!(!fixture.external.exists());
 
     std::fs::write(
         Path::new(&created.worktree.path).join("dirty.txt"),
@@ -507,6 +531,149 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
     assert!(!path.exists());
     assert!(
         !git(&fixture.main, &["worktree", "list", "--porcelain"])?.contains(path.to_str().unwrap())
+    );
+    assert!(
+        git(
+            &fixture.origin,
+            &["show-ref", "--verify", "refs/heads/feature/merged-cleanly"]
+        )
+        .is_ok(),
+        "local deletion must leave the scratch remote branch untouched"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_folder()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::Builder::new()
+        .prefix("com.workman.todo101.plain.")
+        .tempdir_in("/tmp")?;
+    let folder = temp.path().join("plain-project");
+    fs::create_dir(&folder)?;
+    fs::write(folder.join("kept.txt"), "local fixture\n")?;
+    let canonical = fs::canonicalize(&folder)?;
+    let store = Store::open(temp.path().join("state.sqlite3"))?;
+    let project = Project {
+        id: 41,
+        path: canonical.to_string_lossy().into_owned(),
+        name: "plain-project".into(),
+        display_name: Some("Plain Fixture".into()),
+        icon: None,
+        selected: true,
+        sort_order: 0,
+    };
+    store.put_project(&project)?;
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new(store)?));
+
+    let kept = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: false,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(kept.project_unregistered && !kept.deleted_from_disk);
+    assert!(folder.join("kept.txt").is_file());
+
+    registry.lock().await.store().put_project(&project)?;
+    let deleted = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(deleted.project_unregistered && deleted.deleted_from_disk);
+    assert!(!folder.exists());
+    assert!(
+        registry
+            .lock()
+            .await
+            .store()
+            .get_project_by_path_any(canonical.to_str().unwrap())?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_changes_remote()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "dependent-local",
+            fixture.external.to_str().unwrap(),
+            "main",
+        ],
+    )?;
+
+    let listed = worktrees::list_for_project(&fixture.registry, 1).await?;
+    let safety = listed.worktrees[0]
+        .delete_safety
+        .as_ref()
+        .expect("primary checkout has deletion safety");
+    assert!(safety.requires_force);
+    assert_eq!(safety.dependent_worktrees.len(), 1);
+    assert!(safety.dependent_worktrees[0].contains("outside"));
+
+    let refused = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("dependent linked worktrees require force");
+    assert_eq!(refused.code(), "dirty_worktree");
+    assert!(refused.to_string().contains("linked worktree(s) depend"));
+    assert!(fixture.main.exists());
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: Some("main".into()),
+        },
+    )
+    .await?;
+    assert!(removed.deleted_from_disk && removed.project_unregistered);
+    assert!(!fixture.main.exists());
+    assert!(
+        fixture.external.exists(),
+        "dependent checkout is warned about, not deleted"
+    );
+    assert!(
+        git(
+            &fixture.origin,
+            &["show-ref", "--verify", "refs/heads/main"]
+        )
+        .is_ok(),
+        "primary checkout deletion must leave the scratch remote untouched"
     );
     Ok(())
 }

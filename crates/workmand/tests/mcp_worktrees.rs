@@ -134,6 +134,22 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
         remove_tool.input_schema["properties"]["delete_from_disk"]["default"],
         false
     );
+    let delete_project_tool = tools
+        .iter()
+        .find(|tool| tool.name == "delete_project")
+        .expect("delete_project tool is present");
+    assert!(
+        delete_project_tool.input_schema["properties"]
+            .get("delete_from_disk")
+            .is_some(),
+        "delete_project advertises local disk deletion for every project type"
+    );
+    assert!(
+        delete_project_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("never pushes"))
+    );
     let names = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())

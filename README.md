@@ -180,6 +180,20 @@ presets, and custom agent PNGs. They never contain endpoint tokens, update/downl
 process environments, output, todos, or scratchpads; presets that appear to embed credentials are
 rejected rather than exported.
 
+## Project removal
+
+Desktop removal always opens an in-app confirmation dialog for managed, adopted, and primary Git
+worktrees as well as ordinary project folders. The default only unregisters the project from the
+active profile and leaves its files in place. Selecting **Also delete from my computer** permanently
+deletes the exact displayed path and removes the canonical project from every profile.
+
+The CLI exposes the same policy through `wrk project remove`; `wrk worktree remove` remains a
+compatibility alias. Use `--delete-local` for disk deletion. Dirty or unpublished Git state and a
+primary checkout with dependent linked worktrees require `--force --confirm TEXT`. Linked
+worktrees use local `git worktree remove` and metadata pruning while preserving their local branch.
+Removal never pushes, fetches, prunes remote refs, or deletes a remote branch. MCP callers use
+`delete_project` with `delete_from_disk`, `force_dirty`, and `confirm_branch` for the same behavior.
+
 ## Scratchpad Markdown Titles
 
 A scratchpad's `name` is its canonical Markdown H1. When `scratchpad_write` or

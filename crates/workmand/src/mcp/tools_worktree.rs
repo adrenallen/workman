@@ -87,7 +87,7 @@ struct WorktreeAdoptArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct WorktreeRemoveArgs {
-    /// Managed worktree project to remove. Otherwise uses normal MCP project scope.
+    /// Project to remove. Otherwise uses normal MCP project scope.
     #[serde(default)]
     project_id: Option<ProjectId>,
     /// Required before unregistering the worktree project from Workman.
@@ -96,10 +96,10 @@ struct WorktreeRemoveArgs {
     /// Also required when the worktree project has running processes.
     #[serde(default)]
     confirm_stop_running: bool,
-    /// Also delete the linked worktree directory with `git worktree remove` and prune its metadata. Defaults to false.
+    /// Also delete the exact local project directory. Linked worktrees use Git removal and local metadata pruning. Defaults to false.
     #[serde(default)]
     delete_from_disk: bool,
-    /// Permit deleting dirty, untracked, or ignored local paths and unpushed/unmerged commits only with a matching confirm_branch value.
+    /// Permit deleting dirty, untracked, or ignored local paths, unpublished commits, or a primary checkout with dependent worktrees only with a matching confirm_branch value.
     #[serde(default)]
     force_dirty: bool,
     /// Must exactly match the branch when force_dirty=true for a guarded deletion.
@@ -231,7 +231,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Unregister a Workman/SWM-managed linked worktree while preserving its checkout and Git branch by default; set delete_from_disk=true for guarded git worktree removal and pruning; adopted, foreign, and primary worktrees are refused"
+        description = "Remove any project from Workman while preserving local files by default; set delete_from_disk=true for guarded local-only deletion. Linked worktrees use Git removal and pruning, local branches are kept, and no remote operation is performed"
     )]
     async fn worktree_remove(
         &self,

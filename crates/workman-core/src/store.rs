@@ -889,6 +889,23 @@ impl Store {
         Ok(projects)
     }
 
+    /// List canonical projects across every profile.
+    ///
+    /// Destructive path validation uses this broader view so deleting from one
+    /// profile cannot silently remove a directory containing a project that is
+    /// only registered in another profile.
+    pub fn list_all_projects(&self) -> StoreResult<Vec<Project>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, path, name, display_name, icon, selected, sort_order
+             FROM projects
+             ORDER BY id",
+        )?;
+        let projects = statement
+            .query_map([], project_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(projects)
+    }
+
     pub fn next_project_id(&self) -> StoreResult<ProjectId> {
         let id = self.connection.query_row(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM projects",

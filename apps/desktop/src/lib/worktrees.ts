@@ -68,6 +68,7 @@ export interface WorktreeDeleteSafety {
   upstream: string | null;
   push_target: string | null;
   merge_target: string;
+  dependent_worktrees: string[];
   requires_force: boolean;
 }
 

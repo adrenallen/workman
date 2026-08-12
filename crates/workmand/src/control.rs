@@ -457,6 +457,24 @@ async fn dispatch(
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
+        "projects.remove" | "project.remove" | "project_remove" => {
+            let params: WorktreeRemoveParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::remove(
+                registry,
+                crate::worktrees::RemoveWorktree {
+                    project_id,
+                    confirm_remove: params.confirm_remove,
+                    confirm_stop_running: params.confirm_stop_running,
+                    delete_from_disk: params.delete_from_disk,
+                    force_dirty: params.force_dirty,
+                    confirm_branch: params.confirm_branch,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
         "worktree.list" | "worktree_list" => {
             let params: WorktreeScopeParams = params_as(params)?;
             let project_id = control_worktree_project_id(registry, params.project_id).await?;

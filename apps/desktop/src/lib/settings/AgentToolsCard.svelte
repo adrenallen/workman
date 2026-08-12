@@ -2,6 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
 
   import AgentBrandMark from '../AgentBrandMark.svelte';
+  import ConfirmationDialog from '../ConfirmationDialog.svelte';
   import {
     getAgentToolsStore,
     type AgentTool,
@@ -24,6 +25,7 @@
   let draft = $state<AgentToolInput>(emptyDraft());
   let saving = $state(false);
   let busyId = $state<number | null>(null);
+  let removeRequest = $state<AgentTool | null>(null);
   let healthById = $state<Record<number, AgentToolHealth>>({});
   let editedTool = $derived(
     typeof editing === 'number'
@@ -94,8 +96,10 @@
     }
   }
 
-  async function remove(tool: AgentTool): Promise<void> {
-    if (!window.confirm(`Delete the ${tool.name} agent tool? Existing agents may require it.`)) return;
+  async function confirmRemove(): Promise<void> {
+    const tool = removeRequest;
+    if (!tool) return;
+    removeRequest = null;
     busyId = tool.id;
     try {
       await store.remove(tool.id);
@@ -231,7 +235,7 @@
           ><i aria-hidden="true"></i><span>{tool.enabled ? 'Enabled' : 'Disabled'}</span></button>
           <div class="row-actions">
             <button type="button" disabled={!connected || editing !== null || busyId !== null} onclick={() => beginEdit(tool)}>Edit</button>
-            <button class="delete" type="button" disabled={!connected || busyId !== null} onclick={() => void remove(tool)}>Delete</button>
+            <button class="delete" type="button" disabled={!connected || busyId !== null} onclick={() => (removeRequest = tool)}>Delete</button>
           </div>
         </article>
       {/each}
@@ -272,6 +276,16 @@
     </form>
   {/if}
 </section>
+
+{#if removeRequest}
+  <ConfirmationDialog
+    title={`Delete the ${removeRequest.name} agent tool?`}
+    description="Existing agents may require it."
+    confirmLabel="Delete agent tool"
+    onConfirm={() => void confirmRemove()}
+    onClose={() => (removeRequest = null)}
+  />
+{/if}
 
 <style>
   .card { position: relative; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }

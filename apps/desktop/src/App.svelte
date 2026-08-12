@@ -23,6 +23,7 @@
   import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
+  import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
@@ -349,8 +350,8 @@
   const markReadPending = new Set<number>();
   let removeWorktreeDialog = $state<{
     project: Project;
-    repository: WorktreeRepository;
-    entry: WorktreeEntry;
+    repository: WorktreeRepository | null;
+    entry: WorktreeEntry | null;
   } | null>(null);
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
@@ -358,6 +359,13 @@
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
   let importError = $state<string | null>(null);
+  let confirmationDialog = $state<{
+    title: string;
+    description: string;
+    confirmLabel: string;
+    destructive: boolean;
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let projectRailLayout = $derived(buildProjectRailLayout(projects, projectFolders));
@@ -1839,7 +1847,11 @@
 
     if (action === 'delete') {
       const noun = selected.group === 'todos' ? 'todos' : 'scratchpads';
-      if (!window.confirm(`Delete ${selected.ids.length} ${noun}? This cannot be undone.`)) return;
+      if (!(await confirmInApp({
+        title: `Delete ${selected.ids.length} ${noun}?`,
+        description: 'This cannot be undone.',
+        confirmLabel: `Delete ${noun}`
+      }))) return;
     }
 
     treeBulkBusy = true;
@@ -2042,7 +2054,11 @@
     const message = running
       ? `Remove ${process.name}? It is running and will be stopped first. This deletes ${storage} and cannot be undone.`
       : `Remove ${process.name}? This deletes ${storage} and cannot be undone.`;
-    if (!window.confirm(message)) return;
+    if (!(await confirmInApp({
+      title: `Remove ${process.name}?`,
+      description: message,
+      confirmLabel: 'Remove command'
+    }))) return;
 
     processBusyId = process.id;
     try {
@@ -2284,7 +2300,11 @@
 
   async function deleteSelectedTodo(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'todo' || !todoDetail) return;
-    if (!window.confirm(`Delete #${selection.id} ${todoDetail.todo.title}? This cannot be undone.`)) return;
+    if (!(await confirmInApp({
+      title: `Delete #${selection.id} ${todoDetail.todo.title}?`,
+      description: 'This cannot be undone.',
+      confirmLabel: 'Delete todo'
+    }))) return;
     const projectId = selectedProject.id;
     const todoId = selection.id;
     detailBusy = true;
@@ -2512,7 +2532,11 @@
 
   async function deleteSelectedScratchpad(expectedRevision: number): Promise<void> {
     if (!selectedProject || selection?.kind !== 'scratchpad' || !scratchpadRead) return;
-    if (!window.confirm(`Delete ${scratchpadRead.scratchpad.name}? This cannot be undone.`)) return;
+    if (!(await confirmInApp({
+      title: `Delete ${scratchpadRead.scratchpad.name}?`,
+      description: 'This cannot be undone.',
+      confirmLabel: 'Delete scratchpad'
+    }))) return;
     const projectId = selectedProject.id;
     detailBusy = true;
     try {
@@ -2532,7 +2556,11 @@
   }
 
   async function deleteBrowserScratchpad(scratchpad: ScratchpadSummary): Promise<void> {
-    if (!window.confirm(`Delete ${scratchpad.name}? This cannot be undone.`)) return;
+    if (!(await confirmInApp({
+      title: `Delete ${scratchpad.name}?`,
+      description: 'This cannot be undone.',
+      confirmLabel: 'Delete scratchpad'
+    }))) return;
     await runBrowserScratchpadAction(scratchpad, 'coordination.scratchpad_delete');
   }
 
@@ -2723,10 +2751,6 @@
   function openRemoveWorktree(project: Project): void {
     const repository = worktreeRepositoryFor(project);
     const entry = worktreeEntryFor(project);
-    if (!repository || !entry?.can_remove) {
-      reportError(new Error('Only a Workman-managed linked worktree can be removed here'));
-      return;
-    }
     removeWorktreeError = null;
     removeWorktreeForceRequired = false;
     removeWorktreeDialog = { project, repository, entry };
@@ -2742,7 +2766,7 @@
     removeWorktreeBusy = true;
     removeWorktreeError = null;
     try {
-      await client.removeWorktree({
+      await client.control('projects.remove', {
         project_id: state.project.id,
         confirm_remove: true,
         confirm_stop_running: true,
@@ -2752,11 +2776,11 @@
       });
       removeWorktreeDialog = null;
       projects = await client.projects();
-      await refreshWorktreeMetadata(projects, true, true, state.repository.id);
-      const root = projects.find((project) =>
-        project.repository_id === state.repository.id && project.parent_project_id === null
-      );
-      if (root) appNavigation.navigate({ type: 'project', projectId: root.id }, 'api');
+      if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {
+        await refreshWorktreeMetadata(projects, true, true, state.repository.id);
+      }
+      const next = projects.find((project) => project.selected) ?? projects[0];
+      if (next) appNavigation.navigate({ type: 'project', projectId: next.id }, 'api');
     } catch (cause) {
       if (cause instanceof DaemonRequestError && cause.code === 'dirty_worktree') {
         removeWorktreeForceRequired = true;
@@ -2977,9 +3001,11 @@
 
   async function confirmDeleteProjectFolder(request: ProjectFolderMenuRequest): Promise<void> {
     const childCopy = request.projectCount === 1 ? '1 project' : `${request.projectCount} projects`;
-    if (!window.confirm(
-      `Delete “${request.folder.name}”? ${childCopy} will return to the top level; no projects are deleted.`
-    )) return;
+    if (!(await confirmInApp({
+      title: `Delete “${request.folder.name}”?`,
+      description: `${childCopy} will return to the top level; no projects are deleted.`,
+      confirmLabel: 'Delete folder'
+    }))) return;
     folderMenuRequest = null;
     projectReorderBusy = true;
     try {
@@ -3350,12 +3376,7 @@
         return;
       }
       case 'remove-project':
-        if (!window.confirm(`Remove ${projectLabel(project)} from Workman? Files stay on disk.`)) return;
-        await client.control('projects.remove', {
-          project_id: project.id,
-          confirm_remove: true
-        });
-        projects = await client.projects();
+        openRemoveWorktree(project);
         return;
       case 'open-in-editor':
         await openProjectEditor(project.path, $openerSettings);
@@ -3391,13 +3412,21 @@
         return;
       case 'kill':
         if (openAgentCascadeDialog(process, 'kill')) return;
-        if (!window.confirm(`Kill ${process.name} immediately? Unsaved terminal state may be lost.`)) return;
+        if (!(await confirmInApp({
+          title: `Kill ${process.name} immediately?`,
+          description: 'Unsaved terminal state may be lost.',
+          confirmLabel: 'Kill process'
+        }))) return;
         await client.control('process.kill', { process_id: process.id, confirm_kill: true });
         await refreshProcesses(process.project_id);
         return;
       case 'close':
         if (openAgentCascadeDialog(process, 'close')) return;
-        if (!window.confirm(`Close ${process.name}? Its saved terminal entry will be removed.`)) return;
+        if (!(await confirmInApp({
+          title: `Close ${process.name}?`,
+          description: 'Its saved terminal entry will be removed.',
+          confirmLabel: 'Close process'
+        }))) return;
         await client.closeProcess(process.id);
         if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
         await refreshProcesses(process.project_id);
@@ -3482,7 +3511,11 @@
     }
     if (action !== 'archive-scratchpad' && action !== 'delete-scratchpad') return;
     if (action === 'delete-scratchpad'
-      && !window.confirm(`Delete ${target.scratchpad.name}? This cannot be undone.`)) return;
+      && !(await confirmInApp({
+        title: `Delete ${target.scratchpad.name}?`,
+        description: 'This cannot be undone.',
+        confirmLabel: 'Delete scratchpad'
+      }))) return;
 
     const method = action === 'archive-scratchpad'
       ? 'coordination.scratchpad_archive'
@@ -3600,6 +3633,31 @@
     error = cause instanceof Error ? cause.message : String(cause);
   }
 
+  function confirmInApp(options: {
+    title: string;
+    description: string;
+    confirmLabel?: string;
+    destructive?: boolean;
+  }): Promise<boolean> {
+    if (confirmationDialog) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      confirmationDialog = {
+        title: options.title,
+        description: options.description,
+        confirmLabel: options.confirmLabel ?? 'Continue',
+        destructive: options.destructive ?? true,
+        resolve
+      };
+    });
+  }
+
+  function settleConfirmation(confirmed: boolean): void {
+    const pending = confirmationDialog;
+    if (!pending) return;
+    confirmationDialog = null;
+    pending.resolve(confirmed);
+  }
+
   function recordDaemonLog(tone: DaemonLogTone, title: string, detail: string | null): void {
     daemonLog = appendDaemonLogEntry(daemonLog, {
       id: ++daemonLogSequence,
@@ -3616,7 +3674,11 @@
 
   async function restartOutdatedDaemon(): Promise<void> {
     if (versionRestarting) return;
-    if (!window.confirm('Restart Workman daemon? All running project processes will stop.')) return;
+    if (!(await confirmInApp({
+      title: 'Restart Workman daemon?',
+      description: 'All running project processes will stop.',
+      confirmLabel: 'Restart daemon'
+    }))) return;
     versionRestarting = true;
     try {
       await client.restartDaemon();
@@ -3629,7 +3691,11 @@
   async function applyAvailableUpdate(): Promise<void> {
     if (versionRestarting || !startupUpdate || !updateActionAvailable(startupUpdate)) return;
     const copy = updateActionCopy(startupUpdate);
-    if (!window.confirm(copy.dialogDescription)) return;
+    if (!(await confirmInApp({
+      title: copy.dialogTitle,
+      description: copy.dialogDescription,
+      confirmLabel: copy.confirmLabel
+    }))) return;
     versionRestarting = true;
     try {
       const report = await applyUpdate(client);
@@ -4239,6 +4305,7 @@
 
 {#if removeWorktreeDialog}
   <WorktreeRemoveDialog
+    project={removeWorktreeDialog.project}
     repository={removeWorktreeDialog.repository}
     entry={removeWorktreeDialog.entry}
     busy={removeWorktreeBusy}
@@ -4246,6 +4313,17 @@
     serverForceRequired={removeWorktreeForceRequired}
     onConfirm={(deleteFromDisk, forceDirty, confirmBranch) => void confirmRemoveWorktree(deleteFromDisk, forceDirty, confirmBranch)}
     onClose={() => { if (!removeWorktreeBusy) { removeWorktreeDialog = null; removeWorktreeForceRequired = false; } }}
+  />
+{/if}
+
+{#if confirmationDialog}
+  <ConfirmationDialog
+    title={confirmationDialog.title}
+    description={confirmationDialog.description}
+    confirmLabel={confirmationDialog.confirmLabel}
+    destructive={confirmationDialog.destructive}
+    onConfirm={() => settleConfirmation(true)}
+    onClose={() => settleConfirmation(false)}
   />
 {/if}
 

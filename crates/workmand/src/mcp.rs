@@ -197,6 +197,15 @@ struct ProjectDeleteArgs {
     /// Also required when the project has running processes.
     #[serde(default)]
     confirm_stop_running: bool,
+    /// Also permanently delete the exact local project directory. No remote Git operation is ever performed.
+    #[serde(default)]
+    delete_from_disk: bool,
+    /// Permit guarded loss of dirty/unpublished state or dependent linked worktrees.
+    #[serde(default)]
+    force_dirty: bool,
+    /// Exact branch/name confirmation required when force_dirty=true.
+    #[serde(default)]
+    confirm_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -328,7 +337,7 @@ impl WorkmanMcp {
                 "Agent identities are jailed by the daemon to their owning project: list_projects returns only that project, cross-project project_id overrides and indirect process/timer/transfer targets are rejected, select_project cannot escape the jail, and project-creating/global-config tools are unavailable. Unidentified bearer sessions may use discovery/help, but must call identify_session before project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
             }
             "projects" => {
-                "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Agent identities see and target only their owning project and cannot register a new project. Delete always requires confirm_delete and active processes require confirm_stop_running."
+                "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Agent identities see and target only their owning project and cannot register a new project. Delete always requires confirm_delete; active processes require confirm_stop_running; delete_from_disk performs guarded local-only deletion and never changes a remote."
             }
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
@@ -550,57 +559,36 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Delete a project after explicit confirmation")]
+    #[tool(
+        description = "Remove a project from Workman after explicit confirmation; set delete_from_disk=true to permanently delete its exact local folder with guarded force confirmation. This never pushes, fetches, or deletes a remote branch"
+    )]
     async fn delete_project(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<ProjectDeleteArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        if !args.confirm_delete {
-            return failure(
-                "confirmation_required",
-                "set confirm_delete=true to delete this project",
-            );
-        }
-        let processes = match registry.list(Some(project.id)) {
-            Ok(processes) => processes,
-            Err(error) => return failure(error.code(), error.to_string()),
-        };
-        let has_running = processes.iter().any(|process| {
-            matches!(
-                process.status,
-                ProcessStatus::Starting | ProcessStatus::Running
-            )
-        });
-        if has_running && !args.confirm_stop_running {
-            return failure(
-                "running_confirmation_required",
-                "project has running processes; also set confirm_stop_running=true",
-            );
-        }
-        for process in processes {
-            match registry.store().get_process(process.id) {
-                Ok(Some(_)) => {
-                    if let Err(error) = registry.close(process.id) {
-                        return failure(error.code(), error.to_string());
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => return failure("store_error", error.to_string()),
+        let project_id = {
+            let mut registry = self.registry.lock().await;
+            match scoped_project(&mut registry, &parts, args.project_id) {
+                Ok((project, _)) => project.id,
+                Err(error) => return failure("project_scope_error", error),
             }
-        }
-        match registry.store().delete_project(project.id) {
-            Ok(true) => success(json!({ "project_id": project.id, "deleted": true })),
-            Ok(false) => failure(
-                "project_not_found",
-                format!("project {} was not found", project.id),
-            ),
-            Err(error) => failure("project_delete_failed", error.to_string()),
+        };
+        match crate::worktrees::remove(
+            &self.registry,
+            crate::worktrees::RemoveWorktree {
+                project_id,
+                confirm_remove: args.confirm_delete,
+                confirm_stop_running: args.confirm_stop_running,
+                delete_from_disk: args.delete_from_disk,
+                force_dirty: args.force_dirty,
+                confirm_branch: args.confirm_branch,
+            },
+        )
+        .await
+        {
+            Ok(removed) => success(removed),
+            Err(error) => failure(error.code(), error.to_string()),
         }
     }
 }

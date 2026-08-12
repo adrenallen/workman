@@ -4,6 +4,7 @@
   import { agentStatusPresentation } from './agentStatus';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
+  import ConfirmationDialog from './ConfirmationDialog.svelte';
   import { submitOnEnter } from './formInputConventions';
   import TerminalView from './TerminalView.svelte';
   import {
@@ -34,6 +35,7 @@
   let toolSnapshot = $state<AgentToolsSnapshot>(toolStore.current());
   let editingTool = $state<AgentToolInput | null>(null);
   let spawnTool = $state<AgentTool | null>(null);
+  let removeToolRequest = $state<AgentTool | null>(null);
   let launchName = $state('');
   let launchArgs = $state('');
   let prompt = $state('');
@@ -134,9 +136,11 @@
     }
   }
 
-  async function removeTool(tool: AgentTool): Promise<void> {
+  async function confirmRemoveTool(): Promise<void> {
+    const tool = removeToolRequest;
+    if (!tool) return;
     if (tool.source === 'config') return;
-    if (!window.confirm(`Delete the ${tool.name} agent tool?`)) return;
+    removeToolRequest = null;
     try {
       await toolStore.remove(tool.id);
     } catch (cause) {
@@ -368,7 +372,7 @@
       </label>
       <footer>
         {#if editingTool.id}
-          <button class="delete" type="button" onclick={() => { const tool = editingTool as AgentTool; editingTool = null; void removeTool(tool); }}>Delete</button>
+          <button class="delete" type="button" onclick={() => { removeToolRequest = editingTool as AgentTool; editingTool = null; }}>Delete</button>
         {/if}
         <span></span>
         <button type="button" onclick={() => editingTool = null}>Cancel</button>
@@ -405,6 +409,16 @@
       </footer>
     </form>
   </div>
+{/if}
+
+{#if removeToolRequest}
+  <ConfirmationDialog
+    title={`Delete the ${removeToolRequest.name} agent tool?`}
+    description="This removes the local agent-tool configuration."
+    confirmLabel="Delete agent tool"
+    onConfirm={() => void confirmRemoveTool()}
+    onClose={() => (removeToolRequest = null)}
+  />
 {/if}
 
 <style>

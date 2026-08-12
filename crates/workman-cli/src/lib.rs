@@ -56,6 +56,7 @@ const ROOT_HELP: &str = concat!(
     "Workspace\n",
     "  (no command)  Register or sync the current directory and show status\n",
     "  add           Register a project folder\n",
+    "  project       Remove any project from Workman or the local computer\n",
     "  profile       List, create, switch, export, import, or delete profiles\n",
     "\n",
     "Processes\n",
@@ -69,7 +70,7 @@ const ROOT_HELP: &str = concat!(
     "  stop          Stop one process\n",
     "\n",
     "Worktrees\n",
-    "  worktree      Remove a managed worktree from Workman or disk\n",
+    "  worktree      Compatibility alias for project removal\n",
     "  app           Open the desktop workspace and worktree tools\n",
     "\n",
     "Updates\n",
@@ -166,22 +167,42 @@ Options
   -h, --help  Show help and exit
 "#;
 
-const WORKTREE_HELP: &str = r#"wrk worktree — manage Git worktrees
+const WORKTREE_HELP: &str = r#"wrk worktree — compatibility alias for project removal
 Usage: wrk worktree remove [OPTIONS]
 
 Commands
-  remove   Unregister the current or selected managed worktree from Workman
+  remove   Unregister the current or selected project from Workman
 
 Remove options
   --project ID             Target project; defaults to the current project
-  --delete-local           Also delete the exact checkout with Git and prune metadata
-  --stop-running           Confirm stopping running worktree processes
-  --force                  Permit loss of local/ignored files or unpushed/unmerged commits
-  --confirm-branch BRANCH  Exact branch confirmation required with --force
+  --delete-local           Also delete the exact local project folder
+  --stop-running           Confirm stopping running project processes
+  --force                  Permit guarded loss of local/unpublished work
+  --confirm TEXT           Exact branch or project name required with --force
+  --confirm-branch BRANCH  Backward-compatible alias for --confirm
   -h, --help               Show help and exit
 
-Without --delete-local, the checkout and Git branch remain on your computer.
-The local Git branch is preserved even when the checkout is deleted.
+Without --delete-local, files stay on your computer. This command has the same
+local-only behavior as `wrk project remove` and never changes a remote.
+"#;
+
+const PROJECT_HELP: &str = r#"wrk project — manage registered projects
+Usage: wrk project remove [OPTIONS]
+
+Commands
+  remove   Unregister any project, optionally deleting its exact local folder
+
+Remove options
+  --project ID       Target project; defaults to the current project
+  --delete-local     Also permanently delete the exact local project folder
+  --stop-running     Confirm stopping running project processes
+  --force            Permit guarded local loss (dirty/unpublished/dependent worktrees)
+  --confirm TEXT     Exact branch or project name required with --force
+  -h, --help         Show help and exit
+
+Without --delete-local, files stay on your computer. Linked Git worktrees use local
+`git worktree remove` plus metadata pruning and keep their local branch. Removal never
+pushes, fetches, prunes remote refs, or deletes a remote branch.
 "#;
 
 const UPDATE_HELP: &str = r#"wrk update — check for or install Workman updates
@@ -352,7 +373,9 @@ async fn run(
         Command::Attach { process_id } => attach(&mut client, process_id).await,
         Command::Stop { process_id } => stop(&mut client, process_id).await,
         Command::Profile(command) => profile(&mut client, command).await,
-        Command::Worktree(command) => worktree(&mut client, command).await,
+        Command::Project(command) | Command::Worktree(command) => {
+            project_remove(&mut client, command).await
+        }
         Command::App
         | Command::McpSetup { .. }
         | Command::Update { .. }
@@ -433,6 +456,7 @@ enum Command {
         process_id: i64,
     },
     Profile(ProfileCommand),
+    Project(WorktreeCommand),
     Worktree(WorktreeCommand),
     Help(HelpTopic),
     Version,
@@ -475,12 +499,13 @@ enum HelpTopic {
     Attach,
     Stop,
     Profile,
+    Project,
     Worktree,
     Help,
 }
 
 impl HelpTopic {
-    const SUBCOMMANDS: [(&'static str, Self); 15] = [
+    const SUBCOMMANDS: [(&'static str, Self); 16] = [
         ("add", Self::Add),
         ("up", Self::Up),
         ("down", Self::Down),
@@ -494,6 +519,7 @@ impl HelpTopic {
         ("attach", Self::Attach),
         ("stop", Self::Stop),
         ("profile", Self::Profile),
+        ("project", Self::Project),
         ("worktree", Self::Worktree),
         ("help", Self::Help),
     ];
@@ -527,6 +553,7 @@ fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::Attach => ATTACH_HELP,
         HelpTopic::Stop => STOP_HELP,
         HelpTopic::Profile => PROFILE_HELP,
+        HelpTopic::Project => PROJECT_HELP,
         HelpTopic::Worktree => WORKTREE_HELP,
         HelpTopic::Help => HELP_HELP,
     }
@@ -633,6 +660,7 @@ impl Cli {
                 "attach" => break parse_process_id_command(args.collect(), HelpTopic::Attach)?,
                 "stop" => break parse_process_id_command(args.collect(), HelpTopic::Stop)?,
                 "profile" => break parse_profile(args.collect())?,
+                "project" => break parse_project_remove(args.collect())?,
                 "worktree" => break parse_worktree(args.collect())?,
                 _ if arg.starts_with('-') => {
                     return Err(unknown_option(HelpTopic::Root, &arg));
@@ -674,7 +702,8 @@ fn root_help_requested(args: &[String]) -> bool {
                     .any(|arg| matches!(arg.as_str(), "-h" | "--help"));
             }
             "--update" | "update" | "add" | "up" | "down" | "app" | "mcp-setup" | "run"
-            | "agent" | "ps" | "logs" | "attach" | "stop" | "profile" | "worktree" | "help" => {
+            | "agent" | "ps" | "logs" | "attach" | "stop" | "profile" | "project" | "worktree"
+            | "help" => {
                 return false;
             }
             _ => index += 1,
@@ -865,21 +894,30 @@ fn parse_profile(args: Vec<String>) -> Result<Command> {
     Ok(Command::Profile(command))
 }
 
+fn parse_project_remove(args: Vec<String>) -> Result<Command> {
+    parse_removal(args, HelpTopic::Project)
+}
+
 fn parse_worktree(args: Vec<String>) -> Result<Command> {
+    parse_removal(args, HelpTopic::Worktree)
+}
+
+fn parse_removal(args: Vec<String>, topic: HelpTopic) -> Result<Command> {
     if help_requested(&args) {
-        return Ok(Command::Help(HelpTopic::Worktree));
+        return Ok(Command::Help(topic));
     }
+    let command_name = topic.command().expect("removal command help topic");
     let mut args = args.into_iter();
     let subcommand = args
         .next()
-        .ok_or_else(|| usage_error(HelpTopic::Worktree, "worktree requires the remove command"))?;
+        .ok_or_else(|| usage_error(topic, format!("{command_name} requires the remove command")))?;
     if subcommand != "remove" {
         if subcommand.starts_with('-') {
-            return Err(unknown_option(HelpTopic::Worktree, &subcommand));
+            return Err(unknown_option(topic, &subcommand));
         }
         return Err(usage_error(
-            HelpTopic::Worktree,
-            format!("unknown worktree command {subcommand:?}"),
+            topic,
+            format!("unknown {command_name} command {subcommand:?}"),
         ));
     }
 
@@ -892,75 +930,65 @@ fn parse_worktree(args: Vec<String>) -> Result<Command> {
         match arg.as_str() {
             "--project" if project_id.is_none() => {
                 project_id = Some(parse_id_arg(
-                    &next_value(&mut args, &arg, HelpTopic::Worktree)?,
+                    &next_value(&mut args, &arg, topic)?,
                     "project",
-                    HelpTopic::Worktree,
+                    topic,
                 )?);
             }
             "--project" => {
-                return Err(usage_error(
-                    HelpTopic::Worktree,
-                    "--project may only be specified once",
-                ));
+                return Err(usage_error(topic, "--project may only be specified once"));
             }
             "--delete-local" if !delete_from_disk => delete_from_disk = true,
             "--delete-local" => {
                 return Err(usage_error(
-                    HelpTopic::Worktree,
+                    topic,
                     "--delete-local may only be specified once",
                 ));
             }
             "--stop-running" if !stop_running => stop_running = true,
             "--stop-running" => {
                 return Err(usage_error(
-                    HelpTopic::Worktree,
+                    topic,
                     "--stop-running may only be specified once",
                 ));
             }
             "--force" if !force_dirty => force_dirty = true,
             "--force" => {
+                return Err(usage_error(topic, "--force may only be specified once"));
+            }
+            "--confirm" | "--confirm-name" | "--confirm-branch" if confirm_branch.is_none() => {
+                confirm_branch = Some(next_value(&mut args, &arg, topic)?);
+            }
+            "--confirm" | "--confirm-name" | "--confirm-branch" => {
                 return Err(usage_error(
-                    HelpTopic::Worktree,
-                    "--force may only be specified once",
+                    topic,
+                    "confirmation may only be specified once",
                 ));
             }
-            "--confirm-branch" if confirm_branch.is_none() => {
-                confirm_branch = Some(next_value(&mut args, &arg, HelpTopic::Worktree)?);
-            }
-            "--confirm-branch" => {
-                return Err(usage_error(
-                    HelpTopic::Worktree,
-                    "--confirm-branch may only be specified once",
-                ));
-            }
-            _ => return Err(unknown_option(HelpTopic::Worktree, &arg)),
+            _ => return Err(unknown_option(topic, &arg)),
         }
     }
     if force_dirty && !delete_from_disk {
-        return Err(usage_error(
-            HelpTopic::Worktree,
-            "--force requires --delete-local",
-        ));
+        return Err(usage_error(topic, "--force requires --delete-local"));
     }
     if confirm_branch.is_some() && !force_dirty {
-        return Err(usage_error(
-            HelpTopic::Worktree,
-            "--confirm-branch requires --force",
-        ));
+        return Err(usage_error(topic, "confirmation requires --force"));
     }
     if force_dirty && confirm_branch.is_none() {
-        return Err(usage_error(
-            HelpTopic::Worktree,
-            "--force requires --confirm-branch BRANCH",
-        ));
+        return Err(usage_error(topic, "--force requires --confirm TEXT"));
     }
-    Ok(Command::Worktree(WorktreeCommand::Remove {
+    let command = WorktreeCommand::Remove {
         project_id,
         delete_from_disk,
         stop_running,
         force_dirty,
         confirm_branch,
-    }))
+    };
+    Ok(if topic == HelpTopic::Project {
+        Command::Project(command)
+    } else {
+        Command::Worktree(command)
+    })
 }
 
 fn parse_project_action(args: Vec<String>, start: bool) -> Result<Command> {
@@ -1469,7 +1497,7 @@ async fn profile(client: &mut Client, command: ProfileCommand) -> Result<()> {
     Ok(())
 }
 
-async fn worktree(client: &mut Client, command: WorktreeCommand) -> Result<()> {
+async fn project_remove(client: &mut Client, command: WorktreeCommand) -> Result<()> {
     match command {
         WorktreeCommand::Remove {
             project_id,
@@ -1482,7 +1510,7 @@ async fn worktree(client: &mut Client, command: WorktreeCommand) -> Result<()> {
             let project_id = resolve_project_id(client, project_id, &cwd).await?;
             let response: WorktreeRemovalResponse = client
                 .rpc(
-                    "worktree.remove",
+                    "projects.remove",
                     json!({
                         "project_id": project_id,
                         "confirm_remove": true,
@@ -1495,19 +1523,19 @@ async fn worktree(client: &mut Client, command: WorktreeCommand) -> Result<()> {
                 .await?;
             if !response.project_unregistered {
                 return Err(cli_error(format!(
-                    "worktree project {project_id} was not registered in the active profile"
+                    "project {project_id} was not registered in the active profile"
                 )));
             }
             println!("Removed {} from Workman.", response.branch);
             if response.deleted_from_disk {
-                println!("Deleted local worktree at {}.", response.path);
+                println!("Deleted local project at {}.", response.path);
                 if response.metadata_pruned {
                     println!("Pruned Git worktree metadata.");
                 }
             } else {
-                println!("Local checkout kept at {}.", response.path);
+                println!("Local project kept at {}.", response.path);
             }
-            if response.branch_kept {
+            if response.deleted_from_disk && response.branch_kept {
                 println!("Git branch {} was kept.", response.branch);
             }
         }
@@ -2908,6 +2936,34 @@ mod tests {
             )
             .is_err()
         );
+
+        let cli = Cli::parse(
+            [
+                "wrk",
+                "project",
+                "remove",
+                "--project",
+                "9",
+                "--delete-local",
+                "--stop-running",
+                "--force",
+                "--confirm",
+                "main",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Project(WorktreeCommand::Remove {
+                project_id: Some(9),
+                delete_from_disk: true,
+                stop_running: true,
+                force_dirty: true,
+                confirm_branch: Some(ref confirmation),
+            }) if confirmation == "main"
+        ));
+        assert!(Cli::parse(["wrk", "project", "remove", "--force"].map(OsString::from)).is_err());
 
         let cli = Cli::parse(["wrk", "up", "--project", "8"].map(OsString::from)).unwrap();
         assert!(matches!(

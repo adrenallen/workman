@@ -10,6 +10,7 @@
 
   import { Button } from '$lib/components/ui/button';
   import { Separator } from '$lib/components/ui/separator';
+  import ConfirmationDialog from '../ConfirmationDialog.svelte';
   import ProfileSwitchDialog from '../ProfileSwitchDialog.svelte';
   import type {
     DaemonClient,
@@ -33,6 +34,7 @@
   let renameId = $state<number | null>(null);
   let renameName = $state('');
   let pendingSwitch = $state<ProfileSwitchImpact | null>(null);
+  let removeRequest = $state<Profile | null>(null);
   let switchError = $state<string | null>(null);
 
   $effect(() => {
@@ -119,9 +121,11 @@
     }
   }
 
-  async function remove(profile: Profile): Promise<void> {
+  async function confirmRemove(): Promise<void> {
+    const profile = removeRequest;
+    if (!profile) return;
     if (profile.active || busy) return;
-    if (!window.confirm(`Delete the ${profile.name} profile? Projects and their coordination data stay on disk.`)) return;
+    removeRequest = null;
     busy = true;
     try {
       await client.deleteProfile(profile.id);
@@ -241,7 +245,7 @@
               {/if}
               <Button size="sm" variant="ghost" disabled={busy} onclick={() => void exportProfile(profile)}>Export</Button>
               <Button size="icon-sm" variant="ghost" aria-label={`Rename ${profile.name}`} disabled={busy} onclick={() => beginRename(profile)}><PencilIcon size={13} /></Button>
-              <Button size="icon-sm" variant="ghost" aria-label={`Delete ${profile.name}`} disabled={busy || profile.active} onclick={() => void remove(profile)}><TrashIcon size={13} /></Button>
+              <Button size="icon-sm" variant="ghost" aria-label={`Delete ${profile.name}`} disabled={busy || profile.active} onclick={() => (removeRequest = profile)}><TrashIcon size={13} /></Button>
             </div>
           {/if}
         </article>
@@ -263,6 +267,16 @@
     error={switchError}
     onConfirm={() => void confirmSwitch()}
     onClose={() => { if (!busy) pendingSwitch = null; }}
+  />
+{/if}
+
+{#if removeRequest}
+  <ConfirmationDialog
+    title={`Delete the ${removeRequest.name} profile?`}
+    description="Projects and their coordination data stay on disk."
+    confirmLabel="Delete profile"
+    onConfirm={() => void confirmRemove()}
+    onClose={() => (removeRequest = null)}
   />
 {/if}
 

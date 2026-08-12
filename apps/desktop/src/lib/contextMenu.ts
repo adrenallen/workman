@@ -202,21 +202,13 @@ function projectItems(
     worktreeItems.push({ id: 'refresh-pull-request', label: 'Refresh pull request status' });
   }
 
-  const removal: ContextMenuItem = worktree?.can_remove
-    ? {
-        id: 'remove-worktree',
-        label: 'Remove worktree…',
-        detail: 'Deletes managed folder · keeps branch',
-        destructive: true,
-        separatorBefore: true
-      }
-    : {
-        id: 'remove-project',
-        label: 'Remove from Workman…',
-        detail: 'Keeps files on disk',
-        destructive: true,
-        separatorBefore: true
-      };
+  const removal: ContextMenuItem = {
+    id: 'remove-project',
+    label: 'Remove project…',
+    detail: 'Keeps files unless local deletion is selected',
+    destructive: true,
+    separatorBefore: true
+  };
 
   return [
     ...frequentItems,
