@@ -1,7 +1,7 @@
 import type { AgentTool } from './agentTools';
 
 export type BundledAgentGlyph = 'anthropic' | 'openai';
-export type BundledAgentAsset = 'deepseek' | 'kimi';
+export type BundledAgentAsset = 'deepseek' | 'grok' | 'kimi';
 
 export interface AgentBrand {
   id: string;
@@ -21,6 +21,15 @@ interface AgentBrandDefinition extends AgentBrand {
  * launch a provider model through a generic host (for example DeepSeek through OpenCode).
  */
 export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
+  {
+    id: 'grok',
+    label: 'xAI Grok',
+    monogram: 'GR',
+    glyph: null,
+    asset: 'grok',
+    toolTypes: ['grok', 'grok_cli', 'grok_build', 'xai'],
+    searchTerms: ['grok', 'xai', 'x.ai']
+  },
   {
     id: 'deepseek',
     label: 'DeepSeek',

@@ -1,5 +1,6 @@
 <script lang="ts">
   import deepSeekMark from '../../../../assets/branding/agent-deepseek.png';
+  import grokMark from '../../../../assets/branding/agent-grok.png';
   import kimiMark from '../../../../assets/branding/agent-kimi.png';
 
   import type { AgentTool } from './agentTools';
@@ -7,6 +8,7 @@
 
   const bundledAssets: Record<BundledAgentAsset, string> = {
     deepseek: deepSeekMark,
+    grok: grokMark,
     kimi: kimiMark
   };
 

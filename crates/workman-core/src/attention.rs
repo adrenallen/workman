@@ -581,6 +581,7 @@ fn adapter_for(tool_type: Option<&str>) -> Box<dyn ToolAttentionAdapter> {
     match tool_type.map(normalize_tool_type).as_deref() {
         Some("claude") | Some("claude_code") => Box::new(ClaudeCodeAdapter),
         Some("codex") | Some("codex_cli") => Box::new(CodexAdapter),
+        Some("grok") | Some("grok_cli") | Some("grok_build") => Box::new(GrokAdapter),
         _ => Box::new(PromptAdapter),
     }
 }
@@ -731,6 +732,84 @@ impl ToolAttentionAdapter for CodexAdapter {
     }
 }
 
+/// Grok CLI adapter for browser authentication, approval menus, activity, and composer UI.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GrokAdapter;
+
+impl ToolAttentionAdapter for GrokAdapter {
+    fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
+        let rendered = observation.rendered;
+        let lowercase = rendered.to_lowercase();
+        let authentication_at = last_pattern(
+            &lowercase,
+            &[
+                "approve in your browser to finish signing in",
+                "waiting for approval...",
+                "waiting for approval…",
+                "waiting for login to complete",
+            ],
+        );
+        let permission_at = last_pattern(
+            &lowercase,
+            &[
+                "allow once",
+                "always allow this command",
+                "always allow on all sessions",
+                "do you want to allow",
+                "approve this action?",
+            ],
+        );
+        let busy_at = last_pattern(
+            &lowercase,
+            &[
+                "thinking...",
+                "thinking…",
+                "working...",
+                "working…",
+                "running...",
+                "running…",
+                "ctrl+c to cancel",
+                "esc to cancel",
+            ],
+        );
+        let resting_at = last_grok_resting_prompt(rendered);
+
+        let needs_authentication =
+            is_latest(authentication_at, &[permission_at, busy_at, resting_at]);
+        let needs_permission = !needs_authentication
+            && is_latest(permission_at, &[authentication_at, busy_at, resting_at]);
+        let needs_input = needs_authentication || needs_permission;
+        let busy =
+            !needs_input && is_latest(busy_at, &[authentication_at, permission_at, resting_at]);
+        let resting_prompt = !needs_input && !busy && resting_at.is_some();
+        let thinking = busy && lowercase.contains("thinking");
+        let planning = busy && lowercase.contains("planning");
+
+        AdapterFlags {
+            busy,
+            needs_input,
+            resting_prompt,
+            thinking,
+            planning,
+            classification: if needs_authentication {
+                Some("authentication_dialog".into())
+            } else if needs_permission {
+                Some("permission_dialog".into())
+            } else if planning {
+                Some("planning".into())
+            } else if busy {
+                Some("busy_spinner".into())
+            } else if resting_prompt {
+                Some("resting_prompt".into())
+            } else if observation.alternate_screen {
+                Some("alternate_screen".into())
+            } else {
+                None
+            },
+        }
+    }
+}
+
 /// Generic shell/prompt adapter used when a tool has no dedicated adapter yet.
 #[derive(Clone, Copy, Debug, Default)]
 struct PromptAdapter;
@@ -775,6 +854,7 @@ pub fn pending_dialog(rendered: &str, classification: Option<&str>) -> Option<Pe
     let known_first_run = is_known_first_run_trust_dialog(rendered);
     let guard = known_first_run
         || classification == "permission_dialog"
+        || classification == "authentication_dialog"
         || (classification == "input_prompt" && has_numbered_choice_menu(rendered));
     guard.then(|| PendingDialog {
         classification: classification.to_owned(),
@@ -861,6 +941,20 @@ fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
         .rev()
         .take(8)
         .find_map(|(offset, line)| line.starts_with('›').then_some(offset))
+}
+
+fn last_grok_resting_prompt(rendered: &str) -> Option<usize> {
+    nonempty_lines(rendered)
+        .into_iter()
+        .rev()
+        .take(8)
+        .find_map(|(offset, line)| {
+            let lowercase = line.to_ascii_lowercase();
+            (matches!(line, ">" | "❯")
+                || lowercase.contains("type a message")
+                || lowercase.contains("turn complete"))
+            .then_some(offset)
+        })
 }
 
 fn is_claude_dialog_choice(text: &str) -> bool {
@@ -960,6 +1054,17 @@ mod tests {
             }
         }
 
+        fn grok() -> Self {
+            Self {
+                terminal: TerminalEmulator::new(12, 80, 100),
+                tracker: AttentionTracker::new_at(
+                    Some("grok".into()),
+                    AttentionConfig::default(),
+                    1_000,
+                ),
+            }
+        }
+
         fn emit(&mut self, at: i64, bytes: &[u8]) {
             self.terminal.feed(bytes);
             let rendered = self
@@ -989,6 +1094,47 @@ mod tests {
         let working = session.tracker.snapshot_at(2_400);
         assert_eq!(working.state, AttentionState::Working);
         assert_eq!(working.classification.as_deref(), Some("busy_spinner"));
+    }
+
+    #[test]
+    fn grok_adapter_distinguishes_auth_activity_approval_and_rest() {
+        let mut session = ScriptedSession::grok();
+        session.emit(
+            1_100,
+            b"Connecting...\r\nApprove in your browser to finish signing in.\r\nWaiting for approval...\r\nctrl+q quit",
+        );
+        let authentication = session.tracker.snapshot_at(60_000);
+        assert_eq!(authentication.state, AttentionState::NeedsInput);
+        assert_eq!(
+            authentication.classification.as_deref(),
+            Some("authentication_dialog")
+        );
+
+        session.emit(60_100, b"\x1b[2J\x1b[HThinking...\r\nctrl+c to cancel");
+        let thinking = session.tracker.snapshot_at(120_000);
+        assert_eq!(thinking.state, AttentionState::Working);
+        assert!(thinking.thinking);
+        assert_eq!(thinking.classification.as_deref(), Some("busy_spinner"));
+
+        session.emit(
+            120_100,
+            b"\x1b[2J\x1b[HRun shell command?\r\n1. Allow once\r\n2. Always allow this command",
+        );
+        let permission = session.tracker.snapshot_at(180_000);
+        assert_eq!(permission.state, AttentionState::NeedsInput);
+        assert_eq!(
+            permission.classification.as_deref(),
+            Some("permission_dialog")
+        );
+
+        session.emit(180_100, b"\x1b[2J\x1b[HTurn complete\r\n>");
+        assert_eq!(
+            session.tracker.snapshot_at(185_099).state,
+            AttentionState::Working
+        );
+        let resting = session.tracker.snapshot_at(185_100);
+        assert_eq!(resting.state, AttentionState::Idle);
+        assert_eq!(resting.classification.as_deref(), Some("resting_prompt"));
     }
 
     #[test]

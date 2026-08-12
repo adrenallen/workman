@@ -254,7 +254,7 @@
         <label><span>Name</span><input type="text" bind:value={draft.name} placeholder="Claude" /></label>
         <label><span>Tool type</span><input type="text" bind:value={draft.tool_type} list="agent-tool-types" placeholder="claude_code" autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
         <label class="command"><span>Command and arguments</span><input type="text" bind:value={draft.command} placeholder="claude --dangerously-skip-permissions" autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
-        <datalist id="agent-tool-types"><option value="claude"></option><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="kimi"></option><option value="custom"></option></datalist>
+        <datalist id="agent-tool-types"><option value="claude"></option><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="kimi"></option><option value="grok"></option><option value="custom"></option></datalist>
         <label class="enabled-check"><input type="checkbox" bind:checked={draft.enabled} /><span>Available for new agents</span></label>
         <div class="icon-override">
           <span class="icon-preview"><AgentBrandMark tool={editedTool} fallbackName={draft.name || 'Agent'} fallbackToolType={draft.tool_type} size={26} /></span>
