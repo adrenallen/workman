@@ -123,6 +123,14 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
 async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
+    let remote_refs_before_removal = git(
+        &fixture.origin,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    )?;
     let initial = worktrees::list_for_project(&fixture.registry, 1).await?;
     assert_eq!(initial.repository.name, "sample-repo");
     assert_eq!(initial.worktrees.len(), 1);
@@ -460,8 +468,18 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         "disk deletion must remove canonical registration from every profile"
     );
 
-    // The remote stays a local fixture throughout the test; no user repository is touched.
-    assert!(fixture.origin.join("HEAD").exists());
+    assert_eq!(
+        git(
+            &fixture.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before_removal,
+        "linked worktree removals must leave every scratch-remote branch ref untouched"
+    );
     Ok(())
 }
 
@@ -611,6 +629,14 @@ async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_
 async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_changes_remote()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
+    let remote_refs_before_removal = git(
+        &fixture.origin,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    )?;
     git(
         &fixture.main,
         &[
@@ -667,13 +693,17 @@ async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_ch
         fixture.external.exists(),
         "dependent checkout is warned about, not deleted"
     );
-    assert!(
+    assert_eq!(
         git(
             &fixture.origin,
-            &["show-ref", "--verify", "refs/heads/main"]
-        )
-        .is_ok(),
-        "primary checkout deletion must leave the scratch remote untouched"
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before_removal,
+        "primary checkout deletion must leave every scratch-remote branch ref untouched"
     );
     Ok(())
 }
