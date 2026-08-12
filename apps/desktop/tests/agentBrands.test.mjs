@@ -52,3 +52,16 @@ test('tree renders the brand mark before the subprocess count without changing s
   assert.ok(mark >= 0 && subprocessCount > mark);
   assert.match(source, /<AgentStatusIndicator \{process\} \/>/);
 });
+
+test('new-agent picker renders the shared brand mark for every tool option', async () => {
+  const source = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  const pickerStart = source.indexOf("{:else if dialog === 'agent'}");
+  const pickerEnd = source.indexOf('{/if}\n  </Dialog.Root>', pickerStart);
+  const picker = source.slice(pickerStart, pickerEnd);
+  const toolLoop = picker.indexOf('{#each agentTools as tool (tool.id)}');
+  const mark = picker.indexOf('<AgentBrandMark {tool} size={20} />', toolLoop);
+  const name = picker.indexOf('<strong>{tool.name}</strong>', toolLoop);
+
+  assert.ok(pickerStart >= 0 && pickerEnd > pickerStart);
+  assert.ok(toolLoop >= 0 && mark > toolLoop && name > mark);
+});

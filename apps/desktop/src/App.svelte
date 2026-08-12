@@ -13,6 +13,7 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
+  import AgentBrandMark from './lib/AgentBrandMark.svelte';
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
@@ -4295,7 +4296,19 @@
           <IconButton label="Close agent picker" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
         </header>
         <div class="agent-choices">
-          {#if agentToolsLoading}<p>Loading agent tools…</p>{:else}{#each agentTools as tool (tool.id)}<button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}><strong>{tool.name}</strong><small>{tool.command}</small><span>Spawn</span></button>{:else}<p>No enabled agent tools. Add one in Settings.</p>{/each}{/if}
+          {#if agentToolsLoading}
+            <p>Loading agent tools…</p>
+          {:else}
+            {#each agentTools as tool (tool.id)}
+              <button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}>
+                <span class="agent-choice-mark"><AgentBrandMark {tool} size={20} /></span>
+                <span class="agent-choice-copy"><strong>{tool.name}</strong><small>{tool.command}</small></span>
+                <span class="agent-choice-action">Spawn</span>
+              </button>
+            {:else}
+              <p>No enabled agent tools. Add one in Settings.</p>
+            {/each}
+          {/if}
         </div>
         <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
       </section>
@@ -4434,10 +4447,13 @@
   .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
   .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }
-  .agent-choices > button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; border: 0; border-bottom: 1px solid var(--border); padding: 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .agent-choices > button { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 0; border-bottom: 1px solid var(--border); padding: 7px 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .agent-choices > button:hover { background: var(--accent); }
-  .agent-choices strong { font-size: var(--font-size-sm); } .agent-choices small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-choices span { grid-row: 1 / 3; grid-column: 2; align-self: center; color: var(--text-soft); font-size: var(--font-size-sm); }
+  .agent-choice-mark { display: grid; width: 24px; height: 24px; place-items: center; color: var(--text-soft); }
+  .agent-choice-copy { display: grid; min-width: 0; gap: 2px; }
+  .agent-choice-copy strong { font-size: var(--font-size-sm); }
+  .agent-choice-copy small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-choice-action { color: var(--text-soft); font-size: var(--font-size-sm); }
   .agent-choices p { margin: 0; padding: 13px; color: var(--text-soft); font-size: var(--font-size-sm); }
 
   @media (max-width: 760px) {
