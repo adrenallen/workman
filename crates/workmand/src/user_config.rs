@@ -73,6 +73,14 @@ const KNOWN_AGENT_DEFAULTS: &[KnownAgentDefault] = &[
         continue_args: Some("--continue"),
     },
     KnownAgentDefault {
+        name: "Grok",
+        tool_types: &["grok", "grok_cli", "grok_build"],
+        legacy_commands: &["grok"],
+        command: "grok --always-approve",
+        resume_args: Some("--resume {session_id}"),
+        continue_args: Some("--continue"),
+    },
+    KnownAgentDefault {
         name: "DeepSeek v4 flash",
         tool_types: &["opencode", "open_code"],
         legacy_commands: &["opencode --model deepseek/deepseek-v4-flash"],
@@ -1172,7 +1180,7 @@ mod tests {
         let path = temp.path().join("config.yml");
         std::fs::write(
             &path,
-            "# keep heading\nagent_tools:\n  - name: Claude\n    command: claude\n    tool_type: claude_code\n  - name: Codex\n    command: codex\n    tool_type: codex\n  - name: Gemini\n    command: gemini --yolo\n    tool_type: gemini\n  - name: OpenCode\n    command: opencode\n    tool_type: opencode\n  - name: Kimi\n    command: kimi\n    tool_type: kimi\n  - name: DeepSeek v4 flash\n    command: opencode --model deepseek/deepseek-v4-flash\n    tool_type: opencode\n  - name: Custom Codex\n    command: codex\n    tool_type: codex\n  - name: Custom OpenCode\n    command: opencode --model private\n    tool_type: opencode\n  - name: Claude custom runtime\n    command: claude\n    tool_type: company_claude\n# keep footer\ntelemetry: false # keep note\n",
+            "# keep heading\nagent_tools:\n  - name: Claude\n    command: claude\n    tool_type: claude_code\n  - name: Codex\n    command: codex\n    tool_type: codex\n  - name: Gemini\n    command: gemini --yolo\n    tool_type: gemini\n  - name: OpenCode\n    command: opencode\n    tool_type: opencode\n  - name: Kimi\n    command: kimi\n    tool_type: kimi\n  - name: Grok\n    command: grok\n    tool_type: grok\n  - name: DeepSeek v4 flash\n    command: opencode --model deepseek/deepseek-v4-flash\n    tool_type: opencode\n  - name: Custom Codex\n    command: codex\n    tool_type: codex\n  - name: Custom OpenCode\n    command: opencode --model private\n    tool_type: opencode\n  - name: Claude custom runtime\n    command: claude\n    tool_type: company_claude\n# keep footer\ntelemetry: false # keep note\n",
         )
         .unwrap();
         let store = Store::open_in_memory().unwrap();
@@ -1194,6 +1202,7 @@ mod tests {
             ("Gemini", "gemini --approval-mode=yolo"),
             ("OpenCode", "opencode --auto"),
             ("Kimi", "kimi --yolo"),
+            ("Grok", "grok --always-approve"),
             (
                 "DeepSeek v4 flash",
                 "opencode --auto --model deepseek/deepseek-v4-flash",
@@ -1208,6 +1217,9 @@ mod tests {
         let codex = tools.iter().find(|tool| tool.name == "Codex").unwrap();
         assert_eq!(codex.resume_args.as_deref(), Some("resume {session_id}"));
         assert_eq!(codex.continue_args.as_deref(), Some("resume --last"));
+        let grok = tools.iter().find(|tool| tool.name == "Grok").unwrap();
+        assert_eq!(grok.resume_args.as_deref(), Some("--resume {session_id}"));
+        assert_eq!(grok.continue_args.as_deref(), Some("--continue"));
         assert_eq!(commands["Custom Codex"], "codex");
         assert_eq!(commands["Custom OpenCode"], "opencode --model private");
         assert_eq!(commands["Claude custom runtime"], "claude");

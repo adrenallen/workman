@@ -133,10 +133,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project_folders",
         include_str!("../migrations/0025_project_folders.sql"),
     ),
+    (
+        26,
+        "grok_agent_preset",
+        include_str!("../migrations/0026_grok_agent_preset.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 25;
+pub const LATEST_SCHEMA_VERSION: i64 = 26;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

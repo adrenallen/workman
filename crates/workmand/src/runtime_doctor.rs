@@ -522,6 +522,14 @@ fn config_target(tool: &AgentTool, home: &Path) -> ConfigTarget {
             automatic_wiring,
             can_write: false,
         },
+        "grok" | "grok_cli" | "grok_build" => ConfigTarget {
+            normalized_type: "grok".to_owned(),
+            path: home.join(".grok/config.toml"),
+            detect_directory: false,
+            detect_parent_directory: false,
+            automatic_wiring,
+            can_write: false,
+        },
         "kimi" | "kimi_code" => ConfigTarget {
             normalized_type: "kimi".to_owned(),
             path: home.join(".kimi-code/mcp.json"),
@@ -575,6 +583,7 @@ fn install_url(tool_type: &str) -> Option<&'static str> {
         "codex" => Some("https://developers.openai.com/codex/cli/"),
         "gemini" => Some("https://github.com/google-gemini/gemini-cli"),
         "opencode" => Some("https://opencode.ai/docs/"),
+        "grok" => Some("https://grok.com/code"),
         "kimi" => Some("https://moonshotai.github.io/kimi-code/"),
         _ => None,
     }
@@ -876,7 +885,7 @@ mod tests {
     #[test]
     fn supported_runtimes_are_automatic_and_kimi_is_explicitly_unsupported() {
         let home = Path::new("/tmp/workman-runtime-doctor-home");
-        for tool_type in ["claude", "codex", "gemini", "opencode"] {
+        for tool_type in ["claude", "codex", "gemini", "opencode", "grok"] {
             let target = config_target(&tool(1, tool_type, tool_type, tool_type, true), home);
             assert!(target.automatic_wiring, "{tool_type}");
             assert!(!target.can_write, "{tool_type}");

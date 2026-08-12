@@ -2,6 +2,8 @@
 
 use std::{
     collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -13,6 +15,8 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
+use uuid::Uuid;
 use workman_core::{
     AgentTool, AgentToolId, AgentToolSource, Process, ProcessId, ProcessKind, ProcessSource,
     ProcessStatus, Project, ProjectId,
@@ -26,6 +30,7 @@ use crate::ProcessRegistry;
 
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -141,6 +146,7 @@ enum McpLaunchAdapter {
     Codex,
     Gemini,
     OpenCode,
+    Grok,
     KimiUnsupported,
     Unsupported,
 }
@@ -167,6 +173,11 @@ impl McpLaunchAdapter {
                 supported: true,
                 mechanism: "OPENCODE_CONFIG_CONTENT",
                 note: "Workman injects an inline runtime config for every launch, including model variants.",
+            },
+            Self::Grok => McpLaunchCapability {
+                supported: true,
+                mechanism: "private per-launch GROK_HOME config",
+                note: "Workman injects a private Grok config home with the current URL and environment-backed token header; the user's config.toml is never changed.",
             },
             Self::KimiUnsupported => McpLaunchCapability {
                 supported: false,
@@ -687,15 +698,21 @@ fn spawn_registered_agent_for(
             tool.id, tool.name
         ));
     }
+    let name = process_name(registry, project.id, name, &tool.name)?;
+    let source_home = agent_source_home(registry, &tool.tool_type);
     let launch = prepare_agent_launch(
         &tool.command,
         &tool.tool_type,
         mcp_url,
         &extra_args,
         purpose,
+        source_home.as_deref(),
     )?;
-    let name = process_name(registry, project.id, name, &tool.name)?;
     let tool_type = tool.tool_type;
+    let ephemeral_home = launch
+        .env
+        .get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV)
+        .map(PathBuf::from);
     let result = spawn(
         registry,
         project,
@@ -706,7 +723,16 @@ fn spawn_registered_agent_for(
         Some(tool_type.clone()),
         launch.env,
         spawned_by_process_id,
-    )?;
+    );
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(home) = ephemeral_home {
+                let _ = fs::remove_dir_all(home);
+            }
+            return Err(error);
+        }
+    };
     if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
         auto_acknowledge_initial_dialog(registry, result.process_id)?;
     }
@@ -795,6 +821,15 @@ pub(crate) async fn deep_check_registered_agent(
         ),
         "gemini" | "gemini_cli" => (vec!["--prompt".to_owned(), prompt.to_owned()], false),
         "opencode" | "open_code" => (vec!["run".to_owned(), prompt.to_owned()], false),
+        "grok" | "grok_cli" | "grok_build" => (
+            vec![
+                "--single".to_owned(),
+                prompt.to_owned(),
+                "--output-format".to_owned(),
+                "plain".to_owned(),
+            ],
+            false,
+        ),
         _ => (Vec::new(), true),
     };
     let process_id = {
@@ -1062,6 +1097,7 @@ fn prepare_agent_launch(
     mcp_url: &str,
     extra_args: &[String],
     purpose: AgentLaunchPurpose,
+    source_home: Option<&Path>,
 ) -> Result<AgentLaunchPlan, String> {
     let adapter = mcp_launch_adapter(tool_type);
     let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
@@ -1082,6 +1118,24 @@ fn prepare_agent_launch(
             );
             command_with_args(command, extra_args)?
         }
+        McpLaunchAdapter::Grok => {
+            let command = command_with_args(command, extra_args)?;
+            let grok_home = prepare_private_agent_home(
+                "grok",
+                source_home,
+                "config.toml",
+                &grok_config(source_home, mcp_url)?,
+            )?;
+            env.insert(
+                "GROK_HOME".to_owned(),
+                grok_home.to_string_lossy().into_owned(),
+            );
+            env.insert(
+                WORKMAN_EPHEMERAL_AGENT_HOME_ENV.to_owned(),
+                grok_home.to_string_lossy().into_owned(),
+            );
+            command
+        }
         McpLaunchAdapter::KimiUnsupported | McpLaunchAdapter::Unsupported => {
             command_with_args(command, extra_args)?
         }
@@ -1099,9 +1153,139 @@ fn mcp_launch_adapter(tool_type: &str) -> McpLaunchAdapter {
         "codex" => McpLaunchAdapter::Codex,
         "gemini" | "gemini_cli" => McpLaunchAdapter::Gemini,
         "opencode" | "open_code" => McpLaunchAdapter::OpenCode,
+        "grok" | "grok_cli" | "grok_build" => McpLaunchAdapter::Grok,
         "kimi" | "kimi_code" => McpLaunchAdapter::KimiUnsupported,
         _ => McpLaunchAdapter::Unsupported,
     }
+}
+
+fn agent_source_home(registry: &ProcessRegistry, tool_type: &str) -> Option<PathBuf> {
+    if mcp_launch_adapter(tool_type) != McpLaunchAdapter::Grok {
+        return None;
+    }
+    let environment = registry.resolved_user_environment().command_environment();
+    environment
+        .get(std::ffi::OsStr::new("GROK_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            environment
+                .get(std::ffi::OsStr::new("HOME"))
+                .map(PathBuf::from)
+                .map(|home| home.join(".grok"))
+        })
+}
+
+fn grok_config(source_home: Option<&Path>, mcp_url: &str) -> Result<String, String> {
+    let source = source_home.map(|home| home.join("config.toml"));
+    let contents = match source.as_deref().map(fs::read_to_string).transpose() {
+        Ok(Some(contents)) => contents,
+        Ok(None) => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "could not read Grok config {}: {error}",
+                source
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("config.toml"))
+                    .display()
+            ));
+        }
+    };
+    let mut document = contents
+        .parse::<DocumentMut>()
+        .map_err(|error| format!("could not parse Grok config.toml: {error}"))?;
+    if !document.contains_key("mcp_servers") {
+        document["mcp_servers"] = Item::Table(Table::new());
+    }
+    let servers = document["mcp_servers"]
+        .as_table_mut()
+        .ok_or_else(|| "Grok config [mcp_servers] must be a table".to_owned())?;
+    let mut workman = Table::new();
+    workman["url"] = Item::Value(TomlValue::from(mcp_url));
+    workman["enabled"] = Item::Value(TomlValue::from(true));
+    let mut headers = toml_edit::InlineTable::new();
+    headers.insert(
+        "x-workman-mcp-token",
+        TomlValue::from("${WORKMAN_MCP_TOKEN}"),
+    );
+    workman["headers"] = Item::Value(TomlValue::InlineTable(headers));
+    servers["workman"] = Item::Table(workman);
+    Ok(document.to_string())
+}
+
+fn prepare_private_agent_home(
+    prefix: &str,
+    source_home: Option<&Path>,
+    replaced_file: &str,
+    replacement: &str,
+) -> Result<PathBuf, String> {
+    let home = env::temp_dir().join(format!("workman-{prefix}-mcp.{}", Uuid::new_v4().simple()));
+    fs::create_dir(&home)
+        .map_err(|error| format!("create private {prefix} config home: {error}"))?;
+    let prepared = (|| -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("secure private {prefix} config home: {error}"))?;
+        }
+        if let Some(source_home) = source_home {
+            let entries = match fs::read_dir(source_home) {
+                Ok(entries) => Some(entries),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(format!(
+                        "read {prefix} config home {}: {error}",
+                        source_home.display()
+                    ));
+                }
+            };
+            for entry in entries.into_iter().flatten() {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "read {prefix} config home {}: {error}",
+                        source_home.display()
+                    )
+                })?;
+                if entry.file_name() == replaced_file || entry.file_name() == "leader.sock" {
+                    continue;
+                }
+                let target = home.join(entry.file_name());
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(entry.path(), &target).map_err(|error| {
+                    format!(
+                        "seed private {prefix} config home from {}: {error}",
+                        entry.path().display()
+                    )
+                })?;
+                #[cfg(not(unix))]
+                if entry.path().is_file() {
+                    fs::copy(entry.path(), &target).map_err(|error| {
+                        format!(
+                            "seed private {prefix} config home from {}: {error}",
+                            entry.path().display()
+                        )
+                    })?;
+                }
+            }
+        }
+        let path = home.join(replaced_file);
+        fs::write(&path, replacement).map_err(|error| {
+            format!("write private {prefix} config {}: {error}", path.display())
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("secure private {prefix} config: {error}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        let _ = fs::remove_dir_all(&home);
+        return Err(error);
+    }
+    Ok(home)
 }
 
 fn mcp_launch_args(
@@ -1312,13 +1496,18 @@ mod tests {
             })
             .unwrap();
         let tools = load_agent_tools(&registry).unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         assert!(
             tools
                 .iter()
                 .any(|tool| tool.command == "claude --dangerously-skip-permissions")
         );
         assert!(tools.iter().any(|tool| tool.command == "/tmp/fake-agent"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.command == "grok --always-approve")
+        );
     }
 
     #[test]
@@ -1380,6 +1569,7 @@ mod tests {
             "http://127.0.0.1:43123/mcp",
             &["--model".into(), "opus".into()],
             AgentLaunchPurpose::Normal,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -1397,6 +1587,7 @@ mod tests {
             "http://127.0.0.1:43123/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
         )
         .unwrap();
         assert!(
@@ -1414,6 +1605,7 @@ mod tests {
             "http://127.0.0.1:43124/mcp",
             &["--model".into(), "gpt-test".into()],
             AgentLaunchPurpose::Normal,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -1430,6 +1622,7 @@ mod tests {
             "http://127.0.0.1:43124/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
         )
         .unwrap();
         assert!(
@@ -1447,6 +1640,7 @@ mod tests {
             "http://127.0.0.1:43125/mcp",
             &["--model".into(), "gemini-test".into()],
             AgentLaunchPurpose::Normal,
+            None,
         )
         .unwrap();
         assert!(launch.command.contains("GEMINI_CLI_SYSTEM_SETTINGS_PATH"));
@@ -1470,6 +1664,7 @@ mod tests {
             "http://127.0.0.1:43126/mcp",
             &["run".into(), "call workman".into()],
             AgentLaunchPurpose::Normal,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1494,6 +1689,49 @@ mod tests {
     }
 
     #[test]
+    fn grok_launch_uses_a_private_merged_config_home() {
+        let source = tempfile::tempdir().unwrap();
+        let source_config =
+            "[ui]\nscreen_mode = \"minimal\"\n\n[mcp_servers.old]\nurl = \"http://old.test/mcp\"\n";
+        fs::write(source.path().join("config.toml"), source_config).unwrap();
+        fs::write(source.path().join("auth.json"), "fixture-auth\n").unwrap();
+
+        let launch = prepare_agent_launch(
+            "grok --always-approve",
+            "grok_build",
+            "http://127.0.0.1:43127/mcp",
+            &["--model".into(), "grok-test".into()],
+            AgentLaunchPurpose::Normal,
+            Some(source.path()),
+        )
+        .unwrap();
+        assert_eq!(launch.command, "grok --always-approve --model grok-test");
+        let home = PathBuf::from(launch.env.get("GROK_HOME").unwrap());
+        assert_eq!(
+            launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV),
+            launch.env.get("GROK_HOME")
+        );
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("screen_mode = \"minimal\""));
+        assert!(config.contains("http://old.test/mcp"));
+        assert!(config.contains("http://127.0.0.1:43127/mcp"));
+        assert!(config.contains("x-workman-mcp-token"));
+        assert!(config.contains("${WORKMAN_MCP_TOKEN}"));
+        assert_eq!(
+            fs::read_to_string(home.join("auth.json")).unwrap(),
+            "fixture-auth\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("config.toml")).unwrap(),
+            source_config
+        );
+        let capability = mcp_launch_capability("grok-cli");
+        assert!(capability.supported);
+        assert_eq!(capability.mechanism, "private per-launch GROK_HOME config");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn unsupported_launch_is_explicit_and_keeps_the_registered_command() {
         let launch = prepare_agent_launch(
             "kimi --yolo",
@@ -1501,6 +1739,7 @@ mod tests {
             "http://127.0.0.1:43127/mcp",
             &["--model".into(), "kimi-test".into()],
             AgentLaunchPurpose::Normal,
+            None,
         )
         .unwrap();
         assert_eq!(launch.command, "kimi --yolo --model kimi-test");

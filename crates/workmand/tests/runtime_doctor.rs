@@ -107,6 +107,10 @@ fn write_user_config(path: &Path) -> Result<(), Box<dyn Error>> {
          \x20   command: kimi --yolo\n\
          \x20   tool_type: kimi\n\
          \x20   enabled: true\n\
+         \x20 - name: Grok\n\
+         \x20   command: grok --always-approve\n\
+         \x20   tool_type: grok\n\
+         \x20   enabled: true\n\
          \x20 - name: Claude\n\
          \x20   command: claude --dangerously-skip-permissions\n\
          \x20   tool_type: claude\n\
@@ -145,6 +149,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         ("kimi", "kimi 3.4.5-test"),
         ("claude", "claude 4.5.6-test"),
         ("codex", "codex 5.6.7-test"),
+        ("grok", "grok 1.0.3-test"),
     ] {
         write_runtime(&bin.join(binary), version)?;
     }
@@ -199,9 +204,9 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     assert!(health["ok"].as_bool().unwrap());
     assert_eq!(
         health["result"]["summary"],
-        "5 of 7 agent tools are MCP-ready"
+        "6 of 8 agent tools are MCP-ready"
     );
-    assert_eq!(health["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(health["result"]["tools"].as_array().unwrap().len(), 8);
     let missing = health["result"]["tools"]
         .as_array()
         .unwrap()
@@ -217,6 +222,15 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         .unwrap();
     assert_eq!(codex["version"], "codex 5.6.7-test");
     assert_eq!(codex["configuration_mode"], "per_launch");
+    let grok = health["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "Grok")
+        .unwrap();
+    assert_eq!(grok["version"], "grok 1.0.3-test");
+    assert_eq!(grok["configuration_mode"], "per_launch");
+    assert_eq!(grok["mcp_launch_supported"], true);
     let kimi = health["result"]["tools"]
         .as_array()
         .unwrap()
@@ -234,7 +248,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     );
     let mcp = ClientInfo::default().serve(transport).await?;
     let mcp_health = mcp_call(&mcp, "agent_tools_health", json!({})).await;
-    assert_eq!(mcp_health["summary"], "5 of 7 agent tools are MCP-ready");
+    assert_eq!(mcp_health["summary"], "6 of 8 agent tools are MCP-ready");
     assert!(mcp_health["tools"][0]["found_on_path"].is_boolean());
     assert!(mcp_health["tools"][0]["config_path"].is_string());
 
@@ -255,7 +269,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     let refreshed = rpc(&mut socket, 2, "agent_tools.health", json!({})).await;
     assert_eq!(
         refreshed["result"]["summary"],
-        "5 of 7 agent tools are MCP-ready"
+        "6 of 8 agent tools are MCP-ready"
     );
 
     let opencode_id = health["result"]["tools"]

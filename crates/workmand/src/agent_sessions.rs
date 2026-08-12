@@ -22,6 +22,7 @@ enum SessionAdapter {
     Claude,
     Codex,
     Gemini,
+    Grok,
     Kimi,
     OpenCode,
 }
@@ -35,6 +36,7 @@ pub(crate) struct SessionCapture {
     home: PathBuf,
     claude_config: Option<PathBuf>,
     codex_home: Option<PathBuf>,
+    grok_home: Option<PathBuf>,
     xdg_data_home: Option<PathBuf>,
 }
 
@@ -61,6 +63,7 @@ impl SessionCapture {
             home,
             claude_config: variable("CLAUDE_CONFIG_DIR"),
             codex_home: variable("CODEX_HOME"),
+            grok_home: variable("GROK_HOME"),
             xdg_data_home: variable("XDG_DATA_HOME"),
         })
     }
@@ -70,6 +73,7 @@ impl SessionCapture {
             SessionAdapter::Claude => discover_claude(self),
             SessionAdapter::Codex => discover_codex(self),
             SessionAdapter::Gemini => discover_gemini(self),
+            SessionAdapter::Grok => discover_grok(self),
             SessionAdapter::Kimi => discover_kimi(self),
             SessionAdapter::OpenCode => discover_opencode(self),
         };
@@ -78,7 +82,7 @@ impl SessionCapture {
 
     /// Discover the session file that is owned by this Workman process tree.
     ///
-    /// Codex keeps its active rollout JSONL open for the life of the TUI. That
+    /// Codex and Grok keep active session files open for the life of the TUI. That
     /// OS-level ownership is the only reliable discriminator when several
     /// sessions start in the same cwd at nearly the same time. Other adapters
     /// retain their existing cwd-and-watermark discovery until they expose an
@@ -86,15 +90,16 @@ impl SessionCapture {
     pub(crate) fn discover_for_process(&self, root_pid: u32) -> Result<Option<String>, String> {
         let result = match self.adapter {
             SessionAdapter::Codex => discover_codex_for_process(self, root_pid),
+            SessionAdapter::Grok => discover_grok_for_process(self, root_pid),
             _ => return self.discover(),
         };
         result.map_err(|error| error.to_string())
     }
 
-    /// Codex's `resume --last` can select a concurrently-created sibling in the
+    /// Codex and Grok continue-latest can select a concurrently-created sibling in the
     /// same cwd. Without an exact captured ID, a fresh launch is safer.
     pub(crate) fn supports_continue_latest_fallback(&self) -> bool {
-        self.adapter != SessionAdapter::Codex
+        !matches!(self.adapter, SessionAdapter::Codex | SessionAdapter::Grok)
     }
 
     /// Resolve whether this CLI has any cwd-scoped session that its continue-latest
@@ -119,6 +124,7 @@ impl SessionCapture {
             home: home.to_owned(),
             claude_config: None,
             codex_home: None,
+            grok_home: None,
             xdg_data_home: None,
         }
     }
@@ -134,6 +140,7 @@ fn adapter(tool_type: &str) -> Option<SessionAdapter> {
         "claude" | "claude_code" => Some(SessionAdapter::Claude),
         "codex" => Some(SessionAdapter::Codex),
         "gemini" | "gemini_cli" => Some(SessionAdapter::Gemini),
+        "grok" | "grok_cli" | "grok_build" => Some(SessionAdapter::Grok),
         "kimi" | "kimi_code" => Some(SessionAdapter::Kimi),
         "opencode" | "open_code" => Some(SessionAdapter::OpenCode),
         _ => None,
@@ -240,6 +247,102 @@ fn codex_session_id(path: &Path, working_dir: &Path) -> io::Result<Option<String
         .or_else(|| payload.get("session_id"))
         .and_then(Value::as_str)
         .map(str::to_owned))
+}
+
+fn discover_grok(capture: &SessionCapture) -> io::Result<Option<String>> {
+    let root = grok_sessions_root(capture);
+    latest_session_file(&root, "json", capture.started_at_ms, |path| {
+        if path.file_name().and_then(|name| name.to_str()) != Some("summary.json") {
+            return Ok(None);
+        }
+        grok_session_id(path, &capture.working_dir)
+    })
+}
+
+fn discover_grok_for_process(
+    capture: &SessionCapture,
+    root_pid: u32,
+) -> io::Result<Option<String>> {
+    let root = grok_sessions_root(capture);
+    let mut files = open_files_for_process_tree(root_pid)?
+        .into_iter()
+        .filter(|path| path_is_within(path, &root))
+        .filter_map(|path| {
+            let modified = modified_millis(&path).ok()?;
+            (modified >= capture.started_at_ms).then_some((path, modified))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|(_, modified)| *modified);
+    for (path, _) in files.into_iter().rev() {
+        for directory in path.ancestors().skip(1) {
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            if parent == root || !path_is_within(directory, &root) {
+                continue;
+            }
+            let summary = directory.join("summary.json");
+            if summary.is_file()
+                && let Some(session_id) = grok_session_id(&summary, &capture.working_dir)?
+            {
+                return Ok(Some(session_id));
+            }
+            if directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_uuid_like)
+            {
+                return Ok(directory
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn grok_sessions_root(capture: &SessionCapture) -> PathBuf {
+    capture
+        .grok_home
+        .clone()
+        .unwrap_or_else(|| capture.home.join(".grok"))
+        .join("sessions")
+}
+
+fn grok_session_id(path: &Path, working_dir: &Path) -> io::Result<Option<String>> {
+    let Some(value) = first_json_document(path)? else {
+        return Ok(None);
+    };
+    let info = value.get("info").unwrap_or(&value);
+    if !info
+        .get("cwd")
+        .or_else(|| value.get("cwd"))
+        .and_then(Value::as_str)
+        .is_some_and(|cwd| working_dirs_match(cwd, working_dir))
+    {
+        return Ok(None);
+    }
+    Ok(info
+        .get("session_id")
+        .or_else(|| info.get("sessionId"))
+        .or_else(|| info.get("id"))
+        .or_else(|| value.get("session_id"))
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| path.parent()?.file_name()?.to_str().map(str::to_owned)))
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    value.len() == 36
+        && value
+            .chars()
+            .enumerate()
+            .all(|(index, character)| match index {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
 }
 
 fn path_is_within(path: &Path, root: &Path) -> bool {
@@ -532,6 +635,7 @@ mod tests {
     use std::{fs, thread, time::Duration};
 
     use rusqlite::Connection;
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::*;
@@ -666,6 +770,43 @@ mod tests {
                 .as_deref(),
             Some("ses-opencode")
         );
+    }
+
+    #[test]
+    fn discovers_grok_summary_by_cwd_and_honors_grok_home() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("repo with space");
+        fs::create_dir_all(&cwd).unwrap();
+        let grok_home = temp.path().join("isolated-grok");
+        let session = grok_home
+            .join("sessions")
+            .join("%2Ftmp%2Frepo%20with%20space")
+            .join("01989cb4-471e-7cd0-8c9f-3ee5e46f475d");
+        fs::create_dir_all(&session).unwrap();
+        let watermark = now_ms();
+        thread::sleep(Duration::from_millis(2));
+        fs::write(
+            session.join("summary.json"),
+            serde_json::to_vec(&json!({
+                "info": {
+                    "session_id": "01989cb4-471e-7cd0-8c9f-3ee5e46f475d",
+                    "cwd": cwd
+                },
+                "generated_title": "fixture"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut capture =
+            SessionCapture::fixture(SessionAdapter::Grok, temp.path(), &cwd, watermark);
+        capture.grok_home = Some(grok_home);
+        assert_eq!(
+            capture.discover().unwrap().as_deref(),
+            Some("01989cb4-471e-7cd0-8c9f-3ee5e46f475d")
+        );
+        assert!(!capture.supports_continue_latest_fallback());
+        assert_eq!(adapter("grok-build"), Some(SessionAdapter::Grok));
     }
 
     #[test]

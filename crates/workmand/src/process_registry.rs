@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
-    fs::File,
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -40,6 +40,7 @@ use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
 };
+use crate::mcp::agent_spawning::WORKMAN_EPHEMERAL_AGENT_HOME_ENV;
 use crate::process_tree::TrackedProcessTree;
 use crate::status_invalidation::StatusInvalidationHub;
 use crate::user_config::user_config_path;
@@ -1126,6 +1127,10 @@ impl ProcessRegistry {
             self.require(process_id)?
         };
         self.cleanup_user_stopped_process(&process)?;
+        cleanup_ephemeral_agent_home(&process).map_err(|error| RegistryError::Pty {
+            process_id,
+            message: format!("clean private agent config home: {error}"),
+        })?;
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
         self.pty_sizes.remove(&process_id);
@@ -1916,6 +1921,36 @@ impl ProcessRegistry {
     }
 }
 
+fn cleanup_ephemeral_agent_home(process: &Process) -> io::Result<()> {
+    let Some(value) = process.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV) else {
+        return Ok(());
+    };
+    let path = Path::new(value);
+    let temp = std::env::temp_dir();
+    let safe_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("workman-") && name.contains("-mcp."));
+    if path.parent() != Some(temp.as_path()) || !safe_name {
+        return Err(io::Error::other(format!(
+            "refusing to remove unexpected path {}",
+            path.display()
+        )));
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::other(format!(
+            "refusing to remove non-directory {}",
+            path.display()
+        )));
+    }
+    fs::remove_dir_all(path)
+}
+
 /// Resolve the configured spill cap, falling back to the bounded 8 MiB default.
 pub fn output_spill_capacity_from_env() -> usize {
     std::env::var(WORKMAN_OUTPUT_CAPACITY_ENV)
@@ -2346,6 +2381,70 @@ mod tests {
         let launch = agent_start_command(&process, &tool.command, Some(&tool), None, Some(false));
         assert_eq!(launch.mode, AgentLaunchMode::Fresh);
         assert_eq!(launch.command, tool.command);
+    }
+
+    #[test]
+    fn grok_restart_uses_an_exact_session_and_never_guesses_continue_latest() {
+        let mut process = output_test_process("/tmp/repo");
+        process.kind = ProcessKind::Agent;
+        process.exited_at = Some(1);
+        let tool = AgentTool {
+            id: 8,
+            name: "Grok".into(),
+            command: "grok --always-approve".into(),
+            tool_type: "grok".into(),
+            enabled: true,
+            source: workman_core::AgentToolSource::Local,
+            resume_args: Some("--resume {session_id}".into()),
+            continue_args: Some("--continue".into()),
+        };
+        let session = AgentSession {
+            process_id: process.id,
+            session_id: Some("625235f8-8eca-4295-9aef-2ce34e19f512".into()),
+            launch_mode: AgentLaunchMode::Fresh,
+            launched_at: 1,
+            captured_at: Some(2),
+        };
+
+        let exact = agent_start_command(
+            &process,
+            &tool.command,
+            Some(&tool),
+            Some(&session),
+            Some(true),
+        );
+        assert_eq!(exact.mode, AgentLaunchMode::ResumedSession);
+        assert_eq!(
+            exact.command,
+            "grok --always-approve --resume '625235f8-8eca-4295-9aef-2ce34e19f512'"
+        );
+
+        let fresh = agent_start_command(&process, &tool.command, Some(&tool), None, Some(false));
+        assert_eq!(fresh.mode, AgentLaunchMode::Fresh);
+        assert_eq!(fresh.command, tool.command);
+    }
+
+    #[test]
+    fn closing_a_grok_process_removes_only_its_private_launch_home() {
+        let source = tempfile::tempdir().unwrap();
+        let auth = source.path().join("auth.json");
+        fs::write(&auth, "fixture-auth").unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "workman-grok-mcp.test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&home).unwrap();
+        std::os::unix::fs::symlink(&auth, home.join("auth.json")).unwrap();
+        let mut process = output_test_process("/tmp/repo");
+        process.env.insert(
+            WORKMAN_EPHEMERAL_AGENT_HOME_ENV.into(),
+            home.to_string_lossy().into_owned(),
+        );
+
+        cleanup_ephemeral_agent_home(&process).unwrap();
+
+        assert!(!home.exists());
+        assert_eq!(fs::read_to_string(auth).unwrap(), "fixture-auth");
     }
 
     fn wait_for_persisted_output(registry: &mut ProcessRegistry) {

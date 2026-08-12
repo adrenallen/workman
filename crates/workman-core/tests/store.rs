@@ -94,6 +94,7 @@ fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_to
         ("Gemini", "gemini --approval-mode=yolo"),
         ("OpenCode", "opencode --auto"),
         ("Kimi", "kimi --yolo"),
+        ("Grok", "grok --always-approve"),
         (
             "DeepSeek v4 flash",
             "opencode --auto --model deepseek/deepseek-v4-flash",
@@ -134,7 +135,6 @@ fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_to
             "../migrations/0014_agent_tool_yolo_defaults.sql"
         ))
         .expect("reapply yolo repair migration");
-
     let migrated = store.list_agent_tools().expect("list migrated defaults");
     for (name, command) in expected {
         assert_eq!(
@@ -174,7 +174,6 @@ fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_to
             .command,
         "claude --safe"
     );
-
     store
         .connection()
         .execute(
@@ -198,6 +197,35 @@ fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_to
             .command,
         "claude --model private"
     );
+}
+
+#[test]
+fn grok_preset_migration_seeds_each_profile_without_replacing_a_custom_grok() {
+    let store = Store::open_in_memory().expect("open store");
+    store
+        .connection()
+        .execute_batch(
+            "INSERT INTO profiles (id, name, active) VALUES (2, 'Custom', 0), (3, 'Empty', 0);
+             INSERT INTO agent_tools (
+                id, name, display_name, command, tool_type, enabled, source, sort_order, profile_id
+             ) VALUES (
+                100, 'profile-2-tool-100', 'gRoK', 'grok --model private', 'grok', 1, 'local', 0, 2
+             );",
+        )
+        .expect("arrange profiles");
+
+    store
+        .connection()
+        .execute_batch(include_str!("../migrations/0026_grok_agent_preset.sql"))
+        .expect("reapply Grok preset migration");
+
+    let profile_two = store.list_profile_agent_tools(2).unwrap();
+    assert_eq!(profile_two.len(), 1);
+    assert_eq!(profile_two[0].command, "grok --model private");
+    let profile_three = store.list_profile_agent_tools(3).unwrap();
+    assert_eq!(profile_three.len(), 1);
+    assert_eq!(profile_three[0].name, "Grok");
+    assert_eq!(profile_three[0].command, "grok --always-approve");
 }
 
 #[test]

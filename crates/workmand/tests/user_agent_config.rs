@@ -16,7 +16,7 @@ use tokio_tungstenite::{
 };
 use workmand::{Discovery, discovery_path};
 
-const SIX_AGENTS: &str = r#"agent_tools:
+const SEVEN_AGENTS: &str = r#"agent_tools:
   - name: Gemini
     command: gemini --approval-mode=yolo
     tool_type: gemini
@@ -26,6 +26,9 @@ const SIX_AGENTS: &str = r#"agent_tools:
   - name: Kimi
     command: kimi --yolo
     tool_type: kimi
+  - name: Grok
+    command: grok --always-approve
+    tool_type: grok
   - name: Claude
     command: claude --dangerously-skip-permissions
     tool_type: claude
@@ -163,12 +166,12 @@ async fn settings_mutations_persist_to_active_profile_and_survive_isolated_daemo
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join("state");
     let config_path = temp.path().join("config.yml");
-    std::fs::write(&config_path, SIX_AGENTS)?;
+    std::fs::write(&config_path, SEVEN_AGENTS)?;
 
     let child = spawn_daemon(&data_dir, &config_path)?;
     let discovery = wait_for_discovery(&data_dir, child.id().unwrap()).await?;
     let tools = list_agent_tools(&discovery).await?;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     let actual = tools
         .iter()
         .map(|tool| {
@@ -186,6 +189,7 @@ async fn settings_mutations_persist_to_active_profile_and_survive_isolated_daemo
         ("Gemini", "gemini --approval-mode=yolo", "gemini"),
         ("OpenCode", "opencode --auto", "opencode"),
         ("Kimi", "kimi --yolo", "kimi"),
+        ("Grok", "grok --always-approve", "grok"),
         ("Claude", "claude --dangerously-skip-permissions", "claude"),
         (
             "Codex",
@@ -268,12 +272,12 @@ async fn settings_mutations_persist_to_active_profile_and_survive_isolated_daemo
 
     // YAML is a one-time migration source. Settings writes belong to the
     // active profile and must not rewrite the legacy/global config file.
-    assert_eq!(std::fs::read_to_string(&config_path)?, SIX_AGENTS);
+    assert_eq!(std::fs::read_to_string(&config_path)?, SEVEN_AGENTS);
 
     let child = spawn_daemon(&data_dir, &config_path)?;
     let discovery = wait_for_discovery(&data_dir, child.id().unwrap()).await?;
     let tools = list_agent_tools(&discovery).await?;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert!(!tools.iter().any(|tool| tool["name"] == "Kimi"));
     assert_eq!(tools[0]["name"], "UI custom");
     let custom = tools

@@ -259,6 +259,7 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             ("Gemini", "gemini --approval-mode=yolo"),
             ("OpenCode", "opencode --auto"),
             ("Kimi", "kimi --yolo"),
+            ("Grok", "grok --always-approve"),
             (
                 "DeepSeek v4 flash",
                 "opencode --auto --model deepseek/deepseek-v4-flash",
@@ -505,6 +506,95 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
             "{name}: {deep}"
         );
     }
+
+    let _ = parent.cancel().await;
+    let _ = shutdown_tx.send(());
+    server_task.await??;
+    Ok(())
+}
+
+/// Todo 96 acceptance against the installed authenticated Grok CLI. The caller supplies an
+/// isolated root whose `grok-home` contains only disposable state plus an auth link; Workman then
+/// creates its own private launch home and removes that private home when the check closes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires authenticated Grok and WORKMAN_TODO96_QA_ROOT; run alone"]
+async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<(), Box<dyn Error>> {
+    let qa_root = env::var_os("WORKMAN_TODO96_QA_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or("WORKMAN_TODO96_QA_ROOT must name the isolated QA root")?;
+    let grok_home = qa_root.join("grok-home");
+    if !grok_home.join("auth.json").exists() {
+        return Err("isolated grok-home must provide auth.json".into());
+    }
+    let config_path = qa_root.join("config.yml");
+    fs::write(
+        &config_path,
+        "terminal:\n  shell: /bin/zsh\nagent_tools:\n  - name: Grok\n    command: grok --always-approve\n    tool_type: grok\n",
+    )?;
+    let _config_guard = EnvGuard::set(WORKMAN_CONFIG_ENV, &config_path);
+    let _grok_home_guard = EnvGuard::set("GROK_HOME", &grok_home);
+    let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let server = DaemonServer::bind(DaemonConfig {
+        data_dir: qa_root.join("data"),
+        port: 0,
+    })
+    .await?;
+    let registry = server.registry();
+    let grok_id = {
+        let registry = registry.lock().await;
+        registry.store().put_project(&Project {
+            id: 96,
+            path: project_path.to_string_lossy().into_owned(),
+            name: "com.workman.todo96".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 0,
+        })?;
+        registry
+            .store()
+            .put_process(&root_process(96, &project_path))?;
+        registry
+            .store()
+            .list_agent_tools()?
+            .iter()
+            .find(|tool| tool.name == "Grok")
+            .ok_or("Grok preset was not seeded")?
+            .id
+    };
+
+    let discovery = server.discovery().clone();
+    let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(server.serve_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+    );
+    let parent = ClientInfo::default().serve(transport).await?;
+    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
+
+    let deep = call(
+        &parent,
+        "agent_tool_deep_check",
+        json!({
+            "project_id": 96,
+            "agent_tool_id": grok_id,
+            "timeout_ms": 60_000,
+        }),
+    )
+    .await;
+    assert_eq!(deep["success"], true, "{deep}");
+    assert!(deep["process_id"].as_i64().is_some(), "{deep}");
+    assert!(
+        deep["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("called whoami through this daemon")),
+        "{deep}"
+    );
 
     let _ = parent.cancel().await;
     let _ = shutdown_tx.send(());
