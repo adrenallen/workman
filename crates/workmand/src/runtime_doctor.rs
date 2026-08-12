@@ -535,7 +535,7 @@ fn config_target(tool: &AgentTool, home: &Path) -> ConfigTarget {
             path: home.join(".kimi-code/mcp.json"),
             detect_directory: false,
             detect_parent_directory: false,
-            automatic_wiring: false,
+            automatic_wiring,
             can_write: false,
         },
         _ => {
@@ -883,9 +883,9 @@ mod tests {
     }
 
     #[test]
-    fn supported_runtimes_are_automatic_and_kimi_is_explicitly_unsupported() {
+    fn supported_runtimes_are_automatic_without_writing_user_config() {
         let home = Path::new("/tmp/workman-runtime-doctor-home");
-        for tool_type in ["claude", "codex", "gemini", "opencode", "grok"] {
+        for tool_type in ["claude", "codex", "gemini", "opencode", "grok", "kimi"] {
             let target = config_target(&tool(1, tool_type, tool_type, tool_type, true), home);
             assert!(target.automatic_wiring, "{tool_type}");
             assert!(!target.can_write, "{tool_type}");
@@ -894,10 +894,11 @@ mod tests {
         let kimi = tool(2, "Kimi", "kimi --yolo", "kimi", true);
         let target = config_target(&kimi, home);
         assert_eq!(target.path, home.join(".kimi-code/mcp.json"));
-        assert!(!target.automatic_wiring);
+        assert!(target.automatic_wiring);
         assert!(!target.can_write);
         let preview = config_preview_in(&kimi, "http://127.0.0.1:4100/mcp", home).unwrap();
         assert!(!preview.can_write);
-        assert!(preview.message.contains("no documented safe per-launch"));
+        assert!(preview.automatic_wiring);
+        assert!(preview.message.contains("no user config change"));
     }
 }

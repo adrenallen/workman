@@ -173,6 +173,12 @@ async fn configured_agent_tools_route_to_an_isolated_spawning_daemon() -> Result
             None,
         ),
         (
+            103,
+            "routing-kimi",
+            json!(["--prompt", prompt, "--output-format", "text"]),
+            None,
+        ),
+        (
             104,
             "routing-claude",
             json!(["--print", "--output-format", "text", prompt]),
@@ -273,22 +279,6 @@ async fn configured_agent_tools_route_to_an_isolated_spawning_daemon() -> Result
         }
         eprintln!("{name}: closed managed process");
     }
-
-    let kimi = call(
-        &parent,
-        "agent_tool_deep_check",
-        json!({ "project_id": 77, "agent_tool_id": 103, "timeout_ms": 1000 }),
-    )
-    .await;
-    if kimi["success"] != false
-        || kimi["process_id"] != Value::Null
-        || !kimi["message"].as_str().is_some_and(|message| {
-            message.contains("no documented safe per-launch MCP config override")
-        })
-    {
-        failures.push("routing-kimi: unsupported capability check was not explicit".to_owned());
-    }
-    eprintln!("routing-kimi: reported unsupported without launching a process");
 
     let _ = parent.cancel().await;
     let _ = shutdown_tx.send(());

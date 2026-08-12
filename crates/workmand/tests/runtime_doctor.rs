@@ -204,7 +204,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     assert!(health["ok"].as_bool().unwrap());
     assert_eq!(
         health["result"]["summary"],
-        "6 of 8 agent tools are MCP-ready"
+        "7 of 8 agent tools are MCP-ready"
     );
     assert_eq!(health["result"]["tools"].as_array().unwrap().len(), 8);
     let missing = health["result"]["tools"]
@@ -238,8 +238,9 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         .find(|tool| tool["name"] == "Kimi")
         .unwrap();
     assert_eq!(kimi["found_on_path"], true);
-    assert_eq!(kimi["mcp_launch_supported"], false);
-    assert_eq!(kimi["launch_ready"], false);
+    assert_eq!(kimi["configuration_mode"], "per_launch");
+    assert_eq!(kimi["mcp_launch_supported"], true);
+    assert_eq!(kimi["launch_ready"], true);
 
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let transport = StreamableHttpClientTransport::from_config(
@@ -248,7 +249,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     );
     let mcp = ClientInfo::default().serve(transport).await?;
     let mcp_health = mcp_call(&mcp, "agent_tools_health", json!({})).await;
-    assert_eq!(mcp_health["summary"], "6 of 8 agent tools are MCP-ready");
+    assert_eq!(mcp_health["summary"], "7 of 8 agent tools are MCP-ready");
     assert!(mcp_health["tools"][0]["found_on_path"].is_boolean());
     assert!(mcp_health["tools"][0]["config_path"].is_string());
 
@@ -269,7 +270,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     let refreshed = rpc(&mut socket, 2, "agent_tools.health", json!({})).await;
     assert_eq!(
         refreshed["result"]["summary"],
-        "6 of 8 agent tools are MCP-ready"
+        "7 of 8 agent tools are MCP-ready"
     );
 
     let opencode_id = health["result"]["tools"]

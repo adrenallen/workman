@@ -2346,7 +2346,9 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        let error = discover_or_spawn(&data_dir, &daemon, Duration::from_millis(300))
+        // Give the helper shell time to publish its PID even when the workspace test runner is
+        // saturating the host; the assertion is about timeout cleanup, not sub-second startup.
+        let error = discover_or_spawn(&data_dir, &daemon, Duration::from_secs(1))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);

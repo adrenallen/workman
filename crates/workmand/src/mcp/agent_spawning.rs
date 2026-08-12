@@ -31,6 +31,8 @@ use crate::ProcessRegistry;
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
+const KIMI_MCP_TEMPLATE_FILE: &str = ".workman-mcp-template.json";
+const KIMI_MCP_TOKEN_SENTINEL: &str = "__WORKMAN_KIMI_PROCESS_MCP_TOKEN__";
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -147,7 +149,7 @@ enum McpLaunchAdapter {
     Gemini,
     OpenCode,
     Grok,
-    KimiUnsupported,
+    Kimi,
     Unsupported,
 }
 
@@ -179,10 +181,10 @@ impl McpLaunchAdapter {
                 mechanism: "private per-launch GROK_HOME config",
                 note: "Workman injects a private Grok config home with the current URL and environment-backed token header; the user's config.toml is never changed.",
             },
-            Self::KimiUnsupported => McpLaunchCapability {
-                supported: false,
-                mechanism: "unsupported",
-                note: "Kimi Code exposes only user/project mcp.json and has no documented safe per-launch MCP config override.",
+            Self::Kimi => McpLaunchCapability {
+                supported: true,
+                mechanism: "private per-launch KIMI_CODE_HOME config",
+                note: "Workman injects a private Kimi Code home with the current URL and process token header; the user's mcp.json is never changed.",
             },
             Self::Unsupported => McpLaunchCapability {
                 supported: false,
@@ -830,6 +832,15 @@ pub(crate) async fn deep_check_registered_agent(
             ],
             false,
         ),
+        "kimi" | "kimi_code" => (
+            vec![
+                "--prompt".to_owned(),
+                prompt.to_owned(),
+                "--output-format".to_owned(),
+                "text".to_owned(),
+            ],
+            false,
+        ),
         _ => (Vec::new(), true),
     };
     let process_id = {
@@ -858,6 +869,7 @@ pub(crate) async fn deep_check_registered_agent(
         Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 60_000));
     let mut success = false;
     let mut message = "The agent did not call whoami before the deep-check deadline.".to_owned();
+    let mut last_output = String::new();
     loop {
         let (identified, output) = {
             let mut registry = registry.lock().await;
@@ -877,6 +889,9 @@ pub(crate) async fn deep_check_registered_agent(
                 .unwrap_or_default();
             (identified, output)
         };
+        if !output.trim().is_empty() {
+            last_output = output.clone();
+        }
         if identified {
             success = true;
             message = if output.contains("WORKMAN_DEEP_CHECK_OK") {
@@ -888,6 +903,16 @@ pub(crate) async fn deep_check_registered_agent(
             break;
         }
         if Instant::now() >= deadline {
+            if !last_output.is_empty() {
+                const MAX_DIAGNOSTIC_CHARS: usize = 1_000;
+                let start = last_output
+                    .char_indices()
+                    .rev()
+                    .nth(MAX_DIAGNOSTIC_CHARS)
+                    .map_or(0, |(index, _)| index);
+                message.push_str(" Last terminal output: ");
+                message.push_str(last_output[start..].trim());
+            }
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1124,6 +1149,7 @@ fn prepare_agent_launch(
                 "grok",
                 source_home,
                 "config.toml",
+                "config.toml",
                 &grok_config(source_home, mcp_url)?,
             )?;
             env.insert(
@@ -1136,9 +1162,34 @@ fn prepare_agent_launch(
             );
             command
         }
-        McpLaunchAdapter::KimiUnsupported | McpLaunchAdapter::Unsupported => {
-            command_with_args(command, extra_args)?
+        McpLaunchAdapter::Kimi => {
+            // Kimi 0.34 rejects --prompt with --yolo/--auto. Those policy flags remain intact for
+            // normal launches; prompt-mode deep checks are already non-interactive and narrowly
+            // constrained to whoami.
+            let command = if purpose == AgentLaunchPurpose::DeepCheck {
+                kimi_deep_check_command(command, extra_args)?
+            } else {
+                command_with_args(command, extra_args)?
+            };
+            let kimi_home = prepare_private_agent_home(
+                "kimi",
+                source_home,
+                "mcp.json",
+                KIMI_MCP_TEMPLATE_FILE,
+                &kimi_mcp_template(mcp_url),
+            )?;
+            let command = kimi_command_with_materialized_token(&command, &kimi_home);
+            env.insert(
+                "KIMI_CODE_HOME".to_owned(),
+                kimi_home.to_string_lossy().into_owned(),
+            );
+            env.insert(
+                WORKMAN_EPHEMERAL_AGENT_HOME_ENV.to_owned(),
+                kimi_home.to_string_lossy().into_owned(),
+            );
+            command
         }
+        McpLaunchAdapter::Unsupported => command_with_args(command, extra_args)?,
     };
     Ok(AgentLaunchPlan { command, env })
 }
@@ -1154,25 +1205,86 @@ fn mcp_launch_adapter(tool_type: &str) -> McpLaunchAdapter {
         "gemini" | "gemini_cli" => McpLaunchAdapter::Gemini,
         "opencode" | "open_code" => McpLaunchAdapter::OpenCode,
         "grok" | "grok_cli" | "grok_build" => McpLaunchAdapter::Grok,
-        "kimi" | "kimi_code" => McpLaunchAdapter::KimiUnsupported,
+        "kimi" | "kimi_code" => McpLaunchAdapter::Kimi,
         _ => McpLaunchAdapter::Unsupported,
     }
 }
 
 fn agent_source_home(registry: &ProcessRegistry, tool_type: &str) -> Option<PathBuf> {
-    if mcp_launch_adapter(tool_type) != McpLaunchAdapter::Grok {
-        return None;
-    }
+    let (override_name, default_directory) = match mcp_launch_adapter(tool_type) {
+        McpLaunchAdapter::Grok => ("GROK_HOME", ".grok"),
+        McpLaunchAdapter::Kimi => ("KIMI_CODE_HOME", ".kimi-code"),
+        _ => return None,
+    };
     let environment = registry.resolved_user_environment().command_environment();
     environment
-        .get(std::ffi::OsStr::new("GROK_HOME"))
+        .get(std::ffi::OsStr::new(override_name))
         .map(PathBuf::from)
         .or_else(|| {
             environment
                 .get(std::ffi::OsStr::new("HOME"))
                 .map(PathBuf::from)
-                .map(|home| home.join(".grok"))
+                .map(|home| home.join(default_directory))
         })
+}
+
+fn kimi_mcp_template(mcp_url: &str) -> String {
+    format!(
+        "{}\n",
+        json!({
+            "mcpServers": {
+                "workman": {
+                    "url": mcp_url,
+                    "headers": {
+                        "x-workman-mcp-token": KIMI_MCP_TOKEN_SENTINEL
+                    }
+                }
+            }
+        })
+    )
+}
+
+fn kimi_deep_check_command(command: &str, extra_args: &[String]) -> Result<String, String> {
+    let mut words = shell_words::split(command)
+        .map_err(|error| format!("parse Kimi command for deep check: {error}"))?;
+    let executable = words
+        .first()
+        .and_then(|word| Path::new(word).file_name())
+        .and_then(|name| name.to_str());
+    if !matches!(executable, Some("kimi" | "kimi-code"))
+        || words.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                ";" | "&&" | "||" | "|" | "&" | ">" | ">>" | "<"
+            )
+        })
+    {
+        return Err(
+            "Kimi deep checks require a direct kimi command so prompt-mode flags can be applied safely"
+                .to_owned(),
+        );
+    }
+    words.retain(|word| !matches!(word.as_str(), "-y" | "--yolo" | "--auto"));
+    let command = words
+        .iter()
+        .map(|word| shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    command_with_args(&command, extra_args)
+}
+
+fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
+    let template = shell_quote(&home.join(KIMI_MCP_TEMPLATE_FILE).to_string_lossy());
+    let config = shell_quote(&home.join("mcp.json").to_string_lossy());
+    format!(
+        "umask 077; [ -n \"$WORKMAN_MCP_TOKEN\" ] || exit 1; \
+         IFS= read -r workman_kimi_mcp_template < {template} || exit 1; \
+         case \"$workman_kimi_mcp_template\" in *{KIMI_MCP_TOKEN_SENTINEL}*) ;; *) exit 1 ;; esac; \
+         workman_kimi_mcp_prefix=${{workman_kimi_mcp_template%%{KIMI_MCP_TOKEN_SENTINEL}*}}; \
+         workman_kimi_mcp_suffix=${{workman_kimi_mcp_template#*{KIMI_MCP_TOKEN_SENTINEL}}}; \
+         printf '%s%s%s\\n' \"$workman_kimi_mcp_prefix\" \"$WORKMAN_MCP_TOKEN\" \"$workman_kimi_mcp_suffix\" > {config} || exit 1; \
+         {command}"
+    )
 }
 
 fn grok_config(source_home: Option<&Path>, mcp_url: &str) -> Result<String, String> {
@@ -1217,6 +1329,7 @@ fn prepare_private_agent_home(
     prefix: &str,
     source_home: Option<&Path>,
     replaced_file: &str,
+    replacement_file: &str,
     replacement: &str,
 ) -> Result<PathBuf, String> {
     let home = env::temp_dir().join(format!("workman-{prefix}-mcp.{}", Uuid::new_v4().simple()));
@@ -1247,7 +1360,10 @@ fn prepare_private_agent_home(
                         source_home.display()
                     )
                 })?;
-                if entry.file_name() == replaced_file || entry.file_name() == "leader.sock" {
+                if entry.file_name() == replaced_file
+                    || entry.file_name() == replacement_file
+                    || entry.file_name() == "leader.sock"
+                {
                     continue;
                 }
                 let target = home.join(entry.file_name());
@@ -1269,7 +1385,7 @@ fn prepare_private_agent_home(
                 }
             }
         }
-        let path = home.join(replaced_file);
+        let path = home.join(replacement_file);
         fs::write(&path, replacement).map_err(|error| {
             format!("write private {prefix} config {}: {error}", path.display())
         })?;
@@ -1732,21 +1848,98 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_launch_is_explicit_and_keeps_the_registered_command() {
+    fn kimi_launch_uses_a_private_home_and_materializes_the_process_token() {
+        let deep_check = kimi_deep_check_command(
+            "kimi --yolo --model 'kimi test'",
+            &["--prompt".into(), "check".into()],
+        )
+        .unwrap();
+        assert!(!deep_check.contains("--yolo"));
+        assert!(deep_check.contains("--model 'kimi test'"));
+        assert!(deep_check.ends_with("--prompt check"));
+        assert!(kimi_deep_check_command("env kimi --yolo", &[]).is_err());
+
+        let source = tempfile::tempdir().unwrap();
+        let source_mcp = "{\"mcpServers\":{\"existing\":{\"url\":\"http://old.test/mcp\"}}}\n";
+        fs::write(source.path().join("mcp.json"), source_mcp).unwrap();
+        fs::write(
+            source.path().join("config.toml"),
+            "default_model = \"fixture\"\n",
+        )
+        .unwrap();
+
         let launch = prepare_agent_launch(
-            "kimi --yolo",
+            "true",
             "kimi",
             "http://127.0.0.1:43127/mcp",
             &["--model".into(), "kimi-test".into()],
             AgentLaunchPurpose::Normal,
-            None,
+            Some(source.path()),
         )
         .unwrap();
-        assert_eq!(launch.command, "kimi --yolo --model kimi-test");
-        assert!(!launch.env.contains_key(OPENCODE_CONFIG_CONTENT_ENV));
+        let home = PathBuf::from(launch.env.get("KIMI_CODE_HOME").unwrap());
+        assert_eq!(
+            launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV),
+            launch.env.get("KIMI_CODE_HOME")
+        );
+        assert!(launch.command.contains("WORKMAN_MCP_TOKEN"));
+        assert!(!launch.command.contains("test-process-token"));
+        assert!(launch.command.ends_with("true --model kimi-test"));
+        assert!(!home.join("mcp.json").exists());
+        let template = fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE)).unwrap();
+        assert!(template.contains(KIMI_MCP_TOKEN_SENTINEL));
+        assert!(template.contains("x-workman-mcp-token"));
+        assert!(!template.contains("existing"));
+        assert_eq!(
+            fs::read_to_string(source.path().join("mcp.json")).unwrap(),
+            source_mcp
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            "default_model = \"fixture\"\n"
+        );
+
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &launch.command])
+            .env("WORKMAN_MCP_TOKEN", "test-process-token")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["workman"]["url"],
+            "http://127.0.0.1:43127/mcp"
+        );
+        assert_eq!(
+            config["mcpServers"]["workman"]["headers"]["x-workman-mcp-token"],
+            "test-process-token"
+        );
+        assert!(
+            fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE))
+                .unwrap()
+                .contains(KIMI_MCP_TOKEN_SENTINEL)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(home.join("mcp.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
         let capability = mcp_launch_capability("kimi");
-        assert!(!capability.supported);
-        assert!(capability.note.contains("no documented safe per-launch"));
+        assert!(capability.supported);
+        assert_eq!(
+            capability.mechanism,
+            "private per-launch KIMI_CODE_HOME config"
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

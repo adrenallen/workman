@@ -1,6 +1,12 @@
 use std::{
-    collections::BTreeMap, env, error::Error, ffi::OsString, fs, os::unix::fs::PermissionsExt,
-    path::Path, time::Duration,
+    collections::{BTreeMap, BTreeSet},
+    env,
+    error::Error,
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    time::Duration,
 };
 
 use rmcp::{
@@ -595,6 +601,120 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .is_some_and(|message| message.contains("called whoami through this daemon")),
         "{deep}"
     );
+
+    let _ = parent.cancel().await;
+    let _ = shutdown_tx.send(());
+    server_task.await??;
+    Ok(())
+}
+
+/// Todo 98 acceptance against the installed authenticated Kimi CLI. The caller supplies a
+/// disposable KIMI_CODE_HOME containing copied login/config state but no mcp.json; Workman creates
+/// and removes a second private launch home containing only the process-scoped Workman connector.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires authenticated Kimi and WORKMAN_TODO98_QA_ROOT; run alone"]
+async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<(), Box<dyn Error>> {
+    let qa_root = env::var_os("WORKMAN_TODO98_QA_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or("WORKMAN_TODO98_QA_ROOT must name the isolated QA root")?;
+    let kimi_home = qa_root.join("kimi-home");
+    if !kimi_home.join("config.toml").is_file() || !kimi_home.join("credentials").is_dir() {
+        return Err("isolated kimi-home must provide config.toml and credentials/".into());
+    }
+    if kimi_home.join("mcp.json").exists() {
+        return Err("isolated kimi-home must not provide mcp.json".into());
+    }
+    let private_homes_before = fs::read_dir(env::temp_dir())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("workman-kimi-mcp."))
+        })
+        .collect::<BTreeSet<_>>();
+    let config_path = qa_root.join("config.yml");
+    fs::write(
+        &config_path,
+        "terminal:\n  shell: /bin/zsh\nagent_tools:\n  - name: Kimi\n    command: kimi --yolo\n    tool_type: kimi\n",
+    )?;
+    let _config_guard = EnvGuard::set(WORKMAN_CONFIG_ENV, &config_path);
+    let _kimi_home_guard = EnvGuard::set("KIMI_CODE_HOME", &kimi_home);
+    let _no_update_guard = EnvGuard::set("KIMI_CODE_NO_AUTO_UPDATE", "1");
+    let _no_telemetry_guard = EnvGuard::set("KIMI_DISABLE_TELEMETRY", "1");
+    let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let server = DaemonServer::bind(DaemonConfig {
+        data_dir: qa_root.join("data"),
+        port: 0,
+    })
+    .await?;
+    let registry = server.registry();
+    let kimi_id = {
+        let registry = registry.lock().await;
+        registry.store().put_project(&Project {
+            id: 98,
+            path: project_path.to_string_lossy().into_owned(),
+            name: "com.workman.todo98".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 0,
+        })?;
+        registry
+            .store()
+            .put_process(&root_process(98, &project_path))?;
+        registry
+            .store()
+            .list_agent_tools()?
+            .iter()
+            .find(|tool| tool.name == "Kimi")
+            .ok_or("Kimi preset was not seeded")?
+            .id
+    };
+
+    let discovery = server.discovery().clone();
+    let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(server.serve_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+    );
+    let parent = ClientInfo::default().serve(transport).await?;
+    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
+
+    let deep = call(
+        &parent,
+        "agent_tool_deep_check",
+        json!({
+            "project_id": 98,
+            "agent_tool_id": kimi_id,
+            "timeout_ms": 60_000,
+        }),
+    )
+    .await;
+    assert_eq!(deep["success"], true, "{deep}");
+    assert!(deep["process_id"].as_i64().is_some(), "{deep}");
+    assert!(
+        deep["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("called whoami through this daemon")),
+        "{deep}"
+    );
+    assert!(!kimi_home.join("mcp.json").exists());
+    let private_homes_after = fs::read_dir(env::temp_dir())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("workman-kimi-mcp."))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(private_homes_after, private_homes_before);
 
     let _ = parent.cancel().await;
     let _ = shutdown_tx.send(());

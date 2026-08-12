@@ -37,6 +37,7 @@ pub(crate) struct SessionCapture {
     claude_config: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     grok_home: Option<PathBuf>,
+    kimi_home: Option<PathBuf>,
     xdg_data_home: Option<PathBuf>,
 }
 
@@ -64,6 +65,7 @@ impl SessionCapture {
             claude_config: variable("CLAUDE_CONFIG_DIR"),
             codex_home: variable("CODEX_HOME"),
             grok_home: variable("GROK_HOME"),
+            kimi_home: variable("KIMI_CODE_HOME"),
             xdg_data_home: variable("XDG_DATA_HOME"),
         })
     }
@@ -125,6 +127,7 @@ impl SessionCapture {
             claude_config: None,
             codex_home: None,
             grok_home: None,
+            kimi_home: None,
             xdg_data_home: None,
         }
     }
@@ -436,7 +439,11 @@ fn open_files_for_process_tree(_root_pid: u32) -> io::Result<HashSet<PathBuf>> {
 }
 
 fn discover_kimi(capture: &SessionCapture) -> io::Result<Option<String>> {
-    let index = capture.home.join(".kimi-code/session_index.jsonl");
+    let home = capture
+        .kimi_home
+        .clone()
+        .unwrap_or_else(|| capture.home.join(".kimi-code"));
+    let index = home.join("session_index.jsonl");
     let file = match File::open(index) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -727,11 +734,12 @@ mod tests {
         let watermark = now_ms();
         thread::sleep(Duration::from_millis(2));
 
-        let kimi_session = temp.path().join(".kimi-code/sessions/repo/session-kimi");
+        let kimi_home = temp.path().join("isolated-kimi-home");
+        let kimi_session = kimi_home.join("sessions/repo/session-kimi");
         fs::create_dir_all(&kimi_session).unwrap();
         fs::write(kimi_session.join("state.json"), "{}\n").unwrap();
         fs::write(
-            temp.path().join(".kimi-code/session_index.jsonl"),
+            kimi_home.join("session_index.jsonl"),
             format!(
                 "{{\"sessionId\":\"session-kimi\",\"sessionDir\":{},\"workDir\":{}}}\n",
                 serde_json::to_string(&kimi_session).unwrap(),
@@ -756,11 +764,11 @@ mod tests {
             .unwrap();
         drop(database);
 
+        let mut kimi_capture =
+            SessionCapture::fixture(SessionAdapter::Kimi, temp.path(), &cwd, watermark);
+        kimi_capture.kimi_home = Some(kimi_home);
         assert_eq!(
-            SessionCapture::fixture(SessionAdapter::Kimi, temp.path(), &cwd, watermark)
-                .discover()
-                .unwrap()
-                .as_deref(),
+            kimi_capture.discover().unwrap().as_deref(),
             Some("session-kimi")
         );
         assert_eq!(
