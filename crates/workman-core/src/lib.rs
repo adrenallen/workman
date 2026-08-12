@@ -7,6 +7,7 @@ pub mod locks;
 pub mod notifications;
 #[cfg(unix)]
 mod output_spill;
+pub mod project_folders;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
 pub mod store;
@@ -23,6 +24,7 @@ pub use agent_notifications::*;
 pub use domain::*;
 pub use locks::*;
 pub use notifications::*;
+pub use project_folders::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todo_claims::*;

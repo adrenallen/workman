@@ -128,10 +128,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "profiles",
         include_str!("../migrations/0024_profiles.sql"),
     ),
+    (
+        25,
+        "project_folders",
+        include_str!("../migrations/0025_project_folders.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 24;
+pub const LATEST_SCHEMA_VERSION: i64 = 25;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -488,11 +493,66 @@ impl Store {
         )?;
         if copy_active {
             transaction.execute(
-                "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
-                 SELECT ?1, project_id, sort_order, selected
+                "INSERT INTO profile_projects (
+                    profile_id, project_id, sort_order, selected, folder_id
+                 )
+                 SELECT ?1, project_id, sort_order, selected, NULL
                  FROM profile_projects WHERE profile_id = ?2",
                 params![profile_id, source_profile_id],
             )?;
+
+            let folders = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, name, collapsed, sort_order
+                     FROM project_folders WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_folder_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM project_folders",
+                [],
+                |row| row.get(0),
+            )?;
+            for (offset, (source_folder_id, folder_name, collapsed, sort_order)) in
+                folders.into_iter().enumerate()
+            {
+                let target_folder_id = first_folder_id + offset as i64;
+                transaction.execute(
+                    "INSERT INTO project_folders (
+                        id, profile_id, name, collapsed, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        target_folder_id,
+                        profile_id,
+                        folder_name,
+                        collapsed,
+                        sort_order
+                    ],
+                )?;
+                transaction.execute(
+                    "UPDATE profile_projects SET folder_id = ?1
+                     WHERE profile_id = ?2
+                       AND project_id IN (
+                           SELECT project_id FROM profile_projects
+                           WHERE profile_id = ?4 AND folder_id = ?3
+                       )",
+                    params![
+                        target_folder_id,
+                        profile_id,
+                        source_folder_id,
+                        source_profile_id
+                    ],
+                )?;
+            }
         }
 
         let mut icon_pairs = Vec::new();
@@ -668,14 +728,15 @@ impl Store {
 
     pub fn attach_project_to_active_profile(&self, project_id: ProjectId) -> StoreResult<()> {
         let profile_id = self.active_profile_id()?;
+        let sort_order =
+            crate::project_folders::next_project_top_level_order(&self.connection, profile_id)?;
         self.connection.execute(
             "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
-             SELECT ?1, ?2,
-                    COALESCE(MAX(sort_order), -1) + 1,
+             SELECT ?1, ?2, ?3,
                     CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
              FROM profile_projects WHERE profile_id = ?1
              ON CONFLICT(profile_id, project_id) DO NOTHING",
-            params![profile_id, project_id],
+            params![profile_id, project_id, sort_order],
         )?;
         Ok(())
     }
@@ -725,14 +786,15 @@ impl Store {
             transaction.query_row("SELECT id FROM profiles WHERE active = 1", [], |row| {
                 row.get(0)
             })?;
+        let sort_order =
+            crate::project_folders::next_project_top_level_order(&transaction, profile_id)?;
         transaction.execute(
             "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
-             SELECT ?1, ?2,
-                    COALESCE(MAX(sort_order), -1) + 1,
+             SELECT ?1, ?2, ?3,
                     CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
              FROM profile_projects WHERE profile_id = ?1
              ON CONFLICT(profile_id, project_id) DO NOTHING",
-            params![profile_id, project.id],
+            params![profile_id, project.id, sort_order],
         )?;
         if project.selected {
             transaction.execute(
@@ -832,17 +894,19 @@ impl Store {
     }
 
     pub fn next_project_sort_order(&self) -> StoreResult<i64> {
-        Ok(self.connection.query_row(
-            "SELECT COALESCE(MAX(pp.sort_order), -1) + 1
-             FROM profile_projects AS pp
-             JOIN profiles AS p ON p.id = pp.profile_id AND p.active = 1",
-            [],
-            |row| row.get(0),
-        )?)
+        crate::project_folders::next_project_top_level_order(
+            &self.connection,
+            self.active_profile_id()?,
+        )
     }
 
     /// Replace the complete project order in one transaction.
     pub fn reorder_projects(&mut self, ordered_ids: &[ProjectId]) -> StoreResult<Vec<Project>> {
+        if !self.list_project_folders()?.is_empty() {
+            return Err(StoreError::InvalidReorder(
+                "project.reorder cannot flatten a project rail that contains folders".to_owned(),
+            ));
+        }
         let current = self
             .list_projects()?
             .into_iter()

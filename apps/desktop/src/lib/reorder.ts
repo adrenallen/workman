@@ -5,6 +5,7 @@ export interface ReorderDrop {
   sourceId: number;
   targetId: number;
   placement: DropPlacement;
+  inside?: boolean;
 }
 
 export interface ReorderItemOptions {
@@ -12,6 +13,7 @@ export interface ReorderItemOptions {
   group: string;
   disabled?: boolean;
   label?: string;
+  canDropInside?: (sourceId: number) => boolean;
   onDrop: (drop: ReorderDrop) => void;
   onKeyboardMove: (id: number, direction: ReorderDirection) => void;
 }
@@ -154,7 +156,7 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     }
     event.preventDefault();
     const target = pointerTarget(drag, event.clientX, event.clientY);
-    if (target) mark(target, placementFor(target, event.clientY));
+    if (target) mark(target, dropIntentFor(target, drag.id, event.clientY));
     else clearDropMarks();
   }
 
@@ -163,14 +165,11 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     if (!drag || drag.node !== node || drag.pointerId !== event.pointerId) return;
     const target = drag.dragging ? pointerTarget(drag, event.clientX, event.clientY) : null;
     const targetOptions = target ? reorderItems.get(target)?.() : null;
-    const placement = target
-      ? ((target.dataset.reorderDrop as DropPlacement | undefined) ??
-        placementFor(target, event.clientY))
-      : null;
+    const intent = target ? dropIntentFor(target, drag.id, event.clientY) : null;
     if (drag.dragging) event.preventDefault();
     finishPointerDrag(drag);
-    if (targetOptions && placement) {
-      options.onDrop({ sourceId: drag.id, targetId: targetOptions.id, placement });
+    if (targetOptions && intent) {
+      options.onDrop({ sourceId: drag.id, targetId: targetOptions.id, ...intent });
     }
   }
 
@@ -271,11 +270,27 @@ function placementFor(node: HTMLElement, clientY: number): DropPlacement {
   return clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
 }
 
-function mark(node: HTMLElement, placement: DropPlacement): void {
+function dropIntentFor(
+  node: HTMLElement,
+  sourceId: number,
+  clientY: number
+): { placement: DropPlacement; inside?: boolean } {
+  const options = reorderItems.get(node)?.();
+  const bounds = node.getBoundingClientRect();
+  const inside = options?.canDropInside?.(sourceId) === true
+    && clientY >= bounds.top + bounds.height * 0.25
+    && clientY <= bounds.bottom - bounds.height * 0.25;
+  return inside ? { placement: 'after', inside: true } : { placement: placementFor(node, clientY) };
+}
+
+function mark(
+  node: HTMLElement,
+  intent: { placement: DropPlacement; inside?: boolean }
+): void {
   for (const target of markedTargets) {
     if (target !== node) clearMark(target);
   }
-  node.dataset.reorderDrop = placement;
+  node.dataset.reorderDrop = intent.inside ? 'inside' : intent.placement;
   markedTargets.add(node);
 }
 

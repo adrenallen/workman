@@ -13,12 +13,15 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use workman_core::{AgentTool, AgentToolSource, ProcessStatus, ProfileId};
+use workman_core::{
+    AgentTool, AgentToolSource, ImportedProjectFolder, ImportedProjectFolderMembership,
+    ProcessStatus, ProfileId,
+};
 
 use crate::{ProcessRegistry, control::agent_icons};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
-const ARCHIVE_VERSION: u32 = 1;
+const ARCHIVE_VERSION: u32 = 2;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -44,6 +47,8 @@ struct ProfileArchive {
     version: u32,
     name: String,
     terminal_shell: Option<String>,
+    #[serde(default)]
+    folders: Vec<ArchiveFolder>,
     projects: Vec<ArchiveProject>,
     agent_tools: Vec<ArchiveAgentTool>,
 }
@@ -53,6 +58,18 @@ struct ProfileArchive {
 struct ArchiveProject {
     path: String,
     selected: bool,
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    sort_order: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveFolder {
+    name: String,
+    collapsed: bool,
+    sort_order: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -240,16 +257,40 @@ pub(crate) fn export(
             "profile_not_found",
             format!("profile {profile_id} was not found"),
         ))?;
-    let projects = registry
+    let folders = registry
+        .store()
+        .list_project_folders_for(profile_id)
+        .map_err(store_error)?;
+    let folder_names = folders
+        .iter()
+        .map(|folder| (folder.id, folder.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let folders = folders
+        .into_iter()
+        .map(|folder| ArchiveFolder {
+            name: folder.name,
+            collapsed: folder.collapsed,
+            sort_order: folder.sort_order,
+        })
+        .collect();
+    let mut projects = Vec::new();
+    for project in registry
         .store()
         .list_profile_projects(profile_id)
         .map_err(store_error)?
-        .into_iter()
-        .map(|project| ArchiveProject {
+    {
+        let folder = registry
+            .store()
+            .project_folder_id_for(profile_id, project.id)
+            .map_err(store_error)?
+            .and_then(|folder_id| folder_names.get(&folder_id).cloned());
+        projects.push(ArchiveProject {
             path: project.path,
             selected: project.selected,
-        })
-        .collect();
+            folder,
+            sort_order: Some(project.sort_order),
+        });
+    }
     let mut agent_tools = Vec::new();
     for tool in registry
         .store()
@@ -293,6 +334,7 @@ pub(crate) fn export(
             .store()
             .profile_terminal_shell(profile_id)
             .map_err(store_error)?,
+        folders,
         projects,
         agent_tools,
     };
@@ -319,7 +361,7 @@ pub(crate) fn import(
     let bytes = fs::read(path).map_err(|error| ("profile_import_error", error.to_string()))?;
     let archive: ProfileArchive = serde_json::from_slice(&bytes)
         .map_err(|error| ("profile_import_invalid", error.to_string()))?;
-    if archive.format != ARCHIVE_FORMAT || archive.version != ARCHIVE_VERSION {
+    if archive.format != ARCHIVE_FORMAT || !(1..=ARCHIVE_VERSION).contains(&archive.version) {
         return Err((
             "profile_import_invalid",
             format!(
@@ -352,9 +394,31 @@ pub(crate) fn import(
         })
         .transpose()
         .map_err(|error| ("profile_import_invalid", error))?;
+    let mut folder_names = HashSet::new();
+    let mut imported_folders = Vec::with_capacity(archive.folders.len());
+    for folder in archive.folders {
+        let folded = folder.name.trim().to_lowercase();
+        if folded.is_empty()
+            || folder.name.chars().count() > 80
+            || folder.name.chars().any(char::is_control)
+            || folder.sort_order < 0
+            || !folder_names.insert(folded)
+        {
+            return Err((
+                "profile_import_invalid",
+                format!("invalid or duplicate project folder name {:?}", folder.name),
+            ));
+        }
+        imported_folders.push(ImportedProjectFolder {
+            name: folder.name,
+            collapsed: folder.collapsed,
+            sort_order: folder.sort_order,
+        });
+    }
     let mut seen_paths = HashSet::new();
     let mut projects = Vec::with_capacity(archive.projects.len());
-    for project in archive.projects {
+    let mut memberships = Vec::with_capacity(archive.projects.len());
+    for (position, project) in archive.projects.into_iter().enumerate() {
         let path = fs::canonicalize(&project.path).map_err(|error| {
             (
                 "profile_import_invalid",
@@ -374,6 +438,28 @@ pub(crate) fn import(
                 format!("project path {path:?} occurs more than once"),
             ));
         }
+        let folder = project.folder.map(|name| name.trim().to_owned());
+        if folder
+            .as_ref()
+            .is_some_and(|name| !folder_names.contains(&name.to_lowercase()))
+        {
+            return Err((
+                "profile_import_invalid",
+                format!("project path {path:?} references a missing folder"),
+            ));
+        }
+        let sort_order = project.sort_order.unwrap_or(position as i64);
+        if sort_order < 0 {
+            return Err((
+                "profile_import_invalid",
+                format!("project path {path:?} has invalid sort order"),
+            ));
+        }
+        memberships.push(ImportedProjectFolderMembership {
+            project_path: path.clone(),
+            folder_name: folder,
+            sort_order,
+        });
         projects.push((path, project.selected));
     }
     if projects.iter().filter(|(_, selected)| *selected).count() > 1 {
@@ -422,6 +508,14 @@ pub(crate) fn import(
         .store()
         .import_profile(name, terminal_shell.as_deref(), &projects, &tools)
         .map_err(profile_store_error)?;
+    if let Err(error) = registry.store().restore_imported_project_folders(
+        profile.id,
+        &imported_folders,
+        &memberships,
+    ) {
+        let _ = registry.store().delete_profile(profile.id);
+        return Err(("profile_import_invalid", error.to_string()));
+    }
     let mut installed = Vec::new();
     for (tool_id, icon) in tool_ids.into_iter().zip(icons) {
         if let Some(icon) = icon
@@ -605,6 +699,7 @@ mod tests {
             version: ARCHIVE_VERSION,
             name: "Demo".into(),
             terminal_shell: None,
+            folders: Vec::new(),
             projects: Vec::new(),
             agent_tools: Vec::new(),
         };

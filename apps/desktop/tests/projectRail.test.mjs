@@ -112,6 +112,7 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
     id,
     group: 'scratchpad:1',
     label: `Scratchpad ${id}`,
+    canDropInside: id === 2 ? (sourceId) => sourceId === 1 : undefined,
     onDrop: (drop) => dropped.push(drop),
     onKeyboardMove: () => {}
   });
@@ -137,13 +138,13 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
   source.dispatch('pointermove', {
     pointerId: 7,
     clientX: 20,
-    clientY: 44,
+    clientY: 36,
     preventDefault() {}
   });
   source.dispatch('pointerup', {
     pointerId: 7,
     clientX: 20,
-    clientY: 44,
+    clientY: 36,
     preventDefault() {}
   });
 
@@ -159,7 +160,7 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
   };
   target.dispatch('click', postDragClick);
 
-  assert.deepEqual(dropped, [{ sourceId: 1, targetId: 2, placement: 'after' }]);
+  assert.deepEqual(dropped, [{ sourceId: 1, targetId: 2, placement: 'after', inside: true }]);
   assert.equal(source.draggable, false, 'the action never creates an HTML/file drag payload');
   assert.equal(source.capturedPointer, null);
   assert.equal(postDragClick.defaultPrevented, true);

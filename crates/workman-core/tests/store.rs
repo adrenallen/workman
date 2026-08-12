@@ -58,6 +58,7 @@ fn fresh_database_migrates_to_current_schema() {
             "processes",
             "profile_projects",
             "profiles",
+            "project_folders",
             "project_worktrees",
             "projects",
             "schema_migrations",

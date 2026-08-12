@@ -10,8 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
-    AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
-    Store,
+    AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
+    ProjectFolder, ProjectId, ProjectLayoutEntry, Store,
 };
 
 use crate::{
@@ -163,6 +163,35 @@ struct ProjectReorderParams {
     ordered_ids: Vec<ProjectId>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectFolderNameParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFolderRenameParams {
+    folder_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFolderCollapseParams {
+    folder_id: i64,
+    collapsed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFolderDeleteParams {
+    folder_id: i64,
+    #[serde(default)]
+    confirm_delete: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectLayoutParams {
+    entries: Vec<ProjectLayoutEntry>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct WorktreeScopeParams {
     #[serde(default)]
@@ -242,7 +271,15 @@ struct ProjectSummary {
     parent_project_id: Option<ProjectId>,
     branch: Option<String>,
     worktree_managed: bool,
+    folder_id: Option<i64>,
     status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectRailSnapshot {
+    projects: Vec<ProjectSummary>,
+    folders: Vec<ProjectFolder>,
+    layout: Vec<ProjectLayoutEntry>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -717,6 +754,9 @@ async fn dispatch(
         "projects.list" => {
             return project_result(list_projects(registry.store()));
         }
+        "project.rail" => {
+            return project_rail_result(registry.store());
+        }
         "projects.register" => {
             let params: RegisterProjectParams = params_as(params)?;
             register_project(registry.store(), &params.path)?;
@@ -760,6 +800,71 @@ async fn dispatch(
                 .reorder_projects(&params.ordered_ids)
                 .map_err(reorder_store_error)?;
             return project_result(list_projects(registry.store()));
+        }
+        "project.layout" => {
+            let params: ProjectLayoutParams = params_as(params)?;
+            registry
+                .store()
+                .update_project_layout(&params.entries)
+                .map_err(reorder_store_error)?;
+            return project_rail_result(registry.store());
+        }
+        "project_folders.create" => {
+            let params: ProjectFolderNameParams = params_as(params)?;
+            registry
+                .store()
+                .create_project_folder(&params.name)
+                .map_err(project_folder_store_error)?;
+            return project_rail_result(registry.store());
+        }
+        "project_folders.rename" => {
+            let params: ProjectFolderRenameParams = params_as(params)?;
+            let renamed = registry
+                .store()
+                .rename_project_folder(params.folder_id, &params.name)
+                .map_err(project_folder_store_error)?;
+            if renamed.is_none() {
+                return Err((
+                    "project_folder_not_found",
+                    "project folder not found".to_owned(),
+                ));
+            }
+            return project_rail_result(registry.store());
+        }
+        "project_folders.set_collapsed" => {
+            let params: ProjectFolderCollapseParams = params_as(params)?;
+            if !registry
+                .store()
+                .set_project_folder_collapsed(params.folder_id, params.collapsed)
+                .map_err(project_folder_store_error)?
+            {
+                return Err((
+                    "project_folder_not_found",
+                    "project folder not found".to_owned(),
+                ));
+            }
+            return project_rail_result(registry.store());
+        }
+        "project_folders.delete" => {
+            let params: ProjectFolderDeleteParams = params_as(params)?;
+            if !params.confirm_delete {
+                return Err((
+                    "project_folder_delete_requires_confirmation",
+                    "confirm_delete=true is required; projects will be lifted to the top level"
+                        .to_owned(),
+                ));
+            }
+            if !registry
+                .store()
+                .delete_project_folder(params.folder_id)
+                .map_err(project_folder_store_error)?
+            {
+                return Err((
+                    "project_folder_not_found",
+                    "project folder not found".to_owned(),
+                ));
+            }
+            return project_rail_result(registry.store());
         }
         "config.sync" => {
             let params: ProjectParams = params_as(params)?;
@@ -1139,6 +1244,19 @@ fn project_result(
     result.map(json_value)
 }
 
+fn project_rail_result(store: &Store) -> Result<Value, (&'static str, String)> {
+    let projects = list_projects(store)?;
+    let folders = store
+        .list_project_folders()
+        .map_err(project_folder_store_error)?;
+    let layout = store.project_layout().map_err(project_folder_store_error)?;
+    Ok(json_value(ProjectRailSnapshot {
+        projects,
+        folders,
+        layout,
+    }))
+}
+
 fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, String)> {
     let canonical = std::fs::canonicalize(path).map_err(|error| {
         (
@@ -1349,6 +1467,9 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
             let envelope =
                 crate::worktrees::project_envelope(store, project).map_err(worktree_error)?;
             let icon_image = project_icons::resolve(&envelope.project);
+            let folder_id = store
+                .project_folder_id(envelope.project.id)
+                .map_err(project_folder_store_error)?;
             Ok(ProjectSummary {
                 project: envelope.project,
                 icon_color,
@@ -1358,6 +1479,7 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
                 parent_project_id: envelope.parent_project_id,
                 branch: envelope.branch,
                 worktree_managed: envelope.worktree_managed,
+                folder_id,
                 status,
             })
         })
@@ -1403,4 +1525,8 @@ fn project_store_error(error: impl std::fmt::Display) -> (&'static str, String) 
 
 fn reorder_store_error(error: impl std::fmt::Display) -> (&'static str, String) {
     ("invalid_reorder", error.to_string())
+}
+
+fn project_folder_store_error(error: impl std::fmt::Display) -> (&'static str, String) {
+    ("project_folder_error", error.to_string())
 }

@@ -2,6 +2,7 @@
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import GitBranchIcon from '@lucide/svelte/icons/git-branch';
+  import FolderPlusIcon from '@lucide/svelte/icons/folder-plus';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -27,6 +28,9 @@
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
+  import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
+  import ProjectFolderMenu from './lib/ProjectFolderMenu.svelte';
   import ProjectOverview from './lib/ProjectOverview.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
@@ -123,6 +127,24 @@
   } from './lib/nativeNotifications';
   import type { ProjectSettingsInput } from './lib/projectAppearance';
   import {
+    createProjectFolder,
+    deleteProjectFolder,
+    loadProjectRail,
+    renameProjectFolder,
+    setProjectFolderCollapsed,
+    updateProjectLayout,
+    type ProjectRailSnapshot
+  } from './lib/projectFolderClient';
+  import {
+    applyProjectRailLayout,
+    buildProjectRailLayout,
+    moveProjectRailEntry,
+    moveProjectRailEntryFromKeyboard,
+    projectRailLayoutSignature,
+    type ProjectFolder,
+    type ProjectFolderMenuRequest
+  } from './lib/projectFolders';
+  import {
     NATIVE_MENU_EVENT,
     requestNativeUpdateCheck,
     type NativeMenuAction
@@ -159,7 +181,6 @@
     type ProjectTreeMultiSelection
   } from './lib/projectTreeMultiSelect';
   import {
-    moveOrderedId,
     reorderItem,
     type ReorderDirection,
     type ReorderDrop
@@ -203,6 +224,7 @@
   const flatProjectOrderStorageKey = 'workman.project-rail.flat-order.v1';
 
   let projects = $state<Project[]>([]);
+  let projectFolders = $state<ProjectFolder[]>([]);
   let processes = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
@@ -241,6 +263,11 @@
   let daemonLogSequence = 0;
   let renameId = $state<number | null>(null);
   let renameValue = $state('');
+  let folderCreateOpen = $state(false);
+  let folderCreateValue = $state('');
+  let folderRenameId = $state<number | null>(null);
+  let folderRenameValue = $state('');
+  let folderMenuRequest = $state<ProjectFolderMenuRequest | null>(null);
   let projectSettingsProject = $state<Project | null>(null);
   let projectSettingsBusy = $state(false);
   let settingsOpen = $state(false);
@@ -329,6 +356,7 @@
   let importError = $state<string | null>(null);
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
+  let projectRailLayout = $derived(buildProjectRailLayout(projects, projectFolders));
   let visibleProcesses = $derived([
     ...processes,
     ...optimisticProcesses.map((optimistic) => optimistic.process)
@@ -466,6 +494,7 @@
     if (
       connection.status !== 'connected'
       || projects.length === 0
+      || projectFolders.length > 0
       || flatProjectOrderChecked
     ) return;
     flatProjectOrderChecked = true;
@@ -690,6 +719,10 @@
 
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
+    if (folderMenuRequest) {
+      if (event.key === 'Escape') closeProjectFolderMenu();
+      return;
+    }
     if (contextRequest) {
       if (event.key === 'Escape') closeContextMenu();
       return;
@@ -796,7 +829,7 @@
       moveListFocus(
         container,
         event.target,
-        '.project-select:not(:disabled)',
+        '.project-select:not(:disabled), .folder-select:not(:disabled)',
         event.key === 'ArrowDown' ? 1 : -1
       )
     ) event.preventDefault();
@@ -1450,7 +1483,8 @@
     const activationAtStart = projectActivationRequest;
     busy = true;
     try {
-      const nextProjects = await client.projects();
+      const snapshot = await loadProjectRail(client);
+      const nextProjects = snapshot.projects;
       const currentSelectionId = pendingProjectSelectionId ?? selectedProject?.id ?? null;
       const preserveLocalSelection = pendingProjectSelectionId !== null
         || activationAtStart !== projectActivationRequest;
@@ -1459,6 +1493,7 @@
         && nextProjects.some((project) => project.id === currentSelectionId)
         ? selectProjectOptimistically(nextProjects, currentSelectionId)
         : nextProjects;
+      projectFolders = snapshot.folders;
       void refreshWorktreeMetadata(projects);
       void refreshQuickJumpIndex(false);
     } catch (cause) {
@@ -2750,25 +2785,13 @@
   }
 
   function handleProjectDrop(drop: ReorderDrop): void {
-    const orderedIds = moveOrderedId(
-      projects.map((project) => project.id),
-      drop.sourceId,
-      drop.targetId,
-      drop.placement
-    );
-    void persistProjectOrder(orderedIds);
+    const next = moveProjectRailEntry(projectRailLayout, drop);
+    void persistProjectRailLayout(next);
   }
 
-  function moveProjectFromKeyboard(projectId: number, direction: ReorderDirection): void {
-    const currentIndex = projects.findIndex((project) => project.id === projectId);
-    if (currentIndex < 0) return;
-    const targetId = projects[currentIndex + direction]?.id;
-    if (targetId === undefined) return;
-    handleProjectDrop({
-      sourceId: projectId,
-      targetId,
-      placement: direction < 0 ? 'before' : 'after'
-    });
+  function moveProjectRailFromKeyboard(id: number, direction: ReorderDirection): void {
+    const next = moveProjectRailEntryFromKeyboard(projectRailLayout, id, direction);
+    void persistProjectRailLayout(next);
   }
 
   async function seedFlatProjectOrder(): Promise<void> {
@@ -2805,6 +2828,115 @@
       projects = previous;
       reportError(cause);
       return false;
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  function applyProjectRailSnapshot(snapshot: ProjectRailSnapshot): void {
+    projects = snapshot.projects;
+    projectFolders = snapshot.folders;
+  }
+
+  async function persistProjectRailLayout(
+    nextLayout: ReturnType<typeof buildProjectRailLayout>
+  ): Promise<boolean> {
+    if (projectReorderBusy) return false;
+    if (projectRailLayoutSignature(nextLayout) === projectRailLayoutSignature(projectRailLayout)) {
+      return true;
+    }
+    const previousProjects = projects;
+    const previousFolders = projectFolders;
+    const optimistic = applyProjectRailLayout(projects, projectFolders, nextLayout);
+    projects = optimistic.projects;
+    projectFolders = optimistic.folders;
+    projectReorderBusy = true;
+    try {
+      applyProjectRailSnapshot(await updateProjectLayout(client, nextLayout));
+      return true;
+    } catch (cause) {
+      projects = previousProjects;
+      projectFolders = previousFolders;
+      reportError(cause);
+      return false;
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  function beginCreateProjectFolder(): void {
+    folderMenuRequest = null;
+    folderCreateValue = '';
+    folderCreateOpen = true;
+  }
+
+  async function commitCreateProjectFolder(): Promise<void> {
+    const name = folderCreateValue.trim();
+    if (!name || projectReorderBusy) return;
+    projectReorderBusy = true;
+    try {
+      applyProjectRailSnapshot(await createProjectFolder(client, name));
+      folderCreateOpen = false;
+      folderCreateValue = '';
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  function beginRenameProjectFolder(folder: ProjectFolder): void {
+    folderMenuRequest = null;
+    folderRenameId = folder.id;
+    folderRenameValue = folder.name;
+  }
+
+  async function commitRenameProjectFolder(): Promise<void> {
+    const folderId = folderRenameId;
+    const name = folderRenameValue.trim();
+    if (folderId === null || !name || projectReorderBusy) return;
+    projectReorderBusy = true;
+    try {
+      applyProjectRailSnapshot(await renameProjectFolder(client, folderId, name));
+      folderRenameId = null;
+      folderRenameValue = '';
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  async function toggleProjectFolder(folder: ProjectFolder): Promise<void> {
+    if (projectReorderBusy) return;
+    const previous = projectFolders;
+    projectFolders = projectFolders.map((candidate) =>
+      candidate.id === folder.id ? { ...candidate, collapsed: !folder.collapsed } : candidate
+    );
+    projectReorderBusy = true;
+    try {
+      applyProjectRailSnapshot(
+        await setProjectFolderCollapsed(client, folder.id, !folder.collapsed)
+      );
+    } catch (cause) {
+      projectFolders = previous;
+      reportError(cause);
+    } finally {
+      projectReorderBusy = false;
+    }
+  }
+
+  async function confirmDeleteProjectFolder(request: ProjectFolderMenuRequest): Promise<void> {
+    const childCopy = request.projectCount === 1 ? '1 project' : `${request.projectCount} projects`;
+    if (!window.confirm(
+      `Delete “${request.folder.name}”? ${childCopy} will return to the top level; no projects are deleted.`
+    )) return;
+    folderMenuRequest = null;
+    projectReorderBusy = true;
+    try {
+      applyProjectRailSnapshot(await deleteProjectFolder(client, request.folder.id));
+    } catch (cause) {
+      reportError(cause);
     } finally {
       projectReorderBusy = false;
     }
@@ -2994,8 +3126,19 @@
   }
 
   function showContextMenu(request: ContextMenuRequest): void {
+    folderMenuRequest = null;
     treeRenameTarget = null;
     contextRequest = request;
+  }
+
+  function closeProjectFolderMenu(): void {
+    const restoreFocus = folderMenuRequest?.restoreFocus ?? null;
+    folderMenuRequest = null;
+    if (restoreFocus) {
+      queueMicrotask(() => {
+        if (restoreFocus.isConnected) restoreFocus.focus();
+      });
+    }
   }
 
   function projectContextTarget(project: Project): Extract<ContextMenuTarget, { kind: 'project' }> {
@@ -3469,7 +3612,7 @@
   onDismiss={(id) => (agentDoneNotices = agentDoneNotices.filter((notice) => notice.id !== id))}
 />
 
-{#snippet projectRailRow(project: Project)}
+{#snippet projectRailRow(project: Project, nested: boolean)}
   {@const repository = worktreeRepositoryFor(project)}
   {@const worktree = worktreeEntryFor(project)}
   {@const rowLabel = projectLabel(project)}
@@ -3481,6 +3624,7 @@
   {@const activityLabel = projectRailActivityLabel(project, activity)}
   <article
     class:active={project.selected}
+    class:nested
     class="project-row group/project group/repository"
   >
     {#if renameId === project.id}
@@ -3498,10 +3642,10 @@
           use:reorderItem={{
             id: project.id,
             group: 'projects',
-            disabled: busy || projectReorderBusy || renameId !== null || projects.length < 2,
+            disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
             label: fullTitle,
             onDrop: handleProjectDrop,
-            onKeyboardMove: moveProjectFromKeyboard
+            onKeyboardMove: moveProjectRailFromKeyboard
           }}
           onclick={() => selectProject(project)}
           oncontextmenu={(event) => showProjectPointerMenu(event, project)}
@@ -3575,6 +3719,15 @@
       </IconButton>
     {/if}
   </article>
+  {#if project.parent_project_id === null}
+    {#each worktreeOperationsFor(project.repository_id) as operation (operation.id)}
+      <WorktreeOperationRow
+        {operation}
+        collapsed={projectRailCollapsed}
+        onSelect={() => showWorktreeOperation(operation)}
+      />
+    {/each}
+  {/if}
 {/snippet}
 
 <main
@@ -3631,25 +3784,58 @@
 
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
     <div class="project-list" aria-live="polite">
-      {#if projects.length === 0 && connection.status === 'connected' && !busy}
+      {#if projects.length === 0 && projectFolders.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder or switch profiles.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
       {/if}
-      {#each projects as project (project.id)}
-        {@render projectRailRow(project)}
-        {#if project.parent_project_id === null}
-          {#each worktreeOperationsFor(project.repository_id) as operation (operation.id)}
-            <WorktreeOperationRow
-              {operation}
-              collapsed={projectRailCollapsed}
-              onSelect={() => showWorktreeOperation(operation)}
+      {#if folderCreateOpen && !projectRailCollapsed}
+        <ProjectFolderCreateRow
+          value={folderCreateValue}
+          busy={projectReorderBusy}
+          onValueChange={(value) => (folderCreateValue = value)}
+          onSubmit={() => void commitCreateProjectFolder()}
+          onCancel={() => { folderCreateOpen = false; folderCreateValue = ''; }}
+        />
+      {/if}
+      {#each projectRailLayout as entry (`${entry.kind}-${entry.id}`)}
+        {#if entry.kind === 'project'}
+          {@const project = projects.find((candidate) => candidate.id === entry.id)}
+          {#if project}{@render projectRailRow(project, false)}{/if}
+        {:else}
+          {@const folder = projectFolders.find((candidate) => candidate.id === entry.id)}
+          {#if folder}
+            <ProjectFolderHeader
+              {folder}
+              projectCount={entry.project_ids.length}
+              railCollapsed={projectRailCollapsed}
+              busy={busy || projectReorderBusy || folderRenameId !== null || renameId !== null || projects.length + projectFolders.length < 2}
+              renaming={folderRenameId === folder.id}
+              renameValue={folderRenameValue}
+              onRenameValueChange={(value) => (folderRenameValue = value)}
+              onRenameSubmit={() => void commitRenameProjectFolder()}
+              onRenameCancel={() => { folderRenameId = null; folderRenameValue = ''; }}
+              onToggle={() => void toggleProjectFolder(folder)}
+              onDrop={handleProjectDrop}
+              onKeyboardMove={moveProjectRailFromKeyboard}
+              onContextMenu={(request) => (folderMenuRequest = request)}
             />
-          {/each}
+            {#if !folder.collapsed}
+              <div class="folder-children" aria-label={`${folder.name} projects`}>
+                {#each entry.project_ids as projectId (projectId)}
+                  {@const project = projects.find((candidate) => candidate.id === projectId)}
+                  {#if project}{@render projectRailRow(project, true)}{/if}
+                {/each}
+              </div>
+            {/if}
+          {/if}
         {/if}
       {/each}
     </div>
     <footer class="project-footer">
-      <Button class="w-full justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>
+      <Button class="min-w-0 flex-1 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>
         <PlusIcon size={14} aria-hidden="true" /><span class="button-copy">Register project</span>
+      </Button>
+      <Button class="folder-button min-w-0 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy || projectReorderBusy} onclick={beginCreateProjectFolder}>
+        <FolderPlusIcon size={14} aria-hidden="true" /><span class="button-copy">Folder</span>
       </Button>
     </footer>
     {#if !projectRailCollapsed}
@@ -3928,6 +4114,16 @@
   />
 {/if}
 
+{#if folderMenuRequest}
+  {@const request = folderMenuRequest}
+  <ProjectFolderMenu
+    {request}
+    onRename={() => beginRenameProjectFolder(request.folder)}
+    onDelete={() => void confirmDeleteProjectFolder(request)}
+    onClose={closeProjectFolderMenu}
+  />
+{/if}
+
 {#if quickJumpOpen}
   <QuickJumpPalette
     {projects}
@@ -4092,7 +4288,9 @@
   .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
   .project-row { position: relative; display: flex; min-height: 40px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row.nested { min-height: 36px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
   .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
@@ -4119,7 +4317,8 @@
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
   .project-empty strong { color: var(--foreground); font-size: var(--font-size-sm); } .project-empty p { margin: 3px 0 8px; color: var(--muted); font-size: var(--font-size-sm); }
-  .project-footer { padding: 6px; border-top: 1px solid var(--border); }
+  .project-footer { display: flex; gap: var(--space-1); padding: 6px; border-top: 1px solid var(--border); }
+  .project-footer :global(.folder-button) { flex: none; }
 
   .resize-handle { position: absolute; z-index: 8; top: 0; right: -3px; bottom: 0; width: 6px; border: 0; padding: 0; background: transparent; cursor: col-resize; touch-action: none; }
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
@@ -4132,6 +4331,8 @@
   .project-rail.collapsed :global(.brand-collapse) { grid-row: 3; width: 24px; height: 24px; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
+  .project-rail.collapsed .folder-children { display: contents; }
+  .project-rail.collapsed :global(.folder-row) { width: 100%; height: 36px; min-height: 36px; flex: 0 0 36px; margin: 0; }
   .project-rail.collapsed .project-row { width: 100%; height: 40px; min-height: 40px; flex: 0 0 40px; margin: 0; }
   .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }

@@ -94,6 +94,7 @@ export interface Project {
   parent_project_id: number | null;
   branch: string | null;
   worktree_managed: boolean;
+  folder_id: number | null;
 }
 
 export interface ProjectIconImage {
