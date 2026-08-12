@@ -268,13 +268,27 @@ function processItems(process: ProcessView): ContextMenuItem[] {
     }
   }
 
-  if (process.kind === 'command' && process.source === 'yml') {
-    items.push({ id: 'reveal-config', label: 'Reveal in workman.yml', separatorBefore: true });
+  if (process.kind === 'command') {
+    items.push({ id: 'edit-command', label: 'Edit command…', separatorBefore: true });
+    if (process.source === 'yml') {
+      items.push({ id: 'reveal-config', label: 'Reveal in workman.yml' });
+    }
   }
 
-  items.push({ id: 'rename', label: 'Rename', separatorBefore: process.kind !== 'command' });
+  if (process.kind !== 'command') {
+    items.push({ id: 'rename', label: 'Rename', separatorBefore: true });
+  }
   items.push({ id: 'copy-name', label: 'Copy name' });
   items.push({ id: 'copy-id', label: 'Copy process ID' });
+
+  if (process.kind === 'command') {
+    items.push({
+      id: 'remove-command',
+      label: 'Remove command…',
+      destructive: true,
+      separatorBefore: true
+    });
+  }
 
   if (process.kind === 'agent' || process.kind === 'terminal') {
     items.push({

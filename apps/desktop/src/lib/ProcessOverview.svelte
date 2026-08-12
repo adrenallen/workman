@@ -2,9 +2,11 @@
   import BotIcon from '@lucide/svelte/icons/bot';
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import PencilIcon from '@lucide/svelte/icons/pencil';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import SquareIcon from '@lucide/svelte/icons/square';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
   import { Button } from '$lib/components/ui/button';
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
@@ -28,9 +30,23 @@
     onStart: (process: ProcessView) => void;
     onStop: (process: ProcessView) => void;
     onRestart: (process: ProcessView) => void;
+    onEdit: (process: ProcessView) => void;
+    onRemove: (process: ProcessView) => void;
   }
 
-  let { kind, processes, onSelect, onCreate, project = null, busyId, onStart, onStop, onRestart }: Props = $props();
+  let {
+    kind,
+    processes,
+    onSelect,
+    onCreate,
+    project = null,
+    busyId,
+    onStart,
+    onStop,
+    onRestart,
+    onEdit,
+    onRemove
+  }: Props = $props();
 
   const copy = {
     agent: {
@@ -172,6 +188,9 @@
         </button>
         {#if kind === 'command'}
           <div class="process-actions" aria-label={`${process.name} actions`}>
+            <IconButton class="size-7 rounded-sm" label={`Edit ${process.name}`} disabled={busyId !== null} onclick={() => onEdit(process)}>
+              {#snippet icon()}<PencilIcon size={14} strokeWidth={1.8} />{/snippet}
+            </IconButton>
             {#if isRunning(process)}
               <IconButton class="size-7 rounded-sm" label={`Restart ${process.name}`} disabled={busyId !== null} onclick={() => onRestart(process)}>
                 {#snippet icon()}<RefreshCwIcon size={14} strokeWidth={1.8} />{/snippet}
@@ -184,6 +203,9 @@
                 {#snippet icon()}<PlayIcon size={14} strokeWidth={1.8} />{/snippet}
               </IconButton>
             {/if}
+            <IconButton class="size-7 rounded-sm hover:text-destructive" label={`Remove ${process.name}`} disabled={busyId !== null} onclick={() => onRemove(process)}>
+              {#snippet icon()}<Trash2Icon size={14} strokeWidth={1.8} />{/snippet}
+            </IconButton>
           </div>
         {/if}
       </article>
@@ -206,10 +228,10 @@
   .error-state { color: var(--agent-state-exited); }
   .process-ledger { height: 100%; min-height: 0; overflow-y: auto; padding: 4px 7px 10px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .process-row { display: grid; width: 100%; min-height: 42px; grid-template-columns: minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--border); background: transparent; color: var(--foreground); }
-  .process-row.with-actions { grid-template-columns: minmax(0, 1fr) 64px; }
+  .process-row.with-actions { grid-template-columns: minmax(0, 1fr) 124px; }
   .process-row:hover { background: var(--popover); }
   .process-primary { display: grid; width: 100%; min-height: 42px; grid-template-columns: 16px 42px minmax(160px, 1fr) minmax(88px, auto); align-items: center; gap: var(--space-2); border: 0; padding: 4px 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-  .process-actions { display: flex; width: 64px; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 7px; opacity: 0; transition: opacity 120ms ease; }
+  .process-actions { display: flex; width: 124px; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 7px; opacity: 0.72; transition: opacity 120ms ease; }
   .process-row:hover .process-actions, .process-row:focus-within .process-actions { opacity: 1; }
   .process-ref, .process-copy small, .process-state { font-family: var(--terminal-font-family); font-size: var(--font-size-xs); }
   .process-ref { color: var(--muted-foreground); }

@@ -62,6 +62,18 @@ pub struct ValidatedWorkingDirectory {
     pub relative: String,
 }
 
+/// Editable fields shared by locally stored and YAML-backed commands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandDefinition {
+    pub name: String,
+    pub command: String,
+    pub working_dir: String,
+    pub env: BTreeMap<String, String>,
+    pub auto_start: bool,
+    pub auto_restart: bool,
+    pub restart_when_changed: Vec<String>,
+}
+
 /// IDs affected by one source-of-truth synchronization pass.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SyncReport {
@@ -127,6 +139,8 @@ pub enum ConfigError {
     MissingCommand(String),
     WrittenProcessMissing(String),
     LocalNameConflict(String),
+    ProcessNameConflict(String),
+    NotCommand(ProcessId),
     ReadConfig {
         path: PathBuf,
         source: io::Error,
@@ -178,6 +192,10 @@ impl fmt::Display for ConfigError {
                 formatter,
                 "workman.yml process {name:?} conflicts with a local process"
             ),
+            Self::ProcessNameConflict(name) => {
+                write!(formatter, "a command named {name:?} already exists")
+            }
+            Self::NotCommand(id) => write!(formatter, "process {id} is not a command"),
             Self::ReadConfig { path, source } => {
                 write!(formatter, "cannot read {}: {source}", path.display())
             }
@@ -299,12 +317,17 @@ pub fn validate_project_working_dir(
 pub fn write_workman_yml_command(
     registry: &mut ProcessRegistry,
     project_id: ProjectId,
-    name: String,
-    command: String,
-    working_dir: String,
-    auto_start: bool,
-    auto_restart: bool,
+    definition: CommandDefinition,
 ) -> Result<Process, ConfigError> {
+    let CommandDefinition {
+        name,
+        command,
+        working_dir,
+        env,
+        auto_start,
+        auto_restart,
+        restart_when_changed,
+    } = definition;
     let project = registry
         .store()
         .get_project(project_id)
@@ -337,13 +360,6 @@ pub fn write_workman_yml_command(
             ..WorkmanConfig::default()
         }
     };
-    let retained = config.processes.get(&name);
-    let restart_when_changed = retained
-        .map(|process| process.restart_when_changed.clone())
-        .unwrap_or_default();
-    let env = retained
-        .map(|process| process.env.clone())
-        .unwrap_or_default();
     config.processes.insert(
         name.clone(),
         YmlProcess {
@@ -387,6 +403,150 @@ pub fn write_workman_yml_command(
         .ok_or_else(|| ConfigError::WrittenProcessMissing(name.clone()))?;
     let expected_hash = trust_hash_for_process(&process);
     Ok(registry.trust_yml_process(process.id, &expected_hash)?)
+}
+
+/// Persist edits to one command without interrupting its current invocation.
+///
+/// The registry keeps runtime-owned fields when its definition is updated, so a running command
+/// continues with the argv, cwd, and environment it started with. The edited definition is used
+/// the next time the command starts.
+pub fn update_command(
+    registry: &mut ProcessRegistry,
+    process_id: ProcessId,
+    definition: CommandDefinition,
+) -> Result<Process, ConfigError> {
+    let current = registry.get(process_id)?;
+    if current.kind != ProcessKind::Command {
+        return Err(ConfigError::NotCommand(process_id));
+    }
+
+    let name = definition.name.trim().to_owned();
+    if name.is_empty() {
+        return Err(ConfigError::InvalidProcessName);
+    }
+    let command = definition.command.trim().to_owned();
+    if command.is_empty() {
+        return Err(ConfigError::MissingCommand(name));
+    }
+    let validated = validate_project_working_dir(
+        registry.store(),
+        current.project_id,
+        &definition.working_dir,
+    )?;
+    if name != current.name
+        && registry
+            .list(Some(current.project_id))?
+            .iter()
+            .any(|process| process.id != current.id && process.name == name)
+    {
+        return Err(ConfigError::ProcessNameConflict(name));
+    }
+
+    if current.source == ProcessSource::Local {
+        let mut updated = current;
+        updated.name = name;
+        updated.command = Some(command);
+        updated.working_dir = validated.absolute;
+        updated.env = definition.env;
+        updated.auto_start = definition.auto_start;
+        updated.auto_restart = definition.auto_restart;
+        updated.restart_when_changed = definition.restart_when_changed;
+        return Ok(registry.update(updated)?);
+    }
+
+    let project = registry
+        .store()
+        .get_project(current.project_id)
+        .map_err(RegistryError::from)?
+        .ok_or(ConfigError::ProjectNotFound(current.project_id))?;
+    let root = canonical_directory("<project>", Path::new(&project.path))?;
+    let path = root.join(WORKMAN_CONFIG_FILE);
+    let source_path = project_config_path(&root).unwrap_or_else(|| path.clone());
+    if source_path.file_name() != Some(WORKMAN_CONFIG_FILE.as_ref()) {
+        warn_legacy_config(&source_path);
+    }
+    let yaml = fs::read_to_string(&source_path).map_err(|source| ConfigError::ReadConfig {
+        path: source_path,
+        source,
+    })?;
+    let mut config = parse_workman_yml(&yaml)?;
+    if name != current.name && config.processes.contains_key(&name) {
+        return Err(ConfigError::ProcessNameConflict(name));
+    }
+    config
+        .processes
+        .remove(&current.name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(current.name.clone()))?;
+    config.processes.insert(
+        name.clone(),
+        YmlProcess {
+            command,
+            working_dir: validated.relative,
+            auto_start: definition.auto_start,
+            auto_restart: definition.auto_restart,
+            restart_when_changed: definition.restart_when_changed,
+            env: definition.env,
+        },
+    );
+
+    let mut desired = prepare_processes(current.project_id, &root, config.processes.clone())?
+        .into_iter()
+        .find(|process| process.name == name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(name.clone()))?;
+    for process in registry.list(Some(current.project_id))? {
+        if process.source == ProcessSource::Local && process.name == desired.name {
+            return Err(ConfigError::LocalNameConflict(desired.name));
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&config)?;
+    fs::write(&path, yaml).map_err(|source| ConfigError::WriteConfig { path, source })?;
+    desired.id = current.id;
+    let updated = registry.update(desired)?;
+    let expected_hash = trust_hash_for_process(&updated);
+    Ok(registry.trust_yml_process_without_auto_start(updated.id, &expected_hash)?)
+}
+
+/// Stop one command if necessary, remove its stored definition, and delete its registry row.
+pub fn delete_command(
+    registry: &mut ProcessRegistry,
+    process_id: ProcessId,
+) -> Result<Process, ConfigError> {
+    let process = registry.get(process_id)?;
+    if process.kind != ProcessKind::Command {
+        return Err(ConfigError::NotCommand(process_id));
+    }
+    if process.source == ProcessSource::Local {
+        return Ok(registry.close(process_id)?);
+    }
+
+    let project = registry
+        .store()
+        .get_project(process.project_id)
+        .map_err(RegistryError::from)?
+        .ok_or(ConfigError::ProjectNotFound(process.project_id))?;
+    let root = canonical_directory("<project>", Path::new(&project.path))?;
+    let path = root.join(WORKMAN_CONFIG_FILE);
+    let source_path = project_config_path(&root).unwrap_or_else(|| path.clone());
+    if source_path.file_name() != Some(WORKMAN_CONFIG_FILE.as_ref()) {
+        warn_legacy_config(&source_path);
+    }
+    let yaml = fs::read_to_string(&source_path).map_err(|source| ConfigError::ReadConfig {
+        path: source_path,
+        source,
+    })?;
+    let mut config = parse_workman_yml(&yaml)?;
+    config
+        .processes
+        .remove(&process.name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(process.name.clone()))?;
+
+    if is_active(process.status) {
+        registry.stop(process_id)?;
+    }
+    let yaml = serde_yaml::to_string(&config)?;
+    fs::write(&path, yaml).map_err(|source| ConfigError::WriteConfig { path, source })?;
+    Ok(registry.close(process_id)?)
 }
 
 /// Read `<project root>/workman.yml` and synchronize it into the registry.
@@ -781,11 +941,15 @@ mod tests {
         write_workman_yml_command(
             &mut fixture.registry,
             1,
-            "New".into(),
-            "printf new".into(),
-            ".".into(),
-            false,
-            false,
+            CommandDefinition {
+                name: "New".into(),
+                command: "printf new".into(),
+                working_dir: ".".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+            },
         )
         .unwrap();
 
@@ -803,11 +967,15 @@ mod tests {
         let running = write_workman_yml_command(
             &mut fixture.registry,
             1,
-            "Web".into(),
-            "trap 'exit 0' TERM; sleep 30".into(),
-            "frontend".into(),
-            true,
-            false,
+            CommandDefinition {
+                name: "Web".into(),
+                command: "trap 'exit 0' TERM; sleep 30".into(),
+                working_dir: "frontend".into(),
+                env: BTreeMap::new(),
+                auto_start: true,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+            },
         )
         .unwrap();
         assert_eq!(running.status, ProcessStatus::Running);
@@ -853,11 +1021,15 @@ mod tests {
         let updated = write_workman_yml_command(
             &mut fixture.registry,
             1,
-            "Deploy".into(),
-            "printf new".into(),
-            "".into(),
-            false,
-            true,
+            CommandDefinition {
+                name: "Deploy".into(),
+                command: "printf new".into(),
+                working_dir: "".into(),
+                env: BTreeMap::from([("TOKEN".into(), "retained".into())]),
+                auto_start: false,
+                auto_restart: true,
+                restart_when_changed: vec!["src/**".into()],
+            },
         )
         .unwrap();
         assert!(is_process_trusted(&updated));
@@ -872,6 +1044,126 @@ mod tests {
         assert_eq!(parsed.processes["Deploy"].env["TOKEN"], "retained");
         assert_eq!(parsed.processes["Deploy"].restart_when_changed, ["src/**"]);
         assert_eq!(parsed.processes.len(), 2);
+    }
+
+    #[test]
+    fn in_app_edit_keeps_running_invocation_and_delete_stops_and_stays_deleted() {
+        let mut fixture = Fixture::new();
+        let running = write_workman_yml_command(
+            &mut fixture.registry,
+            1,
+            CommandDefinition {
+                name: "Web".into(),
+                command: "trap 'exit 0' TERM; sleep 30".into(),
+                working_dir: "frontend".into(),
+                env: BTreeMap::new(),
+                auto_start: true,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+            },
+        )
+        .unwrap();
+        let original_pid = running.pid;
+
+        let updated = update_command(
+            &mut fixture.registry,
+            running.id,
+            CommandDefinition {
+                name: "Frontend".into(),
+                command: "printf next-start".into(),
+                working_dir: "frontend".into(),
+                env: BTreeMap::from([("MODE".into(), "production".into())]),
+                auto_start: false,
+                auto_restart: true,
+                restart_when_changed: vec!["src/**".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.id, running.id);
+        assert_eq!(updated.status, ProcessStatus::Running);
+        assert_eq!(updated.pid, original_pid);
+        assert_eq!(updated.command.as_deref(), Some("printf next-start"));
+        assert!(is_process_trusted(&updated));
+
+        let path = fixture.root.path().join(WORKMAN_CONFIG_FILE);
+        let parsed = parse_workman_yml(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!parsed.processes.contains_key("Web"));
+        let saved = &parsed.processes["Frontend"];
+        assert_eq!(saved.command, "printf next-start");
+        assert_eq!(saved.env["MODE"], "production");
+        assert_eq!(saved.restart_when_changed, ["src/**"]);
+        assert!(saved.auto_restart);
+
+        let removed = delete_command(&mut fixture.registry, updated.id).unwrap();
+        assert_eq!(removed.status, ProcessStatus::Stopped);
+        assert!(matches!(
+            fixture.registry.get(updated.id),
+            Err(RegistryError::NotFound(_))
+        ));
+        let parsed = parse_workman_yml(&fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!parsed.processes.contains_key("Frontend"));
+
+        sync_workman_yml_file(&mut fixture.registry, 1).unwrap();
+        assert!(fixture.registry.list(Some(1)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_command_edit_and_delete_use_the_same_definition_flow() {
+        let mut fixture = Fixture::new();
+        let root = fs::canonicalize(fixture.root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let command = fixture
+            .registry
+            .create(Process {
+                id: 0,
+                project_id: 1,
+                kind: ProcessKind::Command,
+                name: "Local".into(),
+                command: Some("printf old".into()),
+                working_dir: root,
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+
+        let updated = update_command(
+            &mut fixture.registry,
+            command.id,
+            CommandDefinition {
+                name: "Local logs".into(),
+                command: "printf new".into(),
+                working_dir: "frontend".into(),
+                env: BTreeMap::from([("COLOR".into(), "always".into())]),
+                auto_start: true,
+                auto_restart: true,
+                restart_when_changed: vec!["logs/**".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.name, "Local logs");
+        assert_eq!(updated.status, ProcessStatus::Stopped);
+        assert_eq!(updated.env["COLOR"], "always");
+        assert!(updated.auto_start);
+
+        delete_command(&mut fixture.registry, updated.id).unwrap();
+        assert!(matches!(
+            fixture.registry.get(updated.id),
+            Err(RegistryError::NotFound(_))
+        ));
     }
 
     #[test]

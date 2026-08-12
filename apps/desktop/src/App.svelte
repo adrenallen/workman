@@ -284,6 +284,7 @@
   let treeRailCollapsed = $state(false);
 
   let dialog = $state<'todo' | 'agent' | 'command' | null>(null);
+  let commandDialogProcess = $state<ProcessView | null>(null);
   let todoTitle = $state('');
   let todoBody = $state('');
   let todoPriority = $state<TodoPriority>('medium');
@@ -1233,7 +1234,7 @@
         }
         case 'add-command':
           settingsOpen = false;
-          dialog = 'command';
+          openAddCommand();
           return;
         case 'new-todo':
           settingsOpen = false;
@@ -1976,6 +1977,7 @@
   ): Promise<void> {
     const projectId = process.project_id;
     dialog = null;
+    commandDialogProcess = null;
     await refreshProcesses(projectId);
     if (optimisticId !== null) {
       optimisticProcesses = optimisticProcesses.filter(
@@ -2016,6 +2018,41 @@
     return id;
   }
 
+  function openAddCommand(): void {
+    commandDialogProcess = null;
+    dialog = 'command';
+  }
+
+  function openEditCommand(process: ProcessView): void {
+    if (process.kind !== 'command') return;
+    commandDialogProcess = process;
+    settingsOpen = false;
+    dialog = 'command';
+  }
+
+  async function removeCommand(process: ProcessView): Promise<void> {
+    if (process.kind !== 'command' || processBusyId !== null) return;
+    const running = process.status === 'running' || process.status === 'starting';
+    const storage = process.source === 'yml'
+      ? 'its definition from workman.yml'
+      : 'its locally stored definition';
+    const message = running
+      ? `Remove ${process.name}? It is running and will be stopped first. This deletes ${storage} and cannot be undone.`
+      : `Remove ${process.name}? This deletes ${storage} and cannot be undone.`;
+    if (!window.confirm(message)) return;
+
+    processBusyId = process.id;
+    try {
+      await client.control('config.command_delete', { process_id: process.id });
+      if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
+      await refreshProcesses(process.project_id);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      processBusyId = null;
+    }
+  }
+
   function failPendingProcess(cause: unknown, optimisticId: number): void {
     optimisticProcesses = optimisticProcesses.map((optimistic) =>
       optimistic.process.id === optimisticId
@@ -2038,7 +2075,7 @@
       : agentTools.find((candidate) => candidate.id === optimistic.process.agent_tool_id) ?? null;
     dismissOptimisticProcess(optimistic.process.id);
     if (retry === 'agent' && tool) void spawnAgent(tool);
-    else if (retry === 'command') dialog = 'command';
+    else if (retry === 'command') openAddCommand();
     else if (retry === 'agent') void openAgentDialog();
   }
 
@@ -2408,7 +2445,7 @@
     } else if (kind === 'terminal') {
       void spawnTerminal();
     } else {
-      dialog = 'command';
+      openAddCommand();
     }
   }
 
@@ -3244,7 +3281,7 @@
       case 'add-command':
         if (!(await activateProject(project.id))) return;
         settingsOpen = false;
-        dialog = 'command';
+        openAddCommand();
         return;
       case 'new-todo':
         if (!(await activateProject(project.id))) return;
@@ -3352,6 +3389,12 @@
         await client.closeProcess(process.id);
         if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
         await refreshProcesses(process.project_id);
+        return;
+      case 'edit-command':
+        openEditCommand(process);
+        return;
+      case 'remove-command':
+        await removeCommand(process);
         return;
       case 'rename':
         treeRenameTarget = target;
@@ -3879,7 +3922,7 @@
         onBrowseProcesses={openProcessOverview}
         onAddAgent={() => void openAgentDialog()}
         onAddTerminal={() => void spawnTerminal()}
-        onAddCommand={() => (dialog = 'command')}
+        onAddCommand={openAddCommand}
         onAddScratchpad={() => void createScratchpad()}
         {processBusyId}
         onStartProcess={(process) => void startOrReviewProcess(process)}
@@ -4014,6 +4057,8 @@
             onStart={(process) => void startOrReviewProcess(process)}
             onStop={(process) => void stopProcess(process)}
             onRestart={(process) => void restartProcess(process)}
+            onEdit={openEditCommand}
+            onRemove={(process) => void removeCommand(process)}
           />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView
@@ -4251,10 +4296,11 @@
   <AddCommandDialog
     {client}
     project={selectedProject}
+    initialProcess={commandDialogProcess}
     onPending={beginOptimisticCommand}
     onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
     onFailed={failPendingProcess}
-    onClose={() => (dialog = null)}
+    onClose={() => { dialog = null; commandDialogProcess = null; }}
   />
 {/if}
 

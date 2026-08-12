@@ -126,9 +126,30 @@ struct SaveYmlCommandParams {
     #[serde(default)]
     working_dir: String,
     #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
     auto_start: bool,
     #[serde(default)]
     auto_restart: bool,
+    #[serde(default)]
+    restart_when_changed: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCommandParams {
+    process_id: ProcessId,
+    name: String,
+    command: String,
+    #[serde(default)]
+    working_dir: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    auto_start: bool,
+    #[serde(default)]
+    auto_restart: bool,
+    #[serde(default)]
+    restart_when_changed: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -908,14 +929,42 @@ async fn dispatch(
             return crate::config::write_workman_yml_command(
                 &mut registry,
                 params.project_id,
-                params.name,
-                params.command,
-                params.working_dir,
-                params.auto_start,
-                params.auto_restart,
+                crate::config::CommandDefinition {
+                    name: params.name,
+                    command: params.command,
+                    working_dir: params.working_dir,
+                    env: params.env,
+                    auto_start: params.auto_start,
+                    auto_restart: params.auto_restart,
+                    restart_when_changed: params.restart_when_changed,
+                },
             )
             .map(json_value)
             .map_err(config_error);
+        }
+        "config.command_update" => {
+            let params: UpdateCommandParams = params_as(params)?;
+            return crate::config::update_command(
+                &mut registry,
+                params.process_id,
+                crate::config::CommandDefinition {
+                    name: params.name,
+                    command: params.command,
+                    working_dir: params.working_dir,
+                    env: params.env,
+                    auto_start: params.auto_start,
+                    auto_restart: params.auto_restart,
+                    restart_when_changed: params.restart_when_changed,
+                },
+            )
+            .map(json_value)
+            .map_err(config_error);
+        }
+        "config.command_delete" => {
+            let params: ProcessIdParams = params_as(params)?;
+            return crate::config::delete_command(&mut registry, params.process_id)
+                .map(json_value)
+                .map_err(config_error);
         }
         "process.raw_output" => {
             let params: OutputParams = params_as(params)?;
@@ -1224,7 +1273,11 @@ fn config_error(error: crate::ConfigError) -> (&'static str, String) {
         crate::ConfigError::InvalidProcessName | crate::ConfigError::MissingCommand(_) => {
             "invalid_params"
         }
-        crate::ConfigError::LocalNameConflict(_) => "process_name_conflict",
+        crate::ConfigError::LocalNameConflict(_) | crate::ConfigError::ProcessNameConflict(_) => {
+            "process_name_conflict"
+        }
+        crate::ConfigError::NotCommand(_) => "invalid_params",
+        crate::ConfigError::Registry(error) => error.code(),
         crate::ConfigError::ParentTraversal { .. }
         | crate::ConfigError::WorkingDirectory { .. }
         | crate::ConfigError::NotDirectory { .. }

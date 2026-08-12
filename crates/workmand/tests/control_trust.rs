@@ -407,3 +407,96 @@ async fn websocket_add_command_writes_trusts_and_watches_new_workman_yml() {
     socket.close(None).await.unwrap();
     server.stop().await;
 }
+
+#[tokio::test]
+async fn websocket_command_edit_keeps_running_and_delete_is_durable() {
+    let server = TestServer::start().await;
+    let project = server.data_dir.join("edit-command-project");
+    std::fs::create_dir(&project).unwrap();
+    let (mut socket, _) = connect_async(server.request()).await.unwrap();
+
+    let registered = rpc(
+        &mut socket,
+        "register",
+        "projects.register",
+        json!({ "path": project }),
+    )
+    .await;
+    let project_id = registered["result"][0]["id"].as_i64().unwrap();
+    let saved = rpc(
+        &mut socket,
+        "save",
+        "config.command_save",
+        json!({
+            "project_id": project_id,
+            "name": "Web",
+            "command": "trap 'exit 0' TERM; sleep 30",
+            "working_dir": ".",
+            "env": { "MODE": "development" },
+            "auto_start": true,
+            "auto_restart": false,
+            "restart_when_changed": ["src/**"],
+        }),
+    )
+    .await;
+    let process_id = saved["result"]["id"].as_i64().unwrap();
+    let running_pid = saved["result"]["pid"].as_i64().unwrap();
+
+    let updated = rpc(
+        &mut socket,
+        "update",
+        "config.command_update",
+        json!({
+            "process_id": process_id,
+            "name": "Frontend",
+            "command": "printf next-start",
+            "working_dir": ".",
+            "env": { "MODE": "production" },
+            "auto_start": false,
+            "auto_restart": true,
+            "restart_when_changed": ["frontend/**"],
+        }),
+    )
+    .await;
+    assert!(updated.get("error").is_none(), "{updated}");
+    assert_eq!(updated["result"]["status"], "running");
+    assert_eq!(updated["result"]["pid"], running_pid);
+    assert_eq!(updated["result"]["name"], "Frontend");
+    assert_eq!(updated["result"]["env"]["MODE"], "production");
+
+    let yaml = std::fs::read_to_string(project.join("workman.yml")).unwrap();
+    assert!(!yaml.contains("  Web:"));
+    assert!(yaml.contains("  Frontend:"));
+    assert!(yaml.contains("MODE: production"));
+    assert!(yaml.contains("frontend/**"));
+
+    let deleted = rpc(
+        &mut socket,
+        "delete",
+        "config.command_delete",
+        json!({ "process_id": process_id }),
+    )
+    .await;
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    assert_eq!(deleted["result"]["status"], "stopped");
+
+    let synced = rpc(
+        &mut socket,
+        "sync-after-delete",
+        "config.sync",
+        json!({ "project_id": project_id }),
+    )
+    .await;
+    assert_eq!(synced["result"]["synced"], true);
+    let listed = rpc(
+        &mut socket,
+        "list-after-delete",
+        "process.list",
+        json!({ "project_id": project_id }),
+    )
+    .await;
+    assert_eq!(listed["result"], json!([]));
+
+    socket.close(None).await.unwrap();
+    server.stop().await;
+}

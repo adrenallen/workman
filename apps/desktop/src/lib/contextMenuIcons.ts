@@ -6,6 +6,8 @@ export const CONTEXT_ACTION_IDS = [
   'restart',
   'kill',
   'close',
+  'edit-command',
+  'remove-command',
   'rename',
   'copy-name',
   'copy-id',
@@ -69,6 +71,7 @@ export type ContextActionIcon =
 export const DESTRUCTIVE_CONTEXT_ACTION_IDS = [
   'kill',
   'close',
+  'remove-command',
   'delete-scratchpad',
   'remove-project',
   'remove-worktree'
@@ -82,6 +85,8 @@ const CONTEXT_ACTION_ICONS: Record<ContextActionId, ContextActionIcon> = {
   restart: 'refresh-cw',
   kill: 'trash-2',
   close: 'trash-2',
+  'edit-command': 'pencil',
+  'remove-command': 'trash-2',
   rename: 'pencil',
   'copy-name': 'clipboard',
   'copy-id': 'clipboard',

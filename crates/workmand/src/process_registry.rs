@@ -893,6 +893,24 @@ impl ProcessRegistry {
         process_id: ProcessId,
         expected_hash: &str,
     ) -> RegistryResult<Process> {
+        self.trust_yml_process_inner(process_id, expected_hash, true)
+    }
+
+    /// Approve an in-app command edit without treating `auto_start` as an immediate start request.
+    pub(crate) fn trust_yml_process_without_auto_start(
+        &mut self,
+        process_id: ProcessId,
+        expected_hash: &str,
+    ) -> RegistryResult<Process> {
+        self.trust_yml_process_inner(process_id, expected_hash, false)
+    }
+
+    fn trust_yml_process_inner(
+        &mut self,
+        process_id: ProcessId,
+        expected_hash: &str,
+        start_if_auto: bool,
+    ) -> RegistryResult<Process> {
         self.refresh_exits()?;
         let mut process = self.require(process_id)?;
         if process.source != ProcessSource::Yml {
@@ -913,7 +931,7 @@ impl ProcessRegistry {
         self.status_invalidations.invalidate();
         self.trust_snapshots
             .insert(process_id, TrustFields::from_process(&process));
-        if process.auto_start && !self.running.contains_key(&process_id) {
+        if start_if_auto && process.auto_start && !self.running.contains_key(&process_id) {
             self.start(process_id)
         } else {
             Ok(process)
