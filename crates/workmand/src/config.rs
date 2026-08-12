@@ -412,6 +412,9 @@ pub fn sync_workman_yml_file(
 }
 
 /// Make YAML-backed command rows exactly match one validated `workman.yml` document.
+///
+/// Synchronization never launches an inactive process. Explicit starts, project auto-start for
+/// stopped commands, and lifecycle restart policy are the only launch authorities.
 pub fn sync_workman_yml(
     registry: &mut ProcessRegistry,
     project_id: ProjectId,
@@ -489,9 +492,6 @@ pub fn sync_workman_yml(
 
         if !is_process_trusted(&process) {
             report.awaiting_trust.push(process.id);
-        } else if process.auto_start && !is_active(process.status) {
-            let process = registry.start(process.id)?;
-            report.started.push(process.id);
         }
     }
 

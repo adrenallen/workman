@@ -15,8 +15,8 @@ use tokio::{
 };
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store};
 use workmand::{
-    LifecycleOptions, ProcessRegistry, SharedProcessRegistry,
-    spawn_lifecycle_supervisor_with_options,
+    LifecycleOptions, ProcessRegistry, SharedProcessRegistry, auto_start_project,
+    spawn_lifecycle_supervisor_with_options, sync_workman_yml_file, trust_hash_for_process,
 };
 
 const TEST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
@@ -169,6 +169,94 @@ async fn stop_all(registry: &SharedProcessRegistry) {
     for process_id in process_ids {
         let _ = registry.stop(process_id);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_on_exit_strictly_follows_auto_restart_policy() {
+    let (root, mut registry) = fixture();
+    let watcher_ready = root.path().join("watcher-ready");
+    let mut sentinel = process(&root, 99, "touch \"$WATCHER_READY\"; sleep 30");
+    sentinel.env = BTreeMap::from([(
+        "WATCHER_READY".into(),
+        watcher_ready.to_string_lossy().into_owned(),
+    )]);
+    registry.create(sentinel).unwrap();
+
+    let registry = Arc::new(Mutex::new(registry));
+    let supervisor = SupervisorGuard::spawn(registry.clone(), test_options());
+    wait_until("project watcher initialization", || watcher_ready.exists())
+        .await
+        .unwrap();
+
+    let one_shot_attempts = root.path().join("one-shot-attempts");
+    let one_shot_yaml = format!(
+        "processes:\n  one-shot:\n    command: 'printf x >> \"{}\"; exit 7'\n    auto_start: true\n",
+        one_shot_attempts.display()
+    );
+    fs::write(root.path().join("workman.yml"), &one_shot_yaml).unwrap();
+    let one_shot = {
+        let mut registry = registry.lock().await;
+        sync_workman_yml_file(&mut registry, 1).unwrap();
+        let pending = registry
+            .list(Some(1))
+            .unwrap()
+            .into_iter()
+            .find(|process| process.name == "one-shot")
+            .unwrap();
+        let hash = trust_hash_for_process(&pending);
+        registry.trust_yml_process(pending.id, &hash).unwrap()
+    };
+    wait_for_attempt_count(&one_shot_attempts, 1).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        attempt_count(&one_shot_attempts),
+        1,
+        "passive config reconciliation must not restart a one-shot command"
+    );
+    assert_eq!(
+        registry.lock().await.get(one_shot.id).unwrap().status,
+        ProcessStatus::Crashed
+    );
+    {
+        let mut registry = registry.lock().await;
+        assert!(auto_start_project(&mut registry, 1).unwrap().is_empty());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        attempt_count(&one_shot_attempts),
+        1,
+        "project auto-start must not override restart-on-exit policy"
+    );
+
+    let restarting_attempts = root.path().join("restarting-attempts");
+    let restarting_yaml = format!(
+        "{one_shot_yaml}  restarting:\n    command: 'printf x >> \"{}\"; exit 0'\n    auto_start: true\n    auto_restart: true\n",
+        restarting_attempts.display()
+    );
+    fs::write(root.path().join("workman.yml"), restarting_yaml).unwrap();
+    {
+        let mut registry = registry.lock().await;
+        sync_workman_yml_file(&mut registry, 1).unwrap();
+        let pending = registry
+            .list(Some(1))
+            .unwrap()
+            .into_iter()
+            .find(|process| process.name == "restarting")
+            .unwrap();
+        let hash = trust_hash_for_process(&pending);
+        registry.trust_yml_process(pending.id, &hash).unwrap();
+    }
+    wait_for_attempt_count(&restarting_attempts, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        attempt_count(&one_shot_attempts),
+        1,
+        "syncing another command must not restart an exited one-shot"
+    );
+
+    supervisor.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

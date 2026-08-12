@@ -44,8 +44,10 @@ impl Default for LifecycleOptions {
     }
 }
 
-/// Start eligible commands when a project is opened.
+/// Start eligible stopped commands when a project is opened.
 ///
+/// An exited or crashed command is governed by `auto_restart`; project activation and delayed
+/// initial reconciliation must not turn `auto_start` into an implicit restart-on-exit policy.
 /// Individual launch failures do not prevent the other commands from starting. The registry's
 /// central trust and working-directory checks remain authoritative for every attempted launch.
 pub fn auto_start_project(
@@ -55,7 +57,10 @@ pub fn auto_start_project(
     let processes = registry.list(Some(project_id))?;
     let mut started = Vec::new();
     for process in processes {
-        if !process.auto_start || is_active(process.status) || !is_process_trusted(&process) {
+        if !process.auto_start
+            || process.status != ProcessStatus::Stopped
+            || !is_process_trusted(&process)
+        {
             continue;
         }
         if registry.start(process.id).is_ok() {
@@ -333,7 +338,7 @@ impl LifecycleSupervisor {
                         self.restart_attempts.remove(&process.id);
                     }
                 }
-                ProcessStatus::Crashed => {
+                ProcessStatus::Crashed | ProcessStatus::Exited => {
                     self.running_since.remove(&process.id);
                     if !self.restart_due.contains_key(&process.id) {
                         let attempt = self.restart_attempts.get(&process.id).copied().unwrap_or(0);
@@ -347,7 +352,7 @@ impl LifecycleSupervisor {
                         );
                     }
                 }
-                ProcessStatus::Stopped | ProcessStatus::Exited => {
+                ProcessStatus::Stopped => {
                     self.clear_restart_state(process.id);
                 }
             }
@@ -364,8 +369,10 @@ impl LifecycleSupervisor {
             let Ok(process) = registry.get(process_id) else {
                 continue;
             };
-            if process.status != ProcessStatus::Crashed
-                || !process.auto_restart
+            if !matches!(
+                process.status,
+                ProcessStatus::Crashed | ProcessStatus::Exited
+            ) || !process.auto_restart
                 || !is_process_trusted(&process)
             {
                 continue;
