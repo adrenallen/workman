@@ -27,10 +27,30 @@ struct GitFixture {
     registry: SharedProcessRegistry,
 }
 
+#[derive(Clone, Copy)]
+enum GitRemoveFixture {
+    AlwaysFail,
+    SwapPathOnce,
+}
+
 impl GitFixture {
     fn new() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(None)
+    }
+
+    fn new_with_failing_worktree_remove() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::AlwaysFail))
+    }
+
+    fn new_with_retryable_path_swap() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::SwapPathOnce))
+    }
+
+    fn new_with_remove_fixture(
+        remove_fixture: Option<GitRemoveFixture>,
+    ) -> Result<Self, Box<dyn Error>> {
         let temp = tempfile::Builder::new()
-            .prefix("com.workman.todo101.")
+            .prefix("com.workman.todo102.")
             .tempdir_in("/tmp")?;
         let main = temp.path().join("sample-repo");
         let origin = temp.path().join("origin.git");
@@ -45,10 +65,10 @@ impl GitFixture {
             &[
                 "config",
                 "user.email",
-                "com.workman.todo101@example.invalid",
+                "com.workman.todo102@example.invalid",
             ],
         )?;
-        git(&main, &["config", "user.name", "com.workman.todo101"])?;
+        git(&main, &["config", "user.name", "com.workman.todo102"])?;
         git(&main, &["config", "branch.autoSetupMerge", "false"])?;
         std::fs::write(main.join("README.md"), "fixture\n")?;
         git(&main, &["add", "README.md"])?;
@@ -83,7 +103,52 @@ impl GitFixture {
             sort_order: 0,
         })?;
         worktrees::reconcile_existing_projects(&store)?;
-        let registry = Arc::new(Mutex::new(ProcessRegistry::new(store)?));
+        let registry = if let Some(remove_fixture) = remove_fixture {
+            let profile_bin = temp.path().join("profile-bin");
+            fs::create_dir(&profile_bin)?;
+            let git_executable =
+                executable_on_test_path("git").ok_or("test git executable missing")?;
+            let git_wrapper = profile_bin.join("git");
+            let failure_script = match remove_fixture {
+                GitRemoveFixture::AlwaysFail => {
+                    "echo \"error: failed to delete worktree: Directory not empty\" >&2\nexit 255"
+                        .to_owned()
+                }
+                GitRemoveFixture::SwapPathOnce => format!(
+                    "if [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  target=''\n  for argument in \"$@\"; do target=\"$argument\"; done\n  /bin/mv \"$target\" \"$target.todo102-retry\"\n  /bin/ln -s \"$target.todo102-retry\" \"$target\"\n  echo \"error: simulated path swap during Git removal\" >&2\n  exit 255\nfi\nexec '{git}' \"$@\"",
+                    marker = temp.path().join("remove-failed-once").display(),
+                    git = git_executable.display()
+                ),
+            };
+            fs::write(
+                &git_wrapper,
+                format!(
+                    "#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = remove ]; then\n{failure_script}\nfi\nexec '{}' \"$@\"\n",
+                    git_executable.display()
+                ),
+            )?;
+            fs::set_permissions(&git_wrapper, fs::Permissions::from_mode(0o700))?;
+            let shell = temp.path().join("fixture-shell");
+            fs::write(
+                &shell,
+                format!(
+                    "#!/bin/sh\nexport PATH='{}'\nshift\nexec /bin/sh \"$@\"\n",
+                    profile_bin.display()
+                ),
+            )?;
+            fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+            let config = temp.path().join("config.yml");
+            fs::write(
+                &config,
+                format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
+            )?;
+            Arc::new(Mutex::new(ProcessRegistry::with_user_environment(
+                store,
+                UserEnvironmentResolver::new(config),
+            )?))
+        } else {
+            Arc::new(Mutex::new(ProcessRegistry::new(store)?))
+        };
 
         Ok(Self {
             _temp: temp,
@@ -396,6 +461,15 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         Path::new(&created.worktree.path).join("dirty.txt"),
         "unsaved\n",
     )?;
+    let pending = worktrees::list_for_project(&fixture.registry, 1).await?;
+    let pending = pending
+        .worktrees
+        .iter()
+        .find(|entry| entry.project_id == Some(created.project.project.id))
+        .and_then(|entry| entry.delete_safety.as_ref())
+        .expect("pending work has concrete deletion safety details");
+    assert_eq!(pending.unpushed_subjects, ["child head"]);
+    assert_eq!(pending.unmerged_subjects, ["child head"]);
     let dirty = worktrees::remove(
         &fixture.registry,
         RemoveWorktree {
@@ -408,7 +482,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         },
     )
     .await
-    .expect_err("dirty managed worktree requires typed confirmation");
+    .expect_err("dirty managed worktree requires an explicit force confirmation");
     assert_eq!(dirty.code(), "dirty_worktree");
     let dirty_warning = dirty.to_string();
     assert!(dirty_warning.contains("feature/new-ui"));
@@ -429,7 +503,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             confirm_stop_running: true,
             delete_from_disk: true,
             force_dirty: true,
-            confirm_branch: Some("feature/new-ui".into()),
+            confirm_branch: None,
         },
     )
     .await?;
@@ -565,7 +639,7 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
 async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_folder()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::Builder::new()
-        .prefix("com.workman.todo101.plain.")
+        .prefix("com.workman.todo102.plain.")
         .tempdir_in("/tmp")?;
     let folder = temp.path().join("plain-project");
     fs::create_dir(&folder)?;
@@ -626,7 +700,7 @@ async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_
 }
 
 #[tokio::test]
-async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_changes_remote()
+async fn primary_checkout_with_linked_worktree_requires_force_and_never_changes_remote()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
     let remote_refs_before_removal = git(
@@ -683,7 +757,7 @@ async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_ch
             confirm_stop_running: true,
             delete_from_disk: true,
             force_dirty: true,
-            confirm_branch: Some("main".into()),
+            confirm_branch: None,
         },
     )
     .await?;
@@ -709,7 +783,7 @@ async fn primary_checkout_with_linked_worktree_requires_typed_force_and_never_ch
 }
 
 #[tokio::test]
-async fn ignored_local_files_require_typed_force_before_deletion() -> Result<(), Box<dyn Error>> {
+async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
     std::fs::write(fixture.main.join(".gitignore"), ".env\n")?;
     git(&fixture.main, &["add", ".gitignore"])?;
@@ -760,11 +834,227 @@ async fn ignored_local_files_require_typed_force_before_deletion() -> Result<(),
             confirm_stop_running: true,
             delete_from_disk: true,
             force_dirty: true,
-            confirm_branch: Some("ignored-local".into()),
+            confirm_branch: None,
         },
     )
     .await?;
     assert!(removed.deleted_from_disk && removed.metadata_pruned);
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_failing_worktree_remove()?;
+    fs::write(
+        fixture.main.join(".gitignore"),
+        "node_modules/\nvendor/\n.env\n",
+    )?;
+    git(&fixture.main, &["add", ".gitignore"])?;
+    git(
+        &fixture.main,
+        &["commit", "-m", "ignore generated dependencies"],
+    )?;
+    git(&fixture.main, &["push", "origin", "main"])?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/vendor-junk".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let path = PathBuf::from(&created.worktree.path);
+    fs::create_dir_all(path.join("node_modules/pkg/cache"))?;
+    fs::create_dir_all(path.join("vendor/bundle"))?;
+    fs::write(path.join("node_modules/pkg/cache/blob"), "cache\n")?;
+    fs::write(path.join("vendor/bundle/library"), "vendor\n")?;
+    fs::write(path.join(".env"), "LOCAL_ONLY=1\n")?;
+    fs::write(path.join("notes.tmp"), "untracked\n")?;
+
+    let listed = worktrees::list_for_project(&fixture.registry, 1).await?;
+    let safety = listed
+        .worktrees
+        .iter()
+        .find(|entry| entry.project_id == Some(created.project.project.id))
+        .and_then(|entry| entry.delete_safety.as_ref())
+        .expect("ignored and untracked content is summarized before deletion");
+    assert_eq!(safety.untracked_files, 1);
+    assert!(safety.ignored_files >= 3);
+    assert!(
+        safety
+            .ignored_paths
+            .iter()
+            .any(|entry| entry == "node_modules/")
+    );
+    assert!(safety.ignored_paths.iter().any(|entry| entry == "vendor/"));
+    let remote_refs_before = git(
+        &fixture.origin,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    )?;
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed.deleted_from_disk && removed.metadata_pruned);
+    assert!(removed.branch_kept && removed.project_unregistered);
+    assert!(!path.exists());
+    assert!(!git(&fixture.main, &["worktree", "list", "--porcelain"])?.contains(&removed.path));
+    assert_eq!(
+        git(
+            &fixture.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before,
+        "fallback deletion must leave every scratch-remote ref untouched"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_retryable_path_swap()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/retry-removal".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let path = PathBuf::from(&created.worktree.path);
+    let displaced = PathBuf::from(format!("{}.todo102-retry", path.display()));
+
+    let failure = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("a path swap must stop the direct deletion fallback");
+    assert_eq!(failure.code(), "invalid_worktree_path");
+    assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
+    assert!(displaced.is_dir());
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project(created.project.project.id)?
+            .is_some(),
+        "registration remains until the verified directory is actually gone"
+    );
+
+    fs::remove_file(&path)?;
+    fs::rename(&displaced, &path)?;
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed.deleted_from_disk && removed.project_unregistered);
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retry_recovers_after_git_already_dropped_linked_worktree_metadata()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/metadata-retry".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let path = PathBuf::from(&created.worktree.path);
+    fs::write(path.join("remaining.tmp"), "left after partial deletion\n")?;
+    fs::remove_file(path.join(".git"))?;
+    git(&fixture.main, &["worktree", "prune"])?;
+    assert!(path.exists());
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project(created.project.project.id)?
+            .is_some()
+    );
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed.deleted_from_disk && removed.metadata_pruned);
+    assert!(removed.branch_kept && removed.project_unregistered);
     assert!(!path.exists());
     Ok(())
 }

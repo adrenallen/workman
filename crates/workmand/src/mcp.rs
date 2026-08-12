@@ -208,9 +208,6 @@ struct ProjectDeleteArgs {
     /// Permit guarded loss of dirty/unpublished state or dependent linked worktrees.
     #[serde(default)]
     force_dirty: bool,
-    /// Exact branch/name confirmation required when force_dirty=true.
-    #[serde(default)]
-    confirm_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -587,7 +584,7 @@ impl WorkmanMcp {
                 confirm_stop_running: args.confirm_stop_running,
                 delete_from_disk: args.delete_from_disk,
                 force_dirty: args.force_dirty,
-                confirm_branch: args.confirm_branch,
+                confirm_branch: None,
             },
         )
         .await

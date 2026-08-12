@@ -134,6 +134,12 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
         remove_tool.input_schema["properties"]["delete_from_disk"]["default"],
         false
     );
+    assert!(
+        remove_tool.input_schema["properties"]
+            .get("confirm_branch")
+            .is_none(),
+        "force deletion no longer asks agents to type a branch name"
+    );
     let delete_project_tool = tools
         .iter()
         .find(|tool| tool.name == "delete_project")
@@ -149,6 +155,11 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
             .description
             .as_deref()
             .is_some_and(|description| description.contains("never pushes"))
+    );
+    assert!(
+        delete_project_tool.input_schema["properties"]
+            .get("confirm_branch")
+            .is_none()
     );
     let names = tools
         .into_iter()

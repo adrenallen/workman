@@ -178,8 +178,6 @@ Remove options
   --delete-local           Also delete the exact local project folder
   --stop-running           Confirm stopping running project processes
   --force                  Permit guarded loss of local/unpublished work
-  --confirm TEXT           Exact branch or project name required with --force
-  --confirm-branch BRANCH  Backward-compatible alias for --confirm
   -h, --help               Show help and exit
 
 Without --delete-local, files stay on your computer. This command has the same
@@ -197,7 +195,6 @@ Remove options
   --delete-local     Also permanently delete the exact local project folder
   --stop-running     Confirm stopping running project processes
   --force            Permit guarded local loss (dirty/unpublished/dependent worktrees)
-  --confirm TEXT     Exact branch or project name required with --force
   -h, --help         Show help and exit
 
 Without --delete-local, files stay on your computer. Linked Git worktrees use local
@@ -479,7 +476,6 @@ enum WorktreeCommand {
         delete_from_disk: bool,
         stop_running: bool,
         force_dirty: bool,
-        confirm_branch: Option<String>,
     },
 }
 
@@ -925,7 +921,6 @@ fn parse_removal(args: Vec<String>, topic: HelpTopic) -> Result<Command> {
     let mut delete_from_disk = false;
     let mut stop_running = false;
     let mut force_dirty = false;
-    let mut confirm_branch = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--project" if project_id.is_none() => {
@@ -956,33 +951,17 @@ fn parse_removal(args: Vec<String>, topic: HelpTopic) -> Result<Command> {
             "--force" => {
                 return Err(usage_error(topic, "--force may only be specified once"));
             }
-            "--confirm" | "--confirm-name" | "--confirm-branch" if confirm_branch.is_none() => {
-                confirm_branch = Some(next_value(&mut args, &arg, topic)?);
-            }
-            "--confirm" | "--confirm-name" | "--confirm-branch" => {
-                return Err(usage_error(
-                    topic,
-                    "confirmation may only be specified once",
-                ));
-            }
             _ => return Err(unknown_option(topic, &arg)),
         }
     }
     if force_dirty && !delete_from_disk {
         return Err(usage_error(topic, "--force requires --delete-local"));
     }
-    if confirm_branch.is_some() && !force_dirty {
-        return Err(usage_error(topic, "confirmation requires --force"));
-    }
-    if force_dirty && confirm_branch.is_none() {
-        return Err(usage_error(topic, "--force requires --confirm TEXT"));
-    }
     let command = WorktreeCommand::Remove {
         project_id,
         delete_from_disk,
         stop_running,
         force_dirty,
-        confirm_branch,
     };
     Ok(if topic == HelpTopic::Project {
         Command::Project(command)
@@ -1504,7 +1483,6 @@ async fn project_remove(client: &mut Client, command: WorktreeCommand) -> Result
             delete_from_disk,
             stop_running,
             force_dirty,
-            confirm_branch,
         } => {
             let cwd = canonical_directory(&env::current_dir()?)?;
             let project_id = resolve_project_id(client, project_id, &cwd).await?;
@@ -1517,7 +1495,6 @@ async fn project_remove(client: &mut Client, command: WorktreeCommand) -> Result
                         "confirm_stop_running": stop_running,
                         "delete_from_disk": delete_from_disk,
                         "force_dirty": force_dirty,
-                        "confirm_branch": confirm_branch,
                     }),
                 )
                 .await?;
@@ -2900,7 +2877,6 @@ mod tests {
                 delete_from_disk: false,
                 stop_running: false,
                 force_dirty: false,
-                confirm_branch: None,
             })
         ));
         let cli = Cli::parse(
@@ -2913,8 +2889,6 @@ mod tests {
                 "--delete-local",
                 "--stop-running",
                 "--force",
-                "--confirm-branch",
-                "feature/done",
             ]
             .map(OsString::from),
         )
@@ -2926,15 +2900,12 @@ mod tests {
                 delete_from_disk: true,
                 stop_running: true,
                 force_dirty: true,
-                confirm_branch: Some(ref branch),
-            }) if branch == "feature/done"
+            })
         ));
         assert!(Cli::parse(["wrk", "worktree", "remove", "--force"].map(OsString::from)).is_err());
         assert!(
-            Cli::parse(
-                ["wrk", "worktree", "remove", "--delete-local", "--force"].map(OsString::from)
-            )
-            .is_err()
+            Cli::parse(["wrk", "worktree", "remove", "--confirm", "main"].map(OsString::from))
+                .is_err()
         );
 
         let cli = Cli::parse(
@@ -2947,8 +2918,6 @@ mod tests {
                 "--delete-local",
                 "--stop-running",
                 "--force",
-                "--confirm",
-                "main",
             ]
             .map(OsString::from),
         )
@@ -2960,8 +2929,7 @@ mod tests {
                 delete_from_disk: true,
                 stop_running: true,
                 force_dirty: true,
-                confirm_branch: Some(ref confirmation),
-            }) if confirmation == "main"
+            })
         ));
         assert!(Cli::parse(["wrk", "project", "remove", "--force"].map(OsString::from)).is_err());
 

@@ -99,12 +99,9 @@ struct WorktreeRemoveArgs {
     /// Also delete the exact local project directory. Linked worktrees use Git removal and local metadata pruning. Defaults to false.
     #[serde(default)]
     delete_from_disk: bool,
-    /// Permit deleting dirty, untracked, or ignored local paths, unpublished commits, or a primary checkout with dependent worktrees only with a matching confirm_branch value.
+    /// Permit deleting dirty, untracked, or ignored local paths, unpublished commits, or a primary checkout with dependent worktrees.
     #[serde(default)]
     force_dirty: bool,
-    /// Must exactly match the branch when force_dirty=true for a guarded deletion.
-    #[serde(default)]
-    confirm_branch: Option<String>,
 }
 
 #[tool_router(router = worktree_tool_router, vis = "pub(crate)")]
@@ -250,7 +247,7 @@ impl WorkmanMcp {
                 confirm_stop_running: args.confirm_stop_running,
                 delete_from_disk: args.delete_from_disk,
                 force_dirty: args.force_dirty,
-                confirm_branch: args.confirm_branch,
+                confirm_branch: None,
             },
         )
         .await

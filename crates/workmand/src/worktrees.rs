@@ -169,7 +169,9 @@ pub struct WorktreeDeleteSafety {
     pub ignored_files: usize,
     pub ignored_paths: Vec<String>,
     pub unpushed_commits: usize,
+    pub unpushed_subjects: Vec<String>,
     pub unmerged_commits: usize,
+    pub unmerged_subjects: Vec<String>,
     pub upstream: Option<String>,
     pub push_target: Option<String>,
     pub merge_target: String,
@@ -319,9 +321,16 @@ struct VerifiedDeleteTarget {
     path: PathBuf,
     repository_root: Option<PathBuf>,
     branch: String,
-    project_label: String,
     kind: DeleteTargetKind,
     dependent_worktrees: Vec<String>,
+    recovering_partial_removal: bool,
+}
+
+#[derive(Clone, Debug)]
+struct DeleteRecoveryHint {
+    repository_root: PathBuf,
+    branch: String,
+    linked_worktree: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1117,7 +1126,7 @@ pub async fn remove(
             "set confirm_remove=true to unregister the worktree project; the checkout is kept unless delete_from_disk=true".into(),
         ));
     }
-    let (project, processes, all_projects) = {
+    let (project, processes, all_projects, recovery_hint) = {
         let mut registry = registry.lock().await;
         let project = registry
             .store()
@@ -1130,7 +1139,19 @@ pub async fn remove(
             })?;
         let processes = registry.list(Some(project.id))?;
         let all_projects = registry.store().list_all_projects()?;
-        (project, processes, all_projects)
+        let recovery_hint = match registry.store().get_project_worktree(project.id)? {
+            Some(link) => registry
+                .store()
+                .get_worktree_repository(link.repository_id)?
+                .map(|repository| DeleteRecoveryHint {
+                    linked_worktree: link.parent_project_id.is_some()
+                        || !same_path(Path::new(&project.path), Path::new(&repository.root_path)),
+                    repository_root: PathBuf::from(repository.root_path),
+                    branch: link.branch,
+                }),
+            None => None,
+        };
+        (project, processes, all_projects, recovery_hint)
     };
     let has_running = processes.iter().any(|process| {
         matches!(
@@ -1154,8 +1175,13 @@ pub async fn remove(
     let mut branch_kept = true;
     let mut post_delete_issue = None;
     if request.delete_from_disk {
-        let verified =
-            verify_project_delete_target(&project, &all_projects, &command_environment).await?;
+        let verified = verify_project_delete_target(
+            &project,
+            &all_projects,
+            recovery_hint.as_ref(),
+            &command_environment,
+        )
+        .await?;
         branch.clone_from(&verified.branch);
         branch_kept = verified.kind == DeleteTargetKind::LinkedWorktree;
         let mut safety = delete_target_safety(&verified, &command_environment).await?;
@@ -1182,26 +1208,25 @@ pub async fn remove(
                     .as_ref()
                     .expect("linked worktree has repository root");
                 let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
-                if safety.as_ref().is_some_and(|safety| safety.requires_force) {
+                if request.force_dirty
+                    || safety.as_ref().is_some_and(|safety| safety.requires_force)
+                {
                     args.push(OsString::from("--force"));
                 }
                 args.push(OsString::from("--"));
                 args.push(verified.path.as_os_str().to_owned());
-                git_required(
+                let git_error = git_required(
                     repository_root,
                     args,
                     "remove local Git worktree",
                     &command_environment,
                 )
-                .await?;
+                .await
+                .err();
+                ensure_verified_directory_removed(&verified.path, git_error.as_ref())?;
             }
             DeleteTargetKind::PrimaryCheckout | DeleteTargetKind::Folder => {
-                fs::remove_dir_all(&verified.path).map_err(|error| {
-                    WorktreeError::InvalidPath(format!(
-                        "could not delete {}: {error}",
-                        verified.path.display()
-                    ))
-                })?;
+                ensure_verified_directory_removed(&verified.path, None)?;
             }
         }
         // From this point onward the checkout is gone. Any finalization error
@@ -1223,23 +1248,6 @@ pub async fn remove(
             {
                 Ok(_) => metadata_pruned = true,
                 Err(error) => post_delete_issue = Some(error),
-            }
-        }
-        match fs::symlink_metadata(&verified.path) {
-            Ok(_) => {
-                post_delete_issue.get_or_insert_with(|| WorktreeError::InvalidPath(format!(
-                    "Git removed the worktree metadata but the directory still exists at {}; refusing an automatic filesystem fallback",
-                    verified.path.display()
-                )));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                post_delete_issue.get_or_insert_with(|| {
-                    WorktreeError::InvalidPath(format!(
-                        "could not verify that Git deleted {}: {error}",
-                        verified.path.display()
-                    ))
-                });
             }
         }
         if verified.kind == DeleteTargetKind::LinkedWorktree {
@@ -2167,6 +2175,7 @@ fn parse_porcelain(bytes: &[u8]) -> WorktreeResult<Vec<GitWorktree>> {
 async fn verify_project_delete_target(
     project: &Project,
     all_projects: &[Project],
+    recovery_hint: Option<&DeleteRecoveryHint>,
     environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<VerifiedDeleteTarget> {
     let metadata = fs::symlink_metadata(&project.path).map_err(|error| {
@@ -2209,6 +2218,24 @@ async fn verify_project_delete_target(
         .unwrap_or_else(|| project.name.clone());
     let Some(top) = git_optional(&path, ["rev-parse", "--show-toplevel"], environment).await?
     else {
+        if let Some(hint) = recovery_hint.filter(|hint| hint.linked_worktree) {
+            let repository_root = fs::canonicalize(&hint.repository_root).map_err(|error| {
+                WorktreeError::InvalidPath(format!(
+                    "could not verify the repository for partially removed worktree {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if repository_root != path {
+                return Ok(VerifiedDeleteTarget {
+                    path,
+                    repository_root: Some(repository_root),
+                    branch: hint.branch.clone(),
+                    kind: DeleteTargetKind::LinkedWorktree,
+                    dependent_worktrees: Vec::new(),
+                    recovering_partial_removal: true,
+                });
+            }
+        }
         if path.join(".git").exists() {
             return Err(WorktreeError::InvalidPath(format!(
                 "refusing to delete {}; it looks like a Git checkout but Git could not verify it",
@@ -2219,9 +2246,9 @@ async fn verify_project_delete_target(
             path,
             repository_root: None,
             branch: project_label.clone(),
-            project_label,
             kind: DeleteTargetKind::Folder,
             dependent_worktrees: Vec::new(),
+            recovering_partial_removal: false,
         });
     };
     let top = fs::canonicalize(top.trim())?;
@@ -2233,9 +2260,9 @@ async fn verify_project_delete_target(
             path,
             repository_root: None,
             branch: project_label.clone(),
-            project_label,
             kind: DeleteTargetKind::Folder,
             dependent_worktrees: Vec::new(),
+            recovering_partial_removal: false,
         });
     }
 
@@ -2273,14 +2300,69 @@ async fn verify_project_delete_target(
         path,
         repository_root: Some(snapshot.root_path),
         branch,
-        project_label,
         kind: if primary {
             DeleteTargetKind::PrimaryCheckout
         } else {
             DeleteTargetKind::LinkedWorktree
         },
         dependent_worktrees,
+        recovering_partial_removal: false,
     })
+}
+
+fn ensure_verified_directory_removed(
+    path: &Path,
+    git_error: Option<&WorktreeError>,
+) -> WorktreeResult<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(WorktreeError::InvalidPath(format!(
+                "could not inspect verified deletion target {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(WorktreeError::InvalidPath(format!(
+            "refusing filesystem deletion fallback for {}; the verified path is no longer a real directory",
+            path.display()
+        )));
+    }
+    let current = fs::canonicalize(path).map_err(|error| {
+        WorktreeError::InvalidPath(format!(
+            "could not re-verify deletion target {}: {error}",
+            path.display()
+        ))
+    })?;
+    if current != path {
+        return Err(WorktreeError::InvalidPath(format!(
+            "refusing filesystem deletion fallback because {} now resolves to {}",
+            path.display(),
+            current.display()
+        )));
+    }
+    fs::remove_dir_all(path).map_err(|error| {
+        let prior = git_error
+            .map(|error| format!("Git removal failed ({error}); "))
+            .unwrap_or_default();
+        WorktreeError::InvalidPath(format!(
+            "{prior}direct deletion of verified path {} also failed: {error}. The project remains registered and can be retried",
+            path.display()
+        ))
+    })?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(WorktreeError::InvalidPath(format!(
+            "direct deletion returned successfully but {} still exists; the project remains registered and can be retried",
+            path.display()
+        ))),
+        Err(error) => Err(WorktreeError::InvalidPath(format!(
+            "could not verify deletion of {}; the project remains registered and can be retried: {error}",
+            path.display()
+        ))),
+    }
 }
 
 async fn delete_target_safety(
@@ -2290,6 +2372,24 @@ async fn delete_target_safety(
     let Some(repository_root) = target.repository_root.as_deref() else {
         return Ok(None);
     };
+    if target.recovering_partial_removal {
+        return Ok(Some(WorktreeDeleteSafety {
+            dirty_files: 0,
+            untracked_files: 0,
+            dirty_paths: Vec::new(),
+            ignored_files: 0,
+            ignored_paths: Vec::new(),
+            unpushed_commits: 0,
+            unpushed_subjects: Vec::new(),
+            unmerged_commits: 0,
+            unmerged_subjects: Vec::new(),
+            upstream: None,
+            push_target: None,
+            merge_target: target.branch.clone(),
+            dependent_worktrees: Vec::new(),
+            requires_force: true,
+        }));
+    }
     let mut safety =
         worktree_delete_safety(&target.path, repository_root, &target.branch, environment).await?;
     safety
@@ -2304,15 +2404,13 @@ fn require_delete_confirmation(
     safety: Option<&WorktreeDeleteSafety>,
     request: &RemoveWorktree,
 ) -> WorktreeResult<()> {
-    let confirmation_matches = request
-        .confirm_branch
-        .as_deref()
-        .is_some_and(|confirmation| {
-            confirmation == target.branch || confirmation == target.project_label
-        });
-    if safety.is_some_and(|safety| safety.requires_force)
-        && (!request.force_dirty || !confirmation_matches)
-    {
+    if safety.is_some_and(|safety| safety.requires_force) && !request.force_dirty {
+        if target.recovering_partial_removal {
+            return Err(WorktreeError::Dirty(format!(
+                "Git already dropped metadata for a partially removed worktree at {}; explicitly force deletion to remove the remaining verified directory",
+                target.path.display()
+            )));
+        }
         return Err(WorktreeError::Dirty(delete_safety_warning(
             &target.path,
             &target.branch,
@@ -2380,7 +2478,14 @@ async fn worktree_delete_safety(
         environment,
     )
     .await?;
+    let unpushed_subjects = rev_list_subjects(
+        path,
+        push_target.as_deref().unwrap_or(&merge_target),
+        environment,
+    )
+    .await?;
     let unmerged_commits = rev_list_count(path, &merge_target, environment).await?;
+    let unmerged_subjects = rev_list_subjects(path, &merge_target, environment).await?;
     let dirty_files = dirty_paths.len();
     let ignored_files = ignored_paths.len();
     Ok(WorktreeDeleteSafety {
@@ -2390,7 +2495,9 @@ async fn worktree_delete_safety(
         ignored_files,
         ignored_paths,
         unpushed_commits,
+        unpushed_subjects,
         unmerged_commits,
+        unmerged_subjects,
         upstream,
         push_target,
         merge_target,
@@ -2526,6 +2633,22 @@ async fn rev_list_count(
     })
 }
 
+async fn rev_list_subjects(
+    path: &Path,
+    base: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Vec<String>> {
+    let range = format!("{base}..HEAD");
+    let subjects = git_required(
+        path,
+        ["log", "--format=%s", "--max-count=3", range.as_str()],
+        "inspect worktree commit subjects",
+        environment,
+    )
+    .await?;
+    Ok(subjects.lines().map(str::to_owned).collect())
+}
+
 async fn git_optional<I, S>(
     directory: &Path,
     args: I,
@@ -2584,7 +2707,7 @@ fn delete_safety_warning(path: &Path, branch: &str, safety: &WorktreeDeleteSafet
         ));
     }
     if safety.unpushed_commits > 0 {
-        reasons.push(if let Some(push_target) = &safety.push_target {
+        let mut reason = if let Some(push_target) = &safety.push_target {
             format!(
                 "{} commit(s) not pushed to {push_target}",
                 safety.unpushed_commits
@@ -2594,13 +2717,21 @@ fn delete_safety_warning(path: &Path, branch: &str, safety: &WorktreeDeleteSafet
                 "{} commit(s) have no branch upstream and are not present in {}",
                 safety.unpushed_commits, safety.merge_target
             )
-        });
+        };
+        if !safety.unpushed_subjects.is_empty() {
+            reason.push_str(&format!(": {}", safety.unpushed_subjects.join("; ")));
+        }
+        reasons.push(reason);
     }
     if safety.unmerged_commits > 0 {
-        reasons.push(format!(
+        let mut reason = format!(
             "{} commit(s) not merged into {}",
             safety.unmerged_commits, safety.merge_target
-        ));
+        );
+        if !safety.unmerged_subjects.is_empty() {
+            reason.push_str(&format!(": {}", safety.unmerged_subjects.join("; ")));
+        }
+        reasons.push(reason);
     }
     if !safety.dependent_worktrees.is_empty() {
         reasons.push(format!(
@@ -2610,7 +2741,7 @@ fn delete_safety_warning(path: &Path, branch: &str, safety: &WorktreeDeleteSafet
         ));
     }
     format!(
-        "refusing to delete project {branch:?} at {}: {}. Local files, commits, or dependent worktrees may be permanently lost; explicitly force deletion and confirm {branch:?} to proceed",
+        "refusing to delete project {branch:?} at {}: {}. Local files, commits, or dependent worktrees may be permanently lost; explicitly force deletion to proceed",
         path.display(),
         reasons.join("; ")
     )

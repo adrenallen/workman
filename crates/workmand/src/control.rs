@@ -272,8 +272,6 @@ struct WorktreeRemoveParams {
     delete_from_disk: bool,
     #[serde(default)]
     force_dirty: bool,
-    #[serde(default)]
-    confirm_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,7 +512,7 @@ async fn dispatch(
                     confirm_stop_running: params.confirm_stop_running,
                     delete_from_disk: params.delete_from_disk,
                     force_dirty: params.force_dirty,
-                    confirm_branch: params.confirm_branch,
+                    confirm_branch: None,
                 },
             )
             .await
@@ -613,7 +611,7 @@ async fn dispatch(
                     confirm_stop_running: params.confirm_stop_running,
                     delete_from_disk: params.delete_from_disk,
                     force_dirty: params.force_dirty,
-                    confirm_branch: params.confirm_branch,
+                    confirm_branch: None,
                 },
             )
             .await

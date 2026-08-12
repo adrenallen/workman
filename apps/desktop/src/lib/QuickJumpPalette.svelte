@@ -368,7 +368,7 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
   <Dialog.Content
-    class="quick-jump w-[min(680px,calc(100vw-36px))] max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 shadow-2xl"
+    class="quick-jump w-[min(840px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0 shadow-2xl"
     showCloseButton={false}
     aria-labelledby="quick-jump-title"
   >
@@ -470,9 +470,9 @@
   .palette-title strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 700; }
   .palette-title small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .jump-mark { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--border-strong); background: var(--popover); color: var(--foreground); font: 13px 'JetBrains Mono Variable', monospace; }
-  kbd { display: inline-grid; min-width: 21px; min-height: 19px; place-items: center; border: 1px solid var(--border-strong); border-bottom-color: #5c626b; border-radius: 3px; padding: 1px 5px; background: var(--accent); color: #afb5bd; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  kbd { display: inline-grid; min-width: 21px; min-height: 19px; place-items: center; border: 1px solid var(--border-strong); border-bottom-color: color-mix(in srgb, var(--foreground) 34%, var(--border)); border-radius: 3px; padding: 1px 5px; background: var(--accent); color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
 
-  .search-field { display: grid; min-height: 47px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: #121416; color: var(--muted-foreground); }
+  .search-field { display: grid; min-height: 47px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: color-mix(in srgb, var(--background) 76%, var(--popover)); color: var(--muted-foreground); }
   .search-field > :global(svg) { color: var(--muted-foreground); }
   .search-field :global(input) { width: 100%; border: 0; outline: 0; padding: 4px 0; background: transparent; color: var(--foreground); font-size: 12px; }
   .search-field :global(input::placeholder) { color: var(--muted-foreground); }
@@ -482,7 +482,7 @@
   .result-summary small { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .results { min-height: 90px; padding: 4px; }
   .result-row { display: grid; width: 100%; min-height: 43px; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 3px; padding: 4px 6px; background: transparent; color: var(--text-soft); text-align: left; cursor: pointer; }
-  .result-row:hover, .result-row.active { border-color: #484e56; background: #24272c; }
+  .result-row:hover, .result-row.active { border-color: var(--border-strong); background: var(--accent); }
   .result-row.active { box-shadow: inset 2px 0 var(--text-soft); }
   .kind-glyph { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--border-strong); background: var(--popover); color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .kind-glyph.project { color: var(--text-soft); }
@@ -494,8 +494,8 @@
   .result-copy small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .result-path { display: flex; max-width: 235px; align-items: center; justify-content: flex-end; gap: 5px; overflow: hidden; }
   .result-path b { overflow: hidden; color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-  .result-path em, .result-path i { flex: none; border: 1px solid #393e45; border-radius: 3px; padding: 1px 4px; color: var(--muted-foreground); background: var(--popover); font: normal var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
-  .result-path i { border-color: #55504a; color: #b2a890; }
+  .result-path em, .result-path i { flex: none; border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px; color: var(--muted-foreground); background: var(--popover); font: normal var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .result-path i { border-color: color-mix(in srgb, var(--warning) 38%, var(--border)); color: var(--warning); }
   .no-results { display: grid; min-height: 112px; place-content: center; gap: 4px; color: var(--muted-foreground); text-align: center; }
   .no-results strong { color: var(--foreground); font-size: var(--font-size-sm); }
   .no-results span { font-size: var(--font-size-xs); }

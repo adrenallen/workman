@@ -26,7 +26,7 @@
 </script>
 
 <AlertDialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
-  <AlertDialog.Content class="w-[min(460px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0">
+  <AlertDialog.Content class="w-[min(620px,calc(100vw-24px))] !max-w-none gap-0 rounded-lg border border-border bg-popover p-0">
     <AlertDialog.Header class="gap-2 border-b border-border px-4 py-4 text-left">
       <span class:danger={destructive} class="flex items-center gap-2">
         <AlertTriangleIcon size={16} />

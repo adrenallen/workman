@@ -2758,8 +2758,7 @@
 
   async function confirmRemoveWorktree(
     deleteFromDisk: boolean,
-    forceDirty: boolean,
-    confirmBranch?: string
+    forceDirty: boolean
   ): Promise<void> {
     const state = removeWorktreeDialog;
     if (!state || removeWorktreeBusy) return;
@@ -2771,8 +2770,7 @@
         confirm_remove: true,
         confirm_stop_running: true,
         delete_from_disk: deleteFromDisk,
-        force_dirty: forceDirty,
-        confirm_branch: confirmBranch
+        force_dirty: forceDirty
       });
       removeWorktreeDialog = null;
       projects = await client.projects();
@@ -4311,7 +4309,7 @@
     busy={removeWorktreeBusy}
     error={removeWorktreeError}
     serverForceRequired={removeWorktreeForceRequired}
-    onConfirm={(deleteFromDisk, forceDirty, confirmBranch) => void confirmRemoveWorktree(deleteFromDisk, forceDirty, confirmBranch)}
+    onConfirm={(deleteFromDisk, forceDirty) => void confirmRemoveWorktree(deleteFromDisk, forceDirty)}
     onClose={() => { if (!removeWorktreeBusy) { removeWorktreeDialog = null; removeWorktreeForceRequired = false; } }}
   />
 {/if}

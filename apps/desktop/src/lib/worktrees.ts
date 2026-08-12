@@ -64,7 +64,9 @@ export interface WorktreeDeleteSafety {
   ignored_files: number;
   ignored_paths: string[];
   unpushed_commits: number;
+  unpushed_subjects: string[];
   unmerged_commits: number;
+  unmerged_subjects: string[];
   upstream: string | null;
   push_target: string | null;
   merge_target: string;
@@ -134,7 +136,6 @@ export interface RemoveWorktreeInput {
   confirm_stop_running: boolean;
   delete_from_disk: boolean;
   force_dirty: boolean;
-  confirm_branch?: string;
 }
 
 export type WorktreeDialogSubmission =
