@@ -164,6 +164,12 @@ manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand
 pre-Workman launchers from PATH and known install locations. Versioned bundle directories remain
 available as rollback files; superseded launchers are backed up before being replaced.
 
+`WORKMAN_INSTALL_DIR` overrides only the extracted versioned bundle destination (including the app,
+guides, and manual installer). The bundled installer keeps CLI binaries in the durable
+`$HOME/.local/share/workman/dist/<version>/bin` layout and links them from `$HOME/.local/bin`; the
+bootstrap's reconciliation and final PATH verification use that durable target regardless of the
+bundle destination override.
+
 When old launchers or daemons are present, an interactive install reads confirmation from
 `/dev/tty`, so prompting works under `curl | sh`. `--yes` skips the prompts; a non-interactive
 install also proceeds. A confirmed daemon restart preserves its existing data directory. At the

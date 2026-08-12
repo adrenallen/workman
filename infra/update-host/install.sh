@@ -21,7 +21,8 @@ Options:
 Environment:
   WORKMAN_KEY          Shared Workman download key
   WORKMAN_CHANNEL      Release channel: stable (default) or latest
-  WORKMAN_INSTALL_DIR  Versioned bundle destination
+  WORKMAN_INSTALL_DIR  Extracted versioned bundle destination; CLI binaries
+                       remain in HOME/.local/share/workman/dist/VERSION/bin
 EOF
 }
 
@@ -199,6 +200,7 @@ case "$archive_kind" in
 esac
 
 install_dir="${WORKMAN_INSTALL_DIR:-$HOME/.local/share/workman/$version}"
+durable_bin_dir="$HOME/.local/share/workman/dist/$version/bin"
 if [ ! -f "$stage_dir/install.sh" ] || [ ! -x "$stage_dir/bin/wrk" ] || [ ! -x "$stage_dir/bin/workmand" ]; then
   echo "the Workman bundle is missing its installer or executable pair" >&2
   exit 1
@@ -441,16 +443,16 @@ def scan_daemons():
     return records
 
 
-def scan(home, path_value, install_dir, expected_version, inventory_path):
+def scan(home, path_value, durable_bin_dir, expected_version, inventory_path):
     home = absolute(home)
-    install_dir = absolute(install_dir)
+    durable_bin_dir = absolute(durable_bin_dir)
     inventory = {
         "home": home,
         "path": path_value,
-        "install_dir": install_dir,
+        "durable_bin_dir": durable_bin_dir,
         "managed_bin_dir": os.path.join(home, ".local", "bin"),
-        "new_wrk": os.path.join(install_dir, "bin", "wrk"),
-        "new_workmand": os.path.join(install_dir, "bin", "workmand"),
+        "new_wrk": os.path.join(durable_bin_dir, "wrk"),
+        "new_workmand": os.path.join(durable_bin_dir, "workmand"),
         "expected_version": expected_version,
         "launchers": scan_launchers(home, path_value),
         "historical": scan_historical(home),
@@ -803,7 +805,8 @@ has_controlling_tty() {
   (tty </dev/tty) >/dev/null 2>&1
 }
 
-python3 "$reconciler_path" scan "$HOME" "${PATH:-}" "$install_dir" "$version" "$inventory_path"
+python3 "$reconciler_path" scan \
+  "$HOME" "${PATH:-}" "$durable_bin_dir" "$version" "$inventory_path"
 python3 "$reconciler_path" report "$inventory_path"
 set -- $(python3 "$reconciler_path" counts "$inventory_path")
 launcher_actions="$1"

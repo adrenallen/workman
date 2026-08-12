@@ -17,6 +17,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const installer = fileURLToPath(new URL("../install.sh", import.meta.url));
+const bundledInstaller = fileURLToPath(
+  new URL("../../../scripts/release-assets/install.sh", import.meta.url),
+);
 const requiredShells = ["sh", "bash"];
 const optionalShells = ["dash"];
 
@@ -67,6 +70,7 @@ function createInstallFixture(shell) {
   const tools = join(root, "tools");
   const home = join(root, "home");
   const installDir = join(root, "install");
+  const distBinDir = join(home, ".local", "share", "workman", "dist", "9.9.9", "bin");
   mkdirSync(bundleBin, { recursive: true });
   mkdirSync(oldBin, { recursive: true });
   mkdirSync(lateBin, { recursive: true });
@@ -76,14 +80,13 @@ function createInstallFixture(shell) {
 
   executable(join(bundleBin, "wrk"), "#!/bin/sh\nprintf 'workman 9.9.9\\n'\n");
   executable(join(bundleBin, "workmand"), "#!/bin/sh\nexit 0\n");
+  executable(join(bundle, "release-install.sh"), readFileSync(bundledInstaller, "utf8"));
   executable(
     join(bundle, "install.sh"),
     `#!/bin/bash
 set -eu
 bundle_dir="$(cd "$(dirname "$0")" && pwd)"
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$bundle_dir/bin/wrk" "$HOME/.local/bin/wrk"
-ln -sfn "$bundle_dir/bin/workmand" "$HOME/.local/bin/workmand"
+bash "$bundle_dir/release-install.sh" </dev/null
 if [[ -n "$FIXTURE_LATE_SHADOW" ]]; then
   printf '#!/bin/sh\nprintf "workman 0.1.1\\n"\n' > "$FIXTURE_LATE_SHADOW/wrk"
   chmod +x "$FIXTURE_LATE_SHADOW/wrk"
@@ -144,7 +147,7 @@ esac
 `,
   );
   const path = [lateBin, oldBin, oldBin, tools, join(home, ".local", "bin"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":");
-  return { root, oldBin, lateBin, home, installDir, manifest, archive, path };
+  return { root, oldBin, lateBin, home, installDir, distBinDir, manifest, archive, path };
 }
 
 function executeInstallFixture(fixture, shell, extraArguments = ["--yes"], extraEnv = {}) {
@@ -192,7 +195,7 @@ test("bootstrap installer has valid shell syntax and documents key and channel f
   assert.doesNotMatch(source, /\$'[^']*'/);
 });
 
-test("bootstrap deduplicates and replaces shadowing wrk, workmand, awm, and awmd launchers", () => {
+test("bootstrap follows the bundled installer's durable dist layout while replacing launchers", () => {
   for (const shell of availableShells()) {
     const { fixture, result } = runInstallFixture(shell);
     try {
@@ -203,6 +206,10 @@ test("bootstrap deduplicates and replaces shadowing wrk, workmand, awm, and awmd
       assert.match(result.stdout, /Verified fresh PATH resolution: .* reports workman 9\.9\.9/);
       assert.match(result.stdout, /Note: fresh PATH resolution uses .*old-bin\/wrk/);
       assert.match(result.stdout, /run: hash -r/);
+      assert.equal(
+        realpathSync(join(fixture.home, ".local", "bin", "wrk")),
+        realpathSync(join(fixture.distBinDir, "wrk")),
+      );
       const wrkLines = result.stdout
         .split("\n")
         .filter((line) => line.trimStart().startsWith("wrk") && line.includes(`${fixture.oldBin}/wrk`));
@@ -215,7 +222,7 @@ test("bootstrap deduplicates and replaces shadowing wrk, workmand, awm, and awmd
       ]) {
         assert.equal(
           realpathSync(join(fixture.oldBin, program)),
-          realpathSync(join(fixture.installDir, "bin", target)),
+          realpathSync(join(fixture.distBinDir, target)),
         );
         assert.ok(
           readdirSync(fixture.oldBin).some((name) => name.startsWith(`${program}.workman-backup-`)),
@@ -245,7 +252,7 @@ test("non-tty bootstrap proceeds with replacement like --yes", () => {
     assert.match(result.stdout, /No interactive terminal; proceeding with replacement/);
     assert.equal(
       realpathSync(join(fixture.oldBin, "wrk")),
-      realpathSync(join(fixture.installDir, "bin", "wrk")),
+      realpathSync(join(fixture.distBinDir, "wrk")),
     );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
