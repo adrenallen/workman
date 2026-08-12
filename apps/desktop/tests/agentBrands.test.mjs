@@ -24,6 +24,10 @@ test('maps every bundled preset brand from declarative preset metadata', () => {
     AGENT_BRANDS.filter((brand) => brand.glyph).map((brand) => brand.id),
     ['anthropic', 'openai']
   );
+  assert.deepEqual(
+    AGENT_BRANDS.filter((brand) => brand.asset).map((brand) => [brand.id, brand.asset]),
+    [['deepseek', 'deepseek'], ['moonshot', 'kimi']]
+  );
 });
 
 test('provider identity outranks a generic host tool type', () => {

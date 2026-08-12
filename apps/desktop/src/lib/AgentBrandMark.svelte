@@ -1,6 +1,14 @@
 <script lang="ts">
+  import deepSeekMark from '../../../../assets/branding/agent-deepseek.png';
+  import kimiMark from '../../../../assets/branding/agent-kimi.png';
+
   import type { AgentTool } from './agentTools';
-  import { resolveAgentBrand } from './agentBrands';
+  import { resolveAgentBrand, type BundledAgentAsset } from './agentBrands';
+
+  const bundledAssets: Record<BundledAgentAsset, string> = {
+    deepseek: deepSeekMark,
+    kimi: kimiMark
+  };
 
   interface Props {
     tool?: AgentTool | null;
@@ -19,11 +27,12 @@
   }: Props = $props();
 
   let brand = $derived(resolveAgentBrand(tool, fallbackName, fallbackToolType));
+  let assetSource = $derived(brand.asset ? bundledAssets[brand.asset] : null);
   let label = $derived(tool?.icon_data_url ? `${tool.name} custom mark` : brand.label);
 </script>
 
 <span
-  class={`agent-brand-mark ${tool?.icon_data_url ? 'custom' : brand.glyph ? 'glyph' : 'monogram'} ${className}`}
+  class={`agent-brand-mark ${tool?.icon_data_url ? 'custom' : assetSource ? 'asset' : brand.glyph ? 'glyph' : 'monogram'} ${className}`}
   style={`--agent-brand-size: ${size}px`}
   role="img"
   aria-label={label}
@@ -32,6 +41,8 @@
 >
   {#if tool?.icon_data_url}
     <img src={tool.icon_data_url} alt="" />
+  {:else if assetSource}
+    <img src={assetSource} alt="" />
   {:else if brand.glyph === 'anthropic'}
     <!-- Official Anthropic A geometry; source: https://www.anthropic.com/ -->
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z" /></svg>
@@ -50,5 +61,6 @@
   .agent-brand-mark img { object-fit: contain; }
   .agent-brand-mark.monogram { border: 1px solid currentColor; border-radius: 3px; opacity: 0.48; }
   .agent-brand-mark.monogram > span { font: 700 max(6px, calc(var(--agent-brand-size) * 0.45))/1 'JetBrains Mono Variable', monospace; letter-spacing: -0.08em; transform: translateX(-0.25px); }
+  .agent-brand-mark.asset { border-radius: 3px; opacity: 0.9; }
   .agent-brand-mark.custom { border-radius: 3px; opacity: 0.68; }
 </style>
