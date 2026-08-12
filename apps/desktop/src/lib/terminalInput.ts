@@ -1,4 +1,19 @@
+import type { ProcessKind } from './daemon';
+
 const safePathCharacter = /^[\p{L}\p{N}_./-]$/u;
+
+export type ClipboardImagePasteRoute = 'agent-tui' | 'shell-path';
+
+/**
+ * Agent TUIs own clipboard-image import, so forward their Ctrl+V signal and let them read the
+ * unchanged system clipboard. Plain terminals retain Workman's saved-file + escaped-path paste.
+ */
+export function clipboardImagePasteRoute(processKind: ProcessKind): ClipboardImagePasteRoute {
+  return processKind === 'agent' ? 'agent-tui' : 'shell-path';
+}
+
+/** Ctrl+V as a PTY byte; Claude Code and Codex use it to import an image from the clipboard. */
+export const AGENT_TUI_CLIPBOARD_IMAGE_PASTE = '\x16';
 
 /** Keep replay-generated terminal replies gated without dropping physical user input. */
 export function shouldForwardTerminalInput(

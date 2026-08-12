@@ -130,15 +130,19 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
 
-    let source_icon = temp.path().join("source-icon.png");
+    let clipboard_dir = temp.path().join("Application Support/terminal-clipboard");
+    std::fs::create_dir_all(&clipboard_dir)?;
+    let source_icon = clipboard_dir.join("paste-123.png");
     RgbaImage::from_pixel(96, 32, Rgba([19, 42, 77, 255])).save(&source_icon)?;
+    let escaped_source_icon = source_icon.to_string_lossy().replace(' ', "\\ ");
     let icon = rpc(
         &mut socket,
         20,
         "agent_tools.set_icon",
-        json!({ "agent_tool_id": tool_id, "source_path": source_icon }),
+        json!({ "agent_tool_id": tool_id, "source_path": escaped_source_icon }),
     )
     .await;
+    assert!(icon["ok"].as_bool().unwrap());
     assert!(
         icon["result"]["icon_data_url"]
             .as_str()

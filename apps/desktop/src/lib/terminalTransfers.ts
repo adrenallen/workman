@@ -1,12 +1,19 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 
-import { localPathsFromUriList, pointIsInsideRect, shellEscapePaths } from './terminalInput';
+import {
+  type ClipboardImagePasteRoute,
+  localPathsFromUriList,
+  pointIsInsideRect,
+  shellEscapePaths
+} from './terminalInput';
 
 interface TerminalTransferOptions {
   element: HTMLElement;
   canInsert: () => boolean;
   insert: (text: string) => void;
+  imagePasteRoute: () => ClipboardImagePasteRoute;
+  forwardAgentImagePaste: () => void;
   focus: () => void;
   reportError: (message: string) => void;
   setDropActive: (active: boolean) => void;
@@ -113,6 +120,13 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
     event.stopPropagation();
     if (!options.canInsert()) {
       options.reportError('Terminal input is not ready for a clipboard image.');
+      return;
+    }
+    if (options.imagePasteRoute() === 'agent-tui') {
+      // The TUI reads the image from the OS clipboard when it receives Ctrl+V. Do not save,
+      // replace, or clear the clipboard here; forwarding the chord preserves its native flow.
+      options.focus();
+      options.forwardAgentImagePaste();
       return;
     }
     options.setPasteSaving(true);

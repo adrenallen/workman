@@ -85,7 +85,7 @@ pub fn set_override(
     data_dir: &Path,
     source_path: &Path,
 ) -> Result<AgentToolView, AgentIconError> {
-    let source = fs::canonicalize(source_path).map_err(|_| AgentIconError::SourceMissing)?;
+    let source = canonical_source_path(source_path)?;
     let metadata = fs::metadata(&source).map_err(|_| AgentIconError::SourceMissing)?;
     if !metadata.is_file() {
         return Err(AgentIconError::SourceMissing);
@@ -144,6 +144,36 @@ pub fn set_override(
     fs::rename(&temporary, &destination)?;
 
     Ok(view(tool, data_dir))
+}
+
+fn canonical_source_path(source_path: &Path) -> Result<PathBuf, AgentIconError> {
+    if let Ok(source) = fs::canonicalize(source_path) {
+        return Ok(source);
+    }
+    let decoded = decode_terminal_escaped_path(source_path).ok_or(AgentIconError::SourceMissing)?;
+    fs::canonicalize(decoded).map_err(|_| AgentIconError::SourceMissing)
+}
+
+/// Terminal image paste inserts an unquoted, backslash-escaped path for shells. Accept that same
+/// value when it is carried into the icon picker, but always prefer an existing literal path.
+fn decode_terminal_escaped_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_str()?;
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    let mut changed = false;
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escaped = characters.next()?;
+        if escaped.is_alphanumeric() || matches!(escaped, '_' | '.' | '/' | '-') {
+            return None;
+        }
+        decoded.push(escaped);
+        changed = true;
+    }
+    changed.then(|| PathBuf::from(decoded))
 }
 
 pub fn remove_override(tool: AgentTool, data_dir: &Path) -> Result<AgentToolView, AgentIconError> {
@@ -315,5 +345,47 @@ mod tests {
         fs::write(&source, "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>").unwrap();
         let error = set_override(tool(7), &temp.path().join("state"), &source).unwrap_err();
         assert!(matches!(error, AgentIconError::UnsupportedFormat));
+    }
+
+    #[test]
+    fn override_accepts_a_terminal_escaped_clipboard_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let clipboard = temp.path().join("Application Support/terminal-clipboard");
+        fs::create_dir_all(&clipboard).unwrap();
+        let source = clipboard.join("paste-123.png");
+        RgbaImage::from_pixel(48, 48, image::Rgba([30, 60, 90, 255]))
+            .save(&source)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let escaped = PathBuf::from(source.to_string_lossy().replace(' ', "\\ "));
+
+        let view = set_override(tool(9), &temp.path().join("state"), &escaped).unwrap();
+
+        assert!(view.icon_data_url.is_some());
+        assert!(temp.path().join("state/agent-icons/9.png").is_file());
+    }
+
+    #[test]
+    fn terminal_path_decode_rejects_incomplete_or_non_shell_escapes() {
+        assert_eq!(
+            decode_terminal_escaped_path(Path::new("/tmp/Application\\ Support/icon.png")),
+            Some(PathBuf::from("/tmp/Application Support/icon.png"))
+        );
+        assert_eq!(
+            decode_terminal_escaped_path(Path::new("/tmp/trailing\\")),
+            None
+        );
+        assert_eq!(
+            decode_terminal_escaped_path(Path::new("/tmp/not\\escaped")),
+            None
+        );
+        assert_eq!(
+            decode_terminal_escaped_path(Path::new("/tmp/plain.png")),
+            None
+        );
     }
 }

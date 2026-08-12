@@ -21,7 +21,11 @@
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { hasRetainedTerminalOutput } from './terminalFirstPaint';
-  import { shouldForwardTerminalInput } from './terminalInput';
+  import {
+    AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
+    clipboardImagePasteRoute,
+    shouldForwardTerminalInput
+  } from './terminalInput';
   import { encodeTerminalKey } from './terminalKeys';
   import { installTerminalTransfers } from './terminalTransfers';
 
@@ -141,6 +145,11 @@
       canInsert: () => inputEnabled && process.status === 'running',
       insert: (text) => {
         queueInput(encoder.encode(text), true);
+        flushInput();
+      },
+      imagePasteRoute: () => clipboardImagePasteRoute(process.kind),
+      forwardAgentImagePaste: () => {
+        queueInput(encoder.encode(AGENT_TUI_CLIPBOARD_IMAGE_PASTE), true);
         flushInput();
       },
       focus: () => instance.focus(),
