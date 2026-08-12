@@ -36,6 +36,7 @@
   import MarkdownView from './MarkdownView.svelte';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
   import { resolveTodoClaimant } from './todoClaimant';
+  import { autoGrowTextarea, singleLineTitle } from './wrappingTitle';
 
   interface ProjectOption {
     id: number;
@@ -92,7 +93,7 @@
   let tagsDraft = $state('');
   let tagsOpen = $state(false);
   let commentBody = $state('');
-  let titleInput = $state<HTMLInputElement | null>(null);
+  let titleInput = $state<HTMLTextAreaElement | null>(null);
   let activitySection = $state<HTMLElement | null>(null);
   let bodyFocusRequest = $state(0);
   let bodySaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -332,15 +333,19 @@
     {/snippet}
 
     <article class="todo-document">
-      <input
+      <textarea
         class="title"
         bind:this={titleInput}
-        bind:value={titleDraft}
+        value={titleDraft}
         aria-label="Todo title"
         disabled={busy}
+        rows="1"
+        wrap="soft"
+        use:autoGrowTextarea={titleDraft}
+        oninput={(event) => (titleDraft = singleLineTitle(event.currentTarget.value))}
         onblur={saveTitle}
         onkeydown={handleTitleKeydown}
-      />
+      ></textarea>
 
       <div class="metadata" aria-label="Todo metadata">
         <label class="metadata-chip status-chip" title={todoClaimLabel(detail.todo)}>
@@ -519,7 +524,7 @@
 
 <style>
   .todo-document { min-width: 0; min-height: 100%; }
-  .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
+  .title { display: block; width: 100%; min-height: calc(1.16em + 7px); overflow: hidden; resize: none; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
   .title:hover { background: var(--card); }
   .title:focus { background: var(--card); box-shadow: 0 0 0 2px var(--ring); }
   .metadata { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }

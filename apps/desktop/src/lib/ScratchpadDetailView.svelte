@@ -14,6 +14,7 @@
   import DocumentScaffold from './DocumentScaffold.svelte';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
   import { scratchpadOutline, type ScratchpadOutlineItem } from './scratchpadOutline';
+  import { autoGrowTextarea, singleLineTitle } from './wrappingTitle';
 
   interface Props {
     read: ScratchpadRead | null;
@@ -79,7 +80,7 @@
   let outlineScrollKey = $state(0);
   let outlineScrollRequest = $state<{ key: number; line: number } | null>(null);
   let viewportLine = $state(1);
-  let titleInput = $state<HTMLInputElement | null>(null);
+  let titleInput = $state<HTMLTextAreaElement | null>(null);
 
   let outline = $derived(scratchpadOutline(bodyDraft));
   let activeOutlineId = $derived.by(() => {
@@ -170,7 +171,7 @@
   }
 
   function handleTitleChange(next: string): void {
-    titleDraft = next;
+    titleDraft = singleLineTitle(next);
     updateDraft();
   }
 
@@ -456,16 +457,19 @@
         </Collapsible.Root>
       </div>
 
-      <input
+      <textarea
         class="title"
         bind:this={titleInput}
         value={titleDraft}
         aria-label="Scratchpad title"
         disabled={busy}
+        rows="1"
+        wrap="soft"
+        use:autoGrowTextarea={titleDraft}
         oninput={(event) => handleTitleChange(event.currentTarget.value)}
         onblur={handleTitleBlur}
         onkeydown={handleTitleKeydown}
-      />
+      ></textarea>
 
       <div class="metadata" aria-label="Scratchpad metadata">
         <span class="metadata-chip status-chip">
@@ -536,7 +540,7 @@
 
 <style>
   .scratchpad-document { min-width: 0; min-height: 100%; }
-  .title { width: 100%; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
+  .title { display: block; width: 100%; min-height: calc(1.16em + 7px); overflow: hidden; resize: none; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
   .title:hover { background: var(--card); }
   .title:focus { background: var(--card); box-shadow: 0 0 0 2px var(--ring); }
   .metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 12px; }
