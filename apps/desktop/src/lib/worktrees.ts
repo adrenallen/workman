@@ -84,11 +84,25 @@ export interface OriginBranchList {
   repository_id: number;
   branches: string[];
   options?: WorktreeBranchOption[];
+  default_ref?: string | null;
+  ref_options?: WorktreeRefOption[];
 }
 
 export interface WorktreeBranchOption {
   name: string;
   source: 'local' | 'origin';
+}
+
+export interface WorktreeRefOption {
+  name: string;
+  source: 'current' | 'default' | 'local' | 'remote';
+}
+
+export interface WorktreeRefValidation {
+  repository_id: number;
+  requested_ref: string;
+  resolved_ref: string;
+  commit: string;
 }
 
 export interface WorktreeMutation {

@@ -222,6 +222,14 @@ struct WorktreeScopeParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorktreeRefParams {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    #[serde(rename = "ref")]
+    requested_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorktreeCreateParams {
     #[serde(default)]
     project_id: Option<ProjectId>,
@@ -538,6 +546,18 @@ async fn dispatch(
                 .await
                 .map(json_value)
                 .map_err(worktree_error);
+        }
+        "worktree.ref_validate" | "worktree_ref_validate" => {
+            let params: WorktreeRefParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::validate_ref_for_project(
+                registry,
+                project_id,
+                &params.requested_ref,
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
         }
         "worktree.create" | "worktree_create" => {
             let params: WorktreeCreateParams = params_as(params)?;

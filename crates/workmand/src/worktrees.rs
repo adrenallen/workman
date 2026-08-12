@@ -191,12 +191,28 @@ pub struct OriginBranchList {
     pub repository_id: i64,
     pub branches: Vec<String>,
     pub options: Vec<WorktreeBranchOption>,
+    pub default_ref: Option<String>,
+    pub ref_options: Vec<WorktreeRefOption>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeBranchOption {
     pub name: String,
     pub source: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeRefOption {
+    pub name: String,
+    pub source: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeRefValidation {
+    pub repository_id: i64,
+    pub requested_ref: String,
+    pub resolved_ref: String,
+    pub commit: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -565,21 +581,31 @@ pub async fn origin_branches_for_project(
         .collect::<HashSet<_>>();
     let local_output = git_required(
         &snapshot.root_path,
-        ["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"],
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:strip=2)",
+            "refs/heads",
+        ],
         "list local branches",
         &environment,
     )
     .await?;
-    let mut local = local_output
+    let all_local = local_output
         .lines()
         .map(str::trim)
-        .filter(|branch| !branch.is_empty() && !checked_out.contains(*branch))
+        .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut local = all_local
+        .iter()
+        .filter(|branch| !checked_out.contains(branch.as_str()))
+        .cloned()
         .collect::<Vec<_>>();
     local.sort();
     local.dedup();
 
-    let mut origin = if git_success(
+    let mut all_origin = if git_success(
         &snapshot.root_path,
         ["remote", "get-url", "origin"],
         &environment,
@@ -597,6 +623,8 @@ pub async fn origin_branches_for_project(
     } else {
         Vec::new()
     };
+    let default_ref = detect_origin_default_ref(&snapshot.root_path, &environment).await?;
+    let mut origin = all_origin.clone();
     origin.retain(|branch| !checked_out.contains(branch));
     origin.sort();
     origin.dedup();
@@ -619,10 +647,121 @@ pub async fn origin_branches_for_project(
             }),
     );
     let branches = options.iter().map(|option| option.name.clone()).collect();
+
+    let mut ref_options = vec![WorktreeRefOption {
+        name: "HEAD".into(),
+        source: "current",
+    }];
+    if let Some(default_ref) = default_ref.as_ref() {
+        ref_options.push(WorktreeRefOption {
+            name: default_ref.clone(),
+            source: "default",
+        });
+    }
+    ref_options.extend(all_local.into_iter().take(8).map(|name| WorktreeRefOption {
+        name,
+        source: "local",
+    }));
+
+    let remote_order = git_optional(
+        &snapshot.root_path,
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/remotes/origin",
+        ],
+        &environment,
+    )
+    .await?
+    .unwrap_or_default();
+    let mut recent_remote = remote_order
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "origin/HEAD")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let known_remote = recent_remote.iter().cloned().collect::<HashSet<_>>();
+    all_origin.sort();
+    recent_remote.extend(all_origin.into_iter().filter_map(|branch| {
+        let name = format!("origin/{branch}");
+        (!known_remote.contains(&name)).then_some(name)
+    }));
+    ref_options.extend(
+        recent_remote
+            .into_iter()
+            .filter(|name| Some(name) != default_ref.as_ref())
+            .take(8)
+            .map(|name| WorktreeRefOption {
+                name,
+                source: "remote",
+            }),
+    );
+
+    let mut seen_refs = HashSet::new();
+    ref_options.retain(|option| seen_refs.insert(option.name.clone()));
     Ok(OriginBranchList {
         repository_id,
         branches,
         options,
+        default_ref,
+        ref_options,
+    })
+}
+
+pub async fn validate_ref_for_project(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+    requested_ref: &str,
+) -> WorktreeResult<WorktreeRefValidation> {
+    let environment = command_environment(registry).await;
+    let (project, repository_id) = {
+        let registry = registry.lock().await;
+        let project = registry.store().get_project(project_id)?.ok_or_else(|| {
+            WorktreeError::InvalidProject(format!("project {project_id} was not found"))
+        })?;
+        if registry.store().get_project_worktree(project_id)?.is_none() {
+            reconcile_existing_projects_with_environment(registry.store(), &environment)?;
+        }
+        let link = registry
+            .store()
+            .get_project_worktree(project_id)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidPath(format!("{} is not a Git worktree", project.path))
+            })?;
+        (project, link.repository_id)
+    };
+    let snapshot = snapshot_async(Path::new(&project.path), &environment).await?;
+    let requested_ref = requested_ref.trim();
+    if requested_ref.is_empty() {
+        return Err(WorktreeError::InvalidBranch(
+            "Enter a branch, tag, or commit to start from.".into(),
+        ));
+    }
+    let resolved_ref = resolve_start_point(&snapshot.root_path, Some(requested_ref), &environment)
+        .await
+        .map_err(|error| match error {
+            WorktreeError::InvalidBranch(_) => WorktreeError::InvalidBranch(format!(
+                "Ref {requested_ref:?} was not found in this repository or origin."
+            )),
+            error => error,
+        })?;
+    let commit = git_required(
+        &snapshot.root_path,
+        [
+            "rev-parse",
+            "--verify",
+            format!("{resolved_ref}^{{commit}}").as_str(),
+        ],
+        "resolve starting ref commit",
+        &environment,
+    )
+    .await?;
+    Ok(WorktreeRefValidation {
+        repository_id,
+        requested_ref: requested_ref.into(),
+        resolved_ref,
+        commit,
     })
 }
 
@@ -1990,6 +2129,19 @@ async fn resolve_start_point(
         )
         .await;
     }
+    if let Some(branch) = from_ref.strip_prefix("origin/")
+        && !branch.is_empty()
+        && git_success(repository, ["remote", "get-url", "origin"], environment).await?
+    {
+        let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
+        git_required(
+            repository,
+            ["fetch", "--quiet", "origin", refspec.as_str()],
+            "fetch remote starting ref",
+            environment,
+        )
+        .await?;
+    }
     let remote = format!("origin/{from_ref}");
     if !from_ref.contains('/')
         && git_success(
@@ -2036,6 +2188,44 @@ async fn resolve_start_point(
     }
     Err(WorktreeError::InvalidBranch(format!(
         "cannot find branch-from ref {from_ref:?}"
+    )))
+}
+
+async fn detect_origin_default_ref(
+    repository: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Option<String>> {
+    if let Some(reference) = git_optional(
+        repository,
+        [
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+        environment,
+    )
+    .await?
+    .filter(|reference| {
+        reference.starts_with("origin/") && !reference.contains(char::is_whitespace)
+    }) {
+        return Ok(Some(reference));
+    }
+    if !git_success(repository, ["remote", "get-url", "origin"], environment).await? {
+        return Ok(None);
+    }
+    let output = git_output(
+        repository,
+        ["ls-remote", "--symref", "origin", "HEAD"],
+        GIT_NETWORK_TIMEOUT,
+        environment,
+    )
+    .await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(parse_origin_default_ref(&String::from_utf8_lossy(
+        &output.stdout,
     )))
 }
 
@@ -2794,6 +2984,18 @@ fn parse_origin_branches(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_origin_default_ref(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let reference = line
+            .strip_prefix("ref: ")?
+            .split_whitespace()
+            .next()?
+            .strip_prefix("refs/heads/")?;
+        (!reference.is_empty() && !reference.chars().any(char::is_whitespace))
+            .then(|| format!("origin/{reference}"))
+    })
+}
+
 fn is_swm_managed_path(path: &Path, managed_root: &str, branch: &str) -> bool {
     let managed_root = absolute_path(PathBuf::from(managed_root));
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| absolute_path(path.to_path_buf()));
@@ -3006,6 +3208,17 @@ mod tests {
             "aaaa\trefs/heads/main\nbbbb\trefs/heads/feature/worktree-ui\ninvalid\trefs/tags/v1\n",
         );
         assert_eq!(parsed, vec!["main", "feature/worktree-ui"]);
+    }
+
+    #[test]
+    fn origin_default_parser_reads_symbolic_head_without_hardcoding_branch() {
+        assert_eq!(
+            parse_origin_default_ref(
+                "ref: refs/heads/trunk\tHEAD\naaaa\tHEAD\nref: refs/heads/ignored\tOTHER\n"
+            ),
+            Some("origin/trunk".into())
+        );
+        assert_eq!(parse_origin_default_ref("aaaa\tHEAD\n"), None);
     }
 
     #[test]

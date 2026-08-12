@@ -42,7 +42,8 @@ import type {
   RemoveWorktreeInput,
   WorktreeList,
   WorktreeMutation,
-  WorktreeRemoval
+  WorktreeRemoval,
+  WorktreeRefValidation
 } from './worktrees';
 import {
   replaceWorktreeOperations,
@@ -595,6 +596,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   originWorktreeBranches(projectId: number): Promise<OriginBranchList> {
     return this.request('worktree.branches', { project_id: projectId });
+  }
+
+  validateWorktreeRef(projectId: number, ref: string): Promise<WorktreeRefValidation> {
+    return this.request('worktree.ref_validate', { project_id: projectId, ref });
   }
 
   createWorktree(input: CreateWorktreeInput): Promise<WorktreeMutation> {

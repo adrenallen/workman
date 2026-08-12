@@ -181,6 +181,85 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
             .any(|option| option.name == "remote-only" && option.source == "origin")
     );
     assert!(!branches.branches.iter().any(|branch| branch == "main"));
+    assert_eq!(branches.default_ref.as_deref(), Some("origin/main"));
+    assert!(
+        branches
+            .ref_options
+            .iter()
+            .any(|option| option.name == "HEAD" && option.source == "current")
+    );
+    assert!(
+        branches
+            .ref_options
+            .iter()
+            .any(|option| option.name == "origin/main" && option.source == "default")
+    );
+    assert!(
+        branches
+            .ref_options
+            .iter()
+            .any(|option| option.name == "feature/local-nested" && option.source == "local")
+    );
+    assert!(
+        branches
+            .ref_options
+            .iter()
+            .any(|option| option.name == "origin/remote-only" && option.source == "remote")
+    );
+
+    let validated =
+        worktrees::validate_ref_for_project(&fixture.registry, 1, "origin/remote-only").await?;
+    assert_eq!(validated.requested_ref, "origin/remote-only");
+    assert_eq!(validated.resolved_ref, "origin/remote-only");
+    assert_eq!(
+        validated.commit,
+        git(&fixture.main, &["rev-parse", "origin/remote-only"])?.trim()
+    );
+    let invalid = worktrees::validate_ref_for_project(&fixture.registry, 1, "missing/ref")
+        .await
+        .expect_err("unknown refs must fail before create");
+    assert_eq!(invalid.code(), "invalid_branch");
+    assert!(invalid.to_string().contains("was not found"));
+
+    // A remote ref is a first-class base even when no same-named local branch
+    // or remote-tracking ref exists. Validation fetches the exact ref so the
+    // preview and the eventual worktree use the current remote commit.
+    git(&fixture.main, &["checkout", "--detach", "origin/main"])?;
+    git(&fixture.main, &["branch", "-D", "main"])?;
+    std::fs::write(fixture.main.join("remote-main.txt"), "new remote main\n")?;
+    git(&fixture.main, &["add", "remote-main.txt"])?;
+    git(&fixture.main, &["commit", "-m", "advance remote main"])?;
+    let remote_main = git(&fixture.main, &["rev-parse", "HEAD"])?;
+    git(&fixture.main, &["push", "origin", "HEAD:main"])?;
+    git(&fixture.main, &["reset", "--hard", "HEAD^"])?;
+    git(
+        &fixture.main,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    )?;
+    assert!(git(&fixture.main, &["branch", "--list", "main"])?.is_empty());
+    assert!(git(&fixture.main, &["branch", "-r", "--list", "origin/main"])?.is_empty());
+
+    let remote_validation =
+        worktrees::validate_ref_for_project(&fixture.registry, 1, "origin/main").await?;
+    assert_eq!(remote_validation.resolved_ref, "origin/main");
+    assert_eq!(remote_validation.commit, remote_main.trim());
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "qa/no-local-main".into(),
+            from_ref: Some("origin/main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(
+        git(Path::new(&created.worktree.path), &["rev-parse", "HEAD"])?.trim(),
+        remote_main.trim()
+    );
     Ok(())
 }
 
@@ -223,7 +302,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/new-ui".into(),
-            from_ref: Some("main".into()),
+            from_ref: Some("origin/main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),

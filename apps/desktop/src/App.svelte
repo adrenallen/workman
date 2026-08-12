@@ -208,6 +208,8 @@
     type WorktreeDialogSubmission,
     type WorktreeEntry,
     type WorktreeList,
+    type WorktreeRefOption,
+    type WorktreeRefValidation,
     type WorktreeRepository
   } from './lib/worktrees';
   import {
@@ -333,6 +335,8 @@
   let worktreeDialogBusy = $state(false);
   let worktreeDialogError = $state<string | null>(null);
   let branchOptions = $state<WorktreeBranchOption[]>([]);
+  let worktreeRefOptions = $state<WorktreeRefOption[]>([]);
+  let worktreeDefaultRef = $state<string | null>(null);
   let originBranchesLoading = $state(false);
   let activeWorktreeOperationId = $state<string | null>(null);
   let agentDoneNotices = $state<AgentDoneNotice[]>([]);
@@ -2659,12 +2663,15 @@
     }
     worktreeDialogError = null;
     branchOptions = [];
+    worktreeRefOptions = [];
+    worktreeDefaultRef = null;
     worktreeDialog = {
       mode,
       sourceProject: mode === 'create' || mode === 'adopt' ? root : sourceProject,
       repository: list.repository,
       sourceEntry: mode === 'fork' ? worktreeEntryFor(sourceProject) : null
     };
+    if (mode === 'create') void loadOriginBranches();
   }
 
   async function openWorktreeImport(project: Project): Promise<void> {
@@ -2683,6 +2690,8 @@
     worktreeDialog = null;
     worktreeDialogError = null;
     branchOptions = [];
+    worktreeRefOptions = [];
+    worktreeDefaultRef = null;
   }
 
   async function loadOriginBranches(): Promise<void> {
@@ -2694,11 +2703,19 @@
       const response = await client.originWorktreeBranches(state.sourceProject.id);
       branchOptions = response.options
         ?? response.branches.map((name) => ({ name, source: 'origin' as const }));
+      worktreeRefOptions = response.ref_options ?? [];
+      worktreeDefaultRef = response.default_ref ?? null;
     } catch (cause) {
       worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
     } finally {
       originBranchesLoading = false;
     }
+  }
+
+  async function validateWorktreeRef(ref: string): Promise<WorktreeRefValidation> {
+    const state = worktreeDialog;
+    if (!state) throw new Error('The worktree dialog is no longer open.');
+    return client.validateWorktreeRef(state.sourceProject.id, ref);
   }
 
   async function submitWorktreeDialog(submission: WorktreeDialogSubmission): Promise<void> {
@@ -2717,6 +2734,8 @@
     });
     worktreeDialog = null;
     branchOptions = [];
+    worktreeRefOptions = [];
+    worktreeDefaultRef = null;
     showWorktreeOperation(operation);
     await tick();
     try {
@@ -4292,10 +4311,13 @@
     repository={worktreeDialog.repository}
     sourceEntry={worktreeDialog.sourceEntry}
     {branchOptions}
+    refOptions={worktreeRefOptions}
+    defaultRef={worktreeDefaultRef}
     branchesLoading={originBranchesLoading}
     busy={worktreeDialogBusy}
     error={worktreeDialogError}
     onLoadBranches={() => void loadOriginBranches()}
+    onValidateRef={validateWorktreeRef}
     onSubmit={(submission) => void submitWorktreeDialog(submission)}
     onClose={closeWorktreeDialog}
   />

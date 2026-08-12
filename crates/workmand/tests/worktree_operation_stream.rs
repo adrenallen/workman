@@ -100,6 +100,20 @@ impl TestServer {
 async fn async_worktree_rpc_streams_success_and_bad_branch_failure() -> Result<(), Box<dyn Error>> {
     let server = TestServer::start().await?;
     let (mut socket, _) = connect_async(server.request()).await?;
+    let validated = rpc(
+        &mut socket,
+        "validate-ref",
+        "worktree.ref_validate",
+        json!({ "project_id": 1, "ref": "HEAD" }),
+    )
+    .await?;
+    assert_eq!(validated["requested_ref"], "HEAD");
+    assert_eq!(validated["resolved_ref"], "HEAD");
+    assert!(
+        validated["commit"]
+            .as_str()
+            .is_some_and(|value| value.len() == 40)
+    );
     rpc(
         &mut socket,
         "subscribe",

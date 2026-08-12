@@ -7,9 +7,11 @@
   import SearchIcon from '@lucide/svelte/icons/search';
   import CloudIcon from '@lucide/svelte/icons/cloud';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { onDestroy, onMount } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Badge } from '$lib/components/ui/badge';
@@ -27,6 +29,8 @@
     WorktreeDialogSubmission,
     WorktreeBranchOption,
     WorktreeEntry,
+    WorktreeRefOption,
+    WorktreeRefValidation,
     WorktreeRepository
   } from './worktrees';
 
@@ -37,10 +41,13 @@
     sourceEntry?: WorktreeEntry | null;
     branchOptions?: WorktreeBranchOption[];
     originBranches?: string[];
+    refOptions?: WorktreeRefOption[];
+    defaultRef?: string | null;
     branchesLoading?: boolean;
     busy?: boolean;
     error?: string | null;
     onLoadBranches: () => void;
+    onValidateRef: (ref: string) => Promise<WorktreeRefValidation>;
     onSubmit: (submission: WorktreeDialogSubmission) => void;
     onClose: () => void;
   }
@@ -52,10 +59,13 @@
     sourceEntry = null,
     branchOptions = [],
     originBranches = [],
+    refOptions = [],
+    defaultRef = null,
     branchesLoading = false,
     busy = false,
     error = null,
     onLoadBranches,
+    onValidateRef,
     onSubmit,
     onClose
   }: Props = $props();
@@ -66,17 +76,34 @@
   let branchQuery = $state('');
   let branchOptionIndex = $state(0);
   let baseRef = $state('HEAD');
+  let baseRefTouched = $state(false);
+  let baseRefOpen = $state(false);
+  let baseRefOptionIndex = $state(0);
+  let refValidation = $state<'idle' | 'checking' | 'valid' | 'invalid'>('idle');
+  let refValidationError = $state<string | null>(null);
+  let resolvedRef = $state<string | null>(null);
+  let resolvedCommit = $state<string | null>(null);
   let adoptPath = $state('');
   let envPolicy = $state<EnvironmentPolicy>('skip');
   let rememberEnvPolicy = $state(true);
   let advancedOpen = $state(false);
   let branchInput = $state<HTMLInputElement | null>(null);
   let branchSearchInput = $state<HTMLInputElement | null>(null);
+  let baseRefInput = $state<HTMLInputElement | null>(null);
+  let baseRefPicker = $state<HTMLDivElement | null>(null);
+  let refValidationTimer: ReturnType<typeof setTimeout> | null = null;
+  let refValidationSequence = 0;
+  let appliedDefaultRef = false;
   let effectiveBranchOptions = $derived(branchOptions.length > 0
     ? branchOptions
     : originBranches.map((name) => ({ name, source: 'origin' as const })));
   let rankedBranches = $derived(rankBranches(effectiveBranchOptions, branchQuery));
   let activeBranch = $derived(rankedBranches[branchOptionIndex] ?? null);
+  let rankedRefOptions = $derived(rankRefOptions(refOptions, baseRef));
+  let activeRefOption = $derived(rankedRefOptions[baseRefOptionIndex] ?? null);
+  let previewBranch = $derived(branch.trim() || 'branch-name');
+  let previewRef = $derived(resolvedRef ?? (baseRef.trim() || 'starting-ref'));
+  let previewCommit = $derived(resolvedCommit?.slice(0, 10) ?? null);
 
   let title = $derived(mode === 'create'
     ? 'New worktree'
@@ -91,7 +118,9 @@
       ? adoptPath.trim().length > 0
       : mode === 'create' && createKind === 'origin'
         ? existingBranch.length > 0
-        : branch.trim().length > 0
+      : branch.trim().length > 0
+        && (mode !== 'create' || createKind !== 'new'
+          || (baseRef.trim().length > 0 && refValidation === 'valid'))
   ));
   let environmentSummary = $derived(envPolicy === 'copy' ? 'Copy safe .env' : 'Skip .env');
   let herdSummary = $derived(repository.herd.parked
@@ -103,6 +132,20 @@
     if (input) queueMicrotask(() => input?.focus());
   });
 
+  $effect(() => {
+    if (mode !== 'create' || !defaultRef || baseRefTouched || appliedDefaultRef) return;
+    appliedDefaultRef = true;
+    baseRef = defaultRef;
+    queueMicrotask(() => scheduleRefValidation(0));
+  });
+
+  onMount(() => {
+    if (mode === 'create') scheduleRefValidation(0);
+  });
+  onDestroy(() => {
+    if (refValidationTimer) clearTimeout(refValidationTimer);
+  });
+
   function rankBranches(options: WorktreeBranchOption[], query: string): WorktreeBranchOption[] {
     return options
       .map((option) => ({ option, score: fuzzySubsequenceScore(query, option.name) }))
@@ -111,13 +154,123 @@
       .map((entry) => entry.option);
   }
 
+  function rankRefOptions(options: WorktreeRefOption[], query: string): WorktreeRefOption[] {
+    const trimmed = query.trim();
+    const exact = options.some((option) => option.name === trimmed);
+    const filter = exact ? '' : trimmed;
+    return options
+      .map((option, index) => ({
+        option,
+        index,
+        score: filter ? fuzzySubsequenceScore(filter, option.name) : 0
+      }))
+      .filter((entry): entry is { option: WorktreeRefOption; index: number; score: number } => entry.score !== null)
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .map((entry) => entry.option);
+  }
+
+  function refSourceLabel(source: WorktreeRefOption['source']): string {
+    if (source === 'current') return 'current';
+    if (source === 'default') return 'origin default';
+    return source;
+  }
+
+  function scheduleRefValidation(delay = 400): void {
+    if (refValidationTimer) clearTimeout(refValidationTimer);
+    resolvedRef = null;
+    resolvedCommit = null;
+    refValidationError = null;
+    const value = baseRef.trim();
+    if (!value) {
+      refValidation = 'invalid';
+      refValidationError = 'Enter a branch, tag, or commit.';
+      return;
+    }
+    refValidation = 'idle';
+    refValidationTimer = setTimeout(() => void validateBaseRef(value), delay);
+  }
+
+  async function validateBaseRef(value = baseRef.trim()): Promise<boolean> {
+    if (refValidationTimer) clearTimeout(refValidationTimer);
+    refValidationTimer = null;
+    if (!value) {
+      refValidation = 'invalid';
+      refValidationError = 'Enter a branch, tag, or commit.';
+      return false;
+    }
+    const sequence = ++refValidationSequence;
+    refValidation = 'checking';
+    refValidationError = null;
+    try {
+      const result = await onValidateRef(value);
+      if (sequence !== refValidationSequence || baseRef.trim() !== value) return false;
+      resolvedRef = result.resolved_ref;
+      resolvedCommit = result.commit;
+      refValidation = 'valid';
+      return true;
+    } catch (cause) {
+      if (sequence !== refValidationSequence || baseRef.trim() !== value) return false;
+      resolvedRef = null;
+      resolvedCommit = null;
+      refValidation = 'invalid';
+      refValidationError = cause instanceof Error ? cause.message : String(cause);
+      baseRefOpen = false;
+      return false;
+    }
+  }
+
+  function updateBaseRef(): void {
+    baseRefTouched = true;
+    baseRefOpen = true;
+    baseRefOptionIndex = 0;
+    scheduleRefValidation();
+  }
+
+  function chooseBaseRef(option: WorktreeRefOption | null): void {
+    if (!option) return;
+    baseRefTouched = true;
+    baseRef = option.name;
+    baseRefOpen = false;
+    baseRefOptionIndex = 0;
+    baseRefInput?.focus();
+    scheduleRefValidation(0);
+  }
+
+  function handleBaseRefKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      baseRefOpen = true;
+      if (rankedRefOptions.length === 0) return;
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      baseRefOptionIndex = (baseRefOptionIndex + delta + rankedRefOptions.length) % rankedRefOptions.length;
+      queueMicrotask(() => document.getElementById(`worktree-ref-option-${baseRefOptionIndex}`)?.scrollIntoView({ block: 'nearest' }));
+      return;
+    }
+    if (event.key === 'Enter' && baseRefOpen && activeRefOption) {
+      event.preventDefault();
+      chooseBaseRef(activeRefOption);
+      return;
+    }
+    if (event.key === 'Escape' && baseRefOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      baseRefOpen = false;
+    }
+  }
+
+  function closeBaseRefPicker(event: FocusEvent): void {
+    const next = event.relatedTarget;
+    if (next instanceof Node && baseRefPicker?.contains(next)) return;
+    baseRefOpen = false;
+  }
+
   function changeCreateKind(value: string): void {
     if (value !== 'new' && value !== 'origin') return;
     createKind = value;
     if (value === 'origin' && effectiveBranchOptions.length === 0) onLoadBranches();
   }
 
-  function submit(): void {
+  async function submit(): Promise<void> {
     if (!canSubmit) return;
     if (mode === 'adopt') {
       onSubmit({ mode, path: adoptPath.trim() });
@@ -131,6 +284,7 @@
       onSubmit({ mode, branch: nextBranch, envPolicy, rememberEnvPolicy });
       return;
     }
+    if (createKind === 'new' && !(await validateBaseRef())) return;
     onSubmit({
       mode,
       branch: nextBranch,
@@ -174,7 +328,7 @@
     showCloseButton={false}
     aria-describedby="worktree-dialog-description"
   >
-    <form class="grid min-h-0 max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto]" onsubmit={(event) => { event.preventDefault(); submit(); }}>
+    <form class="grid min-h-0 max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto]" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
       <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
         <span class="flex min-w-0 items-start gap-3">
           <span class="grid size-8 shrink-0 place-items-center rounded border border-border bg-card text-muted-foreground">
@@ -183,7 +337,7 @@
           <span class="min-w-0">
             <Dialog.Title class="truncate text-base">{title}</Dialog.Title>
             <Dialog.Description id="worktree-dialog-description" class="mt-1 text-sm">
-              {#if mode === 'fork'}Starts at exact HEAD <code>{sourceEntry?.head.slice(0, 10) ?? 'unknown'}</code>.{:else if mode === 'adopt'}Registers an existing worktree without moving or changing it.{:else}Creates a managed project under <code>{repository.managed_root}</code>.{/if}
+              {#if mode === 'fork'}Creates a new branch from this worktree's exact HEAD commit <code>{sourceEntry?.head.slice(0, 10) ?? 'unknown'}</code>.{:else if mode === 'adopt'}Registers an existing worktree without moving or changing it.{:else}Creates a new branch at the starting ref you choose.{/if}
             </Dialog.Description>
           </span>
         </span>
@@ -278,6 +432,102 @@
             </label>
           {/if}
 
+          {#if mode === 'create' && createKind === 'new'}
+            <section class="grid gap-1.5" aria-labelledby="worktree-base-ref-label">
+              <span id="worktree-base-ref-label" class="text-sm font-medium">Start branch from…</span>
+              <div
+                bind:this={baseRefPicker}
+                class="relative"
+                onfocusout={closeBaseRefPicker}
+              >
+                <div class="relative">
+                  <Input
+                    bind:ref={baseRefInput}
+                    bind:value={baseRef}
+                    class="pr-9 font-mono"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded={baseRefOpen}
+                    aria-controls="worktree-ref-options"
+                    aria-activedescendant={baseRefOpen && activeRefOption ? `worktree-ref-option-${baseRefOptionIndex}` : undefined}
+                    aria-invalid={refValidation === 'invalid'}
+                    aria-describedby={refValidationError ? 'worktree-base-ref-help worktree-base-ref-error' : 'worktree-base-ref-help'}
+                    placeholder={branchesLoading ? 'Detecting origin default…' : 'HEAD, origin/main, tag, or commit'}
+                    autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck={false}
+                    onfocus={() => (baseRefOpen = true)}
+                    oninput={updateBaseRef}
+                    onkeydown={handleBaseRefKeydown}
+                  />
+                  <button
+                    class="absolute inset-y-0 right-0 grid w-8 place-items-center rounded-r-lg text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    type="button"
+                    aria-label="Show starting ref suggestions"
+                    aria-expanded={baseRefOpen}
+                    onclick={() => { baseRefOpen = !baseRefOpen; if (baseRefOpen) queueMicrotask(() => baseRefInput?.focus()); }}
+                  >
+                    <ChevronDownIcon class={`motion-safe:transition-transform ${baseRefOpen ? 'rotate-180' : ''}`} size={15} aria-hidden="true" />
+                  </button>
+                </div>
+                {#if baseRefOpen}
+                  <div id="worktree-ref-options" class="absolute top-full right-0 left-0 z-30 mt-1 overflow-hidden rounded-lg border border-border bg-popover shadow-lg" role="listbox" aria-label="Starting ref suggestions">
+                    <div class="flex min-h-7 items-center justify-between border-b border-border px-2 text-xs text-muted-foreground">
+                      <span>Suggested refs</span>
+                      <span>or type any ref</span>
+                    </div>
+                    <ScrollArea class="max-h-44">
+                      <div class="grid gap-0.5 p-1">
+                        {#each rankedRefOptions as option, index (option.name)}
+                          <button
+                            id={`worktree-ref-option-${index}`}
+                            class="flex min-h-8 items-center gap-2 rounded px-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring data-[active=true]:bg-accent"
+                            data-active={index === baseRefOptionIndex}
+                            type="button"
+                            role="option"
+                            aria-selected={baseRef === option.name}
+                            onmouseenter={() => (baseRefOptionIndex = index)}
+                            onmousedown={(event) => event.preventDefault()}
+                            onclick={() => chooseBaseRef(option)}
+                          >
+                            {#if option.source === 'remote' || option.source === 'default'}<CloudIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />{:else}<HardDriveIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />{/if}
+                            <span class="min-w-0 flex-1 truncate font-mono">{option.name}</span>
+                            <Badge variant="outline" class="h-5 px-1.5 text-xs font-normal text-muted-foreground">{refSourceLabel(option.source)}</Badge>
+                          </button>
+                        {:else}
+                          <div class="grid min-h-16 place-content-center gap-1 px-3 text-center">
+                            <strong class="text-sm font-medium">No suggested match</strong>
+                            <span class="text-xs text-muted-foreground">Keep typing to use a branch, tag, or commit directly.</span>
+                          </div>
+                        {/each}
+                      </div>
+                    </ScrollArea>
+                  </div>
+                {/if}
+              </div>
+              <small id="worktree-base-ref-help" class="text-xs text-muted-foreground">HEAD = your current checkout state; {defaultRef ? `${defaultRef} = the latest remote default branch.` : 'use origin/<branch> for the latest remote branch.'}</small>
+              {#if refValidationError}
+                <p id="worktree-base-ref-error" class="text-xs text-destructive" role="alert">{refValidationError}</p>
+              {/if}
+              <div class="flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-1 rounded border border-border bg-muted/30 px-2.5 py-1.5 text-xs" aria-live="polite">
+                <span class="text-muted-foreground">Creates branch</span>
+                <code class="font-medium">{previewBranch}</code>
+                <span class="text-muted-foreground">at</span>
+                <code class:text-destructive={refValidation === 'invalid'} class="font-medium">{previewRef}</code>
+                {#if previewCommit}<span class="text-muted-foreground">· commit</span><code class="font-medium">{previewCommit}</code>{/if}
+                {#if refValidation === 'checking'}<LoaderCircleIcon class="ml-auto spin text-muted-foreground" size={13} aria-label="Checking ref" />{:else if refValidation === 'valid'}<CircleCheckIcon class="ml-auto text-emerald-600 dark:text-emerald-400" size={13} aria-label="Ref found" />{/if}
+              </div>
+            </section>
+          {:else if mode === 'fork'}
+            <div class="flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-1 rounded border border-border bg-muted/30 px-2.5 py-1.5 text-xs">
+              <span class="text-muted-foreground">Creates branch</span>
+              <code class="font-medium">{previewBranch}</code>
+              <span class="text-muted-foreground">at exact HEAD</span>
+              <code class="font-medium">{sourceEntry?.head.slice(0, 10) ?? 'unknown'}</code>
+            </div>
+          {/if}
+
           <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-lg border border-border bg-card">
             <Collapsible.Trigger class="flex min-h-10 w-full items-center gap-2 px-3 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
               <SlidersHorizontalIcon class="shrink-0 text-muted-foreground" size={14} aria-hidden="true" />
@@ -299,14 +549,6 @@
                     <dd>{repository.herd.parked ? `Parked on .${repository.herd.tld ?? 'test'}` : repository.herd.available ? 'Available after creation' : 'Not detected'}</dd>
                   </div>
                 </dl>
-
-                {#if mode === 'create' && createKind === 'new'}
-                  <label class="grid gap-1.5 border-t border-border pt-3">
-                    <span class="text-sm font-medium">Base ref</span>
-                    <Input bind:value={baseRef} class="font-mono" placeholder="HEAD, main, origin/main, or SHA" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
-                    <small class="text-xs text-muted-foreground">The new branch starts here. Existing branches are never reset.</small>
-                  </label>
-                {/if}
 
                 <fieldset class="grid gap-2 border-t border-border pt-3">
                   <legend class="text-sm font-medium">Environment file</legend>
