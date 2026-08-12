@@ -3,7 +3,9 @@
   import BotIcon from '@lucide/svelte/icons/bot';
   import CheckIcon from '@lucide/svelte/icons/check';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import ClipboardPasteIcon from '@lucide/svelte/icons/clipboard-paste';
   import ClipboardIcon from '@lucide/svelte/icons/clipboard';
+  import CopyIcon from '@lucide/svelte/icons/copy';
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import FolderIcon from '@lucide/svelte/icons/folder';
@@ -11,6 +13,7 @@
   import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
   import GitForkIcon from '@lucide/svelte/icons/git-fork';
   import ImportIcon from '@lucide/svelte/icons/import';
+  import LinkIcon from '@lucide/svelte/icons/link';
   import MessageSquareIcon from '@lucide/svelte/icons/message-square';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PencilIcon from '@lucide/svelte/icons/pencil';
@@ -53,7 +56,9 @@
     bot: BotIcon,
     check: CheckIcon,
     'circle-check': CircleCheckIcon,
+    'clipboard-paste': ClipboardPasteIcon,
     clipboard: ClipboardIcon,
+    copy: CopyIcon,
     'external-link': ExternalLinkIcon,
     'file-code': FileCodeIcon,
     folder: FolderIcon,
@@ -61,6 +66,7 @@
     'git-branch-plus': GitBranchPlusIcon,
     'git-fork': GitForkIcon,
     import: ImportIcon,
+    link: LinkIcon,
     'message-square': MessageSquareIcon,
     'notebook-text': NotebookTextIcon,
     pencil: PencilIcon,

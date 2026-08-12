@@ -40,7 +40,12 @@ export const CONTEXT_ACTION_IDS = [
   'refresh-worktrees',
   'refresh-pull-request',
   'open-pull-request',
-  'open-herd-site'
+  'open-herd-site',
+  'terminal-copy',
+  'terminal-paste',
+  'terminal-open-link',
+  'terminal-copy-link',
+  'terminal-select-all'
 ] as const;
 
 export type ContextActionId = (typeof CONTEXT_ACTION_IDS)[number];
@@ -50,7 +55,9 @@ export type ContextActionIcon =
   | 'bot'
   | 'check'
   | 'circle-check'
+  | 'clipboard-paste'
   | 'clipboard'
+  | 'copy'
   | 'external-link'
   | 'file-code'
   | 'folder'
@@ -58,6 +65,7 @@ export type ContextActionIcon =
   | 'git-branch-plus'
   | 'git-fork'
   | 'import'
+  | 'link'
   | 'message-square'
   | 'notebook-text'
   | 'pencil'
@@ -119,7 +127,12 @@ const CONTEXT_ACTION_ICONS: Record<ContextActionId, ContextActionIcon> = {
   'refresh-worktrees': 'refresh-cw',
   'refresh-pull-request': 'refresh-cw',
   'open-pull-request': 'external-link',
-  'open-herd-site': 'external-link'
+  'open-herd-site': 'external-link',
+  'terminal-copy': 'copy',
+  'terminal-paste': 'clipboard-paste',
+  'terminal-open-link': 'external-link',
+  'terminal-copy-link': 'link',
+  'terminal-select-all': 'check'
 };
 
 export function contextActionIcon(id: ContextActionId): ContextActionIcon {

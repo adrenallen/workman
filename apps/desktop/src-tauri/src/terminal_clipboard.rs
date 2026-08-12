@@ -11,6 +11,14 @@ use std::{
 
 use workmand::default_data_dir;
 
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSString;
+use serde::Serialize;
+
 const CLIPBOARD_DIRECTORY: &str = "terminal-clipboard";
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
@@ -19,23 +27,99 @@ const MAX_RETAINED_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 static PASTE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TerminalClipboardRead {
+    Text { text: String },
+    Image { path: Option<String> },
+    Empty,
+}
+
+#[tauri::command]
+pub async fn terminal_read_clipboard(save_image: bool) -> Result<TerminalClipboardRead, String> {
+    tauri::async_runtime::spawn_blocking(move || read_native_clipboard(save_image))
+        .await
+        .map_err(|error| format!("clipboard read task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_write_clipboard_text(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_native_clipboard_text(&text))
+        .await
+        .map_err(|error| format!("clipboard write task failed: {error}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn read_native_clipboard(save_image: bool) -> Result<TerminalClipboardRead, String> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    // SAFETY: These AppKit globals are immutable NSString constants.
+    let image = unsafe {
+        pasteboard
+            .dataForType(NSPasteboardTypePNG)
+            .map(|data| (data.to_vec(), "image/png"))
+            .or_else(|| {
+                pasteboard
+                    .dataForType(NSPasteboardTypeTIFF)
+                    .map(|data| (data.to_vec(), "image/tiff"))
+            })
+    };
+    if let Some((bytes, mime_type)) = image {
+        let path = save_image
+            .then(|| save_clipboard_image(&bytes, mime_type))
+            .transpose()?;
+        return Ok(TerminalClipboardRead::Image { path });
+    }
+
+    // SAFETY: NSPasteboardTypeString is an immutable AppKit NSString constant.
+    let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
+    Ok(text.map_or(TerminalClipboardRead::Empty, |text| {
+        TerminalClipboardRead::Text {
+            text: text.to_string(),
+        }
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn write_native_clipboard_text(text: &str) -> Result<(), String> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    // SAFETY: NSPasteboardTypeString is an immutable AppKit NSString constant.
+    let written =
+        unsafe { pasteboard.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
+    written
+        .then_some(())
+        .ok_or_else(|| "the system pasteboard rejected terminal text".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_native_clipboard(_save_image: bool) -> Result<TerminalClipboardRead, String> {
+    Err("terminal context-menu paste is not supported on this platform".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_native_clipboard_text(_text: &str) -> Result<(), String> {
+    Err("terminal context-menu copy is not supported on this platform".to_owned())
+}
+
 #[tauri::command]
 pub async fn terminal_save_clipboard_image(
     bytes: Vec<u8>,
     mime_type: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = CLIPBOARD_LOCK
-            .lock()
-            .map_err(|_| "clipboard image retention lock is poisoned".to_owned())?;
-        let directory = default_data_dir().join(CLIPBOARD_DIRECTORY);
-        let path = save_image_in(&directory, &bytes, &mime_type, SystemTime::now())?;
-        path.into_os_string()
-            .into_string()
-            .map_err(|_| "clipboard image path is not valid UTF-8".to_owned())
-    })
-    .await
-    .map_err(|error| format!("clipboard image task failed: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || save_clipboard_image(&bytes, &mime_type))
+        .await
+        .map_err(|error| format!("clipboard image task failed: {error}"))?
+}
+
+fn save_clipboard_image(bytes: &[u8], mime_type: &str) -> Result<String, String> {
+    let _guard = CLIPBOARD_LOCK
+        .lock()
+        .map_err(|_| "clipboard image retention lock is poisoned".to_owned())?;
+    let directory = default_data_dir().join(CLIPBOARD_DIRECTORY);
+    let path = save_image_in(&directory, bytes, mime_type, SystemTime::now())?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| "clipboard image path is not valid UTF-8".to_owned())
 }
 
 fn save_image_in(

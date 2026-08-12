@@ -12,6 +12,7 @@ interface TerminalTransferOptions {
   element: HTMLElement;
   canInsert: () => boolean;
   insert: (text: string) => void;
+  pasteText: (text: string) => void;
   imagePasteRoute: () => ClipboardImagePasteRoute;
   forwardAgentImagePaste: () => void;
   focus: () => void;
@@ -20,11 +21,29 @@ interface TerminalTransferOptions {
   setPasteSaving: (saving: boolean) => void;
 }
 
+export interface TerminalTransfers {
+  dispose: () => void;
+  pasteFromClipboard: () => Promise<void>;
+}
+
 interface PathFile extends File {
   path?: string;
 }
 
-export function installTerminalTransfers(options: TerminalTransferOptions): () => void {
+type NativeTerminalClipboardRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; path: string | null }
+  | { kind: 'empty' };
+
+export async function writeTerminalClipboardText(text: string): Promise<void> {
+  if (isTauri()) {
+    await invoke('terminal_write_clipboard_text', { text });
+    return;
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+export function installTerminalTransfers(options: TerminalTransferOptions): TerminalTransfers {
   let disposed = false;
   let removeNativeListener: (() => void) | null = null;
 
@@ -109,15 +128,7 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
     }
     insertPaths(paths);
   };
-  const paste = (event: ClipboardEvent) => {
-    const images = Array.from(event.clipboardData?.items ?? [])
-      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-    if (images.length === 0) return;
-
-    event.preventDefault();
-    event.stopPropagation();
+  const pasteImages = async (images: File[]) => {
     if (!options.canInsert()) {
       options.reportError('Terminal input is not ready for a clipboard image.');
       return;
@@ -130,16 +141,46 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
       return;
     }
     options.setPasteSaving(true);
-    void saveClipboardImages(images)
-      .then((paths) => {
-        if (!disposed) insertPaths(paths);
-      })
-      .catch((cause) => {
-        if (!disposed) options.reportError(message(cause));
-      })
-      .finally(() => {
-        if (!disposed) options.setPasteSaving(false);
-      });
+    try {
+      const paths = await saveClipboardImages(images);
+      if (!disposed) insertPaths(paths);
+    } catch (cause) {
+      if (!disposed) options.reportError(message(cause));
+    } finally {
+      if (!disposed) options.setPasteSaving(false);
+    }
+  };
+  const pasteNativeClipboard = async () => {
+    const route = options.imagePasteRoute();
+    const clipboard = await invoke<NativeTerminalClipboardRead>('terminal_read_clipboard', {
+      saveImage: route === 'shell-path'
+    });
+    if (disposed || clipboard.kind === 'empty') return;
+    if (clipboard.kind === 'text') {
+      if (clipboard.text === '') return;
+      options.focus();
+      options.pasteText(clipboard.text);
+      return;
+    }
+    if (route === 'agent-tui') {
+      // The native command only observes that an image exists; the TUI reads the unchanged pasteboard.
+      options.focus();
+      options.forwardAgentImagePaste();
+      return;
+    }
+    if (!clipboard.path) throw new Error('The clipboard image was not saved for terminal paste.');
+    insertPaths([clipboard.path]);
+  };
+  const paste = (event: ClipboardEvent) => {
+    const images = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (images.length === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    void pasteImages(images);
   };
 
   options.element.addEventListener('dragenter', dragOver);
@@ -148,17 +189,76 @@ export function installTerminalTransfers(options: TerminalTransferOptions): () =
   options.element.addEventListener('drop', drop);
   options.element.addEventListener('paste', paste, true);
 
-  return () => {
-    disposed = true;
-    removeNativeListener?.();
-    options.setDropActive(false);
-    options.setPasteSaving(false);
-    options.element.removeEventListener('dragenter', dragOver);
-    options.element.removeEventListener('dragover', dragOver);
-    options.element.removeEventListener('dragleave', dragLeave);
-    options.element.removeEventListener('drop', drop);
-    options.element.removeEventListener('paste', paste, true);
+  return {
+    pasteFromClipboard: async () => {
+      if (!options.canInsert()) {
+        options.reportError('Terminal input is not ready for clipboard paste.');
+        return;
+      }
+      try {
+        if (isTauri()) {
+          await pasteNativeClipboard();
+          return;
+        }
+        let clipboardItems: ClipboardItems;
+        try {
+          clipboardItems = await navigator.clipboard.read();
+        } catch (readCause) {
+          // Older WKWebViews can expose readText before the full ClipboardItem API.
+          const text = await navigator.clipboard.readText();
+          if (disposed || text === '') throw readCause;
+          options.focus();
+          options.pasteText(text);
+          return;
+        }
+        if (disposed) return;
+        const images = await clipboardImages(clipboardItems);
+        if (disposed) return;
+        if (images.length > 0) {
+          await pasteImages(images);
+          return;
+        }
+
+        const text = await clipboardText(clipboardItems);
+        if (disposed || text === '') return;
+        options.focus();
+        options.pasteText(text);
+      } catch (cause) {
+        if (!disposed) options.reportError(`Could not read the clipboard: ${message(cause)}`);
+      }
+    },
+    dispose: () => {
+      disposed = true;
+      removeNativeListener?.();
+      options.setDropActive(false);
+      options.setPasteSaving(false);
+      options.element.removeEventListener('dragenter', dragOver);
+      options.element.removeEventListener('dragover', dragOver);
+      options.element.removeEventListener('dragleave', dragLeave);
+      options.element.removeEventListener('drop', drop);
+      options.element.removeEventListener('paste', paste, true);
+    }
   };
+}
+
+async function clipboardImages(items: ClipboardItems): Promise<File[]> {
+  const images: File[] = [];
+  for (const item of items) {
+    for (const type of item.types.filter((candidate) => candidate.startsWith('image/'))) {
+      const blob = await item.getType(type);
+      images.push(new File([blob], 'clipboard-image', { type }));
+    }
+  }
+  return images;
+}
+
+async function clipboardText(items: ClipboardItems): Promise<string> {
+  const parts: string[] = [];
+  for (const item of items) {
+    if (!item.types.includes('text/plain')) continue;
+    parts.push(await (await item.getType('text/plain')).text());
+  }
+  return parts.join('\n');
 }
 
 async function saveClipboardImages(images: File[]): Promise<string[]> {

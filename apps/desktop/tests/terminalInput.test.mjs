@@ -27,14 +27,46 @@ test('agent image paste forwards the TUI shortcut while plain shells keep saved 
   const terminal = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
   const noImages = transfers.indexOf('if (images.length === 0) return;');
   const preventDefault = transfers.indexOf('event.preventDefault();', noImages);
-  const agentRoute = transfers.indexOf("options.imagePasteRoute() === 'agent-tui'", preventDefault);
+  const sharedPaste = transfers.indexOf('pasteImages(images)', preventDefault);
+  const agentRoute = transfers.indexOf("options.imagePasteRoute() === 'agent-tui'");
   const shellSave = transfers.indexOf('saveClipboardImages(images)', agentRoute);
 
   assert.ok(noImages >= 0 && preventDefault > noImages, 'text-only paste must reach xterm unchanged');
-  assert.ok(agentRoute > preventDefault && shellSave > agentRoute);
+  assert.ok(sharedPaste > preventDefault && agentRoute >= 0 && shellSave > agentRoute);
   assert.match(transfers, /options\.forwardAgentImagePaste\(\);/);
-  assert.doesNotMatch(transfers, /navigator\.clipboard\.(write|writeText)/);
+  assert.doesNotMatch(
+    transfers.slice(transfers.indexOf('export function installTerminalTransfers')),
+    /navigator\.clipboard\.(write|writeText)/
+  );
   assert.match(terminal, /queueInput\(encoder\.encode\(AGENT_TUI_CLIPBOARD_IMAGE_PASTE\), true\)/);
+});
+
+test('context-menu paste reuses image routing and xterm bracketed text paste', async () => {
+  const transfers = await readFile(
+    new URL('../src/lib/terminalTransfers.ts', import.meta.url),
+    'utf8'
+  );
+  const terminal = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
+
+  const nativeRead = transfers.indexOf("'terminal_read_clipboard'");
+  const nativeWrite = transfers.indexOf("'terminal_write_clipboard_text'");
+  const nativeAgentChord = transfers.indexOf('options.forwardAgentImagePaste();', nativeRead);
+  const nativeShellPath = transfers.indexOf('insertPaths([clipboard.path])', nativeAgentChord);
+  const clipboardRead = transfers.indexOf('navigator.clipboard.read()');
+  const sharedPaste = transfers.indexOf('await pasteImages(images)', clipboardRead);
+  const textPaste = transfers.indexOf('options.pasteText(text)', sharedPaste);
+
+  assert.ok(nativeWrite >= 0 && nativeRead > nativeWrite);
+  assert.ok(nativeRead >= 0 && nativeAgentChord > nativeRead && nativeShellPath > nativeAgentChord);
+  assert.ok(clipboardRead > nativeShellPath && sharedPaste > clipboardRead && textPaste > sharedPaste);
+  assert.doesNotMatch(
+    transfers.slice(transfers.indexOf('export function installTerminalTransfers')),
+    /navigator\.clipboard\.(write|writeText)/
+  );
+  assert.match(terminal, /pasteText: \(text\) => \{[\s\S]*pendingUserKeyTokens\.push\(\+\+nextUserKeyToken\);[\s\S]*instance\.paste\(text\);/);
+  assert.match(terminal, /writeTerminalClipboardText\(selection\)/);
+  assert.match(terminal, /writeTerminalClipboardText\(detail\.link\)/);
+  assert.match(terminal, /oncontextmenu=\{showTerminalContextMenu\}/);
 });
 
 test('accepts physical input during replay without forwarding replay-generated replies', () => {

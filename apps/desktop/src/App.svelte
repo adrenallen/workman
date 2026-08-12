@@ -76,6 +76,7 @@
   import {
     contextMenuRequest,
     describeContextMenu,
+    dispatchTerminalContextAction,
     focusTerminalInput,
     keyboardContextMenuRequest,
     openWorkspacePath,
@@ -3300,6 +3301,8 @@
         await runProjectContextAction(action, target);
       } else if (target.kind === 'process') {
         await runProcessContextAction(action, target);
+      } else if (target.kind === 'terminal') {
+        dispatchTerminalContextAction(action, target);
       } else if (target.kind === 'todo') {
         await runTodoContextAction(action, target);
       } else {
@@ -4105,6 +4108,7 @@
                 busy={processBusyId === selectedProcess.id}
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}
+                onContextMenu={showContextMenu}
                 onUnfocus={unfocusSelectedProcess}
               />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />

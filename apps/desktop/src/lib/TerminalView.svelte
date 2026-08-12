@@ -15,7 +15,13 @@
     terminalFontCss,
     terminalXtermTheme
   } from './appearance';
-  import { FOCUS_TERMINAL_EVENT } from './contextMenu';
+  import {
+    contextMenuRequest,
+    FOCUS_TERMINAL_EVENT,
+    TERMINAL_CONTEXT_ACTION_EVENT,
+    type ContextMenuRequest,
+    type TerminalContextActionDetail
+  } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
@@ -27,7 +33,11 @@
     shouldForwardTerminalInput
   } from './terminalInput';
   import { encodeTerminalKey } from './terminalKeys';
-  import { installTerminalTransfers } from './terminalTransfers';
+  import {
+    installTerminalTransfers,
+    type TerminalTransfers,
+    writeTerminalClipboardText
+  } from './terminalTransfers';
 
   let {
     client,
@@ -37,6 +47,7 @@
     busy = false,
     onStart,
     onError,
+    onContextMenu,
     onUnfocus
   }: {
     client: DaemonClient;
@@ -46,6 +57,7 @@
     busy?: boolean;
     onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
+    onContextMenu?: (request: ContextMenuRequest) => void;
     onUnfocus?: () => void;
   } = $props();
 
@@ -53,12 +65,14 @@
   let frame: HTMLElement;
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
+  let terminalTransfers: TerminalTransfers | null = null;
   let hasOutput = $state(false);
   let liveOutputPreviewElement = $state<HTMLPreElement | null>(null);
   let liveOutputPreview = $state('');
   let liveOutputLoaded = $state(false);
   let liveOutputRetained = $state(false);
   let linkHintVisible = $state(false);
+  let hoveredLinkUri: string | null = null;
   let transferDropActive = $state(false);
   let imagePasteSaving = $state(false);
   let resizeFrame = 0;
@@ -110,8 +124,14 @@
       event.preventDefault();
       openExternalUrl(uri, onError);
     };
-    const showLinkHint = () => { linkHintVisible = true; };
-    const hideLinkHint = () => { linkHintVisible = false; };
+    const showLinkHint = (_event: MouseEvent, uri: string) => {
+      hoveredLinkUri = uri;
+      linkHintVisible = true;
+    };
+    const hideLinkHint = (_event: MouseEvent, uri: string) => {
+      if (hoveredLinkUri === uri) hoveredLinkUri = null;
+      linkHintVisible = false;
+    };
     const instance = new Terminal({
       allowTransparency: false,
       convertEol: false,
@@ -140,12 +160,18 @@
       })
     );
     instance.open(host);
-    const removeTerminalTransfers = installTerminalTransfers({
+    terminalTransfers = installTerminalTransfers({
       element: frame,
-      canInsert: () => inputEnabled && process.status === 'running',
+      canInsert: () => process.status === 'running',
       insert: (text) => {
         queueInput(encoder.encode(text), true);
         flushInput();
+      },
+      pasteText: (text) => {
+        // Programmatic xterm paste emits onData without a preceding key event. Mark the next
+        // emission as user input so it remains lossless while retained output is replaying.
+        pendingUserKeyTokens.push(++nextUserKeyToken);
+        instance.paste(text);
       },
       imagePasteRoute: () => clipboardImagePasteRoute(process.kind),
       forwardAgentImagePaste: () => {
@@ -216,6 +242,12 @@
       }
     };
     window.addEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
+    const runContextAction = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalContextActionDetail>).detail;
+      if (detail?.processId !== process.id) return;
+      void runTerminalContextAction(detail);
+    };
+    window.addEventListener(TERMINAL_CONTEXT_ACTION_EVENT, runContextAction);
 
     return () => {
       attachmentGeneration += 1;
@@ -229,7 +261,9 @@
       dataDisposable.dispose();
       binaryDisposable.dispose();
       window.removeEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
-      removeTerminalTransfers();
+      window.removeEventListener(TERMINAL_CONTEXT_ACTION_EVENT, runContextAction);
+      terminalTransfers?.dispose();
+      terminalTransfers = null;
       void client.detachTerminal().catch(() => undefined);
       instance.dispose();
       terminal = null;
@@ -297,6 +331,7 @@
     liveOutputLoaded = false;
     liveOutputRetained = false;
     linkHintVisible = false;
+    hoveredLinkUri = null;
     if (!isVisible || !isConnected || processStatus !== 'running') {
       attachmentGeneration += 1;
       void client.detachTerminal().catch(() => undefined);
@@ -432,6 +467,51 @@
     inputProcessId = process.id;
     for (const byte of bytes) inputBytes.push(byte);
     if (!inputTimer) inputTimer = setTimeout(flushInput, 4);
+  }
+
+  function showTerminalContextMenu(event: MouseEvent): void {
+    const instance = terminal;
+    if (!instance || !onContextMenu) return;
+    const request = contextMenuRequest(event, {
+      kind: 'terminal',
+      process: { id: process.id, kind: process.kind, name: process.name },
+      hasSelection: instance.hasSelection(),
+      link: hoveredLinkUri,
+      pasteEnabled: process.status === 'running'
+    });
+    request.restoreFocus = instance.element?.querySelector<HTMLElement>('.xterm-helper-textarea')
+      ?? host;
+    onContextMenu(request);
+  }
+
+  async function runTerminalContextAction(detail: TerminalContextActionDetail): Promise<void> {
+    const instance = terminal;
+    if (!instance) return;
+    try {
+      switch (detail.action) {
+        case 'terminal-copy': {
+          const selection = instance.getSelection();
+          if (selection) await writeTerminalClipboardText(selection);
+          break;
+        }
+        case 'terminal-paste':
+          await terminalTransfers?.pasteFromClipboard();
+          break;
+        case 'terminal-open-link':
+          if (detail.link) openExternalUrl(detail.link, onError);
+          break;
+        case 'terminal-copy-link':
+          if (detail.link) await writeTerminalClipboardText(detail.link);
+          break;
+        case 'terminal-select-all':
+          instance.selectAll();
+          break;
+      }
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      instance.focus();
+    }
   }
 
   function consumePendingUserKeyToken(): boolean {
@@ -578,6 +658,7 @@
     bind:this={host}
     aria-hidden={process.status !== 'running'}
     aria-label={`${process.name} terminal`}
+    oncontextmenu={showTerminalContextMenu}
   ></div>
   {#if process.status === 'running' && !hasOutput && liveOutputRetained && liveOutputPreview}
     <pre

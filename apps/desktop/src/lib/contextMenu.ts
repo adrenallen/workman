@@ -12,6 +12,10 @@ import { projectFrequentActions } from './projectMenu';
 import type { WorktreeEntry, WorktreeRepository } from './worktrees';
 import { projectRepositoryTitle } from './worktrees';
 import type { ContextActionId } from './contextMenuIcons';
+import {
+  terminalContextMenuItems,
+  type TerminalContextActionId
+} from './terminalContextMenu';
 
 export {
   CONTEXT_ACTION_IDS,
@@ -19,6 +23,7 @@ export {
   contextActionIcon
 } from './contextMenuIcons';
 export type { ContextActionIcon, ContextActionId } from './contextMenuIcons';
+export type { TerminalContextActionId } from './terminalContextMenu';
 
 export interface ContextMenuItem {
   id: ContextActionId;
@@ -39,6 +44,13 @@ export type ContextMenuTarget =
       importableWorktreeCount?: number;
     }
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
+  | {
+      kind: 'terminal';
+      process: Pick<ProcessView, 'id' | 'kind' | 'name'>;
+      hasSelection: boolean;
+      link: string | null;
+      pasteEnabled: boolean;
+    }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
   | { kind: 'scratchpad'; scratchpad: ContextScratchpad; selection: ProjectTreeSelection };
 
@@ -64,6 +76,13 @@ export type ContextScratchpad = Pick<
 >;
 
 export const FOCUS_TERMINAL_EVENT = 'workman:focus-terminal';
+export const TERMINAL_CONTEXT_ACTION_EVENT = 'workman:terminal-context-action';
+
+export interface TerminalContextActionDetail {
+  action: TerminalContextActionId;
+  processId: number;
+  link: string | null;
+}
 
 export function openWorkspacePath(path: string, target: ShellOpenTarget): Promise<void> {
   return invoke('shell_open_path', { path, target });
@@ -73,6 +92,23 @@ export function focusTerminalInput(processId: number): void {
   window.dispatchEvent(
     new CustomEvent(FOCUS_TERMINAL_EVENT, { detail: { processId } })
   );
+}
+
+export function dispatchTerminalContextAction(
+  action: ContextActionId,
+  target: Extract<ContextMenuTarget, { kind: 'terminal' }>
+): void {
+  if (!action.startsWith('terminal-')) return;
+  window.dispatchEvent(new CustomEvent<TerminalContextActionDetail>(
+    TERMINAL_CONTEXT_ACTION_EVENT,
+    {
+      detail: {
+        action: action as TerminalContextActionId,
+        processId: target.process.id,
+        link: target.link
+      }
+    }
+  ));
 }
 
 export function contextMenuRequest(
@@ -128,6 +164,12 @@ export function describeContextMenu(
         subtitle: `${target.process.kind.toUpperCase()} · ${target.process.id}`,
         items: processItems(target.process)
       };
+    case 'terminal':
+      return {
+        title: target.process.name,
+        subtitle: `TERMINAL · ${target.process.id}`,
+        items: terminalItems(target)
+      };
     case 'todo':
       return {
         title: target.todo.title,
@@ -160,6 +202,12 @@ export function describeContextMenu(
         ]
       };
   }
+}
+
+function terminalItems(
+  target: Extract<ContextMenuTarget, { kind: 'terminal' }>
+): ContextMenuItem[] {
+  return terminalContextMenuItems(target);
 }
 
 function projectItems(

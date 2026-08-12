@@ -309,7 +309,9 @@ pub fn run() {
             shell_open_url,
             shell_detect_editors,
             shell_open_with,
+            terminal_clipboard::terminal_read_clipboard,
             terminal_clipboard::terminal_save_clipboard_image,
+            terminal_clipboard::terminal_write_clipboard_text,
             native_notifications::native_notification_permission_state,
             native_notifications::native_notification_request_permission,
             native_notifications::native_notification_show
