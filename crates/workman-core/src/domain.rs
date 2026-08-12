@@ -9,6 +9,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 
 pub type ProjectId = i64;
+pub type ProfileId = i64;
 pub type WorktreeRepositoryId = i64;
 pub type ProcessId = i64;
 pub type AgentToolId = i64;
@@ -191,6 +192,20 @@ pub struct Project {
     pub selected: bool,
     #[serde(default)]
     pub sort_order: i64,
+}
+
+/// One switchable collection of projects and user-level runtime preferences.
+///
+/// Project-owned coordination data follows its canonical project when that project is
+/// attached to more than one profile. Daemon credentials and update secrets are global.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub id: ProfileId,
+    pub name: String,
+    pub active: bool,
+    pub project_count: usize,
+    pub agent_tool_count: usize,
+    pub created_at: i64,
 }
 
 /// One Git repository shared by a main checkout and its linked worktrees.

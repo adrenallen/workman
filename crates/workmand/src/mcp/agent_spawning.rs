@@ -13,11 +13,9 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-#[cfg(test)]
-use workman_core::AgentToolSource;
 use workman_core::{
-    AgentTool, AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectId,
+    AgentTool, AgentToolId, AgentToolSource, Process, ProcessId, ProcessKind, ProcessSource,
+    ProcessStatus, Project, ProjectId,
 };
 
 use super::{
@@ -519,22 +517,59 @@ pub(crate) fn save_agent_tool_from_settings(
     if tool_type.is_empty() {
         return Err("agent tool type cannot be empty".to_owned());
     }
-    crate::user_config::save_agent_tool_from_settings(
-        registry.store(),
-        id,
+    let existing = id
+        .map(|id| {
+            registry
+                .store()
+                .get_agent_tool(id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("agent tool {id} was not found"))
+        })
+        .transpose()?;
+    if registry
+        .store()
+        .list_agent_tools()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|tool| Some(tool.id) != id && tool.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(format!("agent tool name {name:?} is already registered"));
+    }
+    let tool = AgentTool {
+        id: id.unwrap_or(
+            registry
+                .store()
+                .next_agent_tool_id()
+                .map_err(|error| error.to_string())?,
+        ),
         name,
         command,
         tool_type,
         enabled,
-    )
-    .map_err(|error| error.to_string())
+        source: AgentToolSource::Config,
+        resume_args: existing.as_ref().and_then(|tool| tool.resume_args.clone()),
+        continue_args: existing
+            .as_ref()
+            .and_then(|tool| tool.continue_args.clone()),
+    };
+    registry
+        .store()
+        .put_agent_tool(&tool)
+        .map_err(|error| error.to_string())?;
+    Ok(tool)
 }
 
 pub(crate) fn reorder_agent_tools_from_settings(
     registry: &ProcessRegistry,
     ordered_ids: &[AgentToolId],
 ) -> Result<Vec<AgentTool>, String> {
-    crate::user_config::reorder_agent_tools_from_settings(registry.store(), ordered_ids)
+    registry
+        .store()
+        .reorder_agent_tools(ordered_ids)
+        .map_err(|error| error.to_string())?;
+    registry
+        .store()
+        .list_agent_tools()
         .map_err(|error| error.to_string())
 }
 
@@ -543,7 +578,9 @@ pub(crate) fn delete_agent_tool_from_settings(
     agent_tool_id: AgentToolId,
 ) -> Result<bool, String> {
     reject_referenced_agent_tool(registry, agent_tool_id)?;
-    crate::user_config::delete_agent_tool_from_settings(registry.store(), agent_tool_id)
+    registry
+        .store()
+        .delete_agent_tool(agent_tool_id)
         .map_err(|error| error.to_string())
 }
 

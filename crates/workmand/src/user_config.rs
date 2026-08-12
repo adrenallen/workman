@@ -350,30 +350,8 @@ fn migrate_known_agent_defaults(
     Ok(migrated)
 }
 
-/// Add or update one registry row at its source-of-truth YAML file.
-///
-/// Settings mutations promote legacy local rows into config-managed rows. The
-/// agent_tools block is rewritten while unrelated YAML text and comments stay
-/// byte-for-byte intact.
-pub(crate) fn save_agent_tool_from_settings(
-    store: &Store,
-    agent_tool_id: Option<i64>,
-    name: String,
-    command: String,
-    tool_type: String,
-    enabled: bool,
-) -> Result<AgentTool, UserConfigError> {
-    save_agent_tool_from_settings_at(
-        store,
-        &user_config_path(),
-        agent_tool_id,
-        name,
-        command,
-        tool_type,
-        enabled,
-    )
-}
-
+/// Legacy YAML mutation seam retained only for migration regression tests.
+#[cfg(test)]
 fn save_agent_tool_from_settings_at(
     store: &Store,
     path: &Path,
@@ -461,13 +439,6 @@ fn save_agent_tool_from_settings_at(
         .ok_or_else(|| UserConfigError::Invalid("saved agent tool was not reloaded".to_owned()))
 }
 
-pub(crate) fn delete_agent_tool_from_settings(
-    store: &Store,
-    agent_tool_id: i64,
-) -> Result<bool, UserConfigError> {
-    delete_agent_tool_from_settings_at(store, &user_config_path(), agent_tool_id)
-}
-
 /// Persist Settings → Terminal's shell choice while preserving unrelated YAML/comments.
 pub(crate) fn save_user_shell_from_settings_at(
     path: &Path,
@@ -513,6 +484,7 @@ pub(crate) fn save_user_shell_from_settings_at(
     write_user_config_block(path, &source, &root, "terminal")
 }
 
+#[cfg(test)]
 fn delete_agent_tool_from_settings_at(
     store: &Store,
     path: &Path,
@@ -543,13 +515,7 @@ fn delete_agent_tool_from_settings_at(
     Ok(deleted)
 }
 
-pub(crate) fn reorder_agent_tools_from_settings(
-    store: &Store,
-    ordered_ids: &[i64],
-) -> Result<Vec<AgentTool>, UserConfigError> {
-    reorder_agent_tools_from_settings_at(store, &user_config_path(), ordered_ids)
-}
-
+#[cfg(test)]
 fn reorder_agent_tools_from_settings_at(
     store: &Store,
     path: &Path,
@@ -633,6 +599,7 @@ fn read_user_config_document(
     Ok((source, root))
 }
 
+#[cfg(test)]
 fn agent_tool_entries_mut(
     root: &mut serde_yaml::Mapping,
 ) -> Result<&mut Vec<serde_yaml::Value>, UserConfigError> {
@@ -644,6 +611,7 @@ fn agent_tool_entries_mut(
     })
 }
 
+#[cfg(test)]
 fn entry_name(entry: &serde_yaml::Value) -> Option<&str> {
     entry
         .as_mapping()?
@@ -651,6 +619,7 @@ fn entry_name(entry: &serde_yaml::Value) -> Option<&str> {
         .as_str()
 }
 
+#[cfg(test)]
 fn set_agent_tool_entry(
     entry: &mut serde_yaml::Value,
     name: &str,
@@ -752,6 +721,7 @@ fn replace_top_level_yaml_block(source: &str, key: &str, replacement: &str) -> S
     }
 }
 
+#[cfg(test)]
 fn reorder_store_from_config(
     store: &Store,
     configured: &[UserAgentTool],

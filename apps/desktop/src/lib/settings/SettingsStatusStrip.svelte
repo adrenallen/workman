@@ -5,17 +5,16 @@
   import { projectDisplayName } from '../worktrees';
 
   interface Props {
-    project: Project;
+    project: Project | null;
     connection: ConnectionStatus;
     info: DaemonSettingsInfo | null;
   }
 
   let { project, connection, info }: Props = $props();
 
-  let projectName = $derived(projectDisplayName(
-    project,
-    project.path.split('/').filter(Boolean).at(-1) || 'Project'
-  ));
+  let projectName = $derived(project
+    ? projectDisplayName(project, project.path.split('/').filter(Boolean).at(-1) || 'Project')
+    : 'No project loaded');
   let daemonLabel = $derived(
     connection.status === 'connected'
       ? `Daemon ${info?.version ?? connection.daemon_version ?? ''}`.trim()

@@ -126,11 +126,11 @@ the rename.
 
 ## User agent tools
 
-Agent commands can be managed in `workman/config.yml` beneath the platform config directory
-(`~/Library/Application Support/workman/config.yml` on macOS, or
-`${XDG_CONFIG_HOME:-~/.config}/workman/config.yml` on Linux). Set `WORKMAN_CONFIG` to use a
-different file. The daemon reconciles this file on startup; file-backed entries are visible but
-read-only in the desktop settings, while tools created in the UI remain in the database.
+Agent commands are owned by the active profile and managed in desktop Settings. On the first boot
+after upgrading to profile-aware storage, Workman imports the existing `agent_tools` block from
+`workman/config.yml` into the Default profile. Later profile changes are stored in SQLite; the YAML
+block remains as a migration source and is not re-applied on every restart. Set `WORKMAN_CONFIG` to
+choose the per-user file that also retains global update settings.
 
 ```yaml
 agent_tools:
@@ -146,12 +146,39 @@ agent_tools:
     # tool_type is optional and inferred from the command executable.
 ```
 
-Names are the stable identity for file-backed entries. Removing one from the file removes that
-managed entry at the next daemon restart. Unknown `tool_type` values are accepted and use the
-generic terminal-prompt attention detector. Resume behavior is preset-level and agent-agnostic:
+Names are unique within a profile. Unknown `tool_type` values are accepted and use the generic
+terminal-prompt attention detector. Resume behavior is preset-level and agent-agnostic:
 `resume_args` must contain `{session_id}`, while `continue_args` is the cwd-scoped fallback used
 when no captured ID is available. Omitting both always starts that preset fresh. Workman discovers
 session IDs passively from supported CLIs' own stores; it never probes or injects input into a PTY.
+
+## Profiles
+
+Profiles switch the loaded project set, project order/selection, terminal shell override, agent
+tool presets, and custom agent marks. Existing installs migrate transparently into an active
+`Default` profile. Canonical project data follows the project: processes and output history, todos,
+scratchpads, worktree metadata, and project appearance are shared if the same path is attached to
+more than one profile. Daemon/MCP credentials, update keys, notification history, UI-local theme and
+rail preferences, and repository-local `workman.yml` files are global.
+
+Use desktop Settings → Profiles or the CLI:
+
+```sh
+wrk profile list
+wrk profile create "Demo recording" --empty
+wrk profile switch 2 --stop-running
+wrk profile export 1 ./main.workman-profile.json
+wrk profile import ./main.workman-profile.json --name "Imported main"
+wrk profile delete 2
+```
+
+A switch refuses to proceed while the outgoing profile has running work unless the desktop cascade
+dialog or `--stop-running` confirms the exact stop set. The daemon is not restarted, so the MCP
+endpoint and connected global sessions remain stable; a project-scoped session whose project is no
+longer active fails project-scope checks loudly. Export archives contain paths, shell choice, agent
+presets, and custom agent PNGs. They never contain endpoint tokens, update/download/signing keys,
+process environments, output, todos, or scratchpads; presets that appear to embed credentials are
+rejected rather than exported.
 
 ## Scratchpad Markdown Titles
 

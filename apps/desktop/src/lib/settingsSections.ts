@@ -4,6 +4,7 @@ import { appNavigation } from './navigation';
 
 export type SettingsSectionId =
   | 'appearance'
+  | 'profiles'
   | 'terminal'
   | 'sidebar'
   | 'hotkeys'
@@ -24,6 +25,7 @@ export interface SettingsSectionDefinition {
 
 export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'appearance', label: 'Appearance', icon: 'Aa', description: 'Theme and interface type', local: true },
+  { id: 'profiles', label: 'Profiles', icon: '▤', description: 'Switch project and config sets', local: false },
   { id: 'terminal', label: 'Terminal', icon: '>_', description: 'Shell, type, and color', local: true },
   { id: 'sidebar', label: 'Sidebar', icon: '▥', description: 'Rails and project tree', local: true },
   { id: 'hotkeys', label: 'Hotkeys', icon: '⌘', description: 'Keyboard reference', local: true },

@@ -6,9 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentLaunchMode, AgentSession, AgentTool, Process, ProcessId, ProcessKind, Project,
-    ProjectId, ProjectLock, ProjectWorktree, Scratchpad, Timer, Todo, TodoBlocker, TodoComment,
-    TodoId, WorktreeRepository, WorktreeRepositoryId,
+    Actor, AgentLaunchMode, AgentSession, AgentTool, Process, ProcessId, ProcessKind, Profile,
+    ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, Scratchpad, Timer, Todo,
+    TodoBlocker, TodoComment, TodoId, WorktreeRepository, WorktreeRepositoryId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -123,10 +123,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "unique_agent_sessions",
         include_str!("../migrations/0023_unique_agent_sessions.sql"),
     ),
+    (
+        24,
+        "profiles",
+        include_str!("../migrations/0024_profiles.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 23;
+pub const LATEST_SCHEMA_VERSION: i64 = 24;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -135,6 +140,7 @@ pub enum StoreError {
     Json(serde_json::Error),
     SchemaTooNew { found: i64, supported: i64 },
     InvalidReorder(String),
+    InvalidProfile(String),
 }
 
 impl fmt::Display for StoreError {
@@ -146,7 +152,9 @@ impl fmt::Display for StoreError {
                 formatter,
                 "database schema version {found} is newer than supported version {supported}"
             ),
-            Self::InvalidReorder(message) => formatter.write_str(message),
+            Self::InvalidReorder(message) | Self::InvalidProfile(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -156,7 +164,7 @@ impl Error for StoreError {
         match self {
             Self::Sqlite(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::SchemaTooNew { .. } | Self::InvalidReorder(_) => None,
+            Self::SchemaTooNew { .. } | Self::InvalidReorder(_) | Self::InvalidProfile(_) => None,
         }
     }
 }
@@ -266,8 +274,434 @@ impl Store {
         &self.connection
     }
 
-    pub fn put_project(&self, project: &Project) -> StoreResult<()> {
+    /// Return the active profile. Every migrated database has exactly one.
+    pub fn active_profile_id(&self) -> StoreResult<ProfileId> {
+        Ok(self
+            .connection
+            .query_row("SELECT id FROM profiles WHERE active = 1", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    pub fn list_profiles(&self) -> StoreResult<Vec<Profile>> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.name, p.active,
+                    COUNT(DISTINCT pp.project_id), COUNT(DISTINCT a.id), p.created_at
+             FROM profiles AS p
+             LEFT JOIN profile_projects AS pp ON pp.profile_id = p.id
+             LEFT JOIN agent_tools AS a ON a.profile_id = p.id
+             GROUP BY p.id
+             ORDER BY p.active DESC, p.created_at, p.id",
+        )?;
+        Ok(statement
+            .query_map([], profile_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_profile(&self, profile_id: ProfileId) -> StoreResult<Option<Profile>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT p.id, p.name, p.active,
+                        COUNT(DISTINCT pp.project_id), COUNT(DISTINCT a.id), p.created_at
+                 FROM profiles AS p
+                 LEFT JOIN profile_projects AS pp ON pp.profile_id = p.id
+                 LEFT JOIN agent_tools AS a ON a.profile_id = p.id
+                 WHERE p.id = ?1
+                 GROUP BY p.id",
+                [profile_id],
+                profile_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_profile_projects(&self, profile_id: ProfileId) -> StoreResult<Vec<Project>> {
+        let mut statement = self.connection.prepare(
+            "SELECT pr.id, pr.path, pr.name, pr.display_name, pr.icon,
+                    pp.selected, pp.sort_order
+             FROM projects AS pr
+             JOIN profile_projects AS pp ON pp.project_id = pr.id
+             WHERE pp.profile_id = ?1
+             ORDER BY pp.sort_order, pr.id",
+        )?;
+        Ok(statement
+            .query_map([profile_id], project_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_profile_agent_tools(&self, profile_id: ProfileId) -> StoreResult<Vec<AgentTool>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, COALESCE(display_name, name), command, tool_type, enabled, source,
+                    resume_args, continue_args
+             FROM agent_tools WHERE profile_id = ?1 ORDER BY sort_order, id",
+        )?;
+        Ok(statement
+            .query_map([profile_id], |row| {
+                Ok(AgentTool {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    command: row.get(2)?,
+                    tool_type: row.get(3)?,
+                    enabled: row.get(4)?,
+                    source: row.get(5)?,
+                    resume_args: row.get(6)?,
+                    continue_args: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn profile_terminal_shell(&self, profile_id: ProfileId) -> StoreResult<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT terminal_shell FROM profiles WHERE id = ?1",
+                [profile_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Import a fully validated inactive profile. Project paths are canonicalized by the caller.
+    /// Returned tool IDs follow `tools` order for custom-icon installation.
+    pub fn import_profile(
+        &self,
+        name: &str,
+        terminal_shell: Option<&str>,
+        projects: &[(String, bool)],
+        tools: &[AgentTool],
+    ) -> StoreResult<(Profile, Vec<i64>)> {
+        let name = normalized_profile_name(name)?;
+        if projects.iter().filter(|(_, selected)| *selected).count() > 1 {
+            return Err(StoreError::InvalidProfile(
+                "an imported profile may select at most one project".into(),
+            ));
+        }
+        let profile_id: ProfileId = self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM profiles",
+            [],
+            |row| row.get(0),
+        )?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO profiles (
+                id, name, active, terminal_shell, legacy_config_imported, created_at
+             ) VALUES (?1, ?2, 0, ?3, 1, unixepoch())",
+            params![profile_id, name, terminal_shell],
+        )?;
+
+        let mut next_project_id: i64 =
+            transaction.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM projects", [], |row| {
+                row.get(0)
+            })?;
+        for (position, (path, selected)) in projects.iter().enumerate() {
+            let project_id = transaction
+                .query_row("SELECT id FROM projects WHERE path = ?1", [path], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?
+                .unwrap_or_else(|| {
+                    let id = next_project_id;
+                    next_project_id += 1;
+                    id
+                });
+            transaction.execute(
+                "INSERT INTO projects (id, path, name, selected, sort_order)
+                 VALUES (?1, ?2, ?3, 0, 0)
+                 ON CONFLICT(path) DO NOTHING",
+                params![project_id, path, project_name_from_path(path)],
+            )?;
+            transaction.execute(
+                "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![profile_id, project_id, position as i64, selected],
+            )?;
+        }
+
+        let first_tool_id: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_tools",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut tool_ids = Vec::with_capacity(tools.len());
+        for (position, tool) in tools.iter().enumerate() {
+            let id = first_tool_id + position as i64;
+            transaction.execute(
+                "INSERT INTO agent_tools (
+                    id, name, display_name, command, tool_type, enabled, source, sort_order,
+                    resume_args, continue_args, profile_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    id,
+                    profile_agent_storage_name(profile_id, id),
+                    tool.name,
+                    tool.command,
+                    tool.tool_type,
+                    tool.enabled,
+                    tool.source,
+                    position as i64,
+                    tool.resume_args,
+                    tool.continue_args,
+                    profile_id,
+                ],
+            )?;
+            tool_ids.push(id);
+        }
+        transaction.commit()?;
+        let profile = self
+            .get_profile(profile_id)?
+            .ok_or_else(|| StoreError::InvalidProfile("imported profile was not found".into()))?;
+        Ok((profile, tool_ids))
+    }
+
+    /// Create an inactive profile. `copy_active` snapshots membership, shell, and agent tools.
+    /// The returned ID pairs map source agent-tool IDs to their independent copies so callers
+    /// can clone custom icon files without putting filesystem paths in the database.
+    pub fn create_profile(
+        &self,
+        name: &str,
+        copy_active: bool,
+    ) -> StoreResult<(Profile, Vec<(i64, i64)>)> {
+        let name = normalized_profile_name(name)?;
+        let source_profile_id = self.active_profile_id()?;
+        let profile_id = self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM profiles",
+            [],
+            |row| row.get(0),
+        )?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let shell: Option<String> = if copy_active {
+            transaction.query_row(
+                "SELECT terminal_shell FROM profiles WHERE id = ?1",
+                [source_profile_id],
+                |row| row.get(0),
+            )?
+        } else {
+            None
+        };
+        transaction.execute(
+            "INSERT INTO profiles (
+                id, name, active, terminal_shell, legacy_config_imported, created_at
+             ) VALUES (?1, ?2, 0, ?3, 1, unixepoch())",
+            params![profile_id, name, shell],
+        )?;
+        if copy_active {
+            transaction.execute(
+                "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
+                 SELECT ?1, project_id, sort_order, selected
+                 FROM profile_projects WHERE profile_id = ?2",
+                params![profile_id, source_profile_id],
+            )?;
+        }
+
+        let mut icon_pairs = Vec::new();
+        if copy_active {
+            let tools = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, COALESCE(display_name, name), command, tool_type, enabled, source,
+                            sort_order, resume_args, continue_args
+                     FROM agent_tools WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_tools",
+                [],
+                |row| row.get(0),
+            )?;
+            for (
+                position,
+                (
+                    old_id,
+                    display_name,
+                    command,
+                    tool_type,
+                    enabled,
+                    source,
+                    sort_order,
+                    resume_args,
+                    continue_args,
+                ),
+            ) in tools.into_iter().enumerate()
+            {
+                let next_id = first_id + position as i64;
+                let storage_name = profile_agent_storage_name(profile_id, next_id);
+                transaction.execute(
+                    "INSERT INTO agent_tools (
+                        id, name, display_name, command, tool_type, enabled, source, sort_order,
+                        resume_args, continue_args, profile_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        next_id,
+                        storage_name,
+                        display_name,
+                        command,
+                        tool_type,
+                        enabled,
+                        source,
+                        sort_order,
+                        resume_args,
+                        continue_args,
+                        profile_id,
+                    ],
+                )?;
+                icon_pairs.push((old_id, next_id));
+            }
+        }
+        transaction.commit()?;
+        let profile = self
+            .get_profile(profile_id)?
+            .ok_or_else(|| StoreError::InvalidProfile("created profile was not found".into()))?;
+        Ok((profile, icon_pairs))
+    }
+
+    pub fn rename_profile(&self, profile_id: ProfileId, name: &str) -> StoreResult<Profile> {
+        let name = normalized_profile_name(name)?;
+        if self.connection.execute(
+            "UPDATE profiles SET name = ?1 WHERE id = ?2",
+            params![name, profile_id],
+        )? == 0
+        {
+            return Err(StoreError::InvalidProfile(format!(
+                "profile {profile_id} was not found"
+            )));
+        }
+        self.get_profile(profile_id)?
+            .ok_or_else(|| StoreError::InvalidProfile("renamed profile was not found".into()))
+    }
+
+    /// Delete an inactive profile and return its agent-tool IDs for icon cleanup.
+    pub fn delete_profile(&self, profile_id: ProfileId) -> StoreResult<Vec<i64>> {
+        let profile = self.get_profile(profile_id)?.ok_or_else(|| {
+            StoreError::InvalidProfile(format!("profile {profile_id} was not found"))
+        })?;
+        if profile.active {
+            return Err(StoreError::InvalidProfile(
+                "switch away before deleting the active profile".into(),
+            ));
+        }
+        let tool_ids = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id FROM agent_tools WHERE profile_id = ?1 ORDER BY id")?;
+            statement
+                .query_map([profile_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        self.connection
+            .execute("DELETE FROM profiles WHERE id = ?1", [profile_id])?;
+        Ok(tool_ids)
+    }
+
+    pub fn switch_profile(&self, profile_id: ProfileId) -> StoreResult<Profile> {
+        if self.get_profile(profile_id)?.is_none() {
+            return Err(StoreError::InvalidProfile(format!(
+                "profile {profile_id} was not found"
+            )));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute("UPDATE profiles SET active = 0 WHERE active = 1", [])?;
+        transaction.execute("UPDATE profiles SET active = 1 WHERE id = ?1", [profile_id])?;
+        transaction.commit()?;
+        self.get_profile(profile_id)?
+            .ok_or_else(|| StoreError::InvalidProfile("switched profile was not found".into()))
+    }
+
+    pub fn active_profile_terminal_shell(&self) -> StoreResult<Option<String>> {
+        Ok(self.connection.query_row(
+            "SELECT terminal_shell FROM profiles WHERE active = 1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn set_active_profile_terminal_shell(&self, shell: Option<&str>) -> StoreResult<()> {
         self.connection.execute(
+            "UPDATE profiles SET terminal_shell = ?1 WHERE active = 1",
+            [shell],
+        )?;
+        Ok(())
+    }
+
+    pub fn active_profile_needs_legacy_config_import(&self) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
+            "SELECT legacy_config_imported = 0 FROM profiles WHERE active = 1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn mark_active_profile_legacy_config_imported(&self) -> StoreResult<()> {
+        self.connection.execute(
+            "UPDATE profiles SET legacy_config_imported = 1 WHERE active = 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_project_in_active_profile(&self, project_id: ProjectId) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM profile_projects AS pp
+                JOIN profiles AS p ON p.id = pp.profile_id AND p.active = 1
+                WHERE pp.project_id = ?1
+             )",
+            [project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn attach_project_to_active_profile(&self, project_id: ProjectId) -> StoreResult<()> {
+        let profile_id = self.active_profile_id()?;
+        self.connection.execute(
+            "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
+             SELECT ?1, ?2,
+                    COALESCE(MAX(sort_order), -1) + 1,
+                    CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
+             FROM profile_projects WHERE profile_id = ?1
+             ON CONFLICT(profile_id, project_id) DO NOTHING",
+            params![profile_id, project_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn select_project_in_active_profile(&self, project_id: ProjectId) -> StoreResult<bool> {
+        if !self.is_project_in_active_profile(project_id)? {
+            return Ok(false);
+        }
+        let profile_id = self.active_profile_id()?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE profile_projects SET selected = 0 WHERE profile_id = ?1",
+            [profile_id],
+        )?;
+        transaction.execute(
+            "UPDATE profile_projects SET selected = 1
+             WHERE profile_id = ?1 AND project_id = ?2",
+            params![profile_id, project_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn put_project(&self, project: &Project) -> StoreResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO projects (id, path, name, display_name, icon, selected, sort_order)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
@@ -287,6 +721,27 @@ impl Store {
                 project.sort_order,
             ],
         )?;
+        let profile_id: ProfileId =
+            transaction.query_row("SELECT id FROM profiles WHERE active = 1", [], |row| {
+                row.get(0)
+            })?;
+        transaction.execute(
+            "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
+             SELECT ?1, ?2,
+                    COALESCE(MAX(sort_order), -1) + 1,
+                    CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
+             FROM profile_projects WHERE profile_id = ?1
+             ON CONFLICT(profile_id, project_id) DO NOTHING",
+            params![profile_id, project.id],
+        )?;
+        if project.selected {
+            transaction.execute(
+                "UPDATE profile_projects SET selected = CASE WHEN project_id = ?2 THEN 1 ELSE 0 END
+                 WHERE profile_id = ?1",
+                params![profile_id, project.id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -294,8 +749,12 @@ impl Store {
         let project = self
             .connection
             .query_row(
-                "SELECT id, path, name, display_name, icon, selected, sort_order
-                 FROM projects WHERE id = ?1",
+                "SELECT pr.id, pr.path, pr.name, pr.display_name, pr.icon,
+                        pp.selected, pp.sort_order
+                 FROM projects AS pr
+                 JOIN profile_projects AS pp ON pp.project_id = pr.id
+                 JOIN profiles AS p ON p.id = pp.profile_id AND p.active = 1
+                 WHERE pr.id = ?1",
                 [id],
                 |row| {
                     Ok(Project {
@@ -313,10 +772,39 @@ impl Store {
         Ok(project)
     }
 
+    /// Read a canonical project without applying active-profile visibility.
+    pub fn get_project_any(&self, id: ProjectId) -> StoreResult<Option<Project>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, path, name, display_name, icon, selected, sort_order
+                 FROM projects WHERE id = ?1",
+                [id],
+                project_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn get_project_by_path_any(&self, path: &str) -> StoreResult<Option<Project>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, path, name, display_name, icon, selected, sort_order
+                 FROM projects WHERE path = ?1",
+                [path],
+                project_from_row,
+            )
+            .optional()?)
+    }
+
     pub fn list_projects(&self) -> StoreResult<Vec<Project>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, path, name, display_name, icon, selected, sort_order
-             FROM projects ORDER BY sort_order, id",
+            "SELECT pr.id, pr.path, pr.name, pr.display_name, pr.icon,
+                    pp.selected, pp.sort_order
+             FROM projects AS pr
+             JOIN profile_projects AS pp ON pp.project_id = pr.id
+             JOIN profiles AS p ON p.id = pp.profile_id AND p.active = 1
+             ORDER BY pp.sort_order, pr.id",
         )?;
         let projects = statement
             .query_map([], |row| {
@@ -345,7 +833,9 @@ impl Store {
 
     pub fn next_project_sort_order(&self) -> StoreResult<i64> {
         Ok(self.connection.query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects",
+            "SELECT COALESCE(MAX(pp.sort_order), -1) + 1
+             FROM profile_projects AS pp
+             JOIN profiles AS p ON p.id = pp.profile_id AND p.active = 1",
             [],
             |row| row.get(0),
         )?)
@@ -364,7 +854,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (sort_order, project_id) in ordered_ids.iter().enumerate() {
             transaction.execute(
-                "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
+                "UPDATE profile_projects SET sort_order = ?1
+                 WHERE profile_id = (SELECT id FROM profiles WHERE active = 1)
+                   AND project_id = ?2",
                 params![sort_order as i64, project_id],
             )?;
         }
@@ -373,6 +865,20 @@ impl Store {
     }
 
     pub fn delete_project(&self, id: ProjectId) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM profile_projects
+             WHERE profile_id = (SELECT id FROM profiles WHERE active = 1)
+               AND project_id = ?1",
+            [id],
+        )? > 0)
+    }
+
+    /// Permanently remove a canonical project and every profile membership.
+    ///
+    /// Registration-only removal should use [`Self::delete_project`] so other
+    /// profiles keep their project set. Destructive worktree removal must use
+    /// this method because the path no longer exists for any profile.
+    pub fn delete_project_everywhere(&self, id: ProjectId) -> StoreResult<bool> {
         Ok(self
             .connection
             .execute("DELETE FROM projects WHERE id = ?1", [id])?
@@ -530,25 +1036,38 @@ impl Store {
     }
 
     pub fn put_agent_tool(&self, tool: &AgentTool) -> StoreResult<()> {
+        let profile_id = self.active_profile_id()?;
+        let storage_name = self
+            .connection
+            .query_row(
+                "SELECT name FROM agent_tools WHERE id = ?1 AND profile_id = ?2",
+                params![tool.id, profile_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| profile_agent_storage_name(profile_id, tool.id));
         self.connection.execute(
             "INSERT INTO agent_tools (
-                id, name, command, tool_type, enabled, source, sort_order,
-                resume_args, continue_args
+                id, name, display_name, command, tool_type, enabled, source, sort_order,
+                resume_args, continue_args, profile_id
              )
              VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6,
-                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools), 0), ?7, ?8
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools WHERE profile_id = ?10), 0),
+                ?8, ?9, ?10
              )
              ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
+                display_name = excluded.display_name,
                 command = excluded.command,
                 tool_type = excluded.tool_type,
                 enabled = excluded.enabled,
                 source = excluded.source,
                 resume_args = excluded.resume_args,
-                continue_args = excluded.continue_args",
+                continue_args = excluded.continue_args
+             WHERE agent_tools.profile_id = excluded.profile_id",
             params![
                 tool.id,
+                storage_name,
                 tool.name,
                 tool.command,
                 tool.tool_type,
@@ -556,6 +1075,7 @@ impl Store {
                 tool.source,
                 tool.resume_args,
                 tool.continue_args,
+                profile_id,
             ],
         )?;
         Ok(())
@@ -565,9 +1085,12 @@ impl Store {
         let tool = self
             .connection
             .query_row(
-                "SELECT id, name, command, tool_type, enabled, source,
+                "SELECT a.id, COALESCE(a.display_name, a.name), a.command, a.tool_type,
+                        a.enabled, a.source,
                         resume_args, continue_args
-                 FROM agent_tools WHERE id = ?1",
+                 FROM agent_tools AS a
+                 JOIN profiles AS p ON p.id = a.profile_id AND p.active = 1
+                 WHERE a.id = ?1",
                 [id],
                 |row| {
                     Ok(AgentTool {
@@ -588,9 +1111,11 @@ impl Store {
 
     pub fn list_agent_tools(&self) -> StoreResult<Vec<AgentTool>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, command, tool_type, enabled, source,
-                    resume_args, continue_args
-             FROM agent_tools ORDER BY sort_order, id",
+            "SELECT a.id, COALESCE(a.display_name, a.name), a.command, a.tool_type,
+                    a.enabled, a.source, a.resume_args, a.continue_args
+             FROM agent_tools AS a
+             JOIN profiles AS p ON p.id = a.profile_id AND p.active = 1
+             ORDER BY a.sort_order, a.id",
         )?;
         let tools = statement
             .query_map([], |row| {
@@ -624,7 +1149,9 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         for (position, id) in ordered_ids.iter().enumerate() {
             transaction.execute(
-                "UPDATE agent_tools SET sort_order = ?1 WHERE id = ?2",
+                "UPDATE agent_tools SET sort_order = ?1
+                 WHERE id = ?2
+                   AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
                 params![position as i64, id],
             )?;
         }
@@ -641,10 +1168,12 @@ impl Store {
     }
 
     pub fn delete_agent_tool(&self, id: i64) -> StoreResult<bool> {
-        Ok(self
-            .connection
-            .execute("DELETE FROM agent_tools WHERE id = ?1", [id])?
-            > 0)
+        Ok(self.connection.execute(
+            "DELETE FROM agent_tools
+             WHERE id = ?1
+               AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+            [id],
+        )? > 0)
     }
 
     /// Persist the strategy used for the latest agent launch while retaining any captured ID.
@@ -817,6 +1346,26 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         };
         Ok(processes)
+    }
+
+    pub fn list_active_profile_processes(&self) -> StoreResult<Vec<Process>> {
+        let mut statement = self.connection.prepare(
+            "SELECT process.id, process.project_id, process.kind, process.name, process.command,
+                    process.working_dir, process.env, process.auto_start, process.auto_restart,
+                    process.restart_when_changed, process.source, process.trust_hash,
+                    process.status, process.pid, process.exit_code, process.exit_signal,
+                    process.exited_at, process.agent_tool_id, process.spawned_by_process_id,
+                    process.sort_order
+             FROM processes AS process
+             JOIN profile_projects AS pp ON pp.project_id = process.project_id
+             JOIN profiles AS profile ON profile.id = pp.profile_id AND profile.active = 1
+             ORDER BY pp.sort_order,
+                      CASE process.kind WHEN 'agent' THEN 0 WHEN 'terminal' THEN 1 ELSE 2 END,
+                      process.sort_order, process.id",
+        )?;
+        Ok(statement
+            .query_map([], process_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Return an unused positive process ID for a caller that serializes creates.
@@ -1427,6 +1976,59 @@ fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {
         spawned_by_process_id: row.get(18)?,
         sort_order: row.get(19)?,
     })
+}
+
+fn profile_from_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
+    let project_count: i64 = row.get(3)?;
+    let agent_tool_count: i64 = row.get(4)?;
+    Ok(Profile {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        active: row.get(2)?,
+        project_count: usize::try_from(project_count).unwrap_or(usize::MAX),
+        agent_tool_count: usize::try_from(agent_tool_count).unwrap_or(usize::MAX),
+        created_at: row.get(5)?,
+    })
+}
+
+fn project_from_row(row: &Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        name: row.get(2)?,
+        display_name: row.get(3)?,
+        icon: row.get(4)?,
+        selected: row.get(5)?,
+        sort_order: row.get(6)?,
+    })
+}
+
+fn normalized_profile_name(name: &str) -> StoreResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(StoreError::InvalidProfile(
+            "profile name cannot be empty".into(),
+        ));
+    }
+    if name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(StoreError::InvalidProfile(
+            "profile name must be at most 80 visible characters".into(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn profile_agent_storage_name(profile_id: ProfileId, agent_tool_id: i64) -> String {
+    format!("profile-{profile_id}-tool-{agent_tool_id}")
+}
+
+fn project_name_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Project")
+        .to_owned()
 }
 
 fn worktree_repository_from_row(row: &Row<'_>) -> rusqlite::Result<WorktreeRepository> {

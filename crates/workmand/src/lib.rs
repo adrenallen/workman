@@ -47,6 +47,7 @@ mod notification_pipeline_tests;
 mod process_registry;
 pub mod process_stats;
 mod process_tree;
+mod profiles;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;
@@ -240,12 +241,33 @@ impl DaemonServer {
             .map_err(registry_io_error)?;
         let user_config_path = user_config_path();
         let user_environment = UserEnvironmentResolver::new(&user_config_path);
-        sync_user_config_file(&store, &user_config_path).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {error}", user_config_path.display()),
-            )
-        })?;
+        if store
+            .active_profile_needs_legacy_config_import()
+            .map_err(registry_io_error)?
+        {
+            sync_user_config_file(&store, &user_config_path).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {error}", user_config_path.display()),
+                )
+            })?;
+            let legacy_shell = match std::fs::read_to_string(&user_config_path) {
+                Ok(yaml) => {
+                    parse_user_config(&yaml)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                        .terminal
+                        .shell
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            store
+                .set_active_profile_terminal_shell(legacy_shell.as_deref())
+                .map_err(registry_io_error)?;
+            store
+                .mark_active_profile_legacy_config_imported()
+                .map_err(registry_io_error)?;
+        }
         let command_environment = user_environment.resolve().command_environment();
         if let Err(error) =
             worktrees::reconcile_existing_projects_with_environment(&store, &command_environment)

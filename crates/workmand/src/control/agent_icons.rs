@@ -163,6 +163,72 @@ pub fn delete_override(data_dir: &Path, tool_id: AgentToolId) -> Result<(), Agen
     }
 }
 
+pub fn clone_override(
+    data_dir: &Path,
+    source_tool_id: AgentToolId,
+    target_tool_id: AgentToolId,
+) -> Result<(), AgentIconError> {
+    let bytes = match fs::read(icon_path(data_dir, source_tool_id)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    install_png_override(data_dir, target_tool_id, &bytes)
+}
+
+pub fn export_override(
+    data_dir: &Path,
+    tool_id: AgentToolId,
+) -> Result<Option<Vec<u8>>, AgentIconError> {
+    match fs::read(icon_path(data_dir, tool_id)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn validate_png_override(bytes: &[u8]) -> Result<(), AgentIconError> {
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(AgentIconError::ImageTooLarge);
+    }
+    let image = image::load_from_memory_with_format(bytes, ImageFormat::Png)?;
+    if image.width() != ICON_SIZE || image.height() != ICON_SIZE {
+        return Err(AgentIconError::UnsupportedFormat);
+    }
+    Ok(())
+}
+
+pub fn install_png_override(
+    data_dir: &Path,
+    tool_id: AgentToolId,
+    bytes: &[u8],
+) -> Result<(), AgentIconError> {
+    validate_png_override(bytes)?;
+    let directory = icon_directory(data_dir);
+    fs::create_dir_all(&directory)?;
+    restrict_directory_permissions(&directory)?;
+    let destination = icon_path(data_dir, tool_id);
+    let temporary = directory.join(format!(".{tool_id}.{}.tmp", Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result: Result<(), AgentIconError> = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
 fn read_icon_data_url(data_dir: &Path, tool_id: AgentToolId) -> Result<String, AgentIconError> {
     let bytes = fs::read(icon_path(data_dir, tool_id))?;
     Ok(format!("data:image/png;base64,{}", BASE64.encode(bytes)))

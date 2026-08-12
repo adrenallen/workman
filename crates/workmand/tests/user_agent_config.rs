@@ -158,7 +158,7 @@ async fn control_call(
 }
 
 #[tokio::test]
-async fn settings_mutations_persist_to_config_and_survive_isolated_daemon_restart()
+async fn settings_mutations_persist_to_active_profile_and_survive_isolated_daemon_restart()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join("state");
@@ -266,11 +266,9 @@ async fn settings_mutations_persist_to_config_and_survive_isolated_daemon_restar
     assert_eq!(deleted["deleted"], true);
     stop_daemon(child, &data_dir).await?;
 
-    let persisted = std::fs::read_to_string(&config_path)?;
-    assert!(persisted.contains("name: UI custom"));
-    assert!(persisted.contains("name: Codex QA"));
-    assert!(persisted.contains("command: codex --model qa-persisted"));
-    assert!(!persisted.contains("name: Kimi"));
+    // YAML is a one-time migration source. Settings writes belong to the
+    // active profile and must not rewrite the legacy/global config file.
+    assert_eq!(std::fs::read_to_string(&config_path)?, SIX_AGENTS);
 
     let child = spawn_daemon(&data_dir, &config_path)?;
     let discovery = wait_for_discovery(&data_dir, child.id().unwrap()).await?;

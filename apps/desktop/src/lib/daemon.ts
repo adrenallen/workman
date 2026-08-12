@@ -102,6 +102,30 @@ export interface ProjectIconImage {
   path: string;
 }
 
+export interface Profile {
+  id: number;
+  name: string;
+  active: boolean;
+  project_count: number;
+  agent_tool_count: number;
+  created_at: number;
+}
+
+export interface ProfileRunningProcess {
+  id: number;
+  project_id: number;
+  name: string;
+  status: ProcessStatus;
+}
+
+export interface ProfileSwitchImpact {
+  profile: Profile;
+  impact: {
+    profile_id: number;
+    running_processes: ProfileRunningProcess[];
+  };
+}
+
 export interface ConnectionStatus {
   status: 'connecting' | 'connected' | 'disconnected';
   message: string | null;
@@ -301,6 +325,51 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   projects(): Promise<Project[]> {
     return this.request('projects.list');
+  }
+
+  profiles(): Promise<Profile[]> {
+    return this.request<{ profiles: Profile[] }>('profile.list').then((result) => result.profiles);
+  }
+
+  createProfile(name: string, copyCurrent: boolean): Promise<Profile> {
+    return this.request<{ profile: Profile }>('profile.create', {
+      name,
+      copy_current: copyCurrent
+    }).then((result) => result.profile);
+  }
+
+  renameProfile(profileId: number, name: string): Promise<Profile> {
+    return this.request<{ profile: Profile }>('profile.rename', {
+      profile_id: profileId,
+      name
+    }).then((result) => result.profile);
+  }
+
+  profileSwitchImpact(profileId: number): Promise<ProfileSwitchImpact> {
+    return this.request('profile.switch_impact', { profile_id: profileId });
+  }
+
+  switchProfile(profileId: number, confirmStopRunning: boolean): Promise<Profile> {
+    return this.request<{ profile: Profile }>('profile.switch', {
+      profile_id: profileId,
+      confirm_stop_running: confirmStopRunning
+    }).then((result) => result.profile);
+  }
+
+  deleteProfile(profileId: number): Promise<void> {
+    return this.request('profile.delete', {
+      profile_id: profileId,
+      confirm_delete: true
+    });
+  }
+
+  exportProfile(profileId: number, path: string): Promise<void> {
+    return this.request('profile.export', { profile_id: profileId, path });
+  }
+
+  importProfile(path: string, name?: string): Promise<Profile> {
+    return this.request<{ profile: Profile }>('profile.import', { path, name })
+      .then((result) => result.profile);
   }
 
   register(path: string): Promise<Project[]> {

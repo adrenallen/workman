@@ -33,8 +33,9 @@
   import SettingsStatusStrip from './settings/SettingsStatusStrip.svelte';
   import SidebarCard from './settings/SidebarCard.svelte';
   import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
+  import ProfilesCard from './settings/ProfilesCard.svelte';
 
-  let { client, project, connection, onError }: SettingsPanelProps = $props();
+  let { client, project, connection, onError, onProfileSwitched }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
@@ -227,6 +228,13 @@
     >
       {#if $settingsSection === 'appearance'}
         <AppearanceCard />
+      {:else if $settingsSection === 'profiles'}
+        <ProfilesCard
+          {client}
+          connected={connection.status === 'connected'}
+          {onError}
+          onSwitched={onProfileSwitched}
+        />
       {:else if $settingsSection === 'terminal'}
         <TerminalAppearanceCard
           {client}
@@ -241,11 +249,21 @@
       {:else if $settingsSection === 'notifications'}
         <NotificationsCard />
       {:else if $settingsSection === 'agents'}
-        <div class="section-stack">
-          <AgentToolsCard {client} connected={connection.status === 'connected'} {onError} />
-          <RuntimeDoctor {client} {project} connected={connection.status === 'connected'} {onError} />
-          <WorktreeHealthCard {client} connected={connection.status === 'connected'} {onError} />
-        </div>
+        {#if project}
+          <div class="section-stack">
+            <AgentToolsCard {client} connected={connection.status === 'connected'} {onError} />
+            <RuntimeDoctor {client} {project} connected={connection.status === 'connected'} {onError} />
+            <WorktreeHealthCard {client} connected={connection.status === 'connected'} {onError} />
+          </div>
+        {:else}
+          <SettingsConnectionCard
+            title="Agent settings"
+            connected={connection.status === 'connected'}
+            loading={false}
+            error="Load a project before checking agent runtime health."
+            onRetry={() => {}}
+          />
+        {/if}
       {:else if $settingsSection === 'tools'}
         <OpenersCard />
       {:else if $settingsSection === 'mcp'}

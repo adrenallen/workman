@@ -21,9 +21,10 @@ export interface AgentsPanelProps {
 
 export interface SettingsPanelProps {
   client: DaemonClient;
-  project: Project;
+  project: Project | null;
   connection: ConnectionStatus;
   onError: (message: string) => void;
+  onProfileSwitched: () => void;
 }
 
 export interface WorkspaceSectionDefinition {

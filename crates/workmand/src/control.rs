@@ -19,7 +19,7 @@ use crate::{
     SharedProcessRegistry,
 };
 
-mod agent_icons;
+pub(crate) mod agent_icons;
 mod project_icons;
 mod terminal_theme;
 
@@ -64,6 +64,51 @@ struct RenameParams {
 #[derive(Debug, Deserialize)]
 struct ProjectParams {
     project_id: ProjectId,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileParams {
+    profile_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileCreateParams {
+    name: String,
+    #[serde(default = "default_true")]
+    copy_current: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileRenameParams {
+    profile_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileSwitchParams {
+    profile_id: i64,
+    #[serde(default)]
+    confirm_stop_running: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileDeleteParams {
+    profile_id: i64,
+    #[serde(default)]
+    confirm_delete: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileExportParams {
+    profile_id: i64,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileImportParams {
+    path: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -576,6 +621,56 @@ async fn dispatch(
         return result;
     }
     match method {
+        "profile.list" => {
+            return crate::profiles::list(&registry);
+        }
+        "profile.create" => {
+            let params: ProfileCreateParams = params_as(params)?;
+            return crate::profiles::create(&registry, data_dir, &params.name, params.copy_current);
+        }
+        "profile.rename" => {
+            let params: ProfileRenameParams = params_as(params)?;
+            return crate::profiles::rename(&registry, params.profile_id, &params.name);
+        }
+        "profile.switch_impact" => {
+            let params: ProfileParams = params_as(params)?;
+            return crate::profiles::switch_impact(&mut registry, params.profile_id);
+        }
+        "profile.switch" => {
+            let params: ProfileSwitchParams = params_as(params)?;
+            return crate::profiles::switch(
+                &mut registry,
+                params.profile_id,
+                params.confirm_stop_running,
+            );
+        }
+        "profile.delete" => {
+            let params: ProfileDeleteParams = params_as(params)?;
+            return crate::profiles::delete(
+                &registry,
+                data_dir,
+                params.profile_id,
+                params.confirm_delete,
+            );
+        }
+        "profile.export" => {
+            let params: ProfileExportParams = params_as(params)?;
+            return crate::profiles::export(
+                &registry,
+                data_dir,
+                params.profile_id,
+                Path::new(&params.path),
+            );
+        }
+        "profile.import" => {
+            let params: ProfileImportParams = params_as(params)?;
+            return crate::profiles::import(
+                &registry,
+                data_dir,
+                Path::new(&params.path),
+                params.name.as_deref(),
+            );
+        }
         "settings.user_shell" => {
             let params: UserShellParams = params_as(params)?;
             crate::user_config::save_user_shell_from_settings_at(
@@ -583,6 +678,10 @@ async fn dispatch(
                 params.shell.as_deref(),
             )
             .map_err(|error| ("user_config_error", error.to_string()))?;
+            registry
+                .store()
+                .set_active_profile_terminal_shell(params.shell.as_deref())
+                .map_err(project_store_error)?;
             return Ok(json_value(
                 registry.resolved_user_environment().info().clone(),
             ));
@@ -1060,46 +1159,42 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
         .filter(|name| !name.is_empty())
         .unwrap_or("Project")
         .to_owned();
-    let connection = store.connection();
-    connection
-        .execute(
-            "INSERT INTO projects (path, name, sort_order)
-             VALUES (?1, ?2, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects))
-             ON CONFLICT(path) DO NOTHING",
-            (&canonical, &name),
-        )
-        .map_err(project_store_error)?;
-    connection
-        .execute(
-            "UPDATE projects SET selected = 1
-             WHERE path = ?1 AND NOT EXISTS (
-                SELECT 1 FROM projects WHERE selected = 1 AND path <> ?1
-             )",
-            [&canonical],
-        )
-        .map_err(project_store_error)?;
+    if let Some(project) = store
+        .get_project_by_path_any(&canonical)
+        .map_err(project_store_error)?
+    {
+        store
+            .attach_project_to_active_profile(project.id)
+            .map_err(project_store_error)?;
+    } else {
+        let selected = store
+            .list_projects()
+            .map_err(project_store_error)?
+            .is_empty();
+        store
+            .put_project(&Project {
+                id: store.next_project_id().map_err(project_store_error)?,
+                path: canonical,
+                name,
+                display_name: None,
+                icon: None,
+                selected,
+                sort_order: store
+                    .next_project_sort_order()
+                    .map_err(project_store_error)?,
+            })
+            .map_err(project_store_error)?;
+    }
     Ok(())
 }
 
 fn select_project(store: &Store, project_id: ProjectId) -> Result<(), (&'static str, String)> {
-    let exists = store
-        .connection()
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
-            [project_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(project_store_error)?;
-    if !exists {
+    if !store
+        .select_project_in_active_profile(project_id)
+        .map_err(project_store_error)?
+    {
         return Err(("project_not_found", "project not found".to_owned()));
     }
-    store
-        .connection()
-        .execute(
-            "UPDATE projects SET selected = CASE WHEN id = ?1 THEN 1 ELSE 0 END",
-            [project_id],
-        )
-        .map_err(project_store_error)?;
     Ok(())
 }
 

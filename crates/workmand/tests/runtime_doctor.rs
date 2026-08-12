@@ -281,6 +281,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
         "{\"theme\":\"fixture-night\"}\n"
     );
 
+    let legacy_config_before_toggle = fs::read_to_string(&user_config)?;
     let toggled = rpc(
         &mut socket,
         6,
@@ -297,7 +298,10 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
     )
     .await;
     assert_eq!(toggled["result"]["enabled"], false);
-    assert!(fs::read_to_string(&user_config)?.contains("enabled: false"));
+    assert_eq!(
+        fs::read_to_string(&user_config)?,
+        legacy_config_before_toggle
+    );
 
     let _ = mcp.cancel().await;
     socket.close(None).await?;

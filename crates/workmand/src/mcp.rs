@@ -281,6 +281,22 @@ impl WorkmanMcp {
             }
             Err(error) => return failure("store_error", error.to_string()),
         };
+        match registry
+            .store()
+            .is_project_in_active_profile(process.project_id)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return failure(
+                    "identity_scope_error",
+                    format!(
+                        "process {} belongs to project {}, which is not in the active profile",
+                        process.id, process.project_id
+                    ),
+                );
+            }
+            Err(error) => return failure("store_error", error.to_string()),
+        }
         actor.process_id = Some(process.id);
         actor.selected_project_id = Some(process.project_id);
         actor.last_seen_at = now_millis();
@@ -727,12 +743,22 @@ fn process_project_id(
     let Some(process_id) = actor.process_id else {
         return Ok(None);
     };
-    registry
+    let project_id = registry
         .store()
         .get_process(process_id)
         .map_err(|error| error.to_string())?
-        .map(|process| Some(process.project_id))
-        .ok_or_else(|| format!("identified process {process_id} was not found"))
+        .map(|process| process.project_id)
+        .ok_or_else(|| format!("identified process {process_id} was not found"))?;
+    if !registry
+        .store()
+        .is_project_in_active_profile(project_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "identified process {process_id} belongs to project {project_id}, which is not in the active profile; reconnect or switch back before project-scoped work"
+        ));
+    }
+    Ok(Some(project_id))
 }
 
 fn enforce_project_access(

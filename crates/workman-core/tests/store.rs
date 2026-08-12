@@ -56,6 +56,8 @@ fn fresh_database_migrates_to_current_schema() {
             "process_agent_sessions",
             "process_mcp_tokens",
             "processes",
+            "profile_projects",
+            "profiles",
             "project_worktrees",
             "projects",
             "schema_migrations",
@@ -118,9 +120,11 @@ fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_to
              UPDATE agent_tools SET command = 'opencode' WHERE name = 'OpenCode';
              UPDATE agent_tools SET command = 'kimi' WHERE name = 'Kimi';
              UPDATE agent_tools SET command = 'opencode --model deepseek/deepseek-v4-flash' WHERE name = 'DeepSeek v4 flash';
-             INSERT INTO agent_tools (name, command, tool_type, enabled, source, sort_order)
-             VALUES ('Custom Codex', 'codex', 'codex', 0, 'local', 43),
-                    ('Claude custom', 'claude --safe', 'claude_code', 1, 'local', 44);",
+             INSERT INTO agent_tools (
+                name, display_name, command, tool_type, enabled, source, sort_order, profile_id
+             ) VALUES
+                ('Custom Codex', 'Custom Codex', 'codex', 'codex', 0, 'local', 43, 1),
+                ('Claude custom', 'Claude custom', 'claude --safe', 'claude_code', 1, 'local', 44, 1);",
         )
         .expect("arrange legacy defaults and custom tools");
     store

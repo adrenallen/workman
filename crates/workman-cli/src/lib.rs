@@ -26,7 +26,7 @@ use tokio_tungstenite::{
 };
 use workman_core::{
     DEFAULT_RELEASES_API, LATEST_RELEASES_API, Process, ProcessKind, ProcessSource, ProcessStatus,
-    ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, UpdateInstallTarget,
+    Profile, ProjectId, UpdateChannel, UpdateClient, UpdateInstallReport, UpdateInstallTarget,
 };
 use workmand::{
     DaemonVersion, Discovery, McpClient, McpClientSetup, McpConnectionInfo, RuntimeIdentity,
@@ -56,6 +56,7 @@ const ROOT_HELP: &str = concat!(
     "Workspace\n",
     "  (no command)  Register or sync the current directory and show status\n",
     "  add           Register a project folder\n",
+    "  profile       List, create, switch, export, import, or delete profiles\n",
     "\n",
     "Processes\n",
     "  up            Start trusted commands\n",
@@ -114,6 +115,29 @@ Options
 
 Example
   wrk add ~/Code/my-app
+"#;
+
+const PROFILE_HELP: &str = r#"wrk profile — manage switchable project/config profiles
+Usage: wrk profile COMMAND [OPTIONS]
+
+Examples
+  wrk profile list
+  wrk profile create NAME [--empty]
+  wrk profile switch ID [--stop-running]
+  wrk profile export ID PATH
+  wrk profile import PATH [--name NAME]
+  wrk profile delete ID
+
+Commands
+  list     List profiles; * marks the active profile
+  create   Snapshot the active profile; --empty creates a vanilla empty profile
+  switch   Switch profiles; --stop-running confirms stopping outgoing live processes
+  export   Write a secret-free portable JSON archive
+  import   Validate an archive fully, then create an inactive profile
+  delete   Delete an inactive profile (project-owned data remains with canonical projects)
+
+Options
+  -h, --help  Show help and exit
 "#;
 
 const UP_HELP: &str = r#"wrk up — start trusted project commands
@@ -308,6 +332,7 @@ async fn run(
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
         Command::Stop { process_id } => stop(&mut client, process_id).await,
+        Command::Profile(command) => profile(&mut client, command).await,
         Command::App
         | Command::McpSetup { .. }
         | Command::Update { .. }
@@ -387,8 +412,19 @@ enum Command {
     Stop {
         process_id: i64,
     },
+    Profile(ProfileCommand),
     Help(HelpTopic),
     Version,
+}
+
+#[derive(Debug)]
+enum ProfileCommand {
+    List,
+    Create { name: String, copy_current: bool },
+    Switch { profile_id: i64, stop_running: bool },
+    Export { profile_id: i64, path: PathBuf },
+    Import { path: PathBuf, name: Option<String> },
+    Delete { profile_id: i64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,11 +442,12 @@ enum HelpTopic {
     Logs,
     Attach,
     Stop,
+    Profile,
     Help,
 }
 
 impl HelpTopic {
-    const SUBCOMMANDS: [(&'static str, Self); 13] = [
+    const SUBCOMMANDS: [(&'static str, Self); 14] = [
         ("add", Self::Add),
         ("up", Self::Up),
         ("down", Self::Down),
@@ -423,6 +460,7 @@ impl HelpTopic {
         ("logs", Self::Logs),
         ("attach", Self::Attach),
         ("stop", Self::Stop),
+        ("profile", Self::Profile),
         ("help", Self::Help),
     ];
 
@@ -454,6 +492,7 @@ fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::Logs => LOGS_HELP,
         HelpTopic::Attach => ATTACH_HELP,
         HelpTopic::Stop => STOP_HELP,
+        HelpTopic::Profile => PROFILE_HELP,
         HelpTopic::Help => HELP_HELP,
     }
 }
@@ -558,6 +597,7 @@ impl Cli {
                 "logs" => break parse_logs(args.collect())?,
                 "attach" => break parse_process_id_command(args.collect(), HelpTopic::Attach)?,
                 "stop" => break parse_process_id_command(args.collect(), HelpTopic::Stop)?,
+                "profile" => break parse_profile(args.collect())?,
                 _ if arg.starts_with('-') => {
                     return Err(unknown_option(HelpTopic::Root, &arg));
                 }
@@ -598,7 +638,7 @@ fn root_help_requested(args: &[String]) -> bool {
                     .any(|arg| matches!(arg.as_str(), "-h" | "--help"));
             }
             "--update" | "update" | "add" | "up" | "down" | "app" | "mcp-setup" | "run"
-            | "agent" | "ps" | "logs" | "attach" | "stop" | "help" => return false,
+            | "agent" | "ps" | "logs" | "attach" | "stop" | "profile" | "help" => return false,
             _ => index += 1,
         }
     }
@@ -688,6 +728,103 @@ fn parse_add(args: Vec<String>) -> Result<Command> {
         return Err(usage_error(HelpTopic::Add, "add accepts at most one path"));
     }
     Ok(Command::Add { path })
+}
+
+fn parse_profile(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Profile));
+    }
+    let mut args = args.into_iter();
+    let subcommand = args.next().unwrap_or_else(|| "list".into());
+    let command = match subcommand.as_str() {
+        "list" => {
+            require_no_args(args.collect(), "profile list", HelpTopic::Profile)?;
+            ProfileCommand::List
+        }
+        "create" => {
+            let name = args
+                .next()
+                .ok_or_else(|| usage_error(HelpTopic::Profile, "profile create requires NAME"))?;
+            if name.starts_with('-') {
+                return Err(unknown_option(HelpTopic::Profile, &name));
+            }
+            let mut copy_current = true;
+            for arg in args {
+                match arg.as_str() {
+                    "--empty" => copy_current = false,
+                    _ => return Err(unknown_option(HelpTopic::Profile, &arg)),
+                }
+            }
+            ProfileCommand::Create { name, copy_current }
+        }
+        "switch" => {
+            let id = args
+                .next()
+                .ok_or_else(|| usage_error(HelpTopic::Profile, "profile switch requires ID"))?;
+            let profile_id = parse_id_arg(&id, "profile", HelpTopic::Profile)?;
+            let mut stop_running = false;
+            for arg in args {
+                match arg.as_str() {
+                    "--stop-running" => stop_running = true,
+                    _ => return Err(unknown_option(HelpTopic::Profile, &arg)),
+                }
+            }
+            ProfileCommand::Switch {
+                profile_id,
+                stop_running,
+            }
+        }
+        "export" => {
+            let id = args.next().ok_or_else(|| {
+                usage_error(HelpTopic::Profile, "profile export requires ID and PATH")
+            })?;
+            let profile_id = parse_id_arg(&id, "profile", HelpTopic::Profile)?;
+            let path = args
+                .next()
+                .ok_or_else(|| usage_error(HelpTopic::Profile, "profile export requires PATH"))?;
+            require_no_args(args.collect(), "profile export", HelpTopic::Profile)?;
+            ProfileCommand::Export {
+                profile_id,
+                path: PathBuf::from(path),
+            }
+        }
+        "import" => {
+            let path = args
+                .next()
+                .ok_or_else(|| usage_error(HelpTopic::Profile, "profile import requires PATH"))?;
+            let mut name = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--name" if name.is_none() => {
+                        name = Some(next_value(&mut args, &arg, HelpTopic::Profile)?);
+                    }
+                    _ => return Err(unknown_option(HelpTopic::Profile, &arg)),
+                }
+            }
+            ProfileCommand::Import {
+                path: PathBuf::from(path),
+                name,
+            }
+        }
+        "delete" => {
+            let id = args
+                .next()
+                .ok_or_else(|| usage_error(HelpTopic::Profile, "profile delete requires ID"))?;
+            let profile_id = parse_id_arg(&id, "profile", HelpTopic::Profile)?;
+            require_no_args(args.collect(), "profile delete", HelpTopic::Profile)?;
+            ProfileCommand::Delete { profile_id }
+        }
+        _ if subcommand.starts_with('-') => {
+            return Err(unknown_option(HelpTopic::Profile, &subcommand));
+        }
+        _ => {
+            return Err(usage_error(
+                HelpTopic::Profile,
+                format!("unknown profile command {subcommand:?}"),
+            ));
+        }
+    };
+    Ok(Command::Profile(command))
 }
 
 fn parse_project_action(args: Vec<String>, start: bool) -> Result<Command> {
@@ -1069,6 +1206,121 @@ async fn status(client: &mut Client) -> Result<()> {
     sync_project(client, project.id).await?;
     let project = project_by_id(client, project.id).await?;
     show_status(client, &project).await
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileListResponse {
+    profiles: Vec<Profile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileResponse {
+    profile: Profile,
+    #[serde(default)]
+    stopped_processes: Vec<i64>,
+}
+
+async fn profile(client: &mut Client, command: ProfileCommand) -> Result<()> {
+    match command {
+        ProfileCommand::List => {
+            let response: ProfileListResponse = client.rpc("profile.list", json!({})).await?;
+            if response.profiles.is_empty() {
+                println!("No profiles.");
+            } else {
+                for profile in response.profiles {
+                    println!(
+                        "{} {:>3}  {}  · {} project{} · {} agent preset{}",
+                        if profile.active { "*" } else { " " },
+                        profile.id,
+                        profile.name,
+                        profile.project_count,
+                        if profile.project_count == 1 { "" } else { "s" },
+                        profile.agent_tool_count,
+                        if profile.agent_tool_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                    );
+                }
+            }
+        }
+        ProfileCommand::Create { name, copy_current } => {
+            let response: ProfileResponse = client
+                .rpc(
+                    "profile.create",
+                    json!({ "name": name, "copy_current": copy_current }),
+                )
+                .await?;
+            println!(
+                "Created profile {} ({}){}",
+                response.profile.id,
+                response.profile.name,
+                if copy_current {
+                    " from current state"
+                } else {
+                    " empty"
+                }
+            );
+        }
+        ProfileCommand::Switch {
+            profile_id,
+            stop_running,
+        } => {
+            let response: ProfileResponse = client
+                .rpc(
+                    "profile.switch",
+                    json!({
+                        "profile_id": profile_id,
+                        "confirm_stop_running": stop_running,
+                    }),
+                )
+                .await?;
+            println!(
+                "Switched to {} ({})",
+                response.profile.id, response.profile.name
+            );
+            if !response.stopped_processes.is_empty() {
+                println!(
+                    "Stopped {} running process(es).",
+                    response.stopped_processes.len()
+                );
+            }
+        }
+        ProfileCommand::Export { profile_id, path } => {
+            let _: Value = client
+                .rpc(
+                    "profile.export",
+                    json!({ "profile_id": profile_id, "path": path.to_string_lossy() }),
+                )
+                .await?;
+            println!("Exported profile {profile_id} to {}", path.display());
+        }
+        ProfileCommand::Import { path, name } => {
+            let response: ProfileResponse = client
+                .rpc(
+                    "profile.import",
+                    json!({ "path": path.to_string_lossy(), "name": name }),
+                )
+                .await?;
+            println!(
+                "Imported profile {} ({}) from {}",
+                response.profile.id,
+                response.profile.name,
+                path.display()
+            );
+        }
+        ProfileCommand::Delete { profile_id } => {
+            let _: Value = client
+                .rpc(
+                    "profile.delete",
+                    json!({ "profile_id": profile_id, "confirm_delete": true }),
+                )
+                .await?;
+            println!("Deleted profile {profile_id}");
+        }
+    }
+    Ok(())
 }
 
 async fn add(client: &mut Client, path: PathBuf) -> Result<()> {
@@ -2494,6 +2746,43 @@ mod tests {
         assert_eq!(agent.name.as_deref(), Some("reviewer"));
         assert_eq!(agent.extra_args, ["--model", "gpt-test"]);
         assert!(Cli::parse(["wrk", "agent"].map(OsString::from)).is_err());
+
+        let cli = Cli::parse(["wrk", "profile", "create", "Demo", "--empty"].map(OsString::from))
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profile(ProfileCommand::Create {
+                ref name,
+                copy_current: false,
+            }) if name == "Demo"
+        ));
+        let cli =
+            Cli::parse(["wrk", "profile", "switch", "3", "--stop-running"].map(OsString::from))
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profile(ProfileCommand::Switch {
+                profile_id: 3,
+                stop_running: true,
+            })
+        ));
+        let cli = Cli::parse(
+            [
+                "wrk",
+                "profile",
+                "import",
+                "/tmp/demo.json",
+                "--name",
+                "Imported",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profile(ProfileCommand::Import { ref name, .. })
+                if name.as_deref() == Some("Imported")
+        ));
     }
 
     #[test]

@@ -188,9 +188,9 @@
 <section class="card agent-tools-card" aria-labelledby="agent-tools-title">
   <header>
     <div>
-      <span class="eyebrow">Shared registry</span>
+      <span class="eyebrow">Active profile</span>
       <h2 id="agent-tools-title">Agent tools</h2>
-      <p>Edit the launch command and arguments, availability, and order stored in <code>config.yml</code>.</p>
+      <p>Edit the launch command, availability, custom mark, and order for the loaded profile.</p>
     </div>
     <button class="add" type="button" disabled={!connected || editing !== null} onclick={beginNew}>
       <span aria-hidden="true">+</span> Add tool
@@ -282,7 +282,6 @@
   .eyebrow, .add, .tool-copy span, .tool-copy code, .health-badge, .toggle, .row-actions, .order-actions, .loading, .editor label > span, .editor footer p { font-family: 'JetBrains Mono Variable', monospace; }
   .eyebrow { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
   h2 { margin: 0; color: var(--foreground); font-size: 16px; }
-  .card > header p code { color: #8bc9c0; font-family: 'JetBrains Mono Variable', monospace; }
   .add { gap: 5px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 6px 8px; background: var(--accent); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 650; cursor: pointer; }
   .add span { color: var(--text-soft); font-size: 13px; }
   button:disabled { opacity: 0.42; cursor: default; }

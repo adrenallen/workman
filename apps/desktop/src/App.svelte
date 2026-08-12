@@ -164,7 +164,7 @@
     type ReorderDirection,
     type ReorderDrop
   } from './lib/reorder';
-  import { openSettingsSection } from './lib/settingsSections';
+  import { openSettingsSection, selectSettingsSection } from './lib/settingsSections';
   import {
     createOptimisticProcess,
     failOptimisticProcess,
@@ -3632,7 +3632,7 @@
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
     <div class="project-list" aria-live="polite">
       {#if projects.length === 0 && connection.status === 'connected' && !busy}
-        <div class="project-empty"><strong>No projects</strong><p>Register a folder to begin.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button></div>
+        <div class="project-empty"><strong>No projects</strong><p>Register a folder or switch profiles.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
       {/if}
       {#each projects as project (project.id)}
         {@render projectRailRow(project)}
@@ -3733,7 +3733,20 @@
     data-app-panel="main"
     tabindex="-1"
   >
-    {#if selectedProject}
+    {#if settingsOpen}
+      {#if error}
+        <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
+      {/if}
+      <div class="item-viewer" role="region" aria-label="Settings detail">
+        <SettingsPanel
+          {client}
+          project={selectedProject}
+          {connection}
+          onError={reportError}
+          onProfileSwitched={() => window.location.reload()}
+        />
+      </div>
+    {:else if selectedProject}
       {#if error}
         <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
       {/if}
@@ -3743,9 +3756,7 @@
         aria-label={`${frameItemLabel} detail`}
         oncontextmenu={showViewerContextMenu}
       >
-        {#if settingsOpen}
-          <SettingsPanel {client} project={selectedProject} {connection} onError={reportError} />
-        {:else if activeWorktreeOperation}
+        {#if activeWorktreeOperation}
           <WorktreeProgressPanel
             operation={activeWorktreeOperation}
             onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
@@ -3895,8 +3906,11 @@
       {/if}
     {:else}
       <div class="onboarding">
-        <span>Local workspaces</span><h1>Register a project</h1><p>Choose a repository to see its work tree.</p>
-        <Button disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}><PlusIcon size={14} />Register project</Button>
+        <span>Local workspaces</span><h1>Register a project</h1><p>Choose a repository, or switch back to another profile.</p>
+        <div class="flex gap-2">
+          <Button disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}><PlusIcon size={14} />Register project</Button>
+          <Button variant="outline" disabled={connection.status !== 'connected'} onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button>
+        </div>
       </div>
     {/if}
   </section>

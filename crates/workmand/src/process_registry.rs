@@ -487,7 +487,10 @@ impl ProcessRegistry {
 
     pub fn list(&mut self, project_id: Option<ProjectId>) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
-        Ok(self.store.list_processes(project_id)?)
+        Ok(match project_id {
+            Some(project_id) => self.store.list_processes(Some(project_id))?,
+            None => self.store.list_active_profile_processes()?,
+        })
     }
 
     /// List process status views, including agent state for every process.

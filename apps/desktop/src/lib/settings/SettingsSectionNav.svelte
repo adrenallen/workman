@@ -1,5 +1,6 @@
 <script lang="ts">
   import BotIcon from '@lucide/svelte/icons/bot';
+  import ArchiveIcon from '@lucide/svelte/icons/archive';
   import BellIcon from '@lucide/svelte/icons/bell';
   import InfoIcon from '@lucide/svelte/icons/info';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
@@ -20,6 +21,7 @@
 
   const sectionIcons: Record<SettingsSectionId, Component> = {
     appearance: PaletteIcon,
+    profiles: ArchiveIcon,
     terminal: SquareTerminalIcon,
     sidebar: PanelLeftIcon,
     hotkeys: KeyboardIcon,
