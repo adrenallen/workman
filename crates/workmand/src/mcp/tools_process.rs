@@ -549,16 +549,17 @@ impl WorkmanMcp {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),
             };
-            let sent = if input.submit {
-                registry.submit_input(process.id, &input.data)
-            } else {
-                registry.send_input(process.id, &input.data)
-            };
-            if let Err(error) = sent {
-                return registry_failure(error);
-            }
             (process.id, process.name, cursor)
         };
+        let sent = if input.submit {
+            let mut registry = self.registry.lock().await;
+            registry.submit_input(process_id, &input.data)
+        } else {
+            self.input_router.send_input(process_id, &input.data)
+        };
+        if let Err(error) = sent {
+            return registry_failure(error);
+        }
 
         let waited_ms = args.wait_ms.map(|wait| wait.clamp(250, 10_000));
         if let Some(waited_ms) = waited_ms {

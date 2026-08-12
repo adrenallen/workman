@@ -46,6 +46,7 @@ pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or
 #[derive(Clone)]
 pub struct WorkmanMcp {
     registry: SharedProcessRegistry,
+    input_router: crate::ProcessInputRouter,
     mcp_url: String,
     timer_events: TimerLifecycleHub,
     tool_router: ToolRouter<Self>,
@@ -54,6 +55,7 @@ pub struct WorkmanMcp {
 impl WorkmanMcp {
     pub(crate) fn new(
         registry: SharedProcessRegistry,
+        input_router: crate::ProcessInputRouter,
         mcp_url: String,
         timer_events: TimerLifecycleHub,
     ) -> Self {
@@ -68,6 +70,7 @@ impl WorkmanMcp {
         tool_router.merge(Self::worktree_tool_router());
         Self {
             registry,
+            input_router,
             mcp_url,
             timer_events,
             tool_router,
@@ -77,6 +80,7 @@ impl WorkmanMcp {
 
 pub fn streamable_http_service(
     registry: SharedProcessRegistry,
+    input_router: crate::ProcessInputRouter,
     mcp_url: String,
     timer_events: TimerLifecycleHub,
 ) -> (
@@ -89,6 +93,7 @@ pub fn streamable_http_service(
         move || {
             Ok(WorkmanMcp::new(
                 registry.clone(),
+                input_router.clone(),
                 mcp_url.clone(),
                 timer_events.clone(),
             ))

@@ -7,6 +7,7 @@ use std::{
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,8 +21,8 @@ use workman_core::{
         PendingDialog, pending_dialog,
     },
     pty::{
-        DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyProcess, PtySize,
-        PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
+        DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
+        PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
         WORKMAN_PTY_PROFILE_ENV,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
@@ -164,6 +165,138 @@ impl From<StoreError> for RegistryError {
 
 pub type RegistryResult<T> = Result<T, RegistryError>;
 
+/// Fine-grained input routing for live PTYs.
+///
+/// Lifecycle changes update this table while holding the registry mutex. Input writes only take
+/// this short read lock and then the target process's own writer lock, so another process's spawn
+/// preparation cannot stall an attached terminal.
+#[derive(Clone, Default)]
+pub struct ProcessInputRouter {
+    targets: Arc<RwLock<HashMap<ProcessId, ProcessInputTarget>>>,
+}
+
+#[derive(Clone)]
+struct ProcessInputTarget {
+    process: Process,
+    input: PtyInputHandle,
+    attention: AttentionTracker,
+    active: Arc<RwLock<bool>>,
+}
+
+impl ProcessInputRouter {
+    /// Send raw terminal bytes without taking the lifecycle registry mutex.
+    pub fn send_input(&self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
+        let target = self.target(process_id)?;
+        let active = target
+            .active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*active {
+            return Err(RegistryError::NotRunning(process_id));
+        }
+        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        if !submits_prompt
+            && matches!(
+                target.attention.snapshot().state,
+                AttentionState::Idle | AttentionState::Waiting
+            )
+        {
+            target.attention.suppress_ui_activity();
+        }
+        target
+            .input
+            .write_all(data)
+            .map_err(|error| RegistryError::Pty {
+                process_id,
+                message: error.to_string(),
+            })?;
+        if submits_prompt {
+            target.attention.observe_input();
+        }
+        Ok(target.process)
+    }
+
+    fn submit_input(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+        key_delay: Duration,
+    ) -> RegistryResult<Process> {
+        let target = self.target(process_id)?;
+        let active = target
+            .active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*active {
+            return Err(RegistryError::NotRunning(process_id));
+        }
+        let queued = if target.process.kind == ProcessKind::Agent {
+            target.input.submit_input_verified(
+                content,
+                key_delay,
+                PtySubmissionVerification {
+                    timeout: SUBMIT_VERIFY_TIMEOUT,
+                    max_attempts: SUBMIT_MAX_ATTEMPTS,
+                },
+            )
+        } else {
+            target.input.submit_input(content, key_delay)
+        };
+        queued.map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
+        target.attention.observe_input();
+        Ok(target.process)
+    }
+
+    fn target(&self, process_id: ProcessId) -> RegistryResult<ProcessInputTarget> {
+        self.targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+            .cloned()
+            .ok_or(RegistryError::NotRunning(process_id))
+    }
+
+    fn insert(&self, target: ProcessInputTarget) {
+        self.targets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(target.process.id, target);
+    }
+
+    fn remove(&self, process_id: ProcessId) {
+        let removed = self
+            .targets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&process_id);
+        if let Some(target) = removed {
+            *target
+                .active
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        }
+    }
+
+    fn clear(&self) {
+        let targets = self
+            .targets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .map(|(_, target)| target)
+            .collect::<Vec<_>>();
+        for target in targets {
+            *target
+                .active
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        }
+    }
+}
+
 /// A bounded slice of a process's retained raw PTY byte stream.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RawOutputChunk {
@@ -262,6 +395,7 @@ pub struct ProcessRegistry {
     store: Store,
     status_invalidations: StatusInvalidationHub,
     running: HashMap<ProcessId, PtyProcess>,
+    input_router: ProcessInputRouter,
     /// Last geometry measured by a desktop terminal surface, including while stopped.
     /// Keeping this process-local lets the next spawn start at the correct size before the
     /// child emits its first frame, while a newly attached desktop can immediately replace it.
@@ -386,6 +520,7 @@ impl ProcessRegistry {
             store,
             status_invalidations: StatusInvalidationHub::default(),
             running: HashMap::new(),
+            input_router: ProcessInputRouter::default(),
             pty_sizes: HashMap::new(),
             outputs: HashMap::new(),
             selected: HashMap::new(),
@@ -411,6 +546,10 @@ impl ProcessRegistry {
 
     pub(crate) fn status_invalidations(&self) -> StatusInvalidationHub {
         self.status_invalidations.clone()
+    }
+
+    pub fn input_router(&self) -> ProcessInputRouter {
+        self.input_router.clone()
     }
 
     pub fn resolved_user_environment(&self) -> ResolvedUserEnvironment {
@@ -862,16 +1001,25 @@ impl ProcessRegistry {
             message: launch_message.into(),
         });
         let attention = hosted.attention_tracker();
+        let input = hosted
+            .input_handle()
+            .expect("newly spawned PTY must expose its input handle");
         self.connect_attention_invalidation(&attention);
         self.outputs.insert(
             process_id,
             ProcessOutput {
                 raw: hosted.raw_output(),
                 terminal: hosted.terminal_output(),
-                attention,
+                attention: attention.clone(),
                 events: launch_event.into_iter().collect(),
             },
         );
+        self.input_router.insert(ProcessInputTarget {
+            process: process.clone(),
+            input,
+            attention: attention.clone(),
+            active: Arc::new(RwLock::new(true)),
+        });
         self.running.insert(process_id, hosted);
         if process.kind == ProcessKind::Agent {
             let started_at = now_millis();
@@ -991,12 +1139,14 @@ impl ProcessRegistry {
         let mut process = self.require(process_id)?;
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
+            self.input_router.remove(process_id);
             process.status = ProcessStatus::Stopped;
             process.pid = None;
             self.store.put_process(&process)?;
             self.cleanup_user_stopped_process(&process)?;
             return Ok(process);
         };
+        self.input_router.remove(process_id);
         let _ = self.store.clear_process_mcp_token(process_id);
 
         match terminate_hosted_tree(&mut hosted, self.stop_grace, false) {
@@ -1054,12 +1204,14 @@ impl ProcessRegistry {
         let mut process = self.require(process_id)?;
         self.capture_agent_session_id(process_id)?;
         let Some(mut hosted) = self.running.remove(&process_id) else {
+            self.input_router.remove(process_id);
             process.status = ProcessStatus::Stopped;
             process.pid = None;
             self.store.put_process(&process)?;
             self.cleanup_user_stopped_process(&process)?;
             return Ok(process);
         };
+        self.input_router.remove(process_id);
         let _ = self.store.clear_process_mcp_token(process_id);
 
         match terminate_hosted_tree(&mut hosted, self.stop_grace, true) {
@@ -1258,6 +1410,19 @@ impl ProcessRegistry {
             .outputs
             .get(&process_id)
             .map(|output| output.raw.clone()))
+    }
+
+    /// Clone the process-local terminal parser used by attached output streams.
+    pub fn terminal_output_source(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<TerminalOutput>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        Ok(self
+            .outputs
+            .get(&process_id)
+            .map(|output| output.terminal.clone()))
     }
 
     fn record_raw_output_profile(
@@ -1529,28 +1694,7 @@ impl ProcessRegistry {
     /// optimistically start a turn before the agent produces its own output.
     pub fn send_input(&mut self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
         self.refresh_exits()?;
-        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
-        if !submits_prompt
-            && let Some(output) = self.outputs.get(&process_id)
-            && matches!(
-                output.attention.snapshot().state,
-                AttentionState::Idle | AttentionState::Waiting
-            )
-        {
-            output.attention.suppress_ui_activity();
-        }
-        let hosted = self
-            .running
-            .get_mut(&process_id)
-            .ok_or(RegistryError::NotRunning(process_id))?;
-        hosted.write_all(data).map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
-        if submits_prompt && let Some(output) = self.outputs.get(&process_id) {
-            output.attention.observe_input();
-        }
-        self.require(process_id)
+        self.input_router.send_input(process_id, data)
     }
 
     /// Queue content and Enter as distinct, ordered PTY writes.
@@ -1573,31 +1717,8 @@ impl ProcessRegistry {
         key_delay: Duration,
     ) -> RegistryResult<Process> {
         self.refresh_exits()?;
-        let process = self.require(process_id)?;
-        let hosted = self
-            .running
-            .get(&process_id)
-            .ok_or(RegistryError::NotRunning(process_id))?;
-        let queued = if process.kind == ProcessKind::Agent {
-            hosted.submit_input_verified(
-                content,
-                key_delay,
-                PtySubmissionVerification {
-                    timeout: SUBMIT_VERIFY_TIMEOUT,
-                    max_attempts: SUBMIT_MAX_ATTEMPTS,
-                },
-            )
-        } else {
-            hosted.submit_input(content, key_delay)
-        };
-        queued.map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
-        if let Some(output) = self.outputs.get(&process_id) {
-            output.attention.observe_input();
-        }
-        self.require(process_id)
+        self.input_router
+            .submit_input(process_id, content, key_delay)
     }
 
     /// Resize a live process's PTY and server-side terminal emulator together.
@@ -1703,6 +1824,7 @@ impl ProcessRegistry {
 
             self.capture_agent_session_id(process_id)?;
             self.running.remove(&process_id);
+            self.input_router.remove(process_id);
             let _ = self.store.clear_process_mcp_token(process_id);
             let mut process = self.require(process_id)?;
             apply_exit_info(&mut process, &status);
@@ -2002,6 +2124,7 @@ struct ProcessOutput {
 
 impl Drop for ProcessRegistry {
     fn drop(&mut self) {
+        self.input_router.clear();
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();
         for process_id in process_ids {
             let _ = self.capture_agent_session_id(process_id);

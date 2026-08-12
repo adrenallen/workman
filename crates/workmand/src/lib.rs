@@ -28,7 +28,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     process::Command,
-    sync::{Mutex, watch},
+    sync::{Mutex, mpsc, watch},
     time::{Instant, MissedTickBehavior, interval, sleep, timeout},
 };
 use uuid::Uuid;
@@ -80,8 +80,9 @@ pub use lifecycle::{
 pub use mcp::WORKMAN_MCP_TOKEN_HEADER;
 pub use migration::migrate_legacy_data_dir;
 pub use process_registry::{
-    BulkFailure, BulkProcessResult, OUTPUT_DIRECTORY, ProcessRegistry, ProcessStatusView,
-    RegistryError, RegistryResult, WORKMAN_OUTPUT_CAPACITY_ENV, output_spill_capacity_from_env,
+    BulkFailure, BulkProcessResult, OUTPUT_DIRECTORY, ProcessInputRouter, ProcessRegistry,
+    ProcessStatusView, RegistryError, RegistryResult, WORKMAN_OUTPUT_CAPACITY_ENV,
+    output_spill_capacity_from_env,
 };
 pub use process_stats::{
     DescendantProcessStats, LiveStatsSnapshot, ProcessRuntimeStats, ProjectCounts,
@@ -225,6 +226,7 @@ pub struct DaemonServer {
     discovery: Discovery,
     discovery_guard: DiscoveryGuard,
     registry: SharedProcessRegistry,
+    input_router: ProcessInputRouter,
     data_dir: PathBuf,
     started_at: Instant,
     updates: updates::UpdateService,
@@ -274,15 +276,15 @@ impl DaemonServer {
         {
             eprintln!("workman daemon: worktree metadata reconciliation skipped: {error}");
         }
-        let registry = Arc::new(Mutex::new(
-            ProcessRegistry::with_output_persistence_and_environment(
-                store,
-                config.data_dir.join(OUTPUT_DIRECTORY),
-                output_spill_capacity_from_env(),
-                user_environment.clone(),
-            )
-            .map_err(registry_io_error)?,
-        ));
+        let process_registry = ProcessRegistry::with_output_persistence_and_environment(
+            store,
+            config.data_dir.join(OUTPUT_DIRECTORY),
+            output_spill_capacity_from_env(),
+            user_environment.clone(),
+        )
+        .map_err(registry_io_error)?;
+        let input_router = process_registry.input_router();
+        let registry = Arc::new(Mutex::new(process_registry));
         // Build the HTTP update client before publishing discovery so readiness never advertises
         // a listener that is still loading platform TLS state.
         let updates = updates::UpdateService::new(&config.data_dir).map_err(io::Error::other)?;
@@ -357,6 +359,7 @@ impl DaemonServer {
             discovery,
             discovery_guard,
             registry,
+            input_router,
             data_dir: config.data_dir,
             started_at,
             updates,
@@ -415,6 +418,7 @@ impl DaemonServer {
             shutdown_request: shutdown_tx.clone(),
             settings: runtime_settings,
             registry: self.registry,
+            input_router: self.input_router,
             status_invalidations,
             live_stats,
             timer_events,
@@ -453,6 +457,7 @@ struct AppState {
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    input_router: ProcessInputRouter,
     status_invalidations: status_invalidation::StatusInvalidationHub,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
@@ -461,8 +466,12 @@ struct AppState {
 
 fn router(state: AppState) -> Router {
     let mcp_url = format!("http://127.0.0.1:{}/mcp", state.port);
-    let (mcp_service, mcp_sessions) =
-        mcp::streamable_http_service(state.registry.clone(), mcp_url, state.timer_events.clone());
+    let (mcp_service, mcp_sessions) = mcp::streamable_http_service(
+        state.registry.clone(),
+        state.input_router.clone(),
+        mcp_url,
+        state.timer_events.clone(),
+    );
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
@@ -500,6 +509,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
             state.shutdown_request,
             state.settings,
             state.registry,
+            state.input_router,
             state.status_invalidations,
             state.live_stats,
             state.timer_events,
@@ -515,6 +525,7 @@ async fn control_session(
     shutdown_request: watch::Sender<bool>,
     settings: settings::DaemonRuntimeSettings,
     registry: SharedProcessRegistry,
+    input_router: ProcessInputRouter,
     status_invalidations: status_invalidation::StatusInvalidationHub,
     live_stats: process_stats::LiveStatsHub,
     timer_events: timer_events::TimerLifecycleHub,
@@ -522,8 +533,10 @@ async fn control_session(
 ) {
     let mcp_url = settings.info().mcp.endpoint;
     let mut terminal = TerminalSubscription::default();
+    let concurrent_invalidations = status_invalidations.clone();
     let mut status_subscription =
         ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
+    let (concurrent_response_tx, mut concurrent_response_rx) = mpsc::unbounded_channel::<String>();
     let mut timer_event_cursor = timer_events.latest_sequence();
     let mut status_tick = interval(PROCESS_STATUS_STREAM_TICK);
     status_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -558,13 +571,35 @@ async fn control_session(
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
+                                None if concurrent_control_request(&text) => {
+                                    let registry = registry.clone();
+                                    let input_router = input_router.clone();
+                                    let mcp_url = mcp_url.clone();
+                                    let data_dir = settings.data_dir().to_path_buf();
+                                    let responses = concurrent_response_tx.clone();
+                                    let invalidations = concurrent_invalidations.clone();
+                                    tokio::spawn(async move {
+                                        let response = control::handle_text(
+                                            &text,
+                                            &registry,
+                                            &input_router,
+                                            &mcp_url,
+                                            &data_dir,
+                                        )
+                                        .await;
+                                        invalidations.invalidate();
+                                        let _ = responses.send(response);
+                                    });
+                                    continue;
+                                }
                                 None => control::handle_text(
-                                    &text,
-                                    &registry,
-                                    &mcp_url,
-                                    settings.data_dir(),
-                                )
-                                .await,
+                                        &text,
+                                        &registry,
+                                        &input_router,
+                                        &mcp_url,
+                                        settings.data_dir(),
+                                    )
+                                    .await,
                             };
                             status_subscription.status_invalidations.invalidate();
                             Message::Text(response.into())
@@ -588,8 +623,13 @@ async fn control_session(
                     break;
                 }
             }
+            Some(response) = concurrent_response_rx.recv() => {
+                if socket.send(Message::Text(response.into())).await.is_err() {
+                    break;
+                }
+            }
             _ = &mut output_ready => {
-                match terminal_output_frames(&registry, &mut terminal).await {
+                match terminal_output_frames(&mut terminal) {
                     Ok(frames) => {
                         for frame in frames {
                             if socket.send(Message::Binary(frame.into())).await.is_err() {
@@ -650,10 +690,18 @@ async fn control_session(
     }
 }
 
+fn concurrent_control_request(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|request| request.get("method")?.as_str().map(str::to_owned))
+        .is_some_and(|method| matches!(method.as_str(), "agents.spawn" | "agent_tools.deep_check"))
+}
+
 #[derive(Default)]
 struct TerminalSubscription {
     process_id: Option<workman_core::ProcessId>,
     output: Option<workman_core::pty::RawOutput>,
+    terminal_output: Option<workman_core::terminal::TerminalOutput>,
     offset: u64,
     replay_end_offset: u64,
 }
@@ -662,6 +710,7 @@ impl TerminalSubscription {
     fn detach(&mut self) {
         self.process_id = None;
         self.output = None;
+        self.terminal_output = None;
         self.offset = 0;
         self.replay_end_offset = 0;
     }
@@ -1003,8 +1052,22 @@ async fn handle_session_control(
                     );
                 }
             };
+            let terminal_output = match registry.terminal_output_source(process_id) {
+                Ok(output) => output,
+                Err(error) => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": error.code(), "message": error.to_string() }
+                        })
+                        .to_string(),
+                    );
+                }
+            };
             terminal.process_id = Some(process_id);
             terminal.output = output;
+            terminal.terminal_output = terminal_output;
             // `raw_output` clamps stale or future offsets to the retained stream. Start the
             // readiness cursor at that effective offset; otherwise a client-supplied offset past
             // the current end could wait forever for bytes that were never part of the replay.
@@ -1062,13 +1125,14 @@ fn update_error_reply(id: serde_json::Value, error: workman_core::UpdateError) -
     .to_string()
 }
 
-async fn terminal_output_frames(
-    registry: &SharedProcessRegistry,
-    terminal: &mut TerminalSubscription,
-) -> RegistryResult<Vec<Vec<u8>>> {
+fn terminal_output_frames(terminal: &mut TerminalSubscription) -> RegistryResult<Vec<Vec<u8>>> {
     let Some(process_id) = terminal.process_id else {
         return Ok(Vec::new());
     };
+    let output = terminal
+        .output
+        .as_ref()
+        .ok_or(RegistryError::NotRunning(process_id))?;
     let mut frames = Vec::new();
     for _ in 0..TERMINAL_STREAM_CHUNKS_PER_TICK {
         let requested_offset = terminal.offset;
@@ -1080,12 +1144,12 @@ async fn terminal_output_frames(
         } else {
             TERMINAL_STREAM_CHUNK_BYTES
         };
-        let (chunk, keyboard_protocol) = {
-            let mut registry = registry.lock().await;
-            let chunk = registry.raw_output(process_id, Some(requested_offset), max_bytes)?;
-            let keyboard_protocol = registry.terminal_keyboard_protocol(process_id)?;
-            (chunk, keyboard_protocol)
-        };
+        let chunk = output.read(Some(requested_offset), max_bytes);
+        let keyboard_protocol = terminal
+            .terminal_output
+            .as_ref()
+            .map(workman_core::terminal::TerminalOutput::keyboard_protocol)
+            .unwrap_or_default();
         terminal.offset = chunk.end_offset;
         if chunk.data.is_empty() {
             break;
@@ -1533,6 +1597,7 @@ mod tests {
         let mut terminal = TerminalSubscription {
             process_id: Some(7),
             output: Some(output.clone()),
+            terminal_output: None,
             offset: 0,
             replay_end_offset: output.total_bytes_seen(),
         };

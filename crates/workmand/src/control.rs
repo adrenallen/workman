@@ -425,6 +425,7 @@ const fn default_true() -> bool {
 pub(crate) async fn handle_text(
     text: &str,
     registry: &SharedProcessRegistry,
+    input_router: &crate::ProcessInputRouter,
     mcp_url: &str,
     data_dir: &Path,
 ) -> String {
@@ -436,7 +437,15 @@ pub(crate) async fn handle_text(
     };
 
     let id = request.id;
-    let result = dispatch(&request.method, request.params, registry, mcp_url, data_dir).await;
+    let result = dispatch(
+        &request.method,
+        request.params,
+        registry,
+        input_router,
+        mcp_url,
+        data_dir,
+    )
+    .await;
     match result {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
         Err((code, message)) => json!({
@@ -452,11 +461,48 @@ async fn dispatch(
     method: &str,
     params: Value,
     registry: &SharedProcessRegistry,
+    input_router: &crate::ProcessInputRouter,
     mcp_url: &str,
     data_dir: &Path,
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
+        "process.send_input" => {
+            let params: InputParams = params_as(params.clone())?;
+            if !params.submit {
+                let data = BASE64
+                    .decode(params.data)
+                    .map_err(|error| ("invalid_params", error.to_string()))?;
+                return input_router
+                    .send_input(params.process_id, &data)
+                    .map(json_value)
+                    .map_err(registry_error);
+            }
+        }
+        "agents.spawn" => {
+            let params: SpawnAgentParams = params_as(params.clone())?;
+            let project = {
+                let registry = registry.lock().await;
+                registry
+                    .store()
+                    .get_project(params.project_id)
+                    .map_err(project_store_error)?
+                    .ok_or(("project_not_found", "project not found".to_owned()))?
+            };
+            return crate::mcp::agent_spawning::spawn_registered_agent(
+                registry.clone(),
+                project,
+                params.agent_tool_id,
+                params.name,
+                params.extra_args,
+                mcp_url,
+                params.auto_acknowledge_dialogs,
+                None,
+            )
+            .await
+            .map(json_value)
+            .map_err(|error| ("spawn_failed", error));
+        }
         "projects.remove" | "project.remove" | "project_remove" => {
             let params: WorktreeRemoveParams = params_as(params)?;
             let project_id = control_worktree_project_id(registry, params.project_id).await?;
@@ -1097,26 +1143,6 @@ async fn dispatch(
             )
             .map(|tools| json_value(agent_icons::views(tools, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
-        }
-        "agents.spawn" => {
-            let params: SpawnAgentParams = params_as(params)?;
-            let project = registry
-                .store()
-                .get_project(params.project_id)
-                .map_err(project_store_error)?
-                .ok_or(("project_not_found", "project not found".to_owned()))?;
-            return crate::mcp::agent_spawning::spawn_registered_agent(
-                &mut registry,
-                &project,
-                params.agent_tool_id,
-                params.name,
-                params.extra_args,
-                mcp_url,
-                params.auto_acknowledge_dialogs,
-                None,
-            )
-            .map(json_value)
-            .map_err(|error| ("spawn_failed", error));
         }
         _ => {}
     }

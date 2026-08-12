@@ -489,6 +489,58 @@ pub struct PtyProcess {
     submission_thread: Option<JoinHandle<()>>,
 }
 
+/// Cloneable, process-local PTY input path.
+///
+/// The daemon keeps this handle outside its lifecycle registry so a write to one running
+/// terminal never waits for an unrelated process to finish spawning or stopping.
+#[derive(Clone)]
+pub struct PtyInputHandle {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    submission_tx: mpsc::Sender<PtySubmission>,
+}
+
+impl PtyInputHandle {
+    /// Write bytes directly to this process's terminal and flush them to the child.
+    pub fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer.write_all(bytes)?;
+        writer.flush()
+    }
+
+    /// Queue content followed by Enter as one ordered process-local submission.
+    pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
+        self.queue_submission(content, key_delay, None)
+    }
+
+    /// Queue a submission whose Enter is retried when no turn-start output appears.
+    pub fn submit_input_verified(
+        &self,
+        content: &[u8],
+        key_delay: Duration,
+        verification: PtySubmissionVerification,
+    ) -> io::Result<()> {
+        self.queue_submission(content, key_delay, Some(verification))
+    }
+
+    fn queue_submission(
+        &self,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+    ) -> io::Result<()> {
+        self.submission_tx
+            .send(PtySubmission {
+                content: content.to_vec(),
+                key_delay,
+                verification,
+            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
+    }
+}
+
 struct PtySubmission {
     content: Vec<u8>,
     key_delay: Duration,
@@ -735,6 +787,14 @@ impl PtyProcess {
         self.attention.clone()
     }
 
+    /// Clone a process-local input handle independent of the owning lifecycle handle.
+    pub fn input_handle(&self) -> Option<PtyInputHandle> {
+        Some(PtyInputHandle {
+            writer: Arc::clone(self.writer.as_ref()?),
+            submission_tx: self.submission_tx.as_ref()?.clone(),
+        })
+    }
+
     /// Read the current tool-aware attention state.
     pub fn agent_state(&self) -> AgentState {
         self.attention.snapshot()
@@ -758,15 +818,9 @@ impl PtyProcess {
 
     /// Write bytes to the terminal and flush them to the child.
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let writer = self
-            .writer
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer is closed"))?;
-        let mut writer = writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        writer.write_all(bytes)?;
-        writer.flush()
+        self.input_handle()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer is closed"))?
+            .write_all(bytes)
     }
 
     /// Queue content followed by Enter as one ordered per-process submission.
@@ -794,21 +848,9 @@ impl PtyProcess {
         key_delay: Duration,
         verification: Option<PtySubmissionVerification>,
     ) -> io::Result<()> {
-        if self.writer.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "PTY writer is closed",
-            ));
-        }
-        self.submission_tx
-            .as_ref()
+        self.input_handle()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))?
-            .send(PtySubmission {
-                content: content.to_vec(),
-                key_delay,
-                verification,
-            })
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
+            .queue_submission(content, key_delay, verification)
     }
 
     /// Drain retry/failure notices produced since the previous read.

@@ -136,6 +136,13 @@ struct AgentLaunchPlan {
     env: BTreeMap<String, String>,
 }
 
+#[derive(Debug)]
+struct PreparedRegisteredAgent {
+    tool: AgentTool,
+    requested_name: Option<String>,
+    launch: AgentLaunchPlan,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentLaunchPurpose {
     Normal,
@@ -343,10 +350,12 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<SpawnProcessArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
+        let (project, spawned_by_process_id) = {
+            let mut registry = self.registry.lock().await;
+            match scoped_project(&mut registry, &parts, args.project_id) {
+                Ok((project, actor)) => (project, actor.process_id),
+                Err(error) => return failure("project_scope_error", error),
+            }
         };
 
         let result = match args.kind {
@@ -363,6 +372,7 @@ impl WorkmanMcp {
                         "extra_args is only valid when kind=agent",
                     );
                 }
+                let mut registry = self.registry.lock().await;
                 process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
                     let shell = registry
                         .resolved_user_environment()
@@ -378,7 +388,7 @@ impl WorkmanMcp {
                         None,
                         None,
                         BTreeMap::new(),
-                        actor.process_id,
+                        spawned_by_process_id,
                     )
                 })
             }
@@ -390,15 +400,16 @@ impl WorkmanMcp {
                     );
                 };
                 spawn_registered_agent(
-                    &mut registry,
-                    &project,
+                    self.registry.clone(),
+                    project,
                     agent_tool_id,
                     args.name,
                     args.extra_args,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
-                    actor.process_id,
+                    spawned_by_process_id,
                 )
+                .await
             }
         };
         match result {
@@ -415,21 +426,25 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<SpawnAgentArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
+        let (project, spawned_by_process_id) = {
+            let mut registry = self.registry.lock().await;
+            match scoped_project(&mut registry, &parts, args.project_id) {
+                Ok((project, actor)) => (project, actor.process_id),
+                Err(error) => return failure("project_scope_error", error),
+            }
         };
         match spawn_registered_agent(
-            &mut registry,
-            &project,
+            self.registry.clone(),
+            project,
             args.agent_tool_id,
             args.name,
             args.extra_args,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
-            actor.process_id,
-        ) {
+            spawned_by_process_id,
+        )
+        .await
+        {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
         }
@@ -652,9 +667,9 @@ pub(crate) fn load_agent_tool(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_registered_agent(
-    registry: &mut ProcessRegistry,
-    project: &Project,
+pub(crate) async fn spawn_registered_agent(
+    registry: crate::SharedProcessRegistry,
+    project: Project,
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
@@ -673,12 +688,13 @@ pub(crate) fn spawn_registered_agent(
         spawned_by_process_id,
         AgentLaunchPurpose::Normal,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_registered_agent_for(
-    registry: &mut ProcessRegistry,
-    project: &Project,
+async fn spawn_registered_agent_for(
+    registry: crate::SharedProcessRegistry,
+    project: Project,
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
@@ -687,7 +703,13 @@ fn spawn_registered_agent_for(
     spawned_by_process_id: Option<ProcessId>,
     purpose: AgentLaunchPurpose,
 ) -> Result<SpawnResult, String> {
-    let tool = load_agent_tool(registry, agent_tool_id)?;
+    let (tool, user_environment) = {
+        let registry = registry.lock().await;
+        (
+            load_agent_tool(&registry, agent_tool_id)?,
+            registry.user_environment_resolver().clone(),
+        )
+    };
     if !tool.enabled {
         return Err(format!(
             "agent tool {} ({}) is disabled",
@@ -700,43 +722,73 @@ fn spawn_registered_agent_for(
             tool.id, tool.name
         ));
     }
-    let name = process_name(registry, project.id, name, &tool.name)?;
-    let source_home = agent_source_home(registry, &tool.tool_type);
-    let launch = prepare_agent_launch(
-        &tool.command,
-        &tool.tool_type,
-        mcp_url,
-        &extra_args,
-        purpose,
-        source_home.as_deref(),
-    )?;
-    let tool_type = tool.tool_type;
-    let ephemeral_home = launch
+    let mcp_url = mcp_url.to_owned();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let resolved_environment = user_environment.resolve();
+        let source_home = agent_source_home(&resolved_environment, &tool.tool_type);
+        let launch = prepare_agent_launch(
+            &tool.command,
+            &tool.tool_type,
+            &mcp_url,
+            &extra_args,
+            purpose,
+            source_home.as_deref(),
+        )?;
+        Ok::<_, String>(PreparedRegisteredAgent {
+            tool,
+            requested_name: name,
+            launch,
+        })
+    })
+    .await
+    .map_err(|error| format!("agent launch preparation task failed: {error}"))??;
+    let tool_type = prepared.tool.tool_type.clone();
+    let ephemeral_home = prepared
+        .launch
         .env
         .get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV)
         .map(PathBuf::from);
-    let result = spawn(
-        registry,
-        project,
-        ProcessKind::Agent,
-        name,
-        launch.command,
-        Some(tool.id),
-        Some(tool_type.clone()),
-        launch.env,
-        spawned_by_process_id,
-    );
+    let result = {
+        let mut locked = registry.lock().await;
+        let current_tool = load_agent_tool(&locked, prepared.tool.id)?;
+        if current_tool != prepared.tool {
+            if let Some(home) = &ephemeral_home {
+                let _ = fs::remove_dir_all(home);
+            }
+            return Err(format!(
+                "agent tool {} changed while its launch was being prepared; retry the spawn",
+                prepared.tool.id
+            ));
+        }
+        let name = process_name(
+            &locked,
+            project.id,
+            prepared.requested_name,
+            &prepared.tool.name,
+        )?;
+        spawn(
+            &mut locked,
+            &project,
+            ProcessKind::Agent,
+            name,
+            prepared.launch.command,
+            Some(prepared.tool.id),
+            Some(tool_type.clone()),
+            prepared.launch.env,
+            spawned_by_process_id,
+        )
+    };
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            if let Some(home) = ephemeral_home {
+            if let Some(home) = &ephemeral_home {
                 let _ = fs::remove_dir_all(home);
             }
             return Err(error);
         }
     };
     if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
-        auto_acknowledge_initial_dialog(registry, result.process_id)?;
+        auto_acknowledge_initial_dialog(registry.clone(), result.process_id).await?;
     }
     Ok(result)
 }
@@ -843,19 +895,20 @@ pub(crate) async fn deep_check_registered_agent(
         ),
         _ => (Vec::new(), true),
     };
+    let spawned = spawn_registered_agent_for(
+        registry.clone(),
+        project,
+        agent_tool_id,
+        None,
+        extra_args,
+        mcp_url,
+        true,
+        spawned_by_process_id,
+        AgentLaunchPurpose::DeepCheck,
+    )
+    .await?;
     let process_id = {
         let mut registry = registry.lock().await;
-        let spawned = spawn_registered_agent_for(
-            &mut registry,
-            &project,
-            agent_tool_id,
-            None,
-            extra_args,
-            mcp_url,
-            true,
-            spawned_by_process_id,
-            AgentLaunchPurpose::DeepCheck,
-        )?;
         if submit_prompt
             && let Err(error) = registry.submit_input(spawned.process_id, prompt.as_bytes())
         {
@@ -941,8 +994,8 @@ fn supports_first_run_dialog_ack(tool_type: &str) -> bool {
     )
 }
 
-fn auto_acknowledge_initial_dialog(
-    registry: &mut ProcessRegistry,
+async fn auto_acknowledge_initial_dialog(
+    registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -951,35 +1004,47 @@ fn auto_acknowledge_initial_dialog(
     let mut last_output_change = started;
 
     while Instant::now() < deadline {
-        if let Some(dialog) = registry
-            .pending_dialog(process_id)
-            .map_err(|error| error.to_string())?
-        {
+        let dialog = {
+            let mut registry = registry.lock().await;
+            registry
+                .pending_dialog(process_id)
+                .map_err(|error| error.to_string())?
+        };
+        if let Some(dialog) = dialog {
             if !dialog.known_first_run {
                 return Ok(());
             }
-            registry
-                .acknowledge_known_dialog(process_id)
-                .map_err(|error| error.to_string())?;
+            {
+                let mut registry = registry.lock().await;
+                registry
+                    .acknowledge_known_dialog(process_id)
+                    .map_err(|error| error.to_string())?;
+            }
             let clear_deadline = Instant::now() + DIALOG_CLEAR_TIMEOUT;
             while Instant::now() < clear_deadline {
-                if registry
-                    .pending_dialog(process_id)
-                    .map_err(|error| error.to_string())?
-                    .is_none()
-                {
+                let cleared = {
+                    let mut registry = registry.lock().await;
+                    registry
+                        .pending_dialog(process_id)
+                        .map_err(|error| error.to_string())?
+                        .is_none()
+                };
+                if cleared {
                     return Ok(());
                 }
-                std::thread::sleep(DIALOG_POLL_INTERVAL);
+                tokio::time::sleep(DIALOG_POLL_INTERVAL).await;
             }
             return Err(format!(
                 "process {process_id} did not clear its acknowledged first-run dialog"
             ));
         }
 
-        let raw = registry
-            .raw_output(process_id, None, 0)
-            .map_err(|error| error.to_string())?;
+        let raw = {
+            let mut registry = registry.lock().await;
+            registry
+                .raw_output(process_id, None, 0)
+                .map_err(|error| error.to_string())?
+        };
         if raw.total_bytes != last_total_bytes {
             last_total_bytes = raw.total_bytes;
             last_output_change = Instant::now();
@@ -990,7 +1055,7 @@ fn auto_acknowledge_initial_dialog(
         {
             return Ok(());
         }
-        std::thread::sleep(DIALOG_POLL_INTERVAL);
+        tokio::time::sleep(DIALOG_POLL_INTERVAL).await;
     }
     Ok(())
 }
@@ -1210,13 +1275,16 @@ fn mcp_launch_adapter(tool_type: &str) -> McpLaunchAdapter {
     }
 }
 
-fn agent_source_home(registry: &ProcessRegistry, tool_type: &str) -> Option<PathBuf> {
+fn agent_source_home(
+    user_environment: &crate::ResolvedUserEnvironment,
+    tool_type: &str,
+) -> Option<PathBuf> {
     let (override_name, default_directory) = match mcp_launch_adapter(tool_type) {
         McpLaunchAdapter::Grok => ("GROK_HOME", ".grok"),
         McpLaunchAdapter::Kimi => ("KIMI_CODE_HOME", ".kimi-code"),
         _ => return None,
     };
-    let environment = registry.resolved_user_environment().command_environment();
+    let environment = user_environment.command_environment();
     environment
         .get(std::ffi::OsStr::new(override_name))
         .map(PathBuf::from)
