@@ -150,7 +150,12 @@ impl OutputSpillSink {
                 state.overflowed = true;
             }
         }
+        let wake_worker = !state.dirty;
         state.dirty = true;
+        drop(state);
+        if wake_worker {
+            shared.wake.notify_one();
+        }
     }
 
     fn flush(&self, shutdown: bool) -> io::Result<()> {
@@ -171,7 +176,7 @@ impl OutputSpillSink {
 fn writer_loop(shared: Arc<Shared>) {
     let mut retained = VecDeque::with_capacity(shared.capacity.min(1024 * 1024));
     let mut clear_generation = 0_u64;
-    let mut next_periodic_flush = Instant::now() + FLUSH_INTERVAL;
+    let mut next_periodic_flush = None;
 
     loop {
         let (pending, overflowed, requested, shutdown, next_clear_generation) = {
@@ -184,11 +189,18 @@ fn writer_loop(shared: Arc<Shared>) {
                     break;
                 }
 
-                let wait = if state.dirty {
-                    next_periodic_flush.saturating_duration_since(Instant::now())
-                } else {
-                    FLUSH_INTERVAL
-                };
+                if !state.dirty {
+                    next_periodic_flush = None;
+                    state = shared
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    continue;
+                }
+
+                let deadline =
+                    next_periodic_flush.get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
+                let wait = deadline.saturating_duration_since(Instant::now());
                 if wait.is_zero() {
                     break;
                 }
@@ -228,7 +240,7 @@ fn writer_loop(shared: Arc<Shared>) {
         let result = write_snapshot(&shared.path, &retained);
         #[cfg(test)]
         shared.snapshot_writes.fetch_add(1, Ordering::Relaxed);
-        next_periodic_flush = Instant::now() + FLUSH_INTERVAL;
+        next_periodic_flush = None;
         {
             let mut state = lock_state(&shared);
             state.error = result.err().map(|error| error.to_string());
@@ -370,6 +382,27 @@ mod tests {
             snapshot_writes.saturating_sub(first_write_count),
             FLUSH_INTERVAL * 3
         );
+        spill.shutdown().unwrap();
+    }
+
+    #[test]
+    fn idle_spill_worker_parks_until_output_arrives() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut spill = OutputSpill::start(temp.path().join("4.raw"), 64 * 1024).unwrap();
+
+        thread::sleep(FLUSH_INTERVAL * 2);
+        assert_eq!(spill.snapshot_writes(), 0);
+
+        spill.sink().push(b"one line\n");
+        let flush_deadline = Instant::now() + Duration::from_secs(2);
+        while spill.snapshot_writes() == 0 && Instant::now() < flush_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let writes_after_output = spill.snapshot_writes();
+        assert_eq!(writes_after_output, 1);
+
+        thread::sleep(FLUSH_INTERVAL * 2);
+        assert_eq!(spill.snapshot_writes(), writes_after_output);
         spill.shutdown().unwrap();
     }
 }
