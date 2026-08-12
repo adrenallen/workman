@@ -225,14 +225,22 @@ fn parse_pull_requests(bytes: &[u8]) -> Result<HashMap<String, PullRequestView>,
         let Some(branch) = value.get("headRefName").and_then(Value::as_str) else {
             continue;
         };
-        let state = if value.get("isDraft").and_then(Value::as_bool) == Some(true) {
-            "draft"
-        } else {
-            match value.get("state").and_then(Value::as_str).unwrap_or("") {
-                "OPEN" => "open",
-                "MERGED" => "merged",
-                _ => "closed",
+        let state = match value.get("state").and_then(Value::as_str).unwrap_or("") {
+            "OPEN" if value.get("isDraft").and_then(Value::as_bool) == Some(true) => "draft",
+            "OPEN" => "open",
+            "MERGED" => "merged",
+            _ => "closed",
+        };
+        // GitHub may retain a mergeability value after a PR reaches a terminal state.
+        // It is no longer actionable there and must not override the terminal state in the UI.
+        let mergeable = if matches!(state, "open" | "draft") {
+            match value.get("mergeable").and_then(Value::as_str).unwrap_or("") {
+                "MERGEABLE" => "mergeable",
+                "CONFLICTING" => "conflicting",
+                _ => "unknown",
             }
+        } else {
+            "unknown"
         };
         let candidate = PullRequestView {
             number: value.get("number").and_then(Value::as_u64).unwrap_or(0),
@@ -243,15 +251,13 @@ fn parse_pull_requests(bytes: &[u8]) -> Result<HashMap<String, PullRequestView>,
                 .unwrap_or_default()
                 .to_owned(),
             checks: checks_state(value.get("statusCheckRollup")),
-            mergeable: match value.get("mergeable").and_then(Value::as_str).unwrap_or("") {
-                "MERGEABLE" => "mergeable",
-                "CONFLICTING" => "conflicting",
-                _ => "unknown",
-            },
+            mergeable,
         };
-        let replace = result.get(branch).is_none_or(|current: &PullRequestView| {
-            pr_rank(candidate.state) > pr_rank(current.state)
-        });
+        // A branch can be reused across PRs. GitHub numbers are monotonic, so the latest PR
+        // is authoritative even when an older PR has a nominally higher-ranked open state.
+        let replace = result
+            .get(branch)
+            .is_none_or(|current: &PullRequestView| candidate.number > current.number);
         if replace {
             result.insert(branch.to_owned(), candidate);
         }
@@ -293,15 +299,6 @@ fn checks_state(value: Option<&Value>) -> &'static str {
         }
     }
     if pending { "pending" } else { "passing" }
-}
-
-fn pr_rank(state: &str) -> u8 {
-    match state {
-        "open" => 4,
-        "draft" => 3,
-        "merged" => 2,
-        _ => 1,
-    }
 }
 
 pub(crate) async fn health(
@@ -579,23 +576,36 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
-    fn parses_pr_priority_checks_and_mergeability() {
+    fn parses_latest_pr_states_checks_and_mergeability() {
         let parsed = parse_pull_requests(br#"[
           {"number":1,"state":"CLOSED","isDraft":false,"headRefName":"feature","url":"https://example/1","mergeable":"UNKNOWN","statusCheckRollup":[]},
           {"number":2,"state":"OPEN","isDraft":true,"headRefName":"feature","url":"https://example/2","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]},
-          {"number":3,"state":"OPEN","isDraft":false,"headRefName":"ready","url":"https://example/3","mergeable":"CONFLICTING","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}
+          {"number":3,"state":"OPEN","isDraft":false,"headRefName":"ready","url":"https://example/3","mergeable":"CONFLICTING","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]},
+          {"number":4,"state":"MERGED","isDraft":false,"headRefName":"merged","url":"https://example/4","mergeable":"MERGEABLE","statusCheckRollup":[]},
+          {"number":5,"state":"CLOSED","isDraft":true,"headRefName":"closed-draft","url":"https://example/5","mergeable":"MERGEABLE","statusCheckRollup":[]},
+          {"number":7,"state":"MERGED","isDraft":false,"headRefName":"reused","url":"https://example/7","mergeable":"MERGEABLE","statusCheckRollup":[]},
+          {"number":6,"state":"OPEN","isDraft":false,"headRefName":"reused","url":"https://example/6","mergeable":"MERGEABLE","statusCheckRollup":[]}
         ]"#).unwrap();
         assert_eq!(parsed["feature"].number, 2);
         assert_eq!(parsed["feature"].state, "draft");
         assert_eq!(parsed["feature"].checks, "pending");
         assert_eq!(parsed["ready"].checks, "failing");
         assert_eq!(parsed["ready"].mergeable, "conflicting");
+        assert_eq!(parsed["merged"].state, "merged");
+        assert_eq!(parsed["merged"].mergeable, "unknown");
+        assert_eq!(parsed["closed-draft"].state, "closed");
+        assert_eq!(parsed["closed-draft"].mergeable, "unknown");
+        assert_eq!(parsed["reused"].number, 7);
+        assert_eq!(parsed["reused"].state, "merged");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn pr_cache_retries_on_expiry_and_manual_refresh_recovers_errors() {
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("com.workman.todo89.")
+            .tempdir_in("/tmp")
+            .unwrap();
         let repository = fixture.path().join("plain-repository");
         let bin = fixture.path().join("profile-bin");
         fs::create_dir(&repository).unwrap();
@@ -662,6 +672,28 @@ mod tests {
         );
         assert_eq!(recovered.error, None);
         assert_eq!(recovered_branches["main"].number, 42);
+
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"number\":42,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/42\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+        );
+        let (merged_branches, merged) =
+            pull_requests_at(&repository, true, &environment, 452).await;
+        assert!(merged.available);
+        assert_eq!(merged_branches["main"].state, "merged");
+        assert_eq!(merged_branches["main"].mergeable, "unknown");
+        assert_eq!(merged_branches["main"].url, "https://example.test/pr/42");
+
+        write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' '[{\"number\":43,\"state\":\"CLOSED\",\"isDraft\":true,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/43\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+        );
+        let (closed_branches, closed) =
+            pull_requests_at(&repository, true, &environment, 453).await;
+        assert!(closed.available);
+        assert_eq!(closed_branches["main"].state, "closed");
+        assert_eq!(closed_branches["main"].mergeable, "unknown");
+        assert_eq!(closed_branches["main"].url, "https://example.test/pr/43");
     }
 
     #[cfg(unix)]

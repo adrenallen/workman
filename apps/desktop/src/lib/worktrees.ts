@@ -211,13 +211,18 @@ export function projectStatusRollupLabel(repository: string, projects: Project[]
 
 export function pullRequestLabel(pullRequest: PullRequestStatus): string {
   const state = pullRequest.state === 'draft' ? 'draft' : pullRequest.state;
-  const checks = pullRequest.checks === 'none' ? 'no checks reported' : `checks ${pullRequest.checks}`;
+  return `Pull request #${pullRequest.number} ${state} · ${pullRequestDetail(pullRequest)}`;
+}
+
+export function pullRequestDetail(pullRequest: PullRequestStatus): string {
+  const checks = pullRequest.checks === 'none' ? 'No checks reported' : `Checks ${pullRequest.checks}`;
+  if (pullRequest.state === 'merged' || pullRequest.state === 'closed') return checks;
   const mergeability = pullRequest.mergeable === 'unknown'
-    ? 'mergeability unknown'
+    ? 'Mergeability unknown'
     : pullRequest.mergeable === 'conflicting'
-      ? 'merge conflicts detected'
-      : 'mergeable';
-  return `Pull request #${pullRequest.number} ${state} · ${checks} · ${mergeability}`;
+      ? 'Merge conflicts detected'
+      : 'Mergeable';
+  return `${checks} · ${mergeability}`;
 }
 
 export function pullRequestTone(pullRequest: PullRequestStatus): 'success' | 'warning' | 'danger' | 'neutral' {

@@ -24,7 +24,7 @@
     WorktreeEntry,
     WorktreeRepository
   } from './worktrees';
-  import { projectDisplayName, pullRequestLabel } from './worktrees';
+  import { projectDisplayName, pullRequestDetail, pullRequestLabel } from './worktrees';
 
   type CountTarget = 'agent' | 'terminal' | 'todo';
 
@@ -205,7 +205,7 @@
             <span class="pr-number">#{pullRequest.number}</span>
             <div>
               <strong>{pullRequest.state === 'draft' ? 'Draft pull request' : `${pullRequest.state} pull request`}</strong>
-              <small>{pullRequest.checks === 'none' ? 'No checks reported' : `Checks ${pullRequest.checks}`} · {pullRequest.mergeable === 'conflicting' ? 'Conflicts' : pullRequest.mergeable}</small>
+              <small>{pullRequestDetail(pullRequest)}</small>
             </div>
           </div>
           <Button
