@@ -83,6 +83,7 @@
   } from './lib/contextMenu';
   import {
     DaemonClient,
+    DaemonRequestError,
     isUnsupportedControlMethod,
     type ConnectionStatus,
     type Notification,
@@ -352,6 +353,7 @@
   } | null>(null);
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
+  let removeWorktreeForceRequired = $state(false);
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
   let importError = $state<string | null>(null);
@@ -2725,10 +2727,15 @@
       return;
     }
     removeWorktreeError = null;
+    removeWorktreeForceRequired = false;
     removeWorktreeDialog = { project, repository, entry };
   }
 
-  async function confirmRemoveWorktree(forceDirty: boolean, confirmBranch?: string): Promise<void> {
+  async function confirmRemoveWorktree(
+    deleteFromDisk: boolean,
+    forceDirty: boolean,
+    confirmBranch?: string
+  ): Promise<void> {
     const state = removeWorktreeDialog;
     if (!state || removeWorktreeBusy) return;
     removeWorktreeBusy = true;
@@ -2738,6 +2745,7 @@
         project_id: state.project.id,
         confirm_remove: true,
         confirm_stop_running: true,
+        delete_from_disk: deleteFromDisk,
         force_dirty: forceDirty,
         confirm_branch: confirmBranch
       });
@@ -2749,6 +2757,9 @@
       );
       if (root) appNavigation.navigate({ type: 'project', projectId: root.id }, 'api');
     } catch (cause) {
+      if (cause instanceof DaemonRequestError && cause.code === 'dirty_worktree') {
+        removeWorktreeForceRequired = true;
+      }
       removeWorktreeError = cause instanceof Error ? cause.message : String(cause);
     } finally {
       removeWorktreeBusy = false;
@@ -4231,8 +4242,9 @@
     entry={removeWorktreeDialog.entry}
     busy={removeWorktreeBusy}
     error={removeWorktreeError}
-    onConfirm={(forceDirty, confirmBranch) => void confirmRemoveWorktree(forceDirty, confirmBranch)}
-    onClose={() => { if (!removeWorktreeBusy) removeWorktreeDialog = null; }}
+    serverForceRequired={removeWorktreeForceRequired}
+    onConfirm={(deleteFromDisk, forceDirty, confirmBranch) => void confirmRemoveWorktree(deleteFromDisk, forceDirty, confirmBranch)}
+    onClose={() => { if (!removeWorktreeBusy) { removeWorktreeDialog = null; removeWorktreeForceRequired = false; } }}
   />
 {/if}
 

@@ -50,10 +50,25 @@ export interface WorktreeEntry {
   registered: boolean;
   can_adopt: boolean;
   can_remove: boolean;
+  delete_safety: WorktreeDeleteSafety | null;
   locked: boolean;
   prunable: boolean;
   site_url: string | null;
   pull_request: PullRequestStatus | null;
+}
+
+export interface WorktreeDeleteSafety {
+  dirty_files: number;
+  untracked_files: number;
+  dirty_paths: string[];
+  ignored_files: number;
+  ignored_paths: string[];
+  unpushed_commits: number;
+  unmerged_commits: number;
+  upstream: string | null;
+  push_target: string | null;
+  merge_target: string;
+  requires_force: boolean;
 }
 
 export interface WorktreeList {
@@ -92,6 +107,8 @@ export interface WorktreeRemoval {
   branch: string;
   removed: boolean;
   project_unregistered: boolean;
+  deleted_from_disk: boolean;
+  metadata_pruned: boolean;
   branch_kept: boolean;
 }
 
@@ -114,6 +131,7 @@ export interface RemoveWorktreeInput {
   project_id: number;
   confirm_remove: true;
   confirm_stop_running: boolean;
+  delete_from_disk: boolean;
   force_dirty: boolean;
   confirm_branch?: string;
 }

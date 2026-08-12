@@ -119,9 +119,22 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
     );
     let client = ClientInfo::default().serve(transport).await?;
     call(&client, "identify_session", json!({ "process_id": 1 })).await;
-    let names = client
-        .list_all_tools()
-        .await?
+    let tools = client.list_all_tools().await?;
+    let remove_tool = tools
+        .iter()
+        .find(|tool| tool.name == "worktree_remove")
+        .expect("worktree_remove tool is present");
+    assert!(
+        remove_tool.input_schema["properties"]
+            .get("delete_from_disk")
+            .is_some(),
+        "worktree_remove advertises the explicit disk-deletion flag"
+    );
+    assert_eq!(
+        remove_tool.input_schema["properties"]["delete_from_disk"]["default"],
+        false
+    );
+    let names = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect::<Vec<_>>();

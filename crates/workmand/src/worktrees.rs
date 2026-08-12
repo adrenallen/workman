@@ -154,10 +154,26 @@ pub struct WorktreeEntry {
     pub registered: bool,
     pub can_adopt: bool,
     pub can_remove: bool,
+    pub delete_safety: Option<WorktreeDeleteSafety>,
     pub locked: bool,
     pub prunable: bool,
     pub site_url: Option<String>,
     pub pull_request: Option<PullRequestView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeDeleteSafety {
+    pub dirty_files: usize,
+    pub untracked_files: usize,
+    pub dirty_paths: Vec<String>,
+    pub ignored_files: usize,
+    pub ignored_paths: Vec<String>,
+    pub unpushed_commits: usize,
+    pub unmerged_commits: usize,
+    pub upstream: Option<String>,
+    pub push_target: Option<String>,
+    pub merge_target: String,
+    pub requires_force: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -195,6 +211,8 @@ pub struct WorktreeRemoval {
     pub branch: String,
     pub removed: bool,
     pub project_unregistered: bool,
+    pub deleted_from_disk: bool,
+    pub metadata_pruned: bool,
     pub branch_kept: bool,
 }
 
@@ -271,6 +289,7 @@ pub struct RemoveWorktree {
     pub project_id: ProjectId,
     pub confirm_remove: bool,
     pub confirm_stop_running: bool,
+    pub delete_from_disk: bool,
     pub force_dirty: bool,
     pub confirm_branch: Option<String>,
 }
@@ -290,6 +309,13 @@ struct GitWorktree {
     bare: bool,
     locked: bool,
     prunable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedDeleteTarget {
+    path: PathBuf,
+    repository_root: PathBuf,
+    branch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1075,7 +1101,7 @@ pub async fn remove(
     let command_environment = command_environment(registry).await;
     if !request.confirm_remove {
         return Err(WorktreeError::Confirmation(
-            "set confirm_remove=true to remove the worktree and unregister its project".into(),
+            "set confirm_remove=true to unregister the worktree project; the checkout is kept unless delete_from_disk=true".into(),
         ));
     }
     let (project, link, repository, processes) = {
@@ -1102,58 +1128,16 @@ pub async fn remove(
         let processes = registry.list(Some(project.id))?;
         (project, link, repository, processes)
     };
+    if same_path(Path::new(&project.path), Path::new(&repository.root_path)) {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to remove the primary repository checkout at {}",
+            repository.root_path
+        )));
+    }
     if !link.managed {
         return Err(WorktreeError::Foreign(
-            "refusing to remove an adopted or external worktree; only workman/SWM-managed worktrees can be deleted".into(),
+            "refusing to remove an adopted or external worktree; only workman/SWM-managed worktrees can be removed".into(),
         ));
-    }
-
-    let path = std::fs::canonicalize(&project.path).map_err(|error| {
-        WorktreeError::InvalidPath(format!(
-            "could not open managed worktree {}: {error}",
-            project.path
-        ))
-    })?;
-    let repository_root = std::fs::canonicalize(&repository.root_path)?;
-    let managed_root = std::fs::canonicalize(&repository.managed_root)?;
-    let expected = managed_root.join(site_slug(&link.branch));
-    if path == repository_root || path != expected || !path.starts_with(&managed_root) {
-        return Err(WorktreeError::Foreign(format!(
-            "refusing to remove {}; it does not match workman's managed path for branch {:?}",
-            path.display(),
-            link.branch
-        )));
-    }
-    let actual_top = git_required(
-        &path,
-        ["rev-parse", "--show-toplevel"],
-        "verify worktree",
-        &command_environment,
-    )
-    .await?;
-    let actual_top = std::fs::canonicalize(actual_top.trim())?;
-    if actual_top != path {
-        return Err(WorktreeError::Foreign(format!(
-            "refusing to remove unexpected Git directory {}",
-            path.display()
-        )));
-    }
-
-    let dirty = !git_required(
-        &path,
-        ["status", "--porcelain", "--untracked-files=all"],
-        "inspect worktree",
-        &command_environment,
-    )
-    .await?
-    .is_empty();
-    if dirty
-        && (!request.force_dirty || request.confirm_branch.as_deref() != Some(link.branch.as_str()))
-    {
-        return Err(WorktreeError::Dirty(format!(
-            "worktree has local changes; set force_dirty=true and confirm_branch={:?} to delete them",
-            link.branch
-        )));
     }
     let has_running = processes.iter().any(|process| {
         matches!(
@@ -1167,60 +1151,173 @@ pub async fn remove(
         ));
     }
 
-    // Quiesce workman-owned processes before removing their working directory.
-    {
+    let path = absolute_path(PathBuf::from(&project.path));
+    let mut deleted_from_disk = false;
+    let mut metadata_pruned = false;
+    let mut branch_kept = true;
+    let mut post_delete_issue = None;
+    if request.delete_from_disk {
+        let verified =
+            verify_delete_target(&project, &link, &repository, &command_environment).await?;
+        let mut safety = worktree_delete_safety(
+            &verified.path,
+            &verified.repository_root,
+            &verified.branch,
+            &command_environment,
+        )
+        .await?;
+        if safety.requires_force
+            && (!request.force_dirty
+                || request.confirm_branch.as_deref() != Some(verified.branch.as_str()))
+        {
+            return Err(WorktreeError::Dirty(delete_safety_warning(
+                &verified.path,
+                &verified.branch,
+                &safety,
+            )));
+        }
+
+        // Quiesce workman-owned processes before removing their working directory.
+        {
+            let mut registry = registry.lock().await;
+            for process in &processes {
+                if registry.store().get_process(process.id)?.is_some() {
+                    registry.close(process.id)?;
+                }
+            }
+        }
+        // Stopping a process can flush or create files. Recompute immediately
+        // before Git acts so the warning and force decision use the final
+        // quiesced checkout state rather than the earlier UI snapshot.
+        safety = worktree_delete_safety(
+            &verified.path,
+            &verified.repository_root,
+            &verified.branch,
+            &command_environment,
+        )
+        .await?;
+        if safety.requires_force
+            && (!request.force_dirty
+                || request.confirm_branch.as_deref() != Some(verified.branch.as_str()))
+        {
+            return Err(WorktreeError::Dirty(delete_safety_warning(
+                &verified.path,
+                &verified.branch,
+                &safety,
+            )));
+        }
+        let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
+        if safety.requires_force {
+            args.push(OsString::from("--force"));
+        }
+        args.push(OsString::from("--"));
+        args.push(verified.path.as_os_str().to_owned());
+        git_required(
+            &verified.repository_root,
+            args,
+            "remove managed worktree",
+            &command_environment,
+        )
+        .await?;
+        // From this point onward the checkout is gone. Any finalization error
+        // is reported only after the canonical Workman project is removed, so
+        // a successful disk mutation can never leave stale registrations.
+        deleted_from_disk = true;
+        match git_required(
+            &verified.repository_root,
+            ["worktree", "prune"],
+            "prune worktree metadata",
+            &command_environment,
+        )
+        .await
+        {
+            Ok(_) => metadata_pruned = true,
+            Err(error) => post_delete_issue = Some(error),
+        }
+        match fs::symlink_metadata(&verified.path) {
+            Ok(_) => {
+                post_delete_issue.get_or_insert_with(|| WorktreeError::InvalidPath(format!(
+                    "Git removed the worktree metadata but the directory still exists at {}; refusing an automatic filesystem fallback",
+                    verified.path.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                post_delete_issue.get_or_insert_with(|| {
+                    WorktreeError::InvalidPath(format!(
+                        "could not verify that Git deleted {}: {error}",
+                        verified.path.display()
+                    ))
+                });
+            }
+        }
+        match git_success(
+            &verified.repository_root,
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                format!("refs/heads/{}", verified.branch).as_str(),
+            ],
+            &command_environment,
+        )
+        .await
+        {
+            Ok(kept) => {
+                branch_kept = kept;
+                if !kept {
+                    post_delete_issue.get_or_insert_with(|| WorktreeError::Git {
+                        operation: "verify preserved branch".into(),
+                        message: format!(
+                            "branch {:?} disappeared during worktree removal",
+                            verified.branch
+                        ),
+                    });
+                }
+            }
+            Err(error) => {
+                branch_kept = false;
+                post_delete_issue.get_or_insert(error);
+            }
+        }
+    } else {
+        // Registration-only removal still stops owned processes before the
+        // active profile loses the project.
         let mut registry = registry.lock().await;
-        for process in processes {
+        for process in &processes {
             if registry.store().get_process(process.id)?.is_some() {
                 registry.close(process.id)?;
             }
         }
-    }
-    git_required(
-        &repository_root,
-        [
-            "worktree",
-            "remove",
-            "--force",
-            path.to_str().unwrap_or_default(),
-        ],
-        "remove managed worktree",
-        &command_environment,
-    )
-    .await?;
-    let branch_kept = git_success(
-        &repository_root,
-        [
-            "show-ref",
-            "--verify",
-            "--quiet",
-            format!("refs/heads/{}", link.branch).as_str(),
-        ],
-        &command_environment,
-    )
-    .await?;
-    if !branch_kept {
-        return Err(WorktreeError::Git {
-            operation: "verify preserved branch".into(),
-            message: format!(
-                "branch {:?} disappeared during worktree removal",
-                link.branch
-            ),
-        });
     }
 
     // Project deletion is intentionally last: even a self-targeting agent has
     // already finished the Git operation before its process can disappear.
     let project_unregistered = {
         let registry = registry.lock().await;
-        registry.store().delete_project(project.id)?
+        if deleted_from_disk {
+            registry.store().delete_project_everywhere(project.id)?
+        } else {
+            registry.store().delete_project(project.id)?
+        }
     };
+    if let Some(error) = post_delete_issue {
+        return Err(WorktreeError::Git {
+            operation: "finalize worktree deletion".into(),
+            message: format!(
+                "the checkout at {} and its Workman registration were removed, but final verification failed: {error}",
+                path.display()
+            ),
+        });
+    }
     Ok(WorktreeRemoval {
         project_id: project.id,
         path: path.to_string_lossy().into_owned(),
         branch: link.branch,
         removed: true,
         project_unregistered,
+        deleted_from_disk,
+        metadata_pruned,
         branch_kept,
     })
 }
@@ -1599,7 +1696,29 @@ async fn list_from_snapshot(
         } else {
             "external"
         };
-        let status = worktree_status(&record, command_environment).await?;
+        let delete_safety =
+            if managed && !is_main && !record.bare && !record.prunable && record.path.exists() {
+                Some(
+                    worktree_delete_safety(
+                        &record.path,
+                        &snapshot.root_path,
+                        &branch,
+                        command_environment,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+        let status = if let Some(safety) = &delete_safety {
+            if safety.dirty_files == 0 {
+                "clean"
+            } else {
+                "dirty"
+            }
+        } else {
+            worktree_status(&record, command_environment).await?
+        };
         entries.push(WorktreeEntry {
             project_id: project.map(|project| project.id),
             parent_project_id: link
@@ -1614,6 +1733,7 @@ async fn list_from_snapshot(
             registered,
             can_adopt: !registered && !record.bare,
             can_remove: managed && !is_main,
+            delete_safety,
             locked: record.locked,
             prunable: record.prunable,
             site_url: is_herd_site
@@ -1649,11 +1769,9 @@ fn register_project(
 ) -> WorktreeResult<Project> {
     let canonical = std::fs::canonicalize(path)?;
     let canonical_string = canonical.to_string_lossy().into_owned();
-    let existing = store
-        .list_projects()?
-        .into_iter()
-        .find(|project| same_path(Path::new(&project.path), &canonical));
+    let existing = store.get_project_by_path_any(&canonical_string)?;
     let project = if let Some(project) = existing {
+        store.attach_project_to_active_profile(project.id)?;
         project
     } else {
         let project = Project {
@@ -1669,9 +1787,7 @@ fn register_project(
         project
     };
     let root_project_id = store
-        .list_projects()?
-        .into_iter()
-        .find(|candidate| same_path(Path::new(&candidate.path), Path::new(&repository.root_path)))
+        .get_project_by_path_any(&repository.root_path)?
         .map(|candidate| candidate.id);
     let existing_link = store.get_project_worktree(project.id)?;
     store.put_project_worktree(&ProjectWorktree {
@@ -2026,6 +2142,373 @@ fn parse_porcelain(bytes: &[u8]) -> WorktreeResult<Vec<GitWorktree>> {
     Ok(result)
 }
 
+async fn verify_delete_target(
+    project: &Project,
+    link: &ProjectWorktree,
+    repository: &WorktreeRepository,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<VerifiedDeleteTarget> {
+    let path = fs::canonicalize(&project.path).map_err(|error| {
+        WorktreeError::InvalidPath(format!(
+            "could not open managed worktree {}: {error}",
+            project.path
+        ))
+    })?;
+    let repository_root = fs::canonicalize(&repository.root_path)?;
+    let managed_root = fs::canonicalize(&repository.managed_root)?;
+    let expected = managed_root.join(site_slug(&link.branch));
+    let home = dirs::home_dir().map(|home| fs::canonicalize(&home).unwrap_or(home));
+    let suspicious = path.parent().is_none()
+        || path == repository_root
+        || path == managed_root
+        || home.as_ref().is_some_and(|home| path == *home)
+        || path.parent() != Some(managed_root.as_path())
+        || path != expected;
+    if suspicious {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to delete {}; it is not the exact canonical managed path for branch {:?}",
+            path.display(),
+            link.branch
+        )));
+    }
+
+    let snapshot = snapshot_async(&repository_root, environment).await?;
+    if !same_path(&snapshot.root_path, &repository_root) {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to delete {}; repository metadata resolved the primary checkout to {}",
+            path.display(),
+            snapshot.root_path.display()
+        )));
+    }
+    let record = matching_record(&snapshot, &path).ok_or_else(|| {
+        WorktreeError::Foreign(format!(
+            "refusing to delete {}; Git does not list it as a linked worktree of {}",
+            path.display(),
+            repository_root.display()
+        ))
+    })?;
+    if record.bare || same_path(&record.path, &snapshot.root_path) {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to delete the primary repository checkout at {}",
+            path.display()
+        )));
+    }
+    if record.branch.as_deref() != Some(link.branch.as_str()) {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to delete {}; Git reports branch {:?}, not the registered branch {:?}",
+            path.display(),
+            record.branch,
+            link.branch
+        )));
+    }
+
+    let actual_top = git_required(
+        &path,
+        ["rev-parse", "--show-toplevel"],
+        "verify worktree",
+        environment,
+    )
+    .await?;
+    let actual_top = fs::canonicalize(actual_top.trim())?;
+    if actual_top != path {
+        return Err(WorktreeError::Foreign(format!(
+            "refusing to delete unexpected Git directory {}",
+            path.display()
+        )));
+    }
+    Ok(VerifiedDeleteTarget {
+        path,
+        repository_root,
+        branch: link.branch.clone(),
+    })
+}
+
+async fn worktree_delete_safety(
+    path: &Path,
+    repository_root: &Path,
+    branch: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<WorktreeDeleteSafety> {
+    let status = git_required_bytes(
+        path,
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+        "inspect worktree",
+        environment,
+    )
+    .await?;
+    let (dirty_paths, untracked_files, ignored_paths) = parse_status_paths(&status);
+    let merge_target = default_merge_target(repository_root, environment).await?;
+    let upstream = git_optional(
+        path,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+        environment,
+    )
+    .await?
+    .filter(|value| !value.is_empty());
+    let remote_branch = format!("origin/{branch}");
+    let push_target = if let Some(upstream) = upstream.as_deref() {
+        Some(upstream.to_owned())
+    } else if git_success(
+        repository_root,
+        [
+            "show-ref",
+            "--verify",
+            "--quiet",
+            format!("refs/remotes/{remote_branch}").as_str(),
+        ],
+        environment,
+    )
+    .await?
+    {
+        Some(remote_branch)
+    } else {
+        None
+    };
+    let unpushed_commits = rev_list_count(
+        path,
+        push_target.as_deref().unwrap_or(&merge_target),
+        environment,
+    )
+    .await?;
+    let unmerged_commits = rev_list_count(path, &merge_target, environment).await?;
+    let dirty_files = dirty_paths.len();
+    let ignored_files = ignored_paths.len();
+    Ok(WorktreeDeleteSafety {
+        dirty_files,
+        untracked_files,
+        dirty_paths,
+        ignored_files,
+        ignored_paths,
+        unpushed_commits,
+        unmerged_commits,
+        upstream,
+        push_target,
+        merge_target,
+        requires_force: dirty_files > 0
+            || ignored_files > 0
+            || unpushed_commits > 0
+            || unmerged_commits > 0,
+    })
+}
+
+fn parse_status_paths(status: &[u8]) -> (Vec<String>, usize, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut untracked = 0;
+    let mut ignored_paths = Vec::new();
+    let mut skip_rename_source = false;
+    for record in status
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        if skip_rename_source {
+            skip_rename_source = false;
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            continue;
+        }
+        let x = record[0];
+        let y = record[1];
+        if !is_porcelain_status(x) || !is_porcelain_status(y) {
+            continue;
+        }
+        if x == b'!' && y == b'!' {
+            ignored_paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+            continue;
+        }
+        if x == b'?' && y == b'?' {
+            untracked += 1;
+        }
+        skip_rename_source = matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C');
+        paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+    }
+    (paths, untracked, ignored_paths)
+}
+
+fn is_porcelain_status(value: u8) -> bool {
+    matches!(
+        value,
+        b' ' | b'M' | b'T' | b'A' | b'D' | b'R' | b'C' | b'U' | b'?' | b'!'
+    )
+}
+
+async fn default_merge_target(
+    repository_root: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<String> {
+    // The symbolic ref can survive after its target was deleted, so verify
+    // the actual commit before using it as a safety base.
+    if let Some(remote_head) = git_optional(
+        repository_root,
+        [
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+        environment,
+    )
+    .await?
+    .filter(|value| !value.is_empty())
+    .filter(|remote_head| !remote_head.chars().any(char::is_whitespace))
+        && git_success(
+            repository_root,
+            ["rev-parse", "--verify", "--quiet", remote_head.as_str()],
+            environment,
+        )
+        .await?
+    {
+        return Ok(remote_head);
+    }
+    let primary_branch = git_optional(
+        repository_root,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        environment,
+    )
+    .await?
+    .filter(|value| !value.is_empty());
+    if let Some(primary_branch) = primary_branch {
+        let remote_primary = format!("origin/{primary_branch}");
+        if git_success(
+            repository_root,
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                format!("refs/remotes/{remote_primary}").as_str(),
+            ],
+            environment,
+        )
+        .await?
+        {
+            Ok(remote_primary)
+        } else {
+            Ok(primary_branch)
+        }
+    } else {
+        git_required(
+            repository_root,
+            ["rev-parse", "--verify", "HEAD"],
+            "resolve primary checkout commit",
+            environment,
+        )
+        .await
+    }
+}
+
+async fn rev_list_count(
+    path: &Path,
+    base: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<usize> {
+    let range = format!("{base}..HEAD");
+    let count = git_required(
+        path,
+        ["rev-list", "--count", range.as_str()],
+        "inspect worktree commits",
+        environment,
+    )
+    .await?;
+    count.parse::<usize>().map_err(|_| WorktreeError::Git {
+        operation: "inspect worktree commits".into(),
+        message: format!("Git returned an invalid commit count {count:?}"),
+    })
+}
+
+async fn git_optional<I, S>(
+    directory: &Path,
+    args: I,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Option<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = git_output(directory, args, Duration::from_secs(10), environment).await?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+}
+
+fn delete_safety_warning(path: &Path, branch: &str, safety: &WorktreeDeleteSafety) -> String {
+    let mut reasons = Vec::new();
+    if safety.dirty_files > 0 {
+        let mut paths = safety
+            .dirty_paths
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        if safety.dirty_paths.len() > paths.len() {
+            paths.push(format!(
+                "… and {} more",
+                safety.dirty_paths.len() - paths.len()
+            ));
+        }
+        reasons.push(format!(
+            "{} dirty file(s), including {} untracked: {}",
+            safety.dirty_files,
+            safety.untracked_files,
+            paths.join(", ")
+        ));
+    }
+    if safety.ignored_files > 0 {
+        let mut paths = safety
+            .ignored_paths
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        if safety.ignored_paths.len() > paths.len() {
+            paths.push(format!(
+                "… and {} more",
+                safety.ignored_paths.len() - paths.len()
+            ));
+        }
+        reasons.push(format!(
+            "{} ignored local path(s) that Git would delete: {}",
+            safety.ignored_files,
+            paths.join(", ")
+        ));
+    }
+    if safety.unpushed_commits > 0 {
+        reasons.push(if let Some(push_target) = &safety.push_target {
+            format!(
+                "{} commit(s) not pushed to {push_target}",
+                safety.unpushed_commits
+            )
+        } else {
+            format!(
+                "{} commit(s) have no branch upstream and are not present in {}",
+                safety.unpushed_commits, safety.merge_target
+            )
+        });
+    }
+    if safety.unmerged_commits > 0 {
+        reasons.push(format!(
+            "{} commit(s) not merged into {}",
+            safety.unmerged_commits, safety.merge_target
+        ));
+    }
+    format!(
+        "refusing to delete linked worktree {branch:?} at {}: {}. These files or commits may be permanently lost; explicitly force deletion and confirm branch {branch:?} to proceed",
+        path.display(),
+        reasons.join("; ")
+    )
+}
+
 async fn worktree_status(
     record: &GitWorktree,
     environment: &BTreeMap<OsString, OsString>,
@@ -2285,6 +2768,23 @@ mod tests {
             "aaaa\trefs/heads/main\nbbbb\trefs/heads/feature/worktree-ui\ninvalid\trefs/tags/v1\n",
         );
         assert_eq!(parsed, vec!["main", "feature/worktree-ui"]);
+    }
+
+    #[test]
+    fn status_parser_counts_untracked_files_and_skips_rename_sources() {
+        let status = b" M tracked.txt\0 T executable.txt\0?? untracked.txt\0R  renamed.txt\0old-name.txt\0!! .env\0";
+        let (paths, untracked, ignored) = parse_status_paths(status);
+        assert_eq!(
+            paths,
+            [
+                "tracked.txt",
+                "executable.txt",
+                "untracked.txt",
+                "renamed.txt"
+            ]
+        );
+        assert_eq!(untracked, 1);
+        assert_eq!(ignored, [".env"]);
     }
 
     #[test]

@@ -90,16 +90,19 @@ struct WorktreeRemoveArgs {
     /// Managed worktree project to remove. Otherwise uses normal MCP project scope.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Required before deleting the linked worktree and unregistering its workman project.
+    /// Required before unregistering the worktree project from Workman.
     #[serde(default)]
     confirm_remove: bool,
     /// Also required when the worktree project has running processes.
     #[serde(default)]
     confirm_stop_running: bool,
-    /// Permit deleting local changes only with a matching confirm_branch value.
+    /// Also delete the linked worktree directory with `git worktree remove` and prune its metadata. Defaults to false.
+    #[serde(default)]
+    delete_from_disk: bool,
+    /// Permit deleting dirty, untracked, or ignored local paths and unpushed/unmerged commits only with a matching confirm_branch value.
     #[serde(default)]
     force_dirty: bool,
-    /// Must exactly match the branch when force_dirty=true on a dirty worktree.
+    /// Must exactly match the branch when force_dirty=true for a guarded deletion.
     #[serde(default)]
     confirm_branch: Option<String>,
 }
@@ -228,7 +231,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Remove a Workman/SWM-managed linked worktree and unregister its project while preserving the Git branch; adopted or foreign worktrees are refused"
+        description = "Unregister a Workman/SWM-managed linked worktree while preserving its checkout and Git branch by default; set delete_from_disk=true for guarded git worktree removal and pruning; adopted, foreign, and primary worktrees are refused"
     )]
     async fn worktree_remove(
         &self,
@@ -245,6 +248,7 @@ impl WorkmanMcp {
                 project_id,
                 confirm_remove: args.confirm_remove,
                 confirm_stop_running: args.confirm_stop_running,
+                delete_from_disk: args.delete_from_disk,
                 force_dirty: args.force_dirty,
                 confirm_branch: args.confirm_branch,
             },
