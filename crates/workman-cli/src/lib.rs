@@ -2368,7 +2368,7 @@ mod tests {
 
         let cli = Cli::parse(["wrk", "--version"].map(OsString::from)).unwrap();
         assert!(matches!(cli.command, Command::Version));
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.7");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.8");
 
         let cli = Cli::parse(["wrk", "update", "--check"].map(OsString::from)).unwrap();
         assert!(matches!(

@@ -4,6 +4,21 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.8 - 2026-08-12
+
+Workman 0.1.8 makes agent identity more expressive, multi-session work easier to manage, and
+terminal/status updates more efficient under load.
+
+### Desktop and session management
+
+- Add agent brand marks and custom icon overrides across agent surfaces.
+- Add Command/Control-click multi-selection with bulk actions for session management.
+
+### Runtime and release infrastructure
+
+- Drive attached terminal output and status snapshots through event-based invalidation.
+- Park clean output spill workers when idle and harden the authenticated update host.
+
 ## 0.1.7 - 2026-08-11
 
 Workman 0.1.7 makes active and resumed sessions feel immediate while reducing background work and
