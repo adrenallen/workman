@@ -1593,12 +1593,6 @@
       await loadTodo(next.id);
     } else if (next.kind === 'scratchpad') {
       await loadScratchpad(next.id);
-    } else if (next.kind === 'command') {
-      const process = processes.find((candidate) => candidate.id === next.id);
-      if (process && process.status !== 'running' && process.status !== 'starting') {
-        if (process.source === 'yml' && process.trust_hash === null) await openTrustReview(process);
-        else await startProcess(process);
-      }
     }
   }
 

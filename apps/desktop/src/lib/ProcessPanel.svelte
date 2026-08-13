@@ -38,12 +38,7 @@
     return process.source === 'yml' && process.trust_hash === null;
   }
 
-  function runOrSelect(process: ProcessView): void {
-    if (process.kind === 'command' && !isActive(process)) {
-      if (needsTrust(process)) onTrust(process);
-      else onStart(process);
-      return;
-    }
+  function selectProcess(process: ProcessView): void {
     onSelect(process.id);
   }
 
@@ -99,8 +94,8 @@
           <button
             class="process-primary"
             type="button"
-            title={process.kind === 'command' && !isActive(process) ? `Run ${process.name}` : `Open ${process.name}`}
-            onclick={() => runOrSelect(process)}
+            title={`Open ${process.name}`}
+            onclick={() => selectProcess(process)}
           >
             {#if process.kind === 'agent'}
               <AgentStatusIndicator {process} />

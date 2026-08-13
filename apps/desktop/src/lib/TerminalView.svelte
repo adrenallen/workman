@@ -101,6 +101,13 @@
   let processDead = $derived(
     process.status === 'stopped' || process.status === 'exited' || process.status === 'crashed'
   );
+  let processNeverRun = $derived(
+    process.kind === 'command'
+      && process.status === 'stopped'
+      && process.exited_at === null
+      && process.exit_code === null
+      && process.exit_signal === null
+  );
   let processStarting = $derived(process.status === 'starting');
   let retainedTail = $derived(outputTail(retainedOutput));
 
@@ -614,14 +621,16 @@
     return rows.slice(-24).join('\n');
   }
 
-  function processNoun(): 'agent' | 'terminal' {
-    return process.kind === 'agent' ? 'agent' : 'terminal';
+  function processNoun(): 'agent' | 'command' | 'terminal' {
+    return process.kind;
   }
 
   function deadTitle(): string {
-    if (process.status === 'crashed') return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} crashed`;
-    if (process.status === 'stopped') return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} stopped`;
-    return `${processNoun() === 'agent' ? 'Agent' : 'Terminal'} exited`;
+    const noun = processNoun();
+    const label = `${noun[0].toUpperCase()}${noun.slice(1)}`;
+    if (process.status === 'crashed') return `${label} crashed`;
+    if (process.status === 'stopped') return `${label} stopped`;
+    return `${label} exited`;
   }
 
   function exitSummary(): string {
@@ -677,6 +686,28 @@
       <span aria-hidden="true"></span>
       <strong>Starting {processNoun()}…</strong>
       <small>The live terminal will appear when the process is ready.</small>
+    </div>
+  {:else if processNeverRun}
+    <div class="not-run-pane" aria-label={`${process.name} not run`}>
+      <div class="not-run-empty">
+        <span class="not-run-icon" aria-hidden="true">
+          <SquareTerminalIcon size={22} strokeWidth={1.7} />
+        </span>
+        <span class="dead-kicker">Command output</span>
+        <h2>Not run yet</h2>
+        <p>Selecting a command only opens its output. Run it explicitly when you are ready.</p>
+        {#if onStart}
+          <Button
+            size="sm"
+            disabled={!connected || busy}
+            aria-busy={busy}
+            onclick={() => onStart?.(process)}
+          >
+            <PlayIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+            {busy ? 'Starting…' : 'Run command'}
+          </Button>
+        {/if}
+      </div>
     </div>
   {:else if processDead}
     {@const ProcessIcon = process.kind === 'agent' ? BotIcon : SquareTerminalIcon}
@@ -866,6 +897,51 @@
     padding: clamp(var(--space-4), 4vw, 40px);
     color: var(--foreground);
     background: var(--background);
+  }
+
+  .not-run-pane {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    overflow: auto;
+    padding: clamp(var(--space-4), 4vw, 40px);
+    color: var(--foreground);
+    background: var(--background);
+  }
+
+  .not-run-empty {
+    display: grid;
+    width: min(440px, 100%);
+    justify-items: center;
+    gap: var(--space-2);
+    text-align: center;
+  }
+
+  .not-run-icon {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    margin-bottom: var(--space-1);
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted-foreground);
+    background: var(--card);
+  }
+
+  .not-run-empty h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 650;
+  }
+
+  .not-run-empty p {
+    max-width: 400px;
+    margin: 0 0 var(--space-2);
+    color: var(--muted-foreground);
+    font-size: var(--font-size-sm);
+    line-height: 1.45;
   }
 
   .dead-document {
