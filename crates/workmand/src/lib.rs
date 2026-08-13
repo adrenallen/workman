@@ -110,6 +110,8 @@ pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
 
 const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"WRK1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
+const TERMINAL_INPUT_MAGIC: &[u8; 4] = b"WRI1";
+const TERMINAL_INPUT_HEADER_LEN: usize = 12;
 const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
 const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
@@ -536,13 +538,60 @@ async fn control_session(
     let concurrent_invalidations = status_invalidations.clone();
     let mut status_subscription =
         ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
-    let (concurrent_response_tx, mut concurrent_response_rx) = mpsc::unbounded_channel::<String>();
+    let (control_request_tx, mut control_request_rx) = mpsc::unbounded_channel::<String>();
+    let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel::<String>();
+    let control_registry = registry.clone();
+    let control_input_router = input_router.clone();
+    let control_settings = settings.clone();
+    let control_shutdown_request = shutdown_request.clone();
+    let control_worktree_operations = worktree_operations.clone();
+    let control_invalidations = concurrent_invalidations.clone();
+    let control_live_stats = live_stats.clone();
+    let control_mcp_url = mcp_url.clone();
+    let control_task = tokio::spawn(async move {
+        // Preserve control-request ordering on its own lane. Slow filesystem, Git, network,
+        // readiness, and update work can queue ordinary RPCs, but can never occupy the socket
+        // pump responsible for terminal input, terminal output, or heartbeats.
+        let mut detached_terminal = TerminalSubscription::default();
+        let mut detached_status =
+            ProcessStatusSubscription::new(control_live_stats, control_invalidations.clone());
+        while let Some(text) = control_request_rx.recv().await {
+            let response = match handle_session_control(
+                &text,
+                &control_registry,
+                &control_input_router,
+                &control_settings,
+                &control_shutdown_request,
+                &mut detached_terminal,
+                &mut detached_status,
+                &control_worktree_operations,
+            )
+            .await
+            {
+                Some(response) => response,
+                None => {
+                    control::handle_text(
+                        &text,
+                        &control_registry,
+                        &control_input_router,
+                        &control_mcp_url,
+                        control_settings.data_dir(),
+                    )
+                    .await
+                }
+            };
+            control_invalidations.invalidate();
+            if control_response_tx.send(response).is_err() {
+                break;
+            }
+        }
+    });
     let mut timer_event_cursor = timer_events.latest_sequence();
     let mut status_tick = interval(PROCESS_STATUS_STREAM_TICK);
     status_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     status_tick.tick().await;
 
-    loop {
+    'session: loop {
         let output_ready = terminal.output_ready();
         tokio::pin!(output_ready);
         tokio::select! {
@@ -561,9 +610,16 @@ async fn control_session(
                 let reply = match message {
                     Message::Text(text) => {
                         if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+                            if !request_requires_session_state(&text) {
+                                if control_request_tx.send(text.to_string()).is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
                             let response = match handle_session_control(
                                 &text,
                                 &registry,
+                                &input_router,
                                 &settings,
                                 &shutdown_request,
                                 &mut terminal,
@@ -571,35 +627,16 @@ async fn control_session(
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
-                                None if concurrent_control_request(&text) => {
-                                    let registry = registry.clone();
-                                    let input_router = input_router.clone();
-                                    let mcp_url = mcp_url.clone();
-                                    let data_dir = settings.data_dir().to_path_buf();
-                                    let responses = concurrent_response_tx.clone();
-                                    let invalidations = concurrent_invalidations.clone();
-                                    tokio::spawn(async move {
-                                        let response = control::handle_text(
-                                            &text,
-                                            &registry,
-                                            &input_router,
-                                            &mcp_url,
-                                            &data_dir,
-                                        )
-                                        .await;
-                                        invalidations.invalidate();
-                                        let _ = responses.send(response);
-                                    });
-                                    continue;
-                                }
+                                // Raw keystrokes are the only non-session request executed in
+                                // this loop. Their registry-free router is deliberately bounded
+                                // to a PTY writer lock and cannot inherit another RPC's latency.
                                 None => control::handle_text(
-                                        &text,
-                                        &registry,
-                                        &input_router,
-                                        &mcp_url,
-                                        settings.data_dir(),
-                                    )
-                                    .await,
+                                    &text,
+                                    &registry,
+                                    &input_router,
+                                    &mcp_url,
+                                    settings.data_dir(),
+                                ).await,
                             };
                             status_subscription.status_invalidations.invalidate();
                             Message::Text(response.into())
@@ -610,7 +647,27 @@ async fn control_session(
                             }).to_string().into())
                         }
                     }
-                    Message::Binary(bytes) => Message::Binary(bytes),
+                    Message::Binary(bytes) => {
+                        if let Some((process_id, data)) = decode_terminal_input_frame(&bytes) {
+                            match input_router.send_input(process_id, data) {
+                                Ok(_) => continue,
+                                Err(error) => Message::Text(
+                                    json!({
+                                        "event": "terminal.error",
+                                        "process_id": process_id,
+                                        "error": {
+                                            "code": error.code(),
+                                            "message": error.to_string()
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            }
+                        } else {
+                            Message::Binary(bytes)
+                        }
+                    }
                     Message::Ping(bytes) => Message::Pong(bytes),
                     Message::Pong(_) => continue,
                     Message::Close(frame) => {
@@ -623,7 +680,7 @@ async fn control_session(
                     break;
                 }
             }
-            Some(response) = concurrent_response_rx.recv() => {
+            Some(response) = control_response_rx.recv() => {
                 if socket.send(Message::Text(response.into())).await.is_err() {
                     break;
                 }
@@ -633,7 +690,7 @@ async fn control_session(
                     Ok(frames) => {
                         for frame in frames {
                             if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                return;
+                                break 'session;
                             }
                         }
                     }
@@ -658,7 +715,11 @@ async fn control_session(
                     continue;
                 };
                 let (statuses, timers) = {
-                    let mut registry = registry.lock().await;
+                    // Status telemetry is best-effort. Never make the terminal socket wait for
+                    // an unrelated lifecycle mutation that currently owns the registry.
+                    let Ok(mut registry) = registry.try_lock() else {
+                        continue;
+                    };
                     let statuses = registry.list_statuses(None);
                     let timers = timers::TimerService::new(&mut registry)
                         .list_active(timers::now_millis());
@@ -688,13 +749,33 @@ async fn control_session(
             }
         }
     }
+    control_task.abort();
 }
 
-fn concurrent_control_request(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|request| request.get("method")?.as_str().map(str::to_owned))
-        .is_some_and(|method| matches!(method.as_str(), "agents.spawn" | "agent_tools.deep_check"))
+fn request_requires_session_state(text: &str) -> bool {
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(text) else {
+        return true;
+    };
+    let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    if method == "process.send_input" {
+        return !request
+            .get("params")
+            .and_then(|params| params.get("submit"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    }
+    matches!(
+        method,
+        "daemon.hello"
+            | "daemon.info"
+            | "daemon.restart"
+            | "terminal.attach"
+            | "terminal.detach"
+            | "process.status_subscribe"
+            | "process.status_unsubscribe"
+    )
 }
 
 #[derive(Default)]
@@ -780,6 +861,7 @@ impl ProcessStatusSubscription {
 async fn handle_session_control(
     text: &str,
     registry: &SharedProcessRegistry,
+    input_router: &ProcessInputRouter,
     settings: &settings::DaemonRuntimeSettings,
     shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
@@ -996,112 +1078,132 @@ async fn handle_session_control(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    let mut registry = registry.lock().await;
-    match registry.select(process_id) {
-        Ok(process) => {
-            let project_id = process.project_id;
-            let replay = match registry.raw_output(process_id, Some(offset), 0) {
-                Ok(replay) => replay,
-                Err(error) => {
-                    return Some(
-                        json!({
-                            "id": id,
-                            "ok": false,
-                            "error": { "code": error.code(), "message": error.to_string() }
-                        })
-                        .to_string(),
-                    );
+    let (process, output, terminal_output, replay_start_offset, replay_end_offset) =
+        match input_router.terminal_attachment(process_id, offset) {
+            Ok(attachment) => {
+                // Selection is ephemeral UI bookkeeping. Keep it best-effort rather than allowing
+                // a lifecycle operation to delay terminal output reattachment.
+                if let Ok(mut registry) = registry.try_lock() {
+                    let _ = registry.select(process_id);
                 }
-            };
-            let focus_reporting = match registry.terminal_focus_reporting(process_id) {
-                Ok(focus_reporting) => focus_reporting,
-                Err(error) => {
-                    return Some(
-                        json!({
-                            "id": id,
-                            "ok": false,
-                            "error": { "code": error.code(), "message": error.to_string() }
-                        })
-                        .to_string(),
-                    );
-                }
-            };
-            let keyboard_protocol = match registry.terminal_keyboard_protocol(process_id) {
-                Ok(keyboard_protocol) => keyboard_protocol,
-                Err(error) => {
-                    return Some(
-                        json!({
-                            "id": id,
-                            "ok": false,
-                            "error": { "code": error.code(), "message": error.to_string() }
-                        })
-                        .to_string(),
-                    );
-                }
-            };
-            let output = match registry.raw_output_source(process_id) {
-                Ok(output) => output,
-                Err(error) => {
-                    return Some(
-                        json!({
-                            "id": id,
-                            "ok": false,
-                            "error": { "code": error.code(), "message": error.to_string() }
-                        })
-                        .to_string(),
-                    );
-                }
-            };
-            let terminal_output = match registry.terminal_output_source(process_id) {
-                Ok(output) => output,
-                Err(error) => {
-                    return Some(
-                        json!({
-                            "id": id,
-                            "ok": false,
-                            "error": { "code": error.code(), "message": error.to_string() }
-                        })
-                        .to_string(),
-                    );
-                }
-            };
-            terminal.process_id = Some(process_id);
-            terminal.output = output;
-            terminal.terminal_output = terminal_output;
-            // `raw_output` clamps stale or future offsets to the retained stream. Start the
-            // readiness cursor at that effective offset; otherwise a client-supplied offset past
-            // the current end could wait forever for bytes that were never part of the replay.
-            terminal.offset = replay.start_offset;
-            terminal.replay_end_offset = replay.total_bytes;
-            Some(
-                json!({
-                    "id": id,
-                    "ok": true,
-                    "result": {
-                        "process_id": process_id,
-                        "project_id": project_id,
-                        "offset": offset,
-                        "replay_start_offset": replay.start_offset,
-                        "replay_end_offset": replay.total_bytes,
-                        "focus_reporting": focus_reporting,
-                        "keyboard_protocol": {
-                            "kitty_flags": keyboard_protocol.kitty_flags,
-                            "modify_other_keys": keyboard_protocol.modify_other_keys
-                        }
+                (
+                    attachment.process,
+                    Some(attachment.raw_output),
+                    Some(attachment.terminal_output),
+                    attachment.replay_start_offset,
+                    attachment.replay_end_offset,
+                )
+            }
+            Err(RegistryError::NotRunning(_)) => {
+                // Persisted output for stopped processes has no live I/O-router entry. Preserve
+                // the existing replay behavior; only genuinely live PTYs need the bounded path.
+                let mut registry = registry.lock().await;
+                let process = match registry.select(process_id) {
+                    Ok(process) => process,
+                    Err(error) => {
+                        return Some(
+                            json!({
+                                "id": id,
+                                "ok": false,
+                                "error": { "code": error.code(), "message": error.to_string() }
+                            })
+                            .to_string(),
+                        );
                     }
-                })
-                .to_string(),
-            )
-        }
-        Err(error) => Some(
-            json!({
-                "id": id,
-                "ok": false,
-                "error": { "code": error.code(), "message": error.to_string() }
-            })
-            .to_string(),
-        ),
-    }
+                };
+                let replay = match registry.raw_output(process_id, Some(offset), 0) {
+                    Ok(replay) => replay,
+                    Err(error) => {
+                        return Some(
+                            json!({
+                                "id": id,
+                                "ok": false,
+                                "error": { "code": error.code(), "message": error.to_string() }
+                            })
+                            .to_string(),
+                        );
+                    }
+                };
+                let output = match registry.raw_output_source(process_id) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        return Some(
+                            json!({
+                                "id": id,
+                                "ok": false,
+                                "error": { "code": error.code(), "message": error.to_string() }
+                            })
+                            .to_string(),
+                        );
+                    }
+                };
+                let terminal_output = match registry.terminal_output_source(process_id) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        return Some(
+                            json!({
+                                "id": id,
+                                "ok": false,
+                                "error": { "code": error.code(), "message": error.to_string() }
+                            })
+                            .to_string(),
+                        );
+                    }
+                };
+                (
+                    process,
+                    output,
+                    terminal_output,
+                    replay.start_offset,
+                    replay.total_bytes,
+                )
+            }
+            Err(error) => {
+                return Some(
+                    json!({
+                        "id": id,
+                        "ok": false,
+                        "error": { "code": error.code(), "message": error.to_string() }
+                    })
+                    .to_string(),
+                );
+            }
+        };
+    let project_id = process.project_id;
+    let focus_reporting = terminal_output
+        .as_ref()
+        .is_some_and(|output| output.is_focus_reporting());
+    let keyboard_protocol = terminal_output
+        .as_ref()
+        .map(|output| output.keyboard_protocol())
+        .unwrap_or_default();
+    terminal.process_id = Some(process_id);
+    terminal.output = output;
+    terminal.terminal_output = terminal_output;
+    // The raw-output snapshot clamps stale or future offsets to the retained stream. Start the
+    // readiness cursor at that effective offset; otherwise a client-supplied offset past the
+    // current end could wait forever for bytes that were never part of the replay.
+    terminal.offset = replay_start_offset;
+    terminal.replay_end_offset = replay_end_offset;
+    Some(
+        json!({
+            "id": id,
+            "ok": true,
+            "result": {
+                "process_id": process_id,
+                "project_id": project_id,
+                "offset": offset,
+                "replay_start_offset": replay_start_offset,
+                "replay_end_offset": replay_end_offset,
+                "focus_reporting": focus_reporting,
+                "keyboard_protocol": {
+                    "kitty_flags": keyboard_protocol.kitty_flags,
+                    "modify_other_keys": keyboard_protocol.modify_other_keys
+                }
+            }
+        })
+        .to_string(),
+    )
 }
 
 fn status_event_if_changed(
@@ -1192,6 +1294,14 @@ fn encode_terminal_frame(
     frame.push(flags);
     frame.extend_from_slice(data);
     frame
+}
+
+fn decode_terminal_input_frame(bytes: &[u8]) -> Option<(workman_core::ProcessId, &[u8])> {
+    if bytes.len() < TERMINAL_INPUT_HEADER_LEN || &bytes[..4] != TERMINAL_INPUT_MAGIC {
+        return None;
+    }
+    let process_id = i64::from_be_bytes(bytes[4..12].try_into().ok()?);
+    Some((process_id, &bytes[TERMINAL_INPUT_HEADER_LEN..]))
 }
 
 async fn authorize_local_request(
@@ -1544,6 +1654,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_connection_local_controls_and_raw_input_stay_on_the_socket_pump() {
+        for method in [
+            "daemon.hello",
+            "daemon.info",
+            "daemon.restart",
+            "terminal.attach",
+            "terminal.detach",
+            "process.status_subscribe",
+            "process.status_unsubscribe",
+        ] {
+            assert!(request_requires_session_state(
+                &json!({ "id": 1, "method": method, "params": {} }).to_string()
+            ));
+        }
+        assert!(request_requires_session_state(
+            &json!({
+                "id": 1,
+                "method": "process.send_input",
+                "params": { "process_id": 7, "data": "eA==" }
+            })
+            .to_string()
+        ));
+        for method in [
+            "process.wait_for_bound_port",
+            "worktree.list",
+            "daemon.update_check",
+            "agents.spawn",
+        ] {
+            assert!(!request_requires_session_state(
+                &json!({ "id": 1, "method": method, "params": {} }).to_string()
+            ));
+        }
+        assert!(!request_requires_session_state(
+            &json!({
+                "id": 1,
+                "method": "process.send_input",
+                "params": { "process_id": 7, "data": "eA==", "submit": true }
+            })
+            .to_string()
+        ));
+    }
+
+    #[test]
     fn identical_status_events_are_suppressed() {
         let mut previous = None;
         assert_eq!(
@@ -1665,6 +1818,18 @@ mod tests {
             self.shutdown.take().unwrap().send(()).unwrap();
             self.task.await.unwrap().unwrap();
         }
+    }
+
+    #[test]
+    fn terminal_input_binary_frames_decode_without_json_or_a_response() {
+        let mut frame = Vec::from(*TERMINAL_INPUT_MAGIC);
+        frame.extend_from_slice(&42_i64.to_be_bytes());
+        frame.extend_from_slice(b"raw\x00input");
+
+        let (process_id, data) = decode_terminal_input_frame(&frame).unwrap();
+        assert_eq!(process_id, 42);
+        assert_eq!(data, b"raw\x00input");
+        assert!(decode_terminal_input_frame(b"not-terminal-input").is_none());
     }
 
     async fn rpc(

@@ -301,9 +301,18 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface QueuedTerminalInput {
+  processId: number;
+  data: number[];
+}
+
 export class DaemonClient implements CoordinationClient, AgentToolsClient {
   private sequence = 0;
   private pending = new Map<string, PendingRequest>();
+  private connected = false;
+  private inputQueue: QueuedTerminalInput[] = [];
+  private inputPumpRunning = false;
+  private inputRetry: ReturnType<typeof setTimeout> | null = null;
   private unlisten: UnlistenFn[] = [];
   private terminalListeners = new Set<(frame: TerminalFrame) => void>();
   private processListeners = new Set<(processes: ProcessView[]) => void>();
@@ -313,7 +322,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     onProtocolError: (message: string) => void
   ): Promise<ConnectionStatus> {
     this.unlisten.push(
-      await listen<ConnectionStatus>('daemon://status', (event) => onStatus(event.payload)),
+      await listen<ConnectionStatus>('daemon://status', (event) => {
+        this.setConnectionStatus(event.payload);
+        onStatus(event.payload);
+      }),
       await listen<DaemonFrame>('daemon://message', (event) => {
         if (event.payload.kind === 'text') {
           this.handleText(event.payload.data, onProtocolError);
@@ -322,7 +334,9 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
         }
       })
     );
-    return invoke<ConnectionStatus>('daemon_status');
+    const status = await invoke<ConnectionStatus>('daemon_status');
+    this.setConnectionStatus(status);
+    return status;
   }
 
   projects(): Promise<Project[]> {
@@ -725,11 +739,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
     return this.request('terminal.detach');
   }
 
-  sendInput(processId: number, data: Uint8Array): Promise<ProcessView> {
-    return this.request('process.send_input', {
-      process_id: processId,
-      data: bytesToBase64(data)
-    });
+  sendInput(processId: number, data: Uint8Array): Promise<void> {
+    this.inputQueue.push({ processId, data: Array.from(data) });
+    this.flushInputQueue();
+    return Promise.resolve();
   }
 
   submitInput(processId: number, input: string): Promise<ProcessView> {
@@ -767,6 +780,10 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
   }
 
   close(): void {
+    this.connected = false;
+    if (this.inputRetry) clearTimeout(this.inputRetry);
+    this.inputRetry = null;
+    this.inputQueue = [];
     for (const unlisten of this.unlisten.splice(0)) unlisten();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
@@ -838,6 +855,41 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
       }
     }
     return response;
+  }
+
+  private setConnectionStatus(status: ConnectionStatus): void {
+    this.connected = status.status === 'connected';
+    if (this.connected) this.flushInputQueue();
+  }
+
+  private flushInputQueue(): void {
+    if (!this.connected || this.inputPumpRunning || this.inputQueue.length === 0) return;
+    this.inputPumpRunning = true;
+    void (async () => {
+      while (this.connected && this.inputQueue.length > 0) {
+        try {
+          const input = this.inputQueue[0];
+          await invoke('daemon_send_input', {
+            processId: input.processId,
+            data: input.data
+          });
+          this.inputQueue.shift();
+        } catch {
+          if (!this.inputRetry) {
+            this.inputRetry = setTimeout(() => {
+              this.inputRetry = null;
+              this.flushInputQueue();
+            }, 16);
+          }
+          break;
+        }
+      }
+    })().finally(() => {
+      this.inputPumpRunning = false;
+      if (this.connected && this.inputQueue.length > 0 && !this.inputRetry) {
+        queueMicrotask(() => this.flushInputQueue());
+      }
+    });
   }
 
   private handleText(text: string, onProtocolError: (message: string) => void): void {

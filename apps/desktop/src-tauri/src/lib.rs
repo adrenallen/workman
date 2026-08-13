@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env,
     error::Error,
     ffi::OsString,
@@ -21,7 +22,7 @@ use tauri::{
 };
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{sleep, timeout},
+    time::{MissedTickBehavior, interval, sleep, timeout},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -47,19 +48,31 @@ const MENU_TOGGLE_PROJECT_RAIL: &str = "view.toggle_project_rail";
 const MENU_TOGGLE_SECTION_RAIL: &str = "view.toggle_section_rail";
 const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"WRK1";
 const TERMINAL_FRAME_HEADER_LEN: usize = 21;
+const TERMINAL_INPUT_MAGIC: &[u8; 4] = b"WRI1";
+const TERMINAL_INPUT_HEADER_LEN: usize = 12;
 const HELLO_REQUEST_ID: &str = "__workman_desktop_hello__";
 const HELLO_TIMEOUT: Duration = Duration::from_millis(750);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(6);
+const BRIDGE_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+const BRIDGE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const BRIDGE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(3);
+const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct BridgeState {
     sender: mpsc::Sender<BridgeCommand>,
+    input_sender: mpsc::Sender<TerminalInput>,
     status: Arc<Mutex<ConnectionStatus>>,
 }
 
 enum BridgeCommand {
     Send(String),
     Restart(oneshot::Sender<Result<(), String>>),
+}
+
+struct TerminalInput {
+    process_id: i64,
+    data: Vec<u8>,
 }
 
 #[derive(Clone, Serialize)]
@@ -225,6 +238,25 @@ fn daemon_send(message: String, state: State<'_, BridgeState>) -> Result<(), Str
         .map_err(|error| format!("daemon bridge is not accepting messages: {error}"))
 }
 
+/// Queue latency-sensitive PTY input separately from ordinary control traffic.
+///
+/// This command is intentionally synchronous: the webview only waits for a bounded in-memory
+/// enqueue, never for a daemon write, response, timeout, reconnect, or resubscription.
+#[tauri::command]
+fn daemon_send_input(
+    process_id: i64,
+    data: Vec<u8>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    if data.len() > 1024 * 1024 {
+        return Err("terminal input exceeds the 1 MiB limit".to_owned());
+    }
+    state
+        .input_sender
+        .try_send(TerminalInput { process_id, data })
+        .map_err(|error| format!("daemon input bridge is not accepting messages: {error}"))
+}
+
 #[tauri::command]
 async fn daemon_restart(
     confirm_processes_stopped: bool,
@@ -284,8 +316,10 @@ fn shell_open_with(path: String, opener: ShellOpener) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (sender, receiver) = mpsc::channel(256);
+    let (input_sender, input_receiver) = mpsc::channel(1_024);
     let state = BridgeState {
         sender,
+        input_sender,
         status: Arc::new(Mutex::new(ConnectionStatus::connecting())),
     };
     let task_state = state.clone();
@@ -303,6 +337,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             daemon_send,
+            daemon_send_input,
             daemon_restart,
             daemon_status,
             shell_open_path,
@@ -317,7 +352,12 @@ pub fn run() {
             native_notifications::native_notification_show
         ])
         .setup(move |app| {
-            tauri::async_runtime::spawn(run_bridge(app.handle().clone(), task_state, receiver));
+            tauri::async_runtime::spawn(run_bridge(
+                app.handle().clone(),
+                task_state,
+                receiver,
+                input_receiver,
+            ));
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -584,8 +624,10 @@ async fn run_bridge(
     app: tauri::AppHandle,
     state: BridgeState,
     mut receiver: mpsc::Receiver<BridgeCommand>,
+    mut input_receiver: mpsc::Receiver<TerminalInput>,
 ) {
     let mut reconnect_delay = Duration::from_millis(250);
+    let mut pending_input = VecDeque::<TerminalInput>::new();
     loop {
         publish_status(&app, &state, ConnectionStatus::connecting());
         match connect_daemon().await {
@@ -599,13 +641,60 @@ async fn run_bridge(
                     ConnectionStatus::connected(discovery.port, daemon_version.as_ref()),
                 );
 
+                let mut disconnect_message = "Daemon connection closed; retrying".to_owned();
+                let mut last_incoming = Instant::now();
+                let mut heartbeat = interval(BRIDGE_HEARTBEAT_INTERVAL);
+                heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                heartbeat.tick().await;
                 loop {
+                    if let Some(input) = pending_input.pop_front() {
+                        let frame = encode_terminal_input(&input);
+                        if !send_bridge_message(&mut socket, Message::Binary(frame.into())).await {
+                            pending_input.push_front(input);
+                            disconnect_message =
+                                "Daemon stopped accepting terminal input; reconnecting".to_owned();
+                            break;
+                        }
+                        continue;
+                    }
                     tokio::select! {
+                        incoming = socket.next() => {
+                            let Some(incoming) = incoming else { break };
+                            last_incoming = Instant::now();
+                            match incoming {
+                                Ok(Message::Text(text)) => {
+                                    let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Text(text.to_string()));
+                                }
+                                Ok(Message::Binary(bytes)) => {
+                                    let frame = parse_terminal_frame(&bytes)
+                                        .map(DaemonFrame::Terminal)
+                                        .unwrap_or_else(|| DaemonFrame::Binary(bytes.to_vec()));
+                                    let _ = app.emit(MESSAGE_EVENT, frame);
+                                }
+                                Ok(Message::Close(_)) | Err(_) => break,
+                                Ok(Message::Ping(bytes)) => {
+                                    if !send_bridge_message(&mut socket, Message::Pong(bytes)).await {
+                                        break;
+                                    }
+                                }
+                                Ok(Message::Pong(_) | Message::Frame(_)) => {}
+                            }
+                        }
+                        outgoing = input_receiver.recv() => {
+                            let Some(input) = outgoing else { return };
+                            let frame = encode_terminal_input(&input);
+                            if !send_bridge_message(&mut socket, Message::Binary(frame.into())).await {
+                                pending_input.push_back(input);
+                                disconnect_message = "Daemon stopped accepting terminal input; reconnecting".to_owned();
+                                break;
+                            }
+                        }
                         outgoing = receiver.recv() => {
                             let Some(outgoing) = outgoing else { return };
                             match outgoing {
                                 BridgeCommand::Send(message) => {
-                                    if socket.send(Message::Text(message.into())).await.is_err() {
+                                    if !send_bridge_message(&mut socket, Message::Text(message.into())).await {
+                                        disconnect_message = "Daemon stopped accepting control traffic; reconnecting".to_owned();
                                         break;
                                     }
                                 }
@@ -619,20 +708,14 @@ async fn run_bridge(
                                 }
                             }
                         }
-                        incoming = socket.next() => {
-                            let Some(incoming) = incoming else { break };
-                            match incoming {
-                                Ok(Message::Text(text)) => {
-                                    let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Text(text.to_string()));
-                                }
-                                Ok(Message::Binary(bytes)) => {
-                                    let frame = parse_terminal_frame(&bytes)
-                                        .map(DaemonFrame::Terminal)
-                                        .unwrap_or_else(|| DaemonFrame::Binary(bytes.to_vec()));
-                                    let _ = app.emit(MESSAGE_EVENT, frame);
-                                }
-                                Ok(Message::Close(_)) | Err(_) => break,
-                                Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                        _ = heartbeat.tick() => {
+                            if last_incoming.elapsed() >= BRIDGE_HEARTBEAT_TIMEOUT {
+                                disconnect_message = "Daemon is unresponsive; reconnecting".to_owned();
+                                break;
+                            }
+                            if !send_bridge_message(&mut socket, Message::Ping(Vec::new().into())).await {
+                                disconnect_message = "Daemon heartbeat failed; reconnecting".to_owned();
+                                break;
                             }
                         }
                     }
@@ -640,7 +723,7 @@ async fn run_bridge(
                 publish_status(
                     &app,
                     &state,
-                    ConnectionStatus::disconnected("Daemon connection closed; retrying"),
+                    ConnectionStatus::disconnected(disconnect_message),
                 );
             }
             Err(error) => {
@@ -650,6 +733,15 @@ async fn run_bridge(
         tokio::time::sleep(reconnect_delay).await;
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(3));
     }
+}
+
+async fn send_bridge_message(
+    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    message: Message,
+) -> bool {
+    timeout(BRIDGE_WRITE_TIMEOUT, socket.send(message))
+        .await
+        .is_ok_and(|result| result.is_ok())
 }
 
 async fn negotiate_daemon_version(
@@ -752,8 +844,9 @@ async fn connect_daemon() -> Result<
             .parse()
             .map_err(|error| format!("invalid daemon token: {error}"))?,
     );
-    let (socket, _) = connect_async(request)
+    let (socket, _) = timeout(BRIDGE_CONNECT_TIMEOUT, connect_async(request))
         .await
+        .map_err(|_| "timed out connecting to the daemon".to_owned())?
         .map_err(|error| error.to_string())?;
     Ok((discovery, socket))
 }
@@ -778,6 +871,14 @@ fn parse_terminal_frame(bytes: &[u8]) -> Option<TerminalFrame> {
         modify_other_keys: (flags >> 2) & 3,
         data: bytes[TERMINAL_FRAME_HEADER_LEN..].to_vec(),
     })
+}
+
+fn encode_terminal_input(input: &TerminalInput) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(TERMINAL_INPUT_HEADER_LEN + input.data.len());
+    frame.extend_from_slice(TERMINAL_INPUT_MAGIC);
+    frame.extend_from_slice(&input.process_id.to_be_bytes());
+    frame.extend_from_slice(&input.data);
+    frame
 }
 
 fn lock_status(status: &Mutex<ConnectionStatus>) -> std::sync::MutexGuard<'_, ConnectionStatus> {
@@ -1335,6 +1436,19 @@ mod tests {
         assert_eq!(frame.modify_other_keys, 2);
         assert_eq!(frame.data, b"\x1b[31mraw\x00bytes");
         assert!(parse_terminal_frame(b"not-a-terminal-frame").is_none());
+    }
+
+    #[test]
+    fn terminal_input_is_encoded_as_a_response_free_binary_frame() {
+        let input = TerminalInput {
+            process_id: 42,
+            data: b"raw\x00input".to_vec(),
+        };
+        let frame = encode_terminal_input(&input);
+
+        assert_eq!(&frame[..4], TERMINAL_INPUT_MAGIC);
+        assert_eq!(i64::from_be_bytes(frame[4..12].try_into().unwrap()), 42);
+        assert_eq!(&frame[TERMINAL_INPUT_HEADER_LEN..], b"raw\x00input");
     }
 
     #[test]

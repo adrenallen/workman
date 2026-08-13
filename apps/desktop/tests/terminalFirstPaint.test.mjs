@@ -15,7 +15,7 @@ test('live attach fetches and paints the daemon snapshot before raw replay setup
   const attachStart = source.indexOf('replayState = state;');
   const preview = source.indexOf('void loadLiveOutputPreview(state);', attachStart);
   const fonts = source.indexOf('await document.fonts.ready;', attachStart);
-  const attach = source.indexOf('await client.attachTerminal(processId)', attachStart);
+  const attach = source.indexOf('await client.attachTerminal(processId,', attachStart);
 
   assert.ok(attachStart >= 0 && preview > attachStart);
   assert.ok(preview < fonts && preview < attach, 'the retained screen request starts immediately');
@@ -46,7 +46,7 @@ test('retained replay focuses immediately and preserves physical input', async (
   const source = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
   const replayStart = source.indexOf('replayState = state;');
   const earlyFocus = source.indexOf('instance.focus();', replayStart);
-  const attach = source.indexOf('await client.attachTerminal(processId)', replayStart);
+  const attach = source.indexOf('await client.attachTerminal(processId,', replayStart);
   const queueInput = source.slice(
     source.indexOf('function queueInput'),
     source.indexOf('function flushInput')

@@ -474,7 +474,7 @@
   $effect(() => {
     const projectId = selectedProject?.id ?? null;
     const connected = connection.status === 'connected';
-    if (!connected || projectId === null) {
+    if (projectId === null) {
       processes = [];
       optimisticProcesses = [];
       coordination = null;
@@ -489,6 +489,10 @@
       loadedProjectId = null;
       return;
     }
+    // Keep the active xterm and its process snapshot mounted while the daemon reconnects. This
+    // lets TerminalView continue accepting physical input into the reconnect queue instead of
+    // destroying the focused textarea at the exact moment the transport becomes unhealthy.
+    if (!connected) return;
     if (loadedProjectId !== projectId) {
       applyProjectActivationState(projectId);
       void loadAndReconcileProject(projectId);

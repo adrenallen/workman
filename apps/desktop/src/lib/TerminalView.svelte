@@ -87,6 +87,7 @@
   let attachedStatus = '';
   let attachedVisible = true;
   let attachmentGeneration = 0;
+  let terminalOffset = 0;
   let inputEnabled = false;
   let replayState: TerminalReplayState | null = null;
   let kittyKeyboardFlags = 0;
@@ -314,12 +315,13 @@
     const processStatus = process.status;
     const isVisible = visible;
     if (!instance) return;
-    if (
-      attachedProcessId === processId
+    const sameProcessSession = attachedProcessId === processId
       && attachedProcessPid === processPid
-      && attachedConnected === isConnected
       && attachedStatus === processStatus
-      && attachedVisible === isVisible
+      && attachedVisible === isVisible;
+    if (
+      sameProcessSession
+      && attachedConnected === isConnected
     ) return;
 
     attachedProcessId = processId;
@@ -328,22 +330,49 @@
     attachedStatus = processStatus;
     attachedVisible = isVisible;
 
+    if (!isVisible || processStatus !== 'running') {
+      flushInput();
+      attachmentGeneration += 1;
+      inputEnabled = false;
+      replayState = null;
+      terminalOffset = 0;
+      setKeyboardProtocol(0, 0);
+      instance.reset();
+      hasOutput = false;
+      liveOutputPreview = '';
+      liveOutputLoaded = false;
+      liveOutputRetained = false;
+      linkHintVisible = false;
+      hoveredLinkUri = null;
+      if (isConnected) void client.detachTerminal().catch(() => undefined);
+      if (isConnected) scheduleFit();
+      return;
+    }
+
+    if (!isConnected) {
+      // The daemon may still own a healthy PTY even though its control socket is being replaced.
+      // Preserve xterm, focus, protocol state, and the parsed offset. Physical input remains
+      // accepted and DaemonClient retains it until the native bridge reconnects.
+      attachmentGeneration += 1;
+      replayState = null;
+      inputEnabled = true;
+      return;
+    }
+
+    const resumingConnection = sameProcessSession;
     flushInput();
     inputEnabled = false;
     replayState = null;
-    setKeyboardProtocol(0, 0);
-    instance.reset();
-    hasOutput = false;
-    liveOutputPreview = '';
-    liveOutputLoaded = false;
-    liveOutputRetained = false;
-    linkHintVisible = false;
-    hoveredLinkUri = null;
-    if (!isVisible || !isConnected || processStatus !== 'running') {
-      attachmentGeneration += 1;
-      void client.detachTerminal().catch(() => undefined);
-      if (isConnected) scheduleFit();
-      return;
+    if (!resumingConnection) {
+      terminalOffset = 0;
+      setKeyboardProtocol(0, 0);
+      instance.reset();
+      hasOutput = false;
+      liveOutputPreview = '';
+      liveOutputLoaded = false;
+      liveOutputRetained = false;
+      linkHintVisible = false;
+      hoveredLinkUri = null;
     }
 
     const generation = ++attachmentGeneration;
@@ -351,7 +380,7 @@
       generation,
       processId,
       replayEndOffset: null,
-      parsedThrough: 0,
+      parsedThrough: terminalOffset,
       focusReporting: false,
       kittyKeyboardFlags: 0,
       modifyOtherKeys: 0,
@@ -360,7 +389,7 @@
     };
     replayState = state;
     instance.focus();
-    void loadLiveOutputPreview(state);
+    if (!resumingConnection) void loadLiveOutputPreview(state);
     void (async () => {
       // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
       // resizing afterward reflows the active zsh prompt differently from a native terminal.
@@ -368,16 +397,18 @@
       await nextAnimationFrame();
       if (replayState !== state) return;
       fitTerminal();
-      await client.resizeTerminal(
-        processId,
-        instance.rows,
-        instance.cols,
-        Math.round(host.clientWidth),
-        Math.round(host.clientHeight)
-      );
-      if (replayState !== state) return;
+      if (!resumingConnection) {
+        await client.resizeTerminal(
+          processId,
+          instance.rows,
+          instance.cols,
+          Math.round(host.clientWidth),
+          Math.round(host.clientHeight)
+        );
+        if (replayState !== state) return;
+      }
 
-      const attached = await client.attachTerminal(processId);
+      const attached = await client.attachTerminal(processId, terminalOffset);
       if (replayState !== state) return;
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
@@ -435,7 +466,10 @@
         frame.data.length > 0
         && generation === attachmentGeneration
         && frame.process_id === process.id
-      ) hasOutput = true;
+      ) {
+        hasOutput = true;
+        terminalOffset = Math.max(terminalOffset, frame.start_offset + frame.data.length);
+      }
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
       state.parsedThrough = Math.max(
         state.parsedThrough,
@@ -681,6 +715,13 @@
       <strong>Waiting for first output…</strong>
     </div>
   {/if}
+  {#if process.status === 'running' && !connected}
+    <div class="terminal-reconnecting" aria-live="polite" aria-label="Daemon reconnecting; terminal input is queued">
+      <span aria-hidden="true"></span>
+      <strong>Reconnecting…</strong>
+      <small>Keystrokes are queued</small>
+    </div>
+  {/if}
   {#if processStarting}
     <div class="process-starting" aria-live="polite">
       <span aria-hidden="true"></span>
@@ -794,6 +835,36 @@
     color: color-mix(in srgb, var(--terminal-foreground) 68%, var(--terminal-background));
     font: 500 var(--font-size-sm)/1 var(--terminal-font-family);
     pointer-events: none;
+  }
+
+  .terminal-reconnecting {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 4;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid color-mix(in srgb, var(--warning-token) 42%, var(--border));
+    border-radius: 999px;
+    padding: 5px 9px;
+    color: var(--terminal-foreground);
+    background: color-mix(in srgb, var(--terminal-background) 91%, var(--warning-token));
+    font: 500 var(--font-size-xs)/1 var(--terminal-font-family);
+    pointer-events: none;
+  }
+
+  .terminal-reconnecting span {
+    width: 8px;
+    height: 8px;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 32%, transparent);
+    border-top-color: var(--warning-token);
+    border-radius: 50%;
+    animation: terminal-waiting-spin 800ms linear infinite;
+  }
+
+  .terminal-reconnecting small {
+    color: color-mix(in srgb, var(--terminal-foreground) 66%, var(--terminal-background));
   }
 
   .terminal-starting span {

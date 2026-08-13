@@ -17,7 +17,7 @@ test('current geometry is published before attach and while stopped', async () =
   const source = await readFile(terminalViewUrl, 'utf8');
   const attachStart = source.indexOf('void (async () => {');
   const resizeBeforeAttach = source.indexOf('await client.resizeTerminal(', attachStart);
-  const attach = source.indexOf('await client.attachTerminal(processId)', attachStart);
+  const attach = source.indexOf('await client.attachTerminal(processId,', attachStart);
   assert.ok(attachStart >= 0 && resizeBeforeAttach > attachStart && attach > resizeBeforeAttach);
 
   const scheduleStart = source.indexOf('function scheduleFit(): void');

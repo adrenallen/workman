@@ -271,6 +271,55 @@ async fn measure_dialog_poll_contention(
     started.elapsed()
 }
 
+async fn measure_daemon_timeout_contention(
+    shared_socket: &mut Socket,
+    terminal_id: i64,
+    marker: &[u8],
+) -> Duration {
+    shared_socket
+        .send(Message::Text(
+            json!({
+                "id": "stalling-readiness-request",
+                "method": "process.wait_for_bound_port",
+                "params": {
+                    "process_id": terminal_id,
+                    "timeout_ms": 900
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let started = Instant::now();
+    let mut input_frame = Vec::from(*b"WRI1");
+    input_frame.extend_from_slice(&terminal_id.to_be_bytes());
+    input_frame.extend_from_slice(marker);
+    shared_socket
+        .send(Message::Binary(input_frame.into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        wait_for_terminal_bytes(shared_socket, marker),
+    )
+    .await
+    .expect("terminal input was not painted while another RPC timed out");
+    let latency = started.elapsed();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        wait_for_response(shared_socket, "stalling-readiness-request"),
+    )
+    .await
+    .expect("stalling readiness request did not finish");
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["result"]["timed_out"], true, "{response}");
+    latency
+}
+
 async fn collect_spawned_processes(control: &mut Socket, spawn_ids: &[&str]) -> Vec<i64> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut pending = spawn_ids.iter().copied().collect::<HashSet<_>>();
@@ -456,12 +505,18 @@ async fn unrelated_agent_home_preparation_does_not_delay_terminal_input()
         CODEX_MARKER,
     )
     .await;
-    let latency = grok_latency.max(kimi_latency).max(codex_latency);
+    let daemon_timeout_latency =
+        measure_daemon_timeout_contention(&mut terminal_stream, terminal_id, b"Q").await;
+    let latency = grok_latency
+        .max(kimi_latency)
+        .max(codex_latency)
+        .max(daemon_timeout_latency);
     eprintln!(
-        "input_spawn_latency source_entries={SOURCE_ENTRIES} grok_paint_us={} kimi_paint_us={} codex_dialog_paint_us={} worst_paint_ms={}",
+        "input_spawn_latency source_entries={SOURCE_ENTRIES} grok_paint_us={} kimi_paint_us={} codex_dialog_paint_us={} daemon_timeout_paint_us={} worst_paint_ms={}",
         grok_latency.as_micros(),
         kimi_latency.as_micros(),
         codex_latency.as_micros(),
+        daemon_timeout_latency.as_micros(),
         latency.as_millis(),
     );
     assert!(

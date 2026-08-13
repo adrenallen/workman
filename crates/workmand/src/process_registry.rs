@@ -179,8 +179,19 @@ pub struct ProcessInputRouter {
 struct ProcessInputTarget {
     process: Process,
     input: PtyInputHandle,
+    raw_output: RawOutput,
+    terminal_output: TerminalOutput,
     attention: AttentionTracker,
     active: Arc<RwLock<bool>>,
+}
+
+/// Cloneable live-terminal handles used to reattach without taking the lifecycle mutex.
+pub struct ProcessTerminalAttachment {
+    pub process: Process,
+    pub raw_output: RawOutput,
+    pub terminal_output: TerminalOutput,
+    pub replay_start_offset: u64,
+    pub replay_end_offset: u64,
 }
 
 impl ProcessInputRouter {
@@ -214,6 +225,31 @@ impl ProcessInputRouter {
             target.attention.observe_input();
         }
         Ok(target.process)
+    }
+
+    /// Snapshot the live output handles and replay bounds without the lifecycle registry mutex.
+    pub fn terminal_attachment(
+        &self,
+        process_id: ProcessId,
+        offset: u64,
+    ) -> RegistryResult<ProcessTerminalAttachment> {
+        let target = self.target(process_id)?;
+        let active = target
+            .active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*active {
+            return Err(RegistryError::NotRunning(process_id));
+        }
+        drop(active);
+        let replay = target.raw_output.read(Some(offset), 0);
+        Ok(ProcessTerminalAttachment {
+            process: target.process,
+            raw_output: target.raw_output,
+            terminal_output: target.terminal_output,
+            replay_start_offset: replay.start_offset,
+            replay_end_offset: replay.total_bytes,
+        })
     }
 
     fn submit_input(
@@ -1005,11 +1041,13 @@ impl ProcessRegistry {
             .input_handle()
             .expect("newly spawned PTY must expose its input handle");
         self.connect_attention_invalidation(&attention);
+        let raw_output = hosted.raw_output();
+        let terminal_output = hosted.terminal_output();
         self.outputs.insert(
             process_id,
             ProcessOutput {
-                raw: hosted.raw_output(),
-                terminal: hosted.terminal_output(),
+                raw: raw_output.clone(),
+                terminal: terminal_output.clone(),
                 attention: attention.clone(),
                 events: launch_event.into_iter().collect(),
             },
@@ -1017,6 +1055,8 @@ impl ProcessRegistry {
         self.input_router.insert(ProcessInputTarget {
             process: process.clone(),
             input,
+            raw_output,
+            terminal_output,
             attention: attention.clone(),
             active: Arc::new(RwLock::new(true)),
         });
