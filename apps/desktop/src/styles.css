@@ -37,6 +37,7 @@
   --ring: #7aa2f7;
   --success: #51b986;
   --success-foreground: #dff8e9;
+  --pull-request-merged: #a371f7;
   --warning-token: #d5a34f;
   --warning-foreground: #fff3cf;
   --information: #6f9fe8;
@@ -127,6 +128,7 @@
   --ring: #4f72bd;
   --success: #267f5b;
   --success-foreground: #0e3e2a;
+  --pull-request-merged: #8250df;
   --warning-token: #94691f;
   --warning-foreground: #3f2a08;
   --information: #3765ad;

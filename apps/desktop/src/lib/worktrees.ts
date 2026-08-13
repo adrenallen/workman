@@ -5,7 +5,17 @@ export type WorktreeStatus = 'clean' | 'dirty' | 'missing' | 'bare';
 export type PullRequestState = 'draft' | 'open' | 'merged' | 'closed';
 export type PullRequestChecks = 'none' | 'pending' | 'passing' | 'failing';
 export type PullRequestMergeability = 'mergeable' | 'conflicting' | 'unknown';
+export type PullRequestIconName =
+  | 'git-merge'
+  | 'git-pull-request'
+  | 'git-pull-request-closed'
+  | 'git-pull-request-draft';
 export type EnvironmentPolicy = 'copy' | 'skip';
+
+export interface PullRequestVisual {
+  icon: PullRequestIconName;
+  color: string;
+}
 
 export interface HerdStatus {
   available: boolean;
@@ -259,9 +269,15 @@ export function pullRequestDetail(pullRequest: PullRequestStatus): string {
   return `${checks} · ${mergeability}`;
 }
 
-export function pullRequestTone(pullRequest: PullRequestStatus): 'success' | 'warning' | 'danger' | 'neutral' {
-  if (pullRequest.state === 'merged' || pullRequest.state === 'closed') return 'neutral';
-  if (pullRequest.checks === 'failing' || pullRequest.mergeable === 'conflicting') return 'danger';
-  if (pullRequest.checks === 'pending' || pullRequest.state === 'draft') return 'warning';
-  return pullRequest.checks === 'passing' ? 'success' : 'neutral';
+export function pullRequestVisual(state: PullRequestState): PullRequestVisual {
+  switch (state) {
+    case 'merged':
+      return { icon: 'git-merge', color: 'var(--pull-request-merged)' };
+    case 'open':
+      return { icon: 'git-pull-request', color: 'var(--success)' };
+    case 'closed':
+      return { icon: 'git-pull-request-closed', color: 'var(--destructive)' };
+    case 'draft':
+      return { icon: 'git-pull-request-draft', color: 'var(--muted-foreground)' };
+  }
 }

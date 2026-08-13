@@ -9,7 +9,7 @@ import {
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
 import { projectFrequentActions } from './projectMenu';
-import type { WorktreeEntry, WorktreeRepository } from './worktrees';
+import type { PullRequestState, WorktreeEntry, WorktreeRepository } from './worktrees';
 import { projectRepositoryTitle } from './worktrees';
 import type { ContextActionId } from './contextMenuIcons';
 import {
@@ -33,6 +33,7 @@ export interface ContextMenuItem {
   disabled?: boolean;
   destructive?: boolean;
   separatorBefore?: boolean;
+  pullRequestState?: PullRequestState;
 }
 
 export type ContextMenuTarget =

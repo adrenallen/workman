@@ -1,12 +1,14 @@
 <script module lang="ts">
   import type { DaemonClient, ProcessView, Project } from './daemon';
   import type { DaemonLogEntry } from './daemonLog';
+  import type { PullRequestStatus } from './worktrees';
 
   export interface ProcessStatusBarProps {
     client: DaemonClient;
     project: Project;
     process: ProcessView;
     processes: ProcessView[];
+    pullRequest: PullRequestStatus | null;
     connected: boolean;
     daemonPort?: number | null;
     daemonEvents: DaemonLogEntry[];
@@ -33,15 +35,18 @@
   import * as Popover from './components/ui/popover';
   import { liveStats, type DescendantProcessStats } from './liveStats';
   import { processActivity } from './processActivity';
+  import { openBrowserUrl } from './openers';
+  import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import { killSubprocess, listSubprocesses } from './subprocesses';
   import TimerCountdown from './TimerCountdown.svelte';
-  import { projectDisplayName } from './worktrees';
+  import { projectDisplayName, pullRequestLabel } from './worktrees';
 
   let {
     client,
     project,
     process,
     processes,
+    pullRequest,
     connected,
     daemonPort = null,
     daemonEvents,
@@ -70,6 +75,15 @@
   );
   const siblingIndex = $derived(processes.findIndex((candidate) => candidate.id === process.id));
   const timerDensity = $derived(statusWidth <= 680 ? 'hidden' : statusWidth <= 1_040 ? 'compact' : 'full');
+
+  async function openPullRequest(): Promise<void> {
+    if (!pullRequest) return;
+    try {
+      await openBrowserUrl(pullRequest.url);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   onMount(() => {
     const handlePointerDown = (event: PointerEvent) => {
@@ -272,6 +286,18 @@
     </span>
     <TimerCountdown processId={process.id} density={timerDensity} />
     <strong class="process-name" title={process.name}>{process.name}</strong>
+    {#if pullRequest}
+      <button
+        type="button"
+        class="pull-request-link"
+        title={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
+        aria-label={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
+        onclick={() => void openPullRequest()}
+      >
+        <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
+        <span class="pull-request-number">#{pullRequest.number}</span>
+      </button>
+    {/if}
 
     <Popover.Root open={popoverOpen} onOpenChange={changePopover}>
       <Popover.Trigger>
@@ -598,6 +624,7 @@
 
   .telemetry > span,
   .process-name,
+  .pull-request-link,
   .subprocess-trigger {
     display: flex;
     min-width: 0;
@@ -632,6 +659,19 @@
     font-weight: 650;
     letter-spacing: 0;
     text-overflow: ellipsis;
+  }
+
+  .pull-request-link {
+    gap: 4px;
+    color: var(--muted-foreground);
+    font-size: var(--font-size-xs);
+    font-weight: 650;
+  }
+
+  .pull-request-link:not(:disabled):hover,
+  .pull-request-link:focus-visible {
+    background: var(--popover);
+    color: var(--foreground);
   }
 
   .subprocess-trigger {
@@ -1237,6 +1277,7 @@
   .stage-medium .nav-label,
   .stage-medium .uptime-prefix,
   .stage-medium .metric-label,
+  .stage-medium .pull-request-number,
   .stage-medium .subprocess-label,
   .stage-medium .process-name,
   .stage-medium .daemon-port {
@@ -1246,6 +1287,7 @@
   .stage-medium .navigation button,
   .stage-medium .telemetry > span,
   .stage-medium .daemon-connection,
+  .stage-medium .pull-request-link,
   .stage-medium .subprocess-trigger {
     padding-right: 7px;
     padding-left: 7px;

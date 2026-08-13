@@ -24,7 +24,7 @@ test('frequent project actions stay pinned in the requested order', () => {
   ]);
 });
 
-test('closed PRs and missing app URLs do not create false actions', () => {
+test('closed PR links remain available and truthfully report their state', () => {
   const items = projectFrequentActions({
     editorLabel: 'Open in Zed',
     pullRequest: { number: 47, state: 'closed' },
@@ -32,6 +32,12 @@ test('closed PRs and missing app URLs do not create false actions', () => {
   });
 
   assert.deepEqual(items, [
+    {
+      id: 'open-pull-request',
+      label: 'Open PR #47 on GitHub',
+      detail: 'Closed pull request',
+      pullRequestState: 'closed'
+    },
     { id: 'open-in-editor', label: 'Open in Zed' },
     { id: 'open-in-finder', label: 'Open in Finder' }
   ]);
@@ -46,6 +52,21 @@ test('draft pull requests are still open and truthfully labeled', () => {
   assert.deepEqual(pullRequest, {
     id: 'open-pull-request',
     label: 'Open PR #8 on GitHub',
-    detail: 'Draft pull request'
+    detail: 'Draft pull request',
+    pullRequestState: 'draft'
+  });
+});
+
+test('merged PR links carry the merged state for their context-menu treatment', () => {
+  const [pullRequest] = projectFrequentActions({
+    editorLabel: 'Open in editor',
+    pullRequest: { number: 128, state: 'merged' }
+  });
+
+  assert.deepEqual(pullRequest, {
+    id: 'open-pull-request',
+    label: 'Open PR #128 on GitHub',
+    detail: 'Merged pull request',
+    pullRequestState: 'merged'
   });
 });

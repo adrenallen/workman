@@ -26,6 +26,7 @@
   import type { Component } from 'svelte';
 
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import PullRequestStateIcon from './PullRequestStateIcon.svelte';
 
   import {
     contextActionIcon,
@@ -106,7 +107,11 @@
         onclick={() => choose(item)}
         class="min-h-8 gap-2 px-2 py-1.5"
       >
-        <Icon class="size-4" aria-hidden="true" />
+        {#if item.pullRequestState}
+          <PullRequestStateIcon state={item.pullRequestState} size={16} strokeWidth={1.9} />
+        {:else}
+          <Icon class="size-4" aria-hidden="true" />
+        {/if}
         <span class="grid min-w-0 flex-1">
           <span class="truncate text-sm">{item.label}</span>
           {#if item.detail}<span class="truncate font-mono text-xs text-muted-foreground">{item.detail}</span>{/if}

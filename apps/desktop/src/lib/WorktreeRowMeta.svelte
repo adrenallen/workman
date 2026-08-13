@@ -1,16 +1,14 @@
 <script lang="ts">
-  import GitMergeIcon from '@lucide/svelte/icons/git-merge';
   import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import GitPullRequestIcon from '@lucide/svelte/icons/git-pull-request';
-  import GitPullRequestClosedIcon from '@lucide/svelte/icons/git-pull-request-closed';
-  import GitPullRequestDraftIcon from '@lucide/svelte/icons/git-pull-request-draft';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import { openBrowserUrl } from './openers';
+  import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import type { PullRequestCache, WorktreeEntry } from './worktrees';
-  import { pullRequestLabel, pullRequestTone } from './worktrees';
+  import { pullRequestLabel } from './worktrees';
 
   interface Props {
     entry: WorktreeEntry | null;
@@ -36,16 +34,6 @@
     `PR status unavailable — ${pullRequestCache?.error?.trim() || 'lookup failed without a reason'}`
   );
   let openingPullRequest = $state(false);
-  let pullRequestToneName = $derived(pullRequest ? pullRequestTone(pullRequest) : 'neutral');
-  let pullRequestClass = $derived(
-    pullRequestToneName === 'success'
-      ? 'text-success'
-      : pullRequestToneName === 'warning'
-        ? 'text-warning'
-        : pullRequestToneName === 'danger'
-          ? 'text-destructive'
-          : 'text-muted-foreground'
-  );
 
   async function openPullRequest(): Promise<void> {
     if (!pullRequest || openingPullRequest) return;
@@ -63,21 +51,13 @@
 <span class="worktree-meta">
   {#if pullRequest}
     <IconButton
-      class={`size-6 border border-border bg-card ${pullRequestClass}`}
+      class="size-6 border border-border bg-card"
       label={`Open ${pullRequestLabel(pullRequest)}`}
       disabled={openingPullRequest}
       onclick={(event) => { event.stopPropagation(); void openPullRequest(); }}
     >
       {#snippet icon()}
-        {#if pullRequest.state === 'merged'}
-          <GitMergeIcon size={13} strokeWidth={1.9} />
-        {:else if pullRequest.state === 'closed'}
-          <GitPullRequestClosedIcon size={13} strokeWidth={1.9} />
-        {:else if pullRequest.state === 'draft'}
-          <GitPullRequestDraftIcon size={13} strokeWidth={1.9} />
-        {:else}
-          <GitPullRequestIcon size={13} strokeWidth={1.9} />
-        {/if}
+        <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
       {/snippet}
     </IconButton>
   {:else if pullRequestUnavailable}

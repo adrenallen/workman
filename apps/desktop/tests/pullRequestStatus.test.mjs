@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { pullRequestDetail, pullRequestLabel } from '../src/lib/worktrees.ts';
+import {
+  pullRequestDetail,
+  pullRequestLabel,
+  pullRequestVisual
+} from '../src/lib/worktrees.ts';
 
 function pullRequest(state, mergeable = 'mergeable') {
   return {
@@ -30,6 +34,31 @@ test('open PR labels include mergeability while terminal labels report only term
   }
 });
 
+test('PR states map to distinct standard icons and semantic colors', () => {
+  assert.deepEqual(pullRequestVisual('merged'), {
+    icon: 'git-merge',
+    color: 'var(--pull-request-merged)'
+  });
+  assert.deepEqual(pullRequestVisual('open'), {
+    icon: 'git-pull-request',
+    color: 'var(--success)'
+  });
+  assert.deepEqual(pullRequestVisual('closed'), {
+    icon: 'git-pull-request-closed',
+    color: 'var(--destructive)'
+  });
+  assert.deepEqual(pullRequestVisual('draft'), {
+    icon: 'git-pull-request-draft',
+    color: 'var(--muted-foreground)'
+  });
+});
+
+test('merged purple uses GitHub light color and a legible dark-theme variant', async () => {
+  const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /:root \{[\s\S]*--pull-request-merged: #a371f7;/);
+  assert.match(styles, /:root\[data-theme='light'\] \{[\s\S]*--pull-request-merged: #8250df;/);
+});
+
 test('manual PR refresh forces a fresh daemon lookup and installs its direct response', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   const refresh = app.slice(
@@ -47,14 +76,25 @@ test('manual PR refresh forces a fresh daemon lookup and installs its direct res
   assert.match(action, /await refreshWorktreeRepository\(project, true\)/);
 });
 
-test('merged and closed PR URLs remain available from both row and overview surfaces', async () => {
+test('every PR status surface uses the shared state icon treatment', async () => {
   const row = await readFile(new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url), 'utf8');
   const overview = await readFile(new URL('../src/lib/ProjectOverview.svelte', import.meta.url), 'utf8');
+  const quickJump = await readFile(new URL('../src/lib/QuickJumpPalette.svelte', import.meta.url), 'utf8');
+  const contextMenu = await readFile(new URL('../src/lib/ContextMenu.svelte', import.meta.url), 'utf8');
+  const terminalStatus = await readFile(new URL('../src/lib/ProcessStatusBar.svelte', import.meta.url), 'utf8');
+  const icon = await readFile(new URL('../src/lib/PullRequestStateIcon.svelte', import.meta.url), 'utf8');
 
   assert.match(row, /\{#if pullRequest\}/);
   assert.match(row, /openBrowserUrl\(pullRequest\.url\)/);
-  assert.match(row, /pullRequest\.state === 'merged'[\s\S]*<GitMergeIcon/);
-  assert.match(row, /pullRequest\.state === 'closed'[\s\S]*<GitPullRequestClosedIcon/);
+  assert.match(row, /<PullRequestStateIcon state=\{pullRequest\.state\}/);
   assert.match(overview, /if pullRequest/);
   assert.match(overview, /openBrowserUrl\(pullRequest!\.url\)/);
+  assert.match(overview, /<PullRequestStateIcon state=\{pullRequest\.state\}/);
+  assert.match(quickJump, /pullRequests: Record<number, PullRequestStatus \| null>/);
+  assert.match(quickJump, /<PullRequestStateIcon state=\{entry\.pullRequest\.state\}/);
+  assert.match(contextMenu, /<PullRequestStateIcon state=\{item\.pullRequestState\}/);
+  assert.match(terminalStatus, /openBrowserUrl\(pullRequest\.url\)/);
+  assert.match(terminalStatus, /<PullRequestStateIcon state=\{pullRequest\.state\}/);
+  assert.match(icon, /visual\.icon === 'git-merge'[\s\S]*<GitMergeIcon/);
+  assert.match(icon, /visual\.icon === 'git-pull-request-closed'[\s\S]*<GitPullRequestClosedIcon/);
 });

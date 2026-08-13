@@ -9,6 +9,7 @@
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import type { AgentTool } from './agentTools';
   import type { Project } from './daemon';
+  import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import ProjectIcon from './ProjectIcon.svelte';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
@@ -20,10 +21,12 @@
     type NavigationProjectSnapshot
   } from './navigation';
   import { projectTreeSelection, type ProjectTreeItemKind } from './projectTree';
-  import { projectDisplayName } from './worktrees';
+  import type { PullRequestStatus } from './worktrees';
+  import { projectDisplayName, pullRequestLabel, pullRequestVisual } from './worktrees';
 
   interface Props {
     projects: Project[];
+    pullRequests: Record<number, PullRequestStatus | null>;
     index: Record<number, NavigationProjectSnapshot>;
     currentProjectId: number | null;
     agentTools: AgentTool[];
@@ -44,6 +47,7 @@
     searchText: string;
     target: AppNavigationTarget;
     creation: boolean;
+    pullRequest?: PullRequestStatus | null;
   }
 
   interface RankedEntry extends PaletteEntry {
@@ -53,6 +57,7 @@
 
   let {
     projects,
+    pullRequests,
     index,
     currentProjectId,
     agentTools,
@@ -181,6 +186,7 @@
     for (const project of projects) {
       const name = projectLabel(project);
       const snapshot = index[project.id];
+      const pullRequest = pullRequests[project.id] ?? null;
       const target: AppNavigationTarget = { type: 'project', projectId: project.id };
       next.push({
         key: navigationTargetKey(target),
@@ -188,9 +194,10 @@
         label: name,
         detail: project.path,
         projectName: name,
-        searchText: `${name} ${project.name} ${project.path} project`,
+        searchText: `${name} ${project.name} ${project.path} project ${pullRequest ? `PR ${pullRequest.number} ${pullRequest.state}` : ''}`,
         target,
-        creation: false
+        creation: false,
+        pullRequest
       });
 
       for (const process of snapshot?.processes ?? []) {
@@ -434,6 +441,16 @@
           </span>
           <span class="result-copy"><strong>{entry.label}</strong><small>{entry.detail}</small></span>
           <span class="result-path">
+            {#if entry.pullRequest}
+              <span
+                class="pull-request-status"
+                style:color={pullRequestVisual(entry.pullRequest.state).color}
+                aria-label={pullRequestLabel(entry.pullRequest)}
+              >
+                <PullRequestStateIcon state={entry.pullRequest.state} size={12} strokeWidth={1.9} />
+                <span>#{entry.pullRequest.number}</span>
+              </span>
+            {/if}
             {#if entry.recentRank !== null}<i>recent</i>{/if}
             {#if entry.projectName}<b>{entry.projectName}</b>{/if}
             <em>{kindLabel(entry.kind)}</em>
@@ -494,6 +511,7 @@
   .result-copy small { margin-top: 2px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .result-path { display: flex; max-width: 235px; align-items: center; justify-content: flex-end; gap: 5px; overflow: hidden; }
   .result-path b { overflow: hidden; color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .pull-request-status { display: inline-flex; flex: none; align-items: center; gap: 3px; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; font-weight: 650; }
   .result-path em, .result-path i { flex: none; border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px; color: var(--muted-foreground); background: var(--popover); font: normal var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .result-path i { border-color: color-mix(in srgb, var(--warning) 38%, var(--border)); color: var(--warning); }
   .no-results { display: grid; min-height: 112px; place-content: center; gap: 4px; color: var(--muted-foreground); text-align: center; }

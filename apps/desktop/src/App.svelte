@@ -4219,6 +4219,7 @@
           project={selectedProject}
           process={selectedProcess}
           processes={treeProcesses}
+          pullRequest={worktreeEntryFor(selectedProject)?.pull_request ?? null}
           connected={connection.status === 'connected'}
           daemonPort={connection.port}
           daemonEvents={daemonLog}
@@ -4265,6 +4266,10 @@
 {#if quickJumpOpen}
   <QuickJumpPalette
     {projects}
+    pullRequests={Object.fromEntries(projects.map((project) => [
+      project.id,
+      worktreeEntryFor(project)?.pull_request ?? null
+    ]))}
     index={navigationIndex}
     currentProjectId={selectedProject?.id ?? null}
     {agentTools}

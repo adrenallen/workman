@@ -9,6 +9,7 @@ export interface ProjectFrequentAction {
   id: 'open-pull-request' | 'open-in-editor' | 'open-in-finder' | 'open-herd-site';
   label: string;
   detail?: string;
+  pullRequestState?: ProjectMenuPullRequestState;
 }
 
 export function projectFrequentActions(input: {
@@ -19,11 +20,12 @@ export function projectFrequentActions(input: {
   const items: ProjectFrequentAction[] = [];
   const pullRequest = input.pullRequest;
 
-  if (pullRequest && (pullRequest.state === 'open' || pullRequest.state === 'draft')) {
+  if (pullRequest) {
     items.push({
       id: 'open-pull-request',
       label: `Open PR #${pullRequest.number} on GitHub`,
-      detail: pullRequest.state === 'draft' ? 'Draft pull request' : 'Open pull request'
+      detail: `${pullRequest.state[0].toUpperCase()}${pullRequest.state.slice(1)} pull request`,
+      pullRequestState: pullRequest.state
     });
   }
 

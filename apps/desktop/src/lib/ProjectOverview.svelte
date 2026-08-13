@@ -18,13 +18,19 @@
     openProjectEditor,
     openProjectFinder
   } from './openers';
+  import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import SectionOverview from './SectionOverview.svelte';
   import type {
     PullRequestCache,
     WorktreeEntry,
     WorktreeRepository
   } from './worktrees';
-  import { projectDisplayName, pullRequestDetail, pullRequestLabel } from './worktrees';
+  import {
+    projectDisplayName,
+    pullRequestDetail,
+    pullRequestLabel,
+    pullRequestVisual
+  } from './worktrees';
 
   type CountTarget = 'agent' | 'terminal' | 'todo';
 
@@ -198,11 +204,18 @@
       <section class="pr-card" aria-labelledby="pull-request-heading">
         <div class="section-label">
           <span id="pull-request-heading">Pull request</span>
-          <GitPullRequestIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+          {#if pullRequest}
+            <PullRequestStateIcon state={pullRequest.state} size={15} strokeWidth={1.8} />
+          {:else}
+            <GitPullRequestIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+          {/if}
         </div>
         {#if pullRequest}
-          <div class="pr-state open">
-            <span class="pr-number">#{pullRequest.number}</span>
+          <div class={`pr-state ${pullRequest.state}`}>
+            <span class="pr-number" style:color={pullRequestVisual(pullRequest.state).color}>
+              <PullRequestStateIcon state={pullRequest.state} size={18} strokeWidth={1.9} />
+              #{pullRequest.number}
+            </span>
             <div>
               <strong>{pullRequest.state === 'draft' ? 'Draft pull request' : `${pullRequest.state} pull request`}</strong>
               <small>{pullRequestDetail(pullRequest)}</small>
@@ -304,12 +317,15 @@
   .pr-card :global(button) { justify-self: start; }
   .pr-state { display: grid; min-height: 47px; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; border-left: 2px solid var(--border-strong); padding: 6px 8px; background: var(--background); }
   .pr-state.open { border-left-color: var(--success); }
+  .pr-state.merged { border-left-color: var(--pull-request-merged); }
+  .pr-state.closed { border-left-color: var(--destructive); }
+  .pr-state.draft { border-left-color: var(--muted-foreground); }
   .pr-state.unavailable { border-left-color: var(--warning-token); color: var(--warning-token); }
   .pr-state.none { color: var(--muted-foreground); }
   .pr-state strong, .pr-state small { display: block; }
   .pr-state strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; text-transform: capitalize; }
   .pr-state small { margin-top: 2px; overflow-wrap: anywhere; color: var(--muted-foreground); font-family: var(--terminal-font-family); font-size: var(--font-size-xs); }
-  .pr-number { color: var(--success); font-family: var(--terminal-font-family); font-size: var(--font-size-base); font-weight: 700; }
+  .pr-number { display: inline-flex; align-items: center; gap: 5px; font-family: var(--terminal-font-family); font-size: var(--font-size-base); font-weight: 700; }
   .quick-actions { display: grid; align-content: start; gap: 10px; }
   .action-row { display: flex; flex-wrap: wrap; gap: 7px; }
   .action-error { margin: 0; color: var(--destructive); font-size: var(--font-size-xs); }
