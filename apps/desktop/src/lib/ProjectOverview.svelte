@@ -9,6 +9,7 @@
   import { onMount } from 'svelte';
 
   import { Button } from '$lib/components/ui/button';
+  import * as Popover from '$lib/components/ui/popover';
   import type { Project } from './daemon';
   import {
     editorActionLabel,
@@ -18,6 +19,7 @@
     openProjectEditor,
     openProjectFinder
   } from './openers';
+  import PullRequestList from './PullRequestList.svelte';
   import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import SectionOverview from './SectionOverview.svelte';
   import type {
@@ -28,8 +30,10 @@
   import {
     projectDisplayName,
     pullRequestDetail,
+    pullRequestInteraction,
     pullRequestLabel,
-    pullRequestVisual
+    pullRequestVisual,
+    pullRequestsForWorktree
   } from './worktrees';
 
   type CountTarget = 'agent' | 'terminal' | 'todo';
@@ -58,13 +62,16 @@
 
   let actionBusy = $state<'editor' | 'finder' | 'pull-request' | null>(null);
   let actionError = $state<string | null>(null);
+  let pullRequestListOpen = $state(false);
   let projectName = $derived(projectDisplayName(project));
   let editorLabel = $derived.by(() => {
     const label = editorActionLabel($openerSettings.config, $openerSettings.editors);
     return label === 'Open in editor' ? 'Open in IDE' : label;
   });
   let branch = $derived(worktree?.branch.trim() || null);
-  let pullRequest = $derived(worktree?.pull_request ?? null);
+  let pullRequests = $derived(pullRequestsForWorktree(worktree));
+  let pullRequest = $derived(pullRequests[0] ?? null);
+  let pullRequestMode = $derived(pullRequestInteraction(pullRequests));
   let isWorktreeCheckout = $derived(
     project.parent_project_id !== null || (worktree !== null && worktree.kind !== 'main')
   );
@@ -221,15 +228,43 @@
               <small>{pullRequestDetail(pullRequest)}</small>
             </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={actionBusy !== null}
-            aria-label={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
-            onclick={() => void runAction('pull-request', () => openBrowserUrl(pullRequest!.url))}
-          >
-            Open on GitHub <ExternalLinkIcon size={13} aria-hidden="true" />
-          </Button>
+          {#if pullRequestMode === 'direct'}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actionBusy !== null}
+              aria-label={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
+              onclick={() => void runAction('pull-request', () => openBrowserUrl(pullRequest!.url))}
+            >
+              Open on GitHub <ExternalLinkIcon size={13} aria-hidden="true" />
+            </Button>
+          {:else}
+            <Popover.Root bind:open={pullRequestListOpen}>
+              <Popover.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    size="sm"
+                    variant="outline"
+                    disabled={actionBusy !== null}
+                    aria-label={`Show ${pullRequests.length} pull requests for ${worktree?.branch ?? projectName}`}
+                  >
+                    View {pullRequests.length} pull requests
+                  </Button>
+                {/snippet}
+              </Popover.Trigger>
+              <Popover.Content side="bottom" align="start" sideOffset={6} class="w-80 gap-0 p-2">
+                <PullRequestList
+                  branch={worktree?.branch ?? projectName}
+                  {pullRequests}
+                  onChoose={(target) => {
+                    pullRequestListOpen = false;
+                    void runAction('pull-request', () => openBrowserUrl(target.url));
+                  }}
+                />
+              </Popover.Content>
+            </Popover.Root>
+          {/if}
         {:else if pullRequestCache?.available === false}
           <div class="pr-state unavailable" role="status">
             <CircleAlertIcon size={18} strokeWidth={1.8} aria-hidden="true" />

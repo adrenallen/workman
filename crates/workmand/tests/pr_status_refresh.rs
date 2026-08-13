@@ -43,7 +43,7 @@ async fn manual_refresh_round_trips_terminal_pr_state_and_preserves_the_link()
     let gh = profile_bin.join("gh");
     write_gh(
         &gh,
-        r#"[{"number":42,"state":"OPEN","isDraft":false,"headRefName":"main","url":"https://example.test/pr/42","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
+        r#"[{"number":42,"title":"Ship the feature","state":"OPEN","isDraft":false,"headRefName":"main","url":"https://example.test/pr/42","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
     )?;
 
     let shell = fixture.path().join("isolated-login-shell");
@@ -82,11 +82,13 @@ async fn manual_refresh_round_trips_terminal_pr_state_and_preserves_the_link()
     let open = worktrees::list_for_project_refresh(&registry, 1, true).await?;
     let open_pr = pull_request(&open)?;
     assert_eq!(open_pr["state"], "open");
+    assert_eq!(open_pr["title"], "Ship the feature");
     assert_eq!(open_pr["mergeable"], "mergeable");
+    assert_eq!(pull_requests(&open)?.len(), 1);
 
     write_gh(
         &gh,
-        r#"[{"number":42,"state":"MERGED","isDraft":false,"headRefName":"main","url":"https://example.test/pr/42","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
+        r#"[{"number":42,"title":"Ship the feature","state":"MERGED","isDraft":false,"headRefName":"main","url":"https://example.test/pr/42","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
     )?;
     let cached = worktrees::list_for_project(&registry, 1).await?;
     assert_eq!(pull_request(&cached)?["state"], "open");
@@ -99,13 +101,40 @@ async fn manual_refresh_round_trips_terminal_pr_state_and_preserves_the_link()
 
     write_gh(
         &gh,
-        r#"[{"number":43,"state":"CLOSED","isDraft":true,"headRefName":"main","url":"https://example.test/pr/43","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
+        r#"[{"number":43,"title":"Try a different shape","state":"CLOSED","isDraft":true,"headRefName":"main","url":"https://example.test/pr/43","mergeable":"MERGEABLE","statusCheckRollup":[]}]"#,
     )?;
     let closed = worktrees::list_for_project_refresh(&registry, 1, true).await?;
     let closed_pr = pull_request(&closed)?;
     assert_eq!(closed_pr["state"], "closed");
     assert_eq!(closed_pr["mergeable"], "unknown");
     assert_eq!(closed_pr["url"], "https://example.test/pr/43");
+
+    write_gh(
+        &gh,
+        r#"[
+          {"number":45,"title":"Current proposal","state":"OPEN","isDraft":false,"headRefName":"main","url":"https://example.test/pr/45","mergeable":"MERGEABLE","statusCheckRollup":[]},
+          {"number":44,"title":"Draft alternative","state":"OPEN","isDraft":true,"headRefName":"main","url":"https://example.test/pr/44","mergeable":"UNKNOWN","statusCheckRollup":[]},
+          {"number":43,"title":"Closed alternative","state":"CLOSED","isDraft":false,"headRefName":"main","url":"https://example.test/pr/43","mergeable":"UNKNOWN","statusCheckRollup":[]},
+          {"number":42,"title":"Merged original","state":"MERGED","isDraft":false,"headRefName":"main","url":"https://example.test/pr/42","mergeable":"UNKNOWN","statusCheckRollup":[]}
+        ]"#,
+    )?;
+    let multiple = worktrees::list_for_project_refresh(&registry, 1, true).await?;
+    let all = pull_requests(&multiple)?;
+    assert_eq!(all.len(), 4);
+    assert_eq!(
+        all.iter()
+            .map(|pr| pr["number"].as_u64())
+            .collect::<Vec<_>>(),
+        [Some(45), Some(44), Some(43), Some(42)]
+    );
+    assert_eq!(
+        all.iter()
+            .map(|pr| pr["state"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("open"), Some("draft"), Some("closed"), Some("merged")]
+    );
+    assert_eq!(all[0]["title"], "Current proposal");
+    assert_eq!(pull_request(&multiple)?["number"], 45);
     Ok(())
 }
 
@@ -117,6 +146,16 @@ fn pull_request(list: &worktrees::WorktreeList) -> Result<serde_json::Value, Box
         .filter(|pull_request| !pull_request.is_null())
         .cloned()
         .ok_or_else(|| "main worktree PR link is missing".into())
+}
+
+fn pull_requests(list: &worktrees::WorktreeList) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
+    serde_json::to_value(list)?["worktrees"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["branch"] == "main"))
+        .and_then(|entry| entry.get("pull_requests"))
+        .and_then(|pull_requests| pull_requests.as_array())
+        .cloned()
+        .ok_or_else(|| "main worktree PR collection is missing".into())
 }
 
 fn write_gh(path: &Path, json: &str) -> Result<(), Box<dyn Error>> {

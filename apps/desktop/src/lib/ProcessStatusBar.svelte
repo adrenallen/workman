@@ -8,7 +8,7 @@
     project: Project;
     process: ProcessView;
     processes: ProcessView[];
-    pullRequest: PullRequestStatus | null;
+    pullRequests: PullRequestStatus[];
     connected: boolean;
     daemonPort?: number | null;
     daemonEvents: DaemonLogEntry[];
@@ -36,17 +36,18 @@
   import { liveStats, type DescendantProcessStats } from './liveStats';
   import { processActivity } from './processActivity';
   import { openBrowserUrl } from './openers';
+  import PullRequestList from './PullRequestList.svelte';
   import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import { killSubprocess, listSubprocesses } from './subprocesses';
   import TimerCountdown from './TimerCountdown.svelte';
-  import { projectDisplayName, pullRequestLabel } from './worktrees';
+  import { projectDisplayName, pullRequestInteraction, pullRequestLabel } from './worktrees';
 
   let {
     client,
     project,
     process,
     processes,
-    pullRequest,
+    pullRequests,
     connected,
     daemonPort = null,
     daemonEvents,
@@ -66,6 +67,7 @@
   let killingPid = $state<number | null>(null);
   let activeProcessId = $state<number | null>(null);
   let statusWidth = $state(1_200);
+  let pullRequestListOpen = $state(false);
 
   const stats = $derived($liveStats.processes[process.id] ?? null);
   const activity = $derived(processActivity(process, stats ?? undefined));
@@ -75,11 +77,13 @@
   );
   const siblingIndex = $derived(processes.findIndex((candidate) => candidate.id === process.id));
   const timerDensity = $derived(statusWidth <= 680 ? 'hidden' : statusWidth <= 1_040 ? 'compact' : 'full');
+  const pullRequest = $derived(pullRequests[0] ?? null);
+  const pullRequestMode = $derived(pullRequestInteraction(pullRequests));
 
-  async function openPullRequest(): Promise<void> {
-    if (!pullRequest) return;
+  async function openPullRequest(target: PullRequestStatus): Promise<void> {
+    pullRequestListOpen = false;
     try {
-      await openBrowserUrl(pullRequest.url);
+      await openBrowserUrl(target.url);
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -287,16 +291,42 @@
     <TimerCountdown processId={process.id} density={timerDensity} />
     <strong class="process-name" title={process.name}>{process.name}</strong>
     {#if pullRequest}
-      <button
-        type="button"
-        class="pull-request-link"
-        title={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
-        aria-label={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
-        onclick={() => void openPullRequest()}
-      >
-        <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
-        <span class="pull-request-number">#{pullRequest.number}</span>
-      </button>
+      {#if pullRequestMode === 'direct'}
+        <button
+          type="button"
+          class="pull-request-link"
+          title={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
+          aria-label={`Open ${pullRequestLabel(pullRequest)} on GitHub`}
+          onclick={() => void openPullRequest(pullRequest)}
+        >
+          <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
+          <span class="pull-request-number">#{pullRequest.number}</span>
+        </button>
+      {:else}
+        <Popover.Root bind:open={pullRequestListOpen}>
+          <Popover.Trigger>
+            {#snippet child({ props })}
+              <button
+                {...props}
+                type="button"
+                class="pull-request-link"
+                title={`Show ${pullRequests.length} pull requests for ${project.branch ?? project.name}`}
+                aria-label={`Show ${pullRequests.length} pull requests for ${project.branch ?? project.name}`}
+              >
+                <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
+                <span class="pull-request-number">{pullRequests.length} PRs</span>
+              </button>
+            {/snippet}
+          </Popover.Trigger>
+          <Popover.Content side="top" align="end" sideOffset={7} class="w-80 gap-0 p-2">
+            <PullRequestList
+              branch={project.branch ?? project.name}
+              {pullRequests}
+              onChoose={(target) => void openPullRequest(target)}
+            />
+          </Popover.Content>
+        </Popover.Root>
+      {/if}
     {/if}
 
     <Popover.Root open={popoverOpen} onOpenChange={changePopover}>

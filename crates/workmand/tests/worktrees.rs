@@ -1695,7 +1695,7 @@ async fn pr_lookup_uses_login_path_for_plain_and_managed_worktrees_and_refreshes
     let gh = profile_bin.join("gh");
     fs::write(
         &gh,
-        "#!/bin/sh\nprintf '%s\\n' '[{\"number\":51,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/51\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]},{\"number\":52,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feature/managed\",\"url\":\"https://example.test/pr/52\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
+        "#!/bin/sh\nprintf '%s\\n' '[{\"number\":51,\"title\":\"Main change\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/51\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]},{\"number\":50,\"title\":\"Earlier main change\",\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"main\",\"url\":\"https://example.test/pr/50\",\"mergeable\":\"UNKNOWN\",\"statusCheckRollup\":[]},{\"number\":52,\"title\":\"Managed change\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feature/managed\",\"url\":\"https://example.test/pr/52\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[]}]'\n",
     )?;
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
 
@@ -1713,12 +1713,16 @@ async fn pr_lookup_uses_login_path_for_plain_and_managed_worktrees_and_refreshes
         .find(|entry| entry.kind == "main")
         .expect("plain repository row");
     assert_eq!(plain.pull_request.as_ref().map(|pr| pr.number), Some(51));
+    assert_eq!(plain.pull_requests.len(), 2);
+    assert_eq!(plain.pull_requests[0].title, "Main change");
+    assert_eq!(plain.pull_requests[1].state, "merged");
     let managed = recovered
         .worktrees
         .iter()
         .find(|entry| entry.kind == "managed")
         .expect("managed worktree row");
     assert_eq!(managed.pull_request.as_ref().map(|pr| pr.number), Some(52));
+    assert_eq!(managed.pull_requests.len(), 1);
     Ok(())
 }
 

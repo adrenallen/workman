@@ -31,6 +31,7 @@ pub struct HerdView {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct PullRequestView {
     pub number: u64,
+    pub title: String,
     pub state: &'static str,
     pub url: String,
     pub checks: &'static str,
@@ -72,9 +73,11 @@ pub struct IntegrationError {
 #[derive(Clone)]
 struct PrCacheEntry {
     checked_at: i64,
-    branches: HashMap<String, PullRequestView>,
+    branches: PullRequestsByBranch,
     error: Option<String>,
 }
+
+pub(crate) type PullRequestsByBranch = HashMap<String, Vec<PullRequestView>>;
 
 static PR_CACHE: OnceLock<Mutex<HashMap<PathBuf, PrCacheEntry>>> = OnceLock::new();
 
@@ -144,7 +147,7 @@ pub(crate) async fn pull_requests(
     repository: &Path,
     refresh: bool,
     environment: &BTreeMap<OsString, OsString>,
-) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
+) -> (PullRequestsByBranch, PullRequestCacheView) {
     pull_requests_at(repository, refresh, environment, unix_time()).await
 }
 
@@ -153,7 +156,7 @@ async fn pull_requests_at(
     refresh: bool,
     environment: &BTreeMap<OsString, OsString>,
     now: i64,
-) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
+) -> (PullRequestsByBranch, PullRequestCacheView) {
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if !refresh
         && let Some(hit) = cache.lock().await.get(repository).cloned()
@@ -180,7 +183,7 @@ async fn pull_requests_at(
     cache_result(entry)
 }
 
-fn cache_result(entry: PrCacheEntry) -> (HashMap<String, PullRequestView>, PullRequestCacheView) {
+fn cache_result(entry: PrCacheEntry) -> (PullRequestsByBranch, PullRequestCacheView) {
     let view = PullRequestCacheView {
         available: entry.error.is_none(),
         checked_at: Some(entry.checked_at),
@@ -193,7 +196,7 @@ fn cache_result(entry: PrCacheEntry) -> (HashMap<String, PullRequestView>, PullR
 async fn fetch_pull_requests(
     repository: &Path,
     environment: &BTreeMap<OsString, OsString>,
-) -> Result<HashMap<String, PullRequestView>, String> {
+) -> Result<PullRequestsByBranch, String> {
     let gh = executable_on_path("gh", environment)
         .ok_or_else(|| "GitHub CLI was not found in the resolved user PATH".to_owned())?;
     let output = command_output(
@@ -205,7 +208,7 @@ async fn fetch_pull_requests(
             "--limit",
             "200",
             "--json",
-            "number,state,isDraft,headRefName,url,mergeable,statusCheckRollup",
+            "number,title,state,isDraft,headRefName,url,mergeable,statusCheckRollup",
         ]),
         environment,
     )
@@ -217,7 +220,7 @@ async fn fetch_pull_requests(
     parse_pull_requests(&output.stdout)
 }
 
-fn parse_pull_requests(bytes: &[u8]) -> Result<HashMap<String, PullRequestView>, String> {
+fn parse_pull_requests(bytes: &[u8]) -> Result<PullRequestsByBranch, String> {
     let values: Vec<Value> = serde_json::from_slice(bytes)
         .map_err(|error| format!("gh returned invalid PR JSON: {error}"))?;
     let mut result = HashMap::new();
@@ -244,6 +247,11 @@ fn parse_pull_requests(bytes: &[u8]) -> Result<HashMap<String, PullRequestView>,
         };
         let candidate = PullRequestView {
             number: value.get("number").and_then(Value::as_u64).unwrap_or(0),
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             state,
             url: value
                 .get("url")
@@ -253,14 +261,13 @@ fn parse_pull_requests(bytes: &[u8]) -> Result<HashMap<String, PullRequestView>,
             checks: checks_state(value.get("statusCheckRollup")),
             mergeable,
         };
-        // A branch can be reused across PRs. GitHub numbers are monotonic, so the latest PR
-        // is authoritative even when an older PR has a nominally higher-ranked open state.
-        let replace = result
-            .get(branch)
-            .is_none_or(|current: &PullRequestView| candidate.number > current.number);
-        if replace {
-            result.insert(branch.to_owned(), candidate);
-        }
+        result
+            .entry(branch.to_owned())
+            .or_insert_with(Vec::new)
+            .push(candidate);
+    }
+    for pull_requests in result.values_mut() {
+        pull_requests.sort_by(|left, right| right.number.cmp(&left.number));
     }
     Ok(result)
 }
@@ -576,27 +583,34 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
-    fn parses_latest_pr_states_checks_and_mergeability() {
+    fn parses_all_prs_per_branch_with_states_titles_and_newest_first() {
         let parsed = parse_pull_requests(br#"[
-          {"number":1,"state":"CLOSED","isDraft":false,"headRefName":"feature","url":"https://example/1","mergeable":"UNKNOWN","statusCheckRollup":[]},
-          {"number":2,"state":"OPEN","isDraft":true,"headRefName":"feature","url":"https://example/2","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]},
+          {"number":1,"title":"Original attempt","state":"CLOSED","isDraft":false,"headRefName":"feature","url":"https://example/1","mergeable":"UNKNOWN","statusCheckRollup":[]},
+          {"number":2,"title":"Ready for another pass","state":"OPEN","isDraft":true,"headRefName":"feature","url":"https://example/2","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]},
           {"number":3,"state":"OPEN","isDraft":false,"headRefName":"ready","url":"https://example/3","mergeable":"CONFLICTING","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]},
           {"number":4,"state":"MERGED","isDraft":false,"headRefName":"merged","url":"https://example/4","mergeable":"MERGEABLE","statusCheckRollup":[]},
           {"number":5,"state":"CLOSED","isDraft":true,"headRefName":"closed-draft","url":"https://example/5","mergeable":"MERGEABLE","statusCheckRollup":[]},
           {"number":7,"state":"MERGED","isDraft":false,"headRefName":"reused","url":"https://example/7","mergeable":"MERGEABLE","statusCheckRollup":[]},
           {"number":6,"state":"OPEN","isDraft":false,"headRefName":"reused","url":"https://example/6","mergeable":"MERGEABLE","statusCheckRollup":[]}
         ]"#).unwrap();
-        assert_eq!(parsed["feature"].number, 2);
-        assert_eq!(parsed["feature"].state, "draft");
-        assert_eq!(parsed["feature"].checks, "pending");
-        assert_eq!(parsed["ready"].checks, "failing");
-        assert_eq!(parsed["ready"].mergeable, "conflicting");
-        assert_eq!(parsed["merged"].state, "merged");
-        assert_eq!(parsed["merged"].mergeable, "unknown");
-        assert_eq!(parsed["closed-draft"].state, "closed");
-        assert_eq!(parsed["closed-draft"].mergeable, "unknown");
-        assert_eq!(parsed["reused"].number, 7);
-        assert_eq!(parsed["reused"].state, "merged");
+        assert_eq!(parsed["feature"].len(), 2);
+        assert_eq!(parsed["feature"][0].number, 2);
+        assert_eq!(parsed["feature"][0].title, "Ready for another pass");
+        assert_eq!(parsed["feature"][0].state, "draft");
+        assert_eq!(parsed["feature"][0].checks, "pending");
+        assert_eq!(parsed["feature"][1].number, 1);
+        assert_eq!(parsed["feature"][1].state, "closed");
+        assert_eq!(parsed["ready"][0].checks, "failing");
+        assert_eq!(parsed["ready"][0].mergeable, "conflicting");
+        assert_eq!(parsed["merged"][0].state, "merged");
+        assert_eq!(parsed["merged"][0].mergeable, "unknown");
+        assert_eq!(parsed["closed-draft"][0].state, "closed");
+        assert_eq!(parsed["closed-draft"][0].mergeable, "unknown");
+        assert_eq!(parsed["reused"].len(), 2);
+        assert_eq!(parsed["reused"][0].number, 7);
+        assert_eq!(parsed["reused"][0].state, "merged");
+        assert_eq!(parsed["reused"][1].number, 6);
+        assert_eq!(parsed["reused"][1].state, "open");
     }
 
     #[cfg(unix)]
@@ -647,7 +661,7 @@ mod tests {
         let (expired_branches, expired) =
             pull_requests_at(&repository, false, &environment, 100 + PR_CACHE_TTL_SECONDS).await;
         assert!(expired.available, "expiry must trigger a fresh lookup");
-        assert_eq!(expired_branches["main"].number, 41);
+        assert_eq!(expired_branches["main"][0].number, 41);
 
         write_executable(
             &gh,
@@ -671,7 +685,7 @@ mod tests {
             "manual refresh must replace cached errors"
         );
         assert_eq!(recovered.error, None);
-        assert_eq!(recovered_branches["main"].number, 42);
+        assert_eq!(recovered_branches["main"][0].number, 42);
 
         write_executable(
             &gh,
@@ -680,9 +694,9 @@ mod tests {
         let (merged_branches, merged) =
             pull_requests_at(&repository, true, &environment, 452).await;
         assert!(merged.available);
-        assert_eq!(merged_branches["main"].state, "merged");
-        assert_eq!(merged_branches["main"].mergeable, "unknown");
-        assert_eq!(merged_branches["main"].url, "https://example.test/pr/42");
+        assert_eq!(merged_branches["main"][0].state, "merged");
+        assert_eq!(merged_branches["main"][0].mergeable, "unknown");
+        assert_eq!(merged_branches["main"][0].url, "https://example.test/pr/42");
 
         write_executable(
             &gh,
@@ -691,9 +705,9 @@ mod tests {
         let (closed_branches, closed) =
             pull_requests_at(&repository, true, &environment, 453).await;
         assert!(closed.available);
-        assert_eq!(closed_branches["main"].state, "closed");
-        assert_eq!(closed_branches["main"].mergeable, "unknown");
-        assert_eq!(closed_branches["main"].url, "https://example.test/pr/43");
+        assert_eq!(closed_branches["main"][0].state, "closed");
+        assert_eq!(closed_branches["main"][0].mergeable, "unknown");
+        assert_eq!(closed_branches["main"][0].url, "https://example.test/pr/43");
     }
 
     #[cfg(unix)]

@@ -26,7 +26,7 @@
 
   interface Props {
     projects: Project[];
-    pullRequests: Record<number, PullRequestStatus | null>;
+    pullRequests: Record<number, PullRequestStatus[]>;
     index: Record<number, NavigationProjectSnapshot>;
     currentProjectId: number | null;
     agentTools: AgentTool[];
@@ -47,7 +47,7 @@
     searchText: string;
     target: AppNavigationTarget;
     creation: boolean;
-    pullRequest?: PullRequestStatus | null;
+    pullRequests?: PullRequestStatus[];
   }
 
   interface RankedEntry extends PaletteEntry {
@@ -186,7 +186,8 @@
     for (const project of projects) {
       const name = projectLabel(project);
       const snapshot = index[project.id];
-      const pullRequest = pullRequests[project.id] ?? null;
+      const projectPullRequests = pullRequests[project.id] ?? [];
+      const pullRequest = projectPullRequests[0] ?? null;
       const target: AppNavigationTarget = { type: 'project', projectId: project.id };
       next.push({
         key: navigationTargetKey(target),
@@ -197,7 +198,7 @@
         searchText: `${name} ${project.name} ${project.path} project ${pullRequest ? `PR ${pullRequest.number} ${pullRequest.state}` : ''}`,
         target,
         creation: false,
-        pullRequest
+        pullRequests: projectPullRequests
       });
 
       for (const process of snapshot?.processes ?? []) {
@@ -416,6 +417,8 @@
       {#each rankedEntries as entry, index (entry.key)}
         {@const Icon = entryIcon(entry)}
         {@const entryProject = projectForEntry(entry)}
+        {@const entryPullRequests = entry.pullRequests ?? []}
+        {@const entryPullRequest = entryPullRequests[0] ?? null}
         <button
           id={`quick-jump-option-${index}`}
           class="result-row"
@@ -441,14 +444,14 @@
           </span>
           <span class="result-copy"><strong>{entry.label}</strong><small>{entry.detail}</small></span>
           <span class="result-path">
-            {#if entry.pullRequest}
+            {#if entryPullRequest}
               <span
                 class="pull-request-status"
-                style:color={pullRequestVisual(entry.pullRequest.state).color}
-                aria-label={pullRequestLabel(entry.pullRequest)}
+                style:color={pullRequestVisual(entryPullRequest.state).color}
+                aria-label={`${pullRequestLabel(entryPullRequest)}${entryPullRequests.length > 1 ? `; ${entryPullRequests.length} pull requests total` : ''}`}
               >
-                <PullRequestStateIcon state={entry.pullRequest.state} size={12} strokeWidth={1.9} />
-                <span>#{entry.pullRequest.number}</span>
+                <PullRequestStateIcon state={entryPullRequest.state} size={12} strokeWidth={1.9} />
+                <span>#{entryPullRequest.number}{entryPullRequests.length > 1 ? ` +${entryPullRequests.length - 1}` : ''}</span>
               </span>
             {/if}
             {#if entry.recentRank !== null}<i>recent</i>{/if}

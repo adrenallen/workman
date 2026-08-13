@@ -159,6 +159,7 @@ pub struct WorktreeEntry {
     pub prunable: bool,
     pub site_url: Option<String>,
     pub pull_request: Option<PullRequestView>,
+    pub pull_requests: Vec<PullRequestView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1854,7 +1855,8 @@ async fn list_from_snapshot(
             .path
             .parent()
             .is_some_and(|parent| same_path(parent, Path::new(&repository.managed_root)));
-        let pull_request = pull_requests.get(&branch).cloned();
+        let branch_pull_requests = pull_requests.get(&branch).cloned().unwrap_or_default();
+        let pull_request = branch_pull_requests.first().cloned();
         let is_main = same_path(&record.path, &snapshot.root_path);
         let registered = project.is_some();
         let managed = link.is_some_and(|link| link.managed);
@@ -1914,6 +1916,7 @@ async fn list_from_snapshot(
                 .then(|| worktree_integrations::site_url(&site_name, &herd))
                 .flatten(),
             pull_request,
+            pull_requests: branch_pull_requests,
         });
     }
     let preferences = {

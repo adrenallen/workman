@@ -35,6 +35,7 @@ export interface WorktreeRepository {
 
 export interface PullRequestStatus {
   number: number;
+  title: string;
   state: PullRequestState;
   url: string;
   checks: PullRequestChecks;
@@ -65,6 +66,7 @@ export interface WorktreeEntry {
   prunable: boolean;
   site_url: string | null;
   pull_request: PullRequestStatus | null;
+  pull_requests: PullRequestStatus[];
 }
 
 export interface WorktreeDeleteSafety {
@@ -256,6 +258,19 @@ export function projectStatusRollupLabel(repository: string, projects: Project[]
 export function pullRequestLabel(pullRequest: PullRequestStatus): string {
   const state = pullRequest.state === 'draft' ? 'draft' : pullRequest.state;
   return `Pull request #${pullRequest.number} ${state} · ${pullRequestDetail(pullRequest)}`;
+}
+
+export function pullRequestsForWorktree(entry: WorktreeEntry | null): PullRequestStatus[] {
+  if (!entry) return [];
+  if (entry.pull_requests?.length > 0) return entry.pull_requests;
+  return entry.pull_request ? [entry.pull_request] : [];
+}
+
+export function pullRequestInteraction(
+  pullRequests: readonly PullRequestStatus[]
+): 'none' | 'direct' | 'list' {
+  if (pullRequests.length === 0) return 'none';
+  return pullRequests.length === 1 ? 'direct' : 'list';
 }
 
 export function pullRequestDetail(pullRequest: PullRequestStatus): string {

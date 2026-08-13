@@ -204,6 +204,7 @@
     initialFlatProjectOrder,
     projectDisplayName,
     projectRepositoryTitle,
+    pullRequestsForWorktree,
     worktreeParentLabel,
     type WorktreeBranchOption,
     type WorktreeDialogSubmission,
@@ -4219,7 +4220,7 @@
           project={selectedProject}
           process={selectedProcess}
           processes={treeProcesses}
-          pullRequest={worktreeEntryFor(selectedProject)?.pull_request ?? null}
+          pullRequests={pullRequestsForWorktree(worktreeEntryFor(selectedProject))}
           connected={connection.status === 'connected'}
           daemonPort={connection.port}
           daemonEvents={daemonLog}
@@ -4268,7 +4269,7 @@
     {projects}
     pullRequests={Object.fromEntries(projects.map((project) => [
       project.id,
-      worktreeEntryFor(project)?.pull_request ?? null
+      pullRequestsForWorktree(worktreeEntryFor(project))
     ]))}
     index={navigationIndex}
     currentProjectId={selectedProject?.id ?? null}
