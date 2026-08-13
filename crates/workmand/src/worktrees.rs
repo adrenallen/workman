@@ -1368,10 +1368,6 @@ pub async fn remove(
                 ensure_verified_directory_removed(&verified.path, None)?;
             }
         }
-        // From this point onward the checkout is gone. Any finalization error
-        // is reported only after the canonical Workman project is removed, so
-        // a successful disk mutation can never leave stale registrations.
-        deleted_from_disk = true;
         if verified.kind == DeleteTargetKind::LinkedWorktree {
             let repository_root = verified
                 .repository_root
@@ -1424,6 +1420,15 @@ pub async fn remove(
                 }
             }
         }
+        // Git cleanup and other local actors can recreate the checkout after
+        // the first deletion check. Verify absence again at the registration
+        // boundary; never unregister a project whose path has reappeared.
+        ensure_verified_directory_still_absent(&verified.path)?;
+        // From this point onward the checkout is verified gone. Any
+        // finalization error is reported only after the canonical Workman
+        // project is removed, so a successful disk mutation cannot leave a
+        // stale registration.
+        deleted_from_disk = true;
     } else {
         // Registration-only removal still stops owned processes before the
         // active profile loses the project.
@@ -2368,7 +2373,11 @@ async fn verify_project_delete_target(
     recovery_hint: Option<&DeleteRecoveryHint>,
     environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<VerifiedDeleteTarget> {
-    let metadata = fs::symlink_metadata(&project.path).map_err(|error| {
+    // A trailing separator makes symlink_metadata follow a final symlink on
+    // Unix. Strip redundant lexical components before the lstat-style check
+    // so legacy/imported paths such as `/path/to/link/` cannot bypass it.
+    let registered_path = normalized_registered_path(Path::new(&project.path));
+    let metadata = fs::symlink_metadata(&registered_path).map_err(|error| {
         WorktreeError::InvalidPath(format!("could not open {}: {error}", project.path))
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -2377,7 +2386,7 @@ async fn verify_project_delete_target(
             project.path
         )));
     }
-    let path = fs::canonicalize(&project.path)?;
+    let path = fs::canonicalize(&registered_path)?;
     let home = dirs::home_dir().map(|home| fs::canonicalize(&home).unwrap_or(home));
     if path.parent().is_none() || home.as_ref().is_some_and(|home| path == *home) {
         return Err(WorktreeError::InvalidPath(format!(
@@ -2552,6 +2561,29 @@ fn ensure_verified_directory_removed(
             "could not verify deletion of {}; the project remains registered and can be retried: {error}",
             path.display()
         ))),
+    }
+}
+
+fn ensure_verified_directory_still_absent(path: &Path) -> WorktreeResult<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(WorktreeError::InvalidPath(format!(
+            "the deleted project path {} reappeared during local Git cleanup; refusing to delete the replacement. The project remains registered and can be retried",
+            path.display()
+        ))),
+        Err(error) => Err(WorktreeError::InvalidPath(format!(
+            "could not perform the final deletion check for {}; the project remains registered and can be retried: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn normalized_registered_path(path: &Path) -> PathBuf {
+    let normalized = path.components().collect::<PathBuf>();
+    if normalized.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        normalized
     }
 }
 

@@ -58,6 +58,8 @@
         <span></span><small class="break-all font-mono text-xs text-muted-foreground">{path}</small>
       </div>
 
+      {#if error}<p class="rounded border border-destructive/60 bg-destructive/15 px-3 py-3 text-sm font-medium text-destructive" role="alert" aria-live="assertive">Project removal failed: {error}</p>{/if}
+
       <p class="text-sm text-muted-foreground">Any running processes in this project will stop before removal.</p>
 
       <label class="flex items-start gap-2 rounded border border-destructive/40 bg-destructive/5 px-3 py-3 text-sm">
@@ -139,7 +141,6 @@
         </div>
       {/if}
 
-      {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
     </section>
 
     <AlertDialog.Footer class="border-t border-border px-4 py-3">

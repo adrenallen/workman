@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::Command,
     time::Duration,
@@ -26,6 +27,19 @@ use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
+}
+
+async fn call_failure(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    name: &'static str,
+    args: Value,
+) -> Value {
+    let result = client
+        .call_tool(CallToolRequestParams::new(name).with_arguments(arguments(args)))
+        .await
+        .unwrap_or_else(|error| panic!("{name} transport failed: {error}"));
+    assert_eq!(result.is_error, Some(true), "{name}: {result:?}");
+    result.structured_content.expect("structured tool error")
 }
 
 async fn call(
@@ -253,6 +267,188 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
     socket.close(None).await?;
 
     let _ = client.cancel().await;
+    let _ = shutdown_tx.send(());
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::Builder::new()
+        .prefix("com.workman.todo126.surfaces.")
+        .tempdir_in("/tmp")?;
+    let control_folder = temp.path().join("control-project");
+    let locked_parent = temp.path().join("locked-parent");
+    let failed_mcp_folder = locked_parent.join("failed-mcp-project");
+    let successful_mcp_folder = temp.path().join("successful-mcp-project");
+    std::fs::create_dir(&control_folder)?;
+    std::fs::create_dir(&locked_parent)?;
+    std::fs::create_dir(&failed_mcp_folder)?;
+    std::fs::create_dir(&successful_mcp_folder)?;
+    std::fs::write(control_folder.join("local.txt"), "control\n")?;
+    std::fs::write(failed_mcp_folder.join("local.txt"), "retry\n")?;
+    std::fs::write(successful_mcp_folder.join("local.txt"), "mcp\n")?;
+
+    let server = DaemonServer::bind(DaemonConfig {
+        data_dir: temp.path().join("state"),
+        port: 0,
+    })
+    .await?;
+    let discovery = server.discovery().clone();
+    let registry = server.registry();
+    {
+        let registry = registry.lock().await;
+        for (id, path, selected) in [
+            (1, &control_folder, true),
+            (2, &failed_mcp_folder, false),
+            (3, &successful_mcp_folder, false),
+        ] {
+            registry.store().put_project(&Project {
+                id,
+                path: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
+                name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                display_name: None,
+                icon: None,
+                selected,
+                sort_order: id,
+            })?;
+        }
+        for (id, project_id, path) in [(2, 2, &failed_mcp_folder), (3, 3, &successful_mcp_folder)] {
+            registry.store().put_process(&Process {
+                id,
+                project_id,
+                kind: ProcessKind::Agent,
+                name: format!("delete-agent-{id}"),
+                command: Some("true".into()),
+                working_dir: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })?;
+        }
+    }
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(server.serve_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    // The desktop and `wrk project remove --delete-local` both use this
+    // projects.remove control method.
+    let mut request = format!("ws://127.0.0.1:{}/ws", discovery.port).into_client_request()?;
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {}", discovery.token).parse()?,
+    );
+    let (mut socket, _) = connect_async(request).await?;
+    socket
+        .send(Message::Text(
+            json!({
+                "id": 126,
+                "method": "projects.remove",
+                "params": {
+                    "project_id": 1,
+                    "confirm_remove": true,
+                    "confirm_stop_running": true,
+                    "delete_from_disk": true,
+                    "force_dirty": false
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let response = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await?
+        .ok_or("socket closed")??;
+    let Message::Text(response) = response else {
+        return Err("expected text response".into());
+    };
+    let response: Value = serde_json::from_str(&response)?;
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["result"]["deleted_from_disk"], true);
+    assert_eq!(response["result"]["project_unregistered"], true);
+    assert!(!control_folder.exists());
+    socket.close(None).await?;
+
+    let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let failed_client = ClientInfo::default()
+        .serve(StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
+                .auth_header(discovery.token.clone()),
+        ))
+        .await?;
+    call(
+        &failed_client,
+        "identify_session",
+        json!({ "process_id": 2 }),
+    )
+    .await;
+    std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o500))?;
+    let failed = call_failure(
+        &failed_client,
+        "delete_project",
+        json!({
+            "project_id": 2,
+            "confirm_delete": true,
+            "confirm_stop_running": true,
+            "delete_from_disk": true
+        }),
+    )
+    .await;
+    std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o700))?;
+    assert_eq!(failed["code"], "invalid_worktree_path");
+    assert!(
+        failed["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("remains registered"))
+    );
+    assert!(failed_mcp_folder.exists());
+    assert!(
+        registry.lock().await.store().get_project(2)?.is_some(),
+        "MCP failure must preserve registration for retry"
+    );
+
+    let successful_client = ClientInfo::default()
+        .serve(StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(endpoint)
+                .auth_header(discovery.token.clone()),
+        ))
+        .await?;
+    call(
+        &successful_client,
+        "identify_session",
+        json!({ "process_id": 3 }),
+    )
+    .await;
+    let removed = call(
+        &successful_client,
+        "delete_project",
+        json!({
+            "project_id": 3,
+            "confirm_delete": true,
+            "confirm_stop_running": true,
+            "delete_from_disk": true
+        }),
+    )
+    .await;
+    assert_eq!(removed["deleted_from_disk"], true);
+    assert_eq!(removed["project_unregistered"], true);
+    assert!(!successful_mcp_folder.exists());
+
+    let _ = failed_client.cancel().await;
+    let _ = successful_client.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())

@@ -31,6 +31,7 @@ struct GitFixture {
 enum GitRemoveFixture {
     AlwaysFail,
     SwapPathOnce,
+    RecreateOnPrune,
 }
 
 impl GitFixture {
@@ -46,11 +47,15 @@ impl GitFixture {
         Self::new_with_remove_fixture(Some(GitRemoveFixture::SwapPathOnce))
     }
 
+    fn new_with_path_recreated_during_prune() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::RecreateOnPrune))
+    }
+
     fn new_with_remove_fixture(
         remove_fixture: Option<GitRemoveFixture>,
     ) -> Result<Self, Box<dyn Error>> {
         let temp = tempfile::Builder::new()
-            .prefix("com.workman.todo102.")
+            .prefix("com.workman.todo126.")
             .tempdir_in("/tmp")?;
         let main = temp.path().join("sample-repo");
         let origin = temp.path().join("origin.git");
@@ -65,10 +70,10 @@ impl GitFixture {
             &[
                 "config",
                 "user.email",
-                "com.workman.todo102@example.invalid",
+                "com.workman.todo126@example.invalid",
             ],
         )?;
-        git(&main, &["config", "user.name", "com.workman.todo102"])?;
+        git(&main, &["config", "user.name", "com.workman.todo126"])?;
         git(&main, &["config", "branch.autoSetupMerge", "false"])?;
         std::fs::write(main.join("README.md"), "fixture\n")?;
         git(&main, &["add", "README.md"])?;
@@ -109,21 +114,33 @@ impl GitFixture {
             let git_executable =
                 executable_on_test_path("git").ok_or("test git executable missing")?;
             let git_wrapper = profile_bin.join("git");
-            let failure_script = match remove_fixture {
+            let remove_script = match remove_fixture {
                 GitRemoveFixture::AlwaysFail => {
                     "echo \"error: failed to delete worktree: Directory not empty\" >&2\nexit 255"
                         .to_owned()
                 }
                 GitRemoveFixture::SwapPathOnce => format!(
-                    "if [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  target=''\n  for argument in \"$@\"; do target=\"$argument\"; done\n  /bin/mv \"$target\" \"$target.todo102-retry\"\n  /bin/ln -s \"$target.todo102-retry\" \"$target\"\n  echo \"error: simulated path swap during Git removal\" >&2\n  exit 255\nfi\nexec '{git}' \"$@\"",
+                    "if [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  target=''\n  for argument in \"$@\"; do target=\"$argument\"; done\n  /bin/mv \"$target\" \"$target.todo126-retry\"\n  /bin/ln -s \"$target.todo126-retry\" \"$target\"\n  echo \"error: simulated path swap during Git removal\" >&2\n  exit 255\nfi\nexec '{git}' \"$@\"",
                     marker = temp.path().join("remove-failed-once").display(),
                     git = git_executable.display()
                 ),
+                GitRemoveFixture::RecreateOnPrune => format!(
+                    "target=''\nfor argument in \"$@\"; do target=\"$argument\"; done\n'{git}' \"$@\"\nstatus=$?\nif [ \"$status\" -eq 0 ]; then printf '%s' \"$target\" > '{marker}'; fi\nexit \"$status\"",
+                    git = git_executable.display(),
+                    marker = temp.path().join("removed-worktree-path").display(),
+                ),
+            };
+            let prune_script = match remove_fixture {
+                GitRemoveFixture::RecreateOnPrune => format!(
+                    "if [ -s '{marker}' ]; then\n  target=$(/bin/cat '{marker}')\n  /bin/mkdir -p \"$target\"\n  printf 'replacement created after initial verification\\n' > \"$target/reappeared.txt\"\n  /bin/rm '{marker}'\nfi",
+                    marker = temp.path().join("removed-worktree-path").display(),
+                ),
+                GitRemoveFixture::AlwaysFail | GitRemoveFixture::SwapPathOnce => ":".to_owned(),
             };
             fs::write(
                 &git_wrapper,
                 format!(
-                    "#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = remove ]; then\n{failure_script}\nfi\nexec '{}' \"$@\"\n",
+                    "#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = remove ]; then\n{remove_script}\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = prune ]; then\n{prune_script}\nfi\nexec '{}' \"$@\"\n",
                     git_executable.display()
                 ),
             )?;
@@ -718,7 +735,7 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
 async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_folder()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::Builder::new()
-        .prefix("com.workman.todo102.plain.")
+        .prefix("com.workman.todo126.plain.")
         .tempdir_in("/tmp")?;
     let folder = temp.path().join("plain-project");
     fs::create_dir(&folder)?;
@@ -775,6 +792,220 @@ async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_
             .get_project_by_path_any(canonical.to_str().unwrap())?
             .is_none()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plain_git_clone_deletion_removes_checkout_without_changing_scratch_remote_refs()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    let remote_refs_before = git(
+        &fixture.origin,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    )?;
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+
+    assert!(removed.deleted_from_disk && removed.project_unregistered);
+    assert!(!fixture.main.exists());
+    assert_eq!(
+        git(
+            &fixture.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before,
+        "plain clone deletion must leave every scratch-remote branch ref untouched"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plain_folder_permission_failure_is_loud_keeps_registration_and_allows_retry()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::Builder::new()
+        .prefix("com.workman.todo126.permission.")
+        .tempdir_in("/tmp")?;
+    let locked_parent = temp.path().join("locked-parent");
+    let folder = locked_parent.join("plain-project");
+    fs::create_dir_all(&folder)?;
+    fs::write(folder.join("local.txt"), "must not be silently orphaned\n")?;
+    let canonical = fs::canonicalize(&folder)?;
+    let store = Store::open(temp.path().join("state.sqlite3"))?;
+    let project = Project {
+        id: 51,
+        path: canonical.to_string_lossy().into_owned(),
+        name: "plain-project".into(),
+        display_name: None,
+        icon: None,
+        selected: true,
+        sort_order: 0,
+    };
+    store.put_project(&project)?;
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new(store)?));
+
+    fs::set_permissions(&locked_parent, fs::Permissions::from_mode(0o500))?;
+    let attempted = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await;
+    fs::set_permissions(&locked_parent, fs::Permissions::from_mode(0o700))?;
+
+    let failure = attempted.expect_err("parent permissions must prevent directory removal");
+    assert_eq!(failure.code(), "invalid_worktree_path");
+    assert!(failure.to_string().contains("direct deletion"));
+    assert!(failure.to_string().contains("remains registered"));
+    assert!(folder.exists());
+    assert!(
+        registry
+            .lock()
+            .await
+            .store()
+            .get_project(project.id)?
+            .is_some()
+    );
+
+    let retried = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(retried.deleted_from_disk && retried.project_unregistered);
+    assert!(!folder.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn trailing_separator_symlink_is_refused_and_keeps_target_and_registration()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::Builder::new()
+        .prefix("com.workman.todo126.symlink.")
+        .tempdir_in("/tmp")?;
+    let target = temp.path().join("real-project");
+    let alias = temp.path().join("project-link");
+    fs::create_dir(&target)?;
+    fs::write(target.join("local.txt"), "must survive\n")?;
+    symlink(&target, &alias)?;
+    let store = Store::open(temp.path().join("state.sqlite3"))?;
+    let project = Project {
+        id: 52,
+        path: format!("{}/", alias.display()),
+        name: "project-link".into(),
+        display_name: None,
+        icon: None,
+        selected: true,
+        sort_order: 0,
+    };
+    store.put_project(&project)?;
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new(store)?));
+
+    let failure = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("a trailing separator must not bypass final-symlink refusal");
+
+    assert_eq!(failure.code(), "invalid_worktree_path");
+    assert!(failure.to_string().contains("not a real directory"));
+    assert!(alias.is_symlink());
+    assert_eq!(
+        fs::read_to_string(target.join("local.txt"))?,
+        "must survive\n"
+    );
+    assert!(
+        registry
+            .lock()
+            .await
+            .store()
+            .get_project(project.id)?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn trailing_separator_and_apfs_case_alias_delete_only_the_canonical_plain_folder()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::Builder::new()
+        .prefix("com.workman.todo126.case.")
+        .tempdir_in("/tmp")?;
+    let folder = temp.path().join("CaseProject");
+    fs::create_dir(&folder)?;
+    fs::write(folder.join("local.txt"), "delete me\n")?;
+    let case_alias = temp.path().join("caseproject");
+    let registered = if case_alias.is_dir() {
+        case_alias
+    } else {
+        folder.clone()
+    };
+    let store = Store::open(temp.path().join("state.sqlite3"))?;
+    let project = Project {
+        id: 53,
+        path: format!("{}/", registered.display()),
+        name: "CaseProject".into(),
+        display_name: None,
+        icon: None,
+        selected: true,
+        sort_order: 0,
+    };
+    store.put_project(&project)?;
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new(store)?));
+
+    let removed = worktrees::remove(
+        &registry,
+        RemoveWorktree {
+            project_id: project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed.deleted_from_disk && removed.project_unregistered);
+    assert!(!folder.exists());
     Ok(())
 }
 
@@ -1017,6 +1248,109 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
 }
 
 #[tokio::test]
+async fn path_recreated_during_git_cleanup_fails_loudly_and_keeps_registration_for_retry()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_path_recreated_during_prune()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/reappearing-path".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let path = PathBuf::from(&created.worktree.path);
+    let remote_refs_before = git(
+        &fixture.origin,
+        &[
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ],
+    )?;
+
+    let failure = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("a path recreated after initial deletion must prevent unregistration");
+
+    assert_eq!(failure.code(), "invalid_worktree_path");
+    assert!(failure.to_string().contains("reappeared"));
+    assert!(failure.to_string().contains("remains registered"));
+    assert_eq!(
+        fs::read_to_string(path.join("reappeared.txt"))?,
+        "replacement created after initial verification\n"
+    );
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project(created.project.project.id)?
+            .is_some(),
+        "the registration must remain available for retry"
+    );
+    assert_eq!(
+        git(
+            &fixture.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before,
+        "failed local deletion must not change scratch-remote refs"
+    );
+
+    let retried = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(retried.deleted_from_disk && retried.project_unregistered);
+    assert!(!path.exists());
+    assert_eq!(
+        git(
+            &fixture.origin,
+            &[
+                "for-each-ref",
+                "--format=%(refname):%(objectname)",
+                "refs/heads",
+            ],
+        )?,
+        remote_refs_before,
+        "retry must remain local-only"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new_with_retryable_path_swap()?;
@@ -1037,7 +1371,7 @@ async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
     )
     .await?;
     let path = PathBuf::from(&created.worktree.path);
-    let displaced = PathBuf::from(format!("{}.todo102-retry", path.display()));
+    let displaced = PathBuf::from(format!("{}.todo126-retry", path.display()));
 
     let failure = worktrees::remove(
         &fixture.registry,

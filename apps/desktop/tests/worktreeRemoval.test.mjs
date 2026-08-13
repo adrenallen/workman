@@ -17,6 +17,8 @@ test('unified project removal defaults to unregister-only and makes disk deletio
   assert.match(dialog, /project: Project/);
   assert.match(dialog, /entry\?: WorktreeEntry \| null/);
   assert.match(app, /delete_from_disk: deleteFromDisk/);
+  assert.match(dialog, /role="alert" aria-live="assertive"/);
+  assert.match(dialog, /Project removal failed: \{error\}/);
 });
 
 test('pending local work is listed and requires one explicit Delete anyway click', async () => {
@@ -51,6 +53,9 @@ test('project removal RPC is reachable only from the explicit in-app dialog conf
   assert.doesNotMatch(menuAction, /client\.control|confirm_remove/);
   assert.match(confirmation, /client\.control\('projects\.remove'/);
   assert.match(confirmation, /confirm_remove: true/);
+  assert.match(confirmation, /removeWorktreeDialog = null/);
+  assert.match(confirmation, /catch \(cause\)/);
+  assert.match(confirmation, /removeWorktreeError = cause instanceof Error/);
   assert.match(app, /<WorktreeRemoveDialog/);
   assert.match(app, /onConfirm=\{\(deleteFromDisk, forceDirty\)/);
   assert.equal((app.match(/client\.control\('projects\.remove'/g) ?? []).length, 1);
