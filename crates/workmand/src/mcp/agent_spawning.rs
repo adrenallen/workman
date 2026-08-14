@@ -33,6 +33,8 @@ const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
 const KIMI_MCP_TEMPLATE_FILE: &str = ".workman-mcp-template.json";
 const KIMI_MCP_TOKEN_SENTINEL: &str = "__WORKMAN_KIMI_PROCESS_MCP_TOKEN__";
+#[cfg(windows)]
+const CLAUDE_MCP_CONFIG_FILE: &str = "workman-mcp.json";
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -1192,8 +1194,27 @@ fn prepare_agent_launch(
     let adapter = mcp_launch_adapter(tool_type);
     let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
     let command = match adapter {
-        McpLaunchAdapter::Claude | McpLaunchAdapter::Codex => {
-            let mut launch_args = mcp_launch_args(adapter, mcp_url, purpose);
+        McpLaunchAdapter::Claude => {
+            #[cfg(windows)]
+            let config_argument = {
+                let claude_home = claude_mcp_config_home(mcp_url)?;
+                env.insert(
+                    WORKMAN_EPHEMERAL_AGENT_HOME_ENV.to_owned(),
+                    claude_home.to_string_lossy().into_owned(),
+                );
+                claude_home
+                    .join(CLAUDE_MCP_CONFIG_FILE)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            #[cfg(not(windows))]
+            let config_argument = claude_mcp_config_json(mcp_url);
+            let mut launch_args = claude_launch_args(config_argument, purpose);
+            launch_args.extend(extra_args.iter().cloned());
+            command_with_args(command, &launch_args)?
+        }
+        McpLaunchAdapter::Codex => {
+            let mut launch_args = codex_launch_args(mcp_url, purpose);
             launch_args.extend(extra_args.iter().cloned());
             command_with_args(command, &launch_args)?
         }
@@ -1341,6 +1362,7 @@ fn kimi_deep_check_command(command: &str, extra_args: &[String]) -> Result<Strin
     command_with_args(&command, extra_args)
 }
 
+#[cfg(not(windows))]
 fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
     let template = shell_quote(&home.join(KIMI_MCP_TEMPLATE_FILE).to_string_lossy());
     let config = shell_quote(&home.join("mcp.json").to_string_lossy());
@@ -1351,6 +1373,23 @@ fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
          workman_kimi_mcp_prefix=${{workman_kimi_mcp_template%%{KIMI_MCP_TOKEN_SENTINEL}*}}; \
          workman_kimi_mcp_suffix=${{workman_kimi_mcp_template#*{KIMI_MCP_TOKEN_SENTINEL}}}; \
          printf '%s%s%s\\n' \"$workman_kimi_mcp_prefix\" \"$WORKMAN_MCP_TOKEN\" \"$workman_kimi_mcp_suffix\" > {config} || exit 1; \
+         {command}"
+    )
+}
+
+/// The PowerShell twin of the POSIX prelude above. `umask 077` has no
+/// equivalent here; the private home under `%TEMP%` already inherits the
+/// user-only ACL that stands in for it.
+#[cfg(windows)]
+fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
+    let template = powershell_quote(&home.join(KIMI_MCP_TEMPLATE_FILE).to_string_lossy());
+    let config = powershell_quote(&home.join("mcp.json").to_string_lossy());
+    let sentinel = powershell_quote(KIMI_MCP_TOKEN_SENTINEL);
+    format!(
+        "if (-not $env:WORKMAN_MCP_TOKEN) {{ exit 1 }}; \
+         try {{ $workman_kimi_mcp_template = [System.IO.File]::ReadAllText({template}) }} catch {{ exit 1 }}; \
+         if (-not $workman_kimi_mcp_template.Contains({sentinel})) {{ exit 1 }}; \
+         try {{ [System.IO.File]::WriteAllText({config}, $workman_kimi_mcp_template.Replace({sentinel}, $env:WORKMAN_MCP_TOKEN)) }} catch {{ exit 1 }}; \
          {command}"
     )
 }
@@ -1472,60 +1511,88 @@ fn prepare_private_agent_home(
     Ok(home)
 }
 
-fn mcp_launch_args(
-    adapter: McpLaunchAdapter,
-    mcp_url: &str,
-    purpose: AgentLaunchPurpose,
-) -> Vec<String> {
-    // Every launch gets the process-scoped connector. Authorization narrowing belongs only to
-    // the fixed whoami deep check; a normal launch must honor the registered command's policy.
-    match adapter {
-        McpLaunchAdapter::Claude => {
-            let mut args = vec![
-                "--mcp-config".to_owned(),
-                json!({
-                    "mcpServers": {
-                        "workman": {
-                            "type": "http",
-                            "url": mcp_url,
-                            "headers": {
-                                "x-workman-mcp-token": "${WORKMAN_MCP_TOKEN}"
-                            }
-                        }
-                    }
-                })
-                .to_string(),
-                "--strict-mcp-config".to_owned(),
-            ];
-            if purpose == AgentLaunchPurpose::DeepCheck {
-                args.extend([
-                    "--allowedTools".to_owned(),
-                    "mcp__workman__whoami".to_owned(),
-                ]);
+fn claude_mcp_config_json(mcp_url: &str) -> String {
+    json!({
+        "mcpServers": {
+            "workman": {
+                "type": "http",
+                "url": mcp_url,
+                "headers": {
+                    "x-workman-mcp-token": "${WORKMAN_MCP_TOKEN}"
+                }
             }
-            args
         }
-        McpLaunchAdapter::Codex => {
-            let mut args = vec![
-                "-c".to_owned(),
-                format!(
-                    "mcp_servers.workman.url={}",
-                    serde_json::to_string(mcp_url).expect("MCP URL serializes as a TOML string")
-                ),
-                "-c".to_owned(),
-                "mcp_servers.workman.env_http_headers={\"x-workman-mcp-token\"=\"WORKMAN_MCP_TOKEN\"}"
-                    .to_owned(),
-            ];
-            if purpose == AgentLaunchPurpose::DeepCheck {
-                args.extend([
-                    "-c".to_owned(),
-                    "mcp_servers.workman.tools.whoami.approval_mode=\"approve\"".to_owned(),
-                ]);
-            }
-            args
-        }
-        _ => Vec::new(),
+    })
+    .to_string()
+}
+
+/// Windows PowerShell rebuilds native-command arguments without escaping
+/// embedded double quotes, so inline JSON cannot survive the trip to Claude.
+/// Hand it the same connector config as a private file instead; the token
+/// stays the `${WORKMAN_MCP_TOKEN}` placeholder Claude expands itself.
+#[cfg(windows)]
+fn claude_mcp_config_home(mcp_url: &str) -> Result<PathBuf, String> {
+    prepare_private_agent_home(
+        "claude",
+        None,
+        CLAUDE_MCP_CONFIG_FILE,
+        CLAUDE_MCP_CONFIG_FILE,
+        &format!("{}\n", claude_mcp_config_json(mcp_url)),
+    )
+}
+
+// Every launch gets the process-scoped connector. Authorization narrowing belongs only to
+// the fixed whoami deep check; a normal launch must honor the registered command's policy.
+
+fn claude_launch_args(mcp_config_argument: String, purpose: AgentLaunchPurpose) -> Vec<String> {
+    let mut args = vec![
+        "--mcp-config".to_owned(),
+        mcp_config_argument,
+        "--strict-mcp-config".to_owned(),
+    ];
+    if purpose == AgentLaunchPurpose::DeepCheck {
+        args.extend([
+            "--allowedTools".to_owned(),
+            "mcp__workman__whoami".to_owned(),
+        ]);
     }
+    args
+}
+
+fn codex_launch_args(mcp_url: &str, purpose: AgentLaunchPurpose) -> Vec<String> {
+    // Windows PowerShell drops embedded double quotes from native-command
+    // arguments, so there every override is a fully dotted path with a bare
+    // value; Codex keeps values that are not valid TOML as raw strings.
+    let mut args = if cfg!(windows) {
+        vec![
+            "-c".to_owned(),
+            format!("mcp_servers.workman.url={mcp_url}"),
+            "-c".to_owned(),
+            "mcp_servers.workman.env_http_headers.x-workman-mcp-token=WORKMAN_MCP_TOKEN".to_owned(),
+        ]
+    } else {
+        vec![
+            "-c".to_owned(),
+            format!(
+                "mcp_servers.workman.url={}",
+                serde_json::to_string(mcp_url).expect("MCP URL serializes as a TOML string")
+            ),
+            "-c".to_owned(),
+            "mcp_servers.workman.env_http_headers={\"x-workman-mcp-token\"=\"WORKMAN_MCP_TOKEN\"}"
+                .to_owned(),
+        ]
+    };
+    if purpose == AgentLaunchPurpose::DeepCheck {
+        args.extend([
+            "-c".to_owned(),
+            if cfg!(windows) {
+                "mcp_servers.workman.tools.whoami.approval_mode=approve".to_owned()
+            } else {
+                "mcp_servers.workman.tools.whoami.approval_mode=\"approve\"".to_owned()
+            },
+        ]);
+    }
+    args
 }
 
 fn gemini_command_with_ephemeral_settings(command: &str, mcp_url: &str) -> String {
@@ -1572,6 +1639,13 @@ fn normalize_tool_type(tool_type: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace(['-', ' '], "_")
+}
+
+/// PowerShell literal quoting for strings Workman composes itself: single
+/// quotes, with embedded single quotes doubled.
+#[cfg(windows)]
+fn powershell_quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "''"))
 }
 
 fn shell_quote(argument: &str) -> String {
@@ -1759,9 +1833,24 @@ mod tests {
         let command = launch.command;
         assert!(command.contains("--mcp-config"));
         assert!(command.contains("--strict-mcp-config"));
-        assert!(command.contains("http://127.0.0.1:43123/mcp"));
-        assert!(command.contains("x-workman-mcp-token"));
-        assert!(command.contains("${WORKMAN_MCP_TOKEN}"));
+        #[cfg(not(windows))]
+        {
+            assert!(command.contains("http://127.0.0.1:43123/mcp"));
+            assert!(command.contains("x-workman-mcp-token"));
+            assert!(command.contains("${WORKMAN_MCP_TOKEN}"));
+        }
+        // Windows passes the connector as a private file instead of inline
+        // JSON, whose embedded quotes PowerShell would strip in transit.
+        #[cfg(windows)]
+        {
+            let home = PathBuf::from(launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV).unwrap());
+            assert!(command.contains(&*home.join(CLAUDE_MCP_CONFIG_FILE).to_string_lossy()));
+            let config = fs::read_to_string(home.join(CLAUDE_MCP_CONFIG_FILE)).unwrap();
+            assert!(config.contains("http://127.0.0.1:43123/mcp"));
+            assert!(config.contains("x-workman-mcp-token"));
+            assert!(config.contains("${WORKMAN_MCP_TOKEN}"));
+            let _ = fs::remove_dir_all(&home);
+        }
         assert!(!command.contains("--allowedTools"));
         assert!(command.ends_with("--model opus"));
 
@@ -1779,6 +1868,16 @@ mod tests {
                 .command
                 .contains("--allowedTools mcp__workman__whoami")
         );
+        #[cfg(windows)]
+        {
+            let home = PathBuf::from(
+                deep_check
+                    .env
+                    .get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV)
+                    .unwrap(),
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
     }
 
     #[test]
@@ -1795,6 +1894,13 @@ mod tests {
         let command = launch.command;
         assert!(command.contains("mcp_servers.workman.url="));
         assert!(command.contains("http://127.0.0.1:43124/mcp"));
+        // Windows spells the overrides as dotted paths with bare values so no
+        // double quote has to survive PowerShell's native-argument handling.
+        #[cfg(windows)]
+        assert!(command.contains(
+            "mcp_servers.workman.env_http_headers.x-workman-mcp-token=WORKMAN_MCP_TOKEN"
+        ));
+        #[cfg(not(windows))]
         assert!(command.contains("mcp_servers.workman.env_http_headers="));
         assert!(command.contains("WORKMAN_MCP_TOKEN"));
         assert!(!command.contains("approval_mode"));
@@ -1809,6 +1915,13 @@ mod tests {
             None,
         )
         .unwrap();
+        #[cfg(windows)]
+        assert!(
+            deep_check
+                .command
+                .contains("mcp_servers.workman.tools.whoami.approval_mode=approve")
+        );
+        #[cfg(not(windows))]
         assert!(
             deep_check
                 .command
@@ -2007,6 +2120,72 @@ mod tests {
         assert_eq!(
             capability.mechanism,
             "private per-launch KIMI_CODE_HOME config"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kimi_launch_materializes_the_process_token_through_powershell() {
+        let source = tempfile::tempdir().unwrap();
+        let source_mcp = "{\"mcpServers\":{\"existing\":{\"url\":\"http://old.test/mcp\"}}}\n";
+        fs::write(source.path().join("mcp.json"), source_mcp).unwrap();
+        fs::write(
+            source.path().join("config.toml"),
+            "default_model = \"fixture\"\n",
+        )
+        .unwrap();
+
+        let launch = prepare_agent_launch(
+            "echo",
+            "kimi",
+            "http://127.0.0.1:43127/mcp",
+            &["--model".into(), "kimi-test".into()],
+            AgentLaunchPurpose::Normal,
+            Some(source.path()),
+        )
+        .unwrap();
+        let home = PathBuf::from(launch.env.get("KIMI_CODE_HOME").unwrap());
+        assert!(launch.command.contains("$env:WORKMAN_MCP_TOKEN"));
+        assert!(!launch.command.contains("test-process-token"));
+        assert!(launch.command.ends_with("echo --model kimi-test"));
+        assert!(!home.join("mcp.json").exists());
+        assert!(
+            fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE))
+                .unwrap()
+                .contains(KIMI_MCP_TOKEN_SENTINEL)
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            "default_model = \"fixture\"\n"
+        );
+
+        let status = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-c",
+                &launch.command,
+            ])
+            .env("WORKMAN_MCP_TOKEN", "test-process-token")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["workman"]["url"],
+            "http://127.0.0.1:43127/mcp"
+        );
+        assert_eq!(
+            config["mcpServers"]["workman"]["headers"]["x-workman-mcp-token"],
+            "test-process-token"
+        );
+        assert!(
+            fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE))
+                .unwrap()
+                .contains(KIMI_MCP_TOKEN_SENTINEL)
         );
         fs::remove_dir_all(home).unwrap();
     }
