@@ -34,7 +34,7 @@ fn test_options() -> LifecycleOptions {
 
 fn fixture() -> (TempDir, ProcessRegistry) {
     let root = tempfile::tempdir().unwrap();
-    let path = fs::canonicalize(root.path()).unwrap();
+    let path = workman_core::canonical_path(root.path()).unwrap();
     let store = Store::open_in_memory().unwrap();
     store
         .put_project(&Project {
@@ -57,7 +57,7 @@ fn process(root: &TempDir, id: i64, command: &str) -> Process {
         kind: ProcessKind::Command,
         name: format!("process-{id}"),
         command: Some(command.into()),
-        working_dir: fs::canonicalize(root.path())
+        working_dir: workman_core::canonical_path(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned(),

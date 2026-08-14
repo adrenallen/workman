@@ -562,7 +562,7 @@ fn executable_on_path(
 
 fn same_path(left: &Path, right: &Path) -> bool {
     let normalize = |path: &Path| {
-        std::fs::canonicalize(path)
+        workman_core::canonical_path(path)
             .unwrap_or_else(|_| PathBuf::from(path.to_string_lossy().trim_end_matches('/')))
     };
     normalize(left) == normalize(right)

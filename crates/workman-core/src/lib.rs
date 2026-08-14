@@ -6,6 +6,7 @@ pub mod domain;
 pub mod locks;
 pub mod notifications;
 mod output_spill;
+mod paths;
 pub mod project_folders;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
@@ -22,6 +23,7 @@ pub use agent_notifications::*;
 pub use domain::*;
 pub use locks::*;
 pub use notifications::*;
+pub use paths::*;
 pub use project_folders::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};

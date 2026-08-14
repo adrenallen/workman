@@ -323,7 +323,7 @@ async fn websocket_add_command_writes_trusts_and_watches_new_workman_yml() {
     assert_eq!(validated["result"]["relative"], ".");
     assert_eq!(
         validated["result"]["absolute"],
-        std::fs::canonicalize(&project)
+        workman_core::canonical_path(&project)
             .unwrap()
             .to_string_lossy()
             .as_ref()

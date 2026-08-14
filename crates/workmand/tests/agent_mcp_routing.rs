@@ -123,9 +123,8 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
 async fn configured_agent_tools_route_to_an_isolated_spawning_daemon() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;
-    let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
+    let project_path =
+        workman_core::canonical_path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
     let server = DaemonServer::bind(DaemonConfig {
         data_dir: temp.path().join("state"),
         port: 0,

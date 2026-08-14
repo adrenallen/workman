@@ -147,11 +147,11 @@ pub fn set_override(
 }
 
 fn canonical_source_path(source_path: &Path) -> Result<PathBuf, AgentIconError> {
-    if let Ok(source) = fs::canonicalize(source_path) {
+    if let Ok(source) = workman_core::canonical_path(source_path) {
         return Ok(source);
     }
     let decoded = decode_terminal_escaped_path(source_path).ok_or(AgentIconError::SourceMissing)?;
-    fs::canonicalize(decoded).map_err(|_| AgentIconError::SourceMissing)
+    workman_core::canonical_path(decoded).map_err(|_| AgentIconError::SourceMissing)
 }
 
 /// Terminal image paste inserts an unquoted, backslash-escaped path for shells. Accept that same

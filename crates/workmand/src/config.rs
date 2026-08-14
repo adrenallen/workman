@@ -684,7 +684,7 @@ pub(crate) fn validate_process_working_dir(store: &Store, process: &Process) -> 
         .get_project(process.project_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("project {} was not found", process.project_id))?;
-    let root = fs::canonicalize(&project.path)
+    let root = workman_core::canonical_path(&project.path)
         .map_err(|error| format!("cannot resolve project root: {error}"))?;
     let configured = Path::new(&process.working_dir);
     if configured
@@ -693,7 +693,7 @@ pub(crate) fn validate_process_working_dir(store: &Store, process: &Process) -> 
     {
         return Err("working_dir contains '..'".into());
     }
-    let actual = fs::canonicalize(configured)
+    let actual = workman_core::canonical_path(configured)
         .map_err(|error| format!("cannot resolve working_dir: {error}"))?;
     if !actual.is_dir() {
         return Err("working_dir is not a directory".into());
@@ -780,11 +780,12 @@ fn resolve_working_dir(
 }
 
 fn canonical_directory(process: &str, path: &Path) -> Result<PathBuf, ConfigError> {
-    let canonical = fs::canonicalize(path).map_err(|source| ConfigError::WorkingDirectory {
-        process: process.into(),
-        path: path.to_owned(),
-        source,
-    })?;
+    let canonical =
+        workman_core::canonical_path(path).map_err(|source| ConfigError::WorkingDirectory {
+            process: process.into(),
+            path: path.to_owned(),
+            source,
+        })?;
     if !canonical.is_dir() {
         return Err(ConfigError::NotDirectory {
             process: process.into(),
@@ -1110,7 +1111,7 @@ mod tests {
     #[test]
     fn local_command_edit_and_delete_use_the_same_definition_flow() {
         let mut fixture = Fixture::new();
-        let root = fs::canonicalize(fixture.root.path())
+        let root = workman_core::canonical_path(fixture.root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -1173,7 +1174,7 @@ mod tests {
             validate_project_working_dir(fixture.registry.store(), 1, "frontend").unwrap();
         assert_eq!(
             validated.absolute,
-            fs::canonicalize(fixture.root.path().join("frontend"))
+            workman_core::canonical_path(fixture.root.path().join("frontend"))
                 .unwrap()
                 .to_string_lossy()
         );
@@ -1226,7 +1227,7 @@ mod tests {
         assert_eq!(web.source, ProcessSource::Yml);
         assert_eq!(
             web.working_dir,
-            fs::canonicalize(fixture.root.path().join("frontend"))
+            workman_core::canonical_path(fixture.root.path().join("frontend"))
                 .unwrap()
                 .to_string_lossy()
         );
@@ -1298,7 +1299,7 @@ mod tests {
             kind: ProcessKind::Command,
             name: "name".into(),
             command: Some("command".into()),
-            working_dir: fs::canonicalize(fixture.root.path())
+            working_dir: workman_core::canonical_path(fixture.root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

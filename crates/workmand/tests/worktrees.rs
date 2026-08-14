@@ -100,7 +100,9 @@ impl GitFixture {
         let store = Store::open(&state)?;
         store.put_project(&Project {
             id: 1,
-            path: std::fs::canonicalize(&main)?.to_string_lossy().into_owned(),
+            path: workman_core::canonical_path(&main)?
+                .to_string_lossy()
+                .into_owned(),
             name: "sample-repo".into(),
             display_name: None,
             icon: None,
@@ -393,7 +395,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         let legacy_id = registry.store().next_project_id()?;
         registry.store().put_project(&Project {
             id: legacy_id,
-            path: std::fs::canonicalize(&legacy_path)?
+            path: workman_core::canonical_path(&legacy_path)?
                 .to_string_lossy()
                 .into_owned(),
             name: "sample-repo: legacy/port".into(),
@@ -740,7 +742,7 @@ async fn plain_project_removal_defaults_to_registration_only_then_deletes_exact_
     let folder = temp.path().join("plain-project");
     fs::create_dir(&folder)?;
     fs::write(folder.join("kept.txt"), "local fixture\n")?;
-    let canonical = fs::canonicalize(&folder)?;
+    let canonical = workman_core::canonical_path(&folder)?;
     let store = Store::open(temp.path().join("state.sqlite3"))?;
     let project = Project {
         id: 41,
@@ -848,7 +850,7 @@ async fn plain_folder_permission_failure_is_loud_keeps_registration_and_allows_r
     let folder = locked_parent.join("plain-project");
     fs::create_dir_all(&folder)?;
     fs::write(folder.join("local.txt"), "must not be silently orphaned\n")?;
-    let canonical = fs::canonicalize(&folder)?;
+    let canonical = workman_core::canonical_path(&folder)?;
     let store = Store::open(temp.path().join("state.sqlite3"))?;
     let project = Project {
         id: 51,
@@ -1643,7 +1645,9 @@ async fn pr_lookup_uses_login_path_for_plain_and_managed_worktrees_and_refreshes
     ] {
         store.put_project(&Project {
             id,
-            path: fs::canonicalize(path)?.to_string_lossy().into_owned(),
+            path: workman_core::canonical_path(path)?
+                .to_string_lossy()
+                .into_owned(),
             name: name.into(),
             display_name: None,
             icon: None,

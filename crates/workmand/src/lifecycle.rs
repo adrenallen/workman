@@ -201,7 +201,7 @@ impl LifecycleSupervisor {
     }
 
     fn watch_project(&mut self, project: &Project) {
-        let Ok(root) = std::fs::canonicalize(&project.path) else {
+        let Ok(root) = workman_core::canonical_path(&project.path) else {
             return;
         };
         if self.watched_projects.get(&project.id) == Some(&root) {

@@ -353,10 +353,9 @@ fn is_uuid_like(value: &str) -> bool {
 
 fn path_is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
-        || path
-            .canonicalize()
+        || workman_core::canonical_path(path)
             .ok()
-            .zip(root.canonicalize().ok())
+            .zip(workman_core::canonical_path(root).ok())
             .is_some_and(|(path, root)| path.starts_with(root))
 }
 
@@ -615,10 +614,9 @@ fn claude_project_slug(path: &Path) -> String {
 fn working_dirs_match(recorded: &str, expected: &Path) -> bool {
     let recorded = Path::new(recorded);
     recorded == expected
-        || recorded
-            .canonicalize()
+        || workman_core::canonical_path(recorded)
             .ok()
-            .zip(expected.canonicalize().ok())
+            .zip(workman_core::canonical_path(expected).ok())
             .is_some_and(|(recorded, expected)| recorded == expected)
 }
 

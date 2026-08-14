@@ -77,7 +77,7 @@ async fn profile_switch_confirmation_keeps_endpoint_and_round_trips_archive() {
         &mut socket,
         1,
         "projects.register",
-        json!({ "path": fs::canonicalize(&original).unwrap() }),
+        json!({ "path": workman_core::canonical_path(&original).unwrap() }),
     )
     .await;
     let original_id = projects[0]["id"].as_i64().unwrap();
@@ -129,12 +129,12 @@ async fn profile_switch_confirmation_keeps_endpoint_and_round_trips_archive() {
         &mut socket,
         7,
         "projects.register",
-        json!({ "path": fs::canonicalize(&throwaway).unwrap() }),
+        json!({ "path": workman_core::canonical_path(&throwaway).unwrap() }),
     )
     .await;
     assert_eq!(
         throwaway_projects[0]["path"],
-        fs::canonicalize(&throwaway)
+        workman_core::canonical_path(&throwaway)
             .unwrap()
             .to_string_lossy()
             .as_ref()

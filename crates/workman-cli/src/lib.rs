@@ -1723,8 +1723,7 @@ fn print_field(label: &str, value: &str) {
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
+    let canonical = workman_core::canonical_path(path)
         .map_err(|error| cli_error(format!("cannot open {}: {error}", path.display())))?;
     if !canonical.is_dir() {
         return Err(cli_error(format!("not a directory: {}", path.display())));
@@ -1733,7 +1732,10 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 }
 
 fn display_path(path: &Path) -> String {
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from)
+    // Windows sessions carry the home directory in USERPROFILE, not HOME.
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
         && let Ok(relative) = path.strip_prefix(home)
     {
         return if relative.as_os_str().is_empty() {
@@ -1746,10 +1748,8 @@ fn display_path(path: &Path) -> String {
 }
 
 async fn run_command(client: &mut Client, options: RunOptions) -> Result<()> {
-    let cwd = options
-        .cwd
-        .unwrap_or(env::current_dir()?)
-        .canonicalize()
+    let cwd = options.cwd.unwrap_or(env::current_dir()?);
+    let cwd = workman_core::canonical_path(&cwd)
         .map_err(|error| cli_error(format!("invalid working directory: {error}")))?;
     let project_id = resolve_project_id(client, options.project_id, &cwd).await?;
     let command = shell_command(&options.command);
