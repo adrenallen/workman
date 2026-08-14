@@ -1,0 +1,4 @@
+# Checkouts must be byte-identical on every platform: rustfmt enforces LF
+# (newline_style = "Unix"), shell scripts require LF, and the terminal recording
+# and snapshot fixtures are compared byte-for-byte in tests.
+* text=auto eol=lf
