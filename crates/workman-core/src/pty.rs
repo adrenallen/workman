@@ -593,6 +593,9 @@ impl PtyProcess {
             command.arg("-l");
         }
         if !options.interactive_shell {
+            for flag in shell_command_prelude(&options.shell) {
+                command.arg(flag);
+            }
             command.arg(shell_command_flag(&options.shell));
             // Keep the complete command as one argv item. The login shell, not Workman,
             // owns its quoting and expansion semantics.
@@ -1378,6 +1381,26 @@ fn profile_enabled() -> bool {
     })
 }
 
+/// Flags the configured shell needs before it will run one command string.
+///
+/// Windows PowerShell's default Restricted execution policy refuses `.ps1`
+/// launchers, which is how npm ships agent CLIs on PATH. The command string is
+/// explicit user intent, so bypass the policy for the spawned session only;
+/// interactive terminals keep the account's policy.
+fn shell_command_prelude(shell: &std::path::Path) -> &'static [&'static str] {
+    #[cfg(windows)]
+    if shell.file_name().is_some_and(|name| {
+        ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    }) {
+        return &["-ExecutionPolicy", "Bypass"];
+    }
+    #[cfg(not(windows))]
+    let _ = shell;
+    &[]
+}
+
 /// Flag that makes the configured shell run one command string.
 ///
 /// POSIX shells and PowerShell both accept `-c`; only `cmd.exe` insists on `/c`.
@@ -1837,6 +1860,28 @@ mod tests {
             "command was reinterpreted or split: {output}"
         );
         assert!(process.wait().unwrap().success());
+    }
+
+    #[test]
+    fn powershell_command_sessions_bypass_the_execution_policy() {
+        #[cfg(windows)]
+        {
+            for shell in [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+            ] {
+                assert_eq!(
+                    super::shell_command_prelude(std::path::Path::new(shell)),
+                    ["-ExecutionPolicy", "Bypass"]
+                );
+            }
+            assert!(
+                super::shell_command_prelude(std::path::Path::new(r"C:\Windows\System32\cmd.exe"))
+                    .is_empty()
+            );
+        }
+        #[cfg(not(windows))]
+        assert!(super::shell_command_prelude(std::path::Path::new("/bin/zsh")).is_empty());
     }
 
     #[cfg(unix)]
