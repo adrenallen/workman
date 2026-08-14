@@ -1,3 +1,7 @@
+// Exercises the Unix install layout (symlinked launchers, executable modes, macOS
+// bundles). The Windows install and self-update layout is designed separately.
+#![cfg(unix)]
+
 use std::{
     collections::HashMap,
     fs,

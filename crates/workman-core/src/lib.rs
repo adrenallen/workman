@@ -5,7 +5,6 @@ pub mod attention;
 pub mod domain;
 pub mod locks;
 pub mod notifications;
-#[cfg(unix)]
 mod output_spill;
 pub mod project_folders;
 /// Revision-guarded project scratchpads.
@@ -17,7 +16,6 @@ pub mod todos;
 /// Authenticated release checks and verified atomic self-updates.
 pub mod update;
 
-#[cfg(unix)]
 pub mod pty;
 
 pub use agent_notifications::*;

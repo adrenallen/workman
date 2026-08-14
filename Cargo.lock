@@ -6249,6 +6249,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.61.2",
  "workman-core",
  "workmand",
 ]
@@ -6273,6 +6274,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

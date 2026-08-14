@@ -1221,6 +1221,7 @@ fn daemon_executable_from(
     })
 }
 
+#[cfg(unix)]
 async fn embedded_shutdown_signal() {
     let mut terminate =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -1232,6 +1233,11 @@ async fn embedded_shutdown_signal() {
     } else {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+#[cfg(windows)]
+async fn embedded_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]

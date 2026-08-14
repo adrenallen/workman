@@ -2412,6 +2412,7 @@ fn ascii_case_insensitive_matches(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::{thread, time::Instant};
 
@@ -2587,6 +2588,7 @@ mod tests {
         assert_eq!(fresh.command, tool.command);
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_a_grok_process_removes_only_its_private_launch_home() {
         let source = tempfile::tempdir().unwrap();
@@ -2671,6 +2673,7 @@ mod tests {
         assert!(process.exited_at.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn command_spawn_uses_login_profile_and_complete_pty_environment() {
         let temp = tempfile::tempdir().unwrap();

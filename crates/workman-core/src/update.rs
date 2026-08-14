@@ -245,6 +245,11 @@ impl ReleaseTarget {
                 desktop_asset_name: "workman-linux-arm64.tar.gz".to_owned(),
                 platform_label: "Linux arm64".to_owned(),
             }),
+            ("windows", "x86_64") => Ok(Self {
+                binary_asset_name: "workman-windows-x86_64.zip".to_owned(),
+                desktop_asset_name: "workman-windows-x86_64.zip".to_owned(),
+                platform_label: "Windows x86_64".to_owned(),
+            }),
             (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
         }
     }
@@ -944,6 +949,8 @@ impl UpdateInstallEnvironment {
     fn from_environment() -> UpdateResult<Self> {
         let home_dir = env::var_os("WORKMAN_UPDATE_HOME")
             .or_else(|| env::var_os("HOME"))
+            // Windows sessions carry the home directory in USERPROFILE, not HOME.
+            .or_else(|| env::var_os("USERPROFILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| {
@@ -1566,12 +1573,16 @@ fn set_executable(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1668,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn release_targets_cover_both_static_linux_archives() {
+    fn release_targets_cover_every_packaged_platform() {
         let macos = ReleaseTarget::for_platform("macos", "aarch64").unwrap();
         assert_eq!(macos.binary_asset_name, "workman-macos-arm64.zip");
         assert_eq!(macos.desktop_asset_name, macos.binary_asset_name);
@@ -1683,6 +1694,12 @@ mod tests {
                 .unwrap()
                 .binary_asset_name,
             "workman-linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            ReleaseTarget::for_platform("windows", "x86_64")
+                .unwrap()
+                .binary_asset_name,
+            "workman-windows-x86_64.zip"
         );
     }
 

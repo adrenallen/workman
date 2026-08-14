@@ -6,11 +6,13 @@ use std::{
     error::Error,
     ffi::{OsStr, OsString},
     fmt, io,
-    os::fd::RawFd,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
@@ -1923,9 +1925,9 @@ async fn attach(client: &mut Client, process_id: i64) -> Result<()> {
         return Ok(());
     }
 
-    let _raw_mode = RawModeGuard::enable(libc::STDIN_FILENO)?;
+    let _raw_mode = RawModeGuard::enable()?;
     send_resize(client, process_id).await?;
-    let mut resize = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+    let mut resize = resize_events();
     let mut stdin = tokio::io::stdin();
     let mut stdin_open = true;
     let mut input = [0_u8; 8192];
@@ -1948,7 +1950,7 @@ async fn attach(client: &mut Client, process_id: i64) -> Result<()> {
                     ).await?;
                 }
             }
-            _ = resize.recv() => send_resize(client, process_id).await?,
+            Some(()) = resize.recv() => send_resize(client, process_id).await?,
             _ = poll.tick() => {
                 (offset, status) = drain_raw(client, process_id, Some(offset), &mut stdout).await?;
                 if !is_active(status) {
@@ -1962,7 +1964,7 @@ async fn attach(client: &mut Client, process_id: i64) -> Result<()> {
 }
 
 async fn send_resize(client: &mut Client, process_id: i64) -> Result<()> {
-    let size = terminal_size(libc::STDOUT_FILENO).unwrap_or(TerminalSize {
+    let size = terminal_size().unwrap_or(TerminalSize {
         rows: 24,
         cols: 80,
         pixel_width: 0,
@@ -2588,14 +2590,17 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
     Box::new(io::Error::other(message.into()))
 }
 
+#[cfg(unix)]
 struct RawModeGuard {
     fd: RawFd,
     original: libc::termios,
     enabled: bool,
 }
 
+#[cfg(unix)]
 impl RawModeGuard {
-    fn enable(fd: RawFd) -> io::Result<Self> {
+    fn enable() -> io::Result<Self> {
+        let fd = libc::STDIN_FILENO;
         // SAFETY: isatty only inspects the valid process-owned file descriptor.
         if unsafe { libc::isatty(fd) } != 1 {
             return Ok(Self {
@@ -2627,6 +2632,7 @@ impl RawModeGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.enabled {
@@ -2636,7 +2642,99 @@ impl Drop for RawModeGuard {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Console raw mode for Windows: byte-stream VT input in, VT sequences out.
+///
+/// Handles are stored as integers so the guard stays `Send`; they are stable
+/// process pseudo-handles owned by the console subsystem, not resources to close.
+#[cfg(windows)]
+struct RawModeGuard {
+    input: isize,
+    output: isize,
+    original_input: u32,
+    original_output: u32,
+    restore_output: bool,
+    enabled: bool,
+}
+
+#[cfg(windows)]
+impl RawModeGuard {
+    fn enable() -> io::Result<Self> {
+        use windows_sys::Win32::System::Console::{
+            DISABLE_NEWLINE_AUTO_RETURN, ENABLE_ECHO_INPUT, ENABLE_EXTENDED_FLAGS,
+            ENABLE_LINE_INPUT, ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_QUICK_EDIT_MODE,
+            ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
+            GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+        };
+
+        // SAFETY: std handles are process-owned pseudo-handles and every mode value
+        // is initialized by the console call that precedes its use.
+        unsafe {
+            let input = GetStdHandle(STD_INPUT_HANDLE);
+            let mut original_input = 0_u32;
+            if GetConsoleMode(input, &mut original_input) == 0 {
+                // Redirected stdin is not a console; raw mode is unnecessary.
+                return Ok(Self {
+                    input: 0,
+                    output: 0,
+                    original_input: 0,
+                    original_output: 0,
+                    restore_output: false,
+                    enabled: false,
+                });
+            }
+
+            let raw_input = (original_input
+                & !(ENABLE_ECHO_INPUT
+                    | ENABLE_LINE_INPUT
+                    | ENABLE_PROCESSED_INPUT
+                    | ENABLE_MOUSE_INPUT
+                    | ENABLE_QUICK_EDIT_MODE))
+                | ENABLE_VIRTUAL_TERMINAL_INPUT
+                | ENABLE_EXTENDED_FLAGS;
+            if SetConsoleMode(input, raw_input) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let output = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut original_output = 0_u32;
+            let restore_output = GetConsoleMode(output, &mut original_output) != 0
+                && SetConsoleMode(
+                    output,
+                    original_output
+                        | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                        | DISABLE_NEWLINE_AUTO_RETURN,
+                ) != 0;
+
+            Ok(Self {
+                input: input as isize,
+                output: output as isize,
+                original_input,
+                original_output,
+                restore_output,
+                enabled: true,
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleMode;
+
+        if self.enabled {
+            // SAFETY: both modes came from GetConsoleMode on these same std handles.
+            unsafe {
+                let _ = SetConsoleMode(self.input as _, self.original_input);
+                if self.restore_output {
+                    let _ = SetConsoleMode(self.output as _, self.original_output);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TerminalSize {
     rows: u16,
     cols: u16,
@@ -2644,11 +2742,12 @@ struct TerminalSize {
     pixel_height: u16,
 }
 
-fn terminal_size(fd: RawFd) -> io::Result<TerminalSize> {
+#[cfg(unix)]
+fn terminal_size() -> io::Result<TerminalSize> {
     // SAFETY: winsize is a plain integer struct initialized before ioctl writes it.
     let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
-    // SAFETY: TIOCGWINSZ writes a winsize to the valid pointer for the provided fd.
-    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } != 0 {
+    // SAFETY: TIOCGWINSZ writes a winsize to the valid pointer for standard output.
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(TerminalSize {
@@ -2657,6 +2756,68 @@ fn terminal_size(fd: RawFd) -> io::Result<TerminalSize> {
         pixel_width: size.ws_xpixel,
         pixel_height: size.ws_ypixel,
     })
+}
+
+#[cfg(windows)]
+fn terminal_size() -> io::Result<TerminalSize> {
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE,
+    };
+
+    // SAFETY: the std handle is process-owned and the buffer info is plain data
+    // written by the call before any field is read.
+    unsafe {
+        let output = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut info = std::mem::zeroed::<CONSOLE_SCREEN_BUFFER_INFO>();
+        if GetConsoleScreenBufferInfo(output, &mut info) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
+        let cols = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
+        Ok(TerminalSize {
+            rows: u16::try_from(rows).unwrap_or(1).max(1),
+            cols: u16::try_from(cols).unwrap_or(1).max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+    }
+}
+
+/// Deliver one tick for every resize of the local terminal.
+///
+/// Unix subscribes to SIGWINCH. Windows has no resize signal, so the console
+/// size is polled and a tick is sent only when it changes. A closed or
+/// unavailable source simply stops producing ticks; attach keeps running.
+fn resize_events() -> tokio::sync::mpsc::Receiver<()> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        let Ok(mut signals) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+        else {
+            return;
+        };
+        while signals.recv().await.is_some() {
+            if sender.send(()).await.is_err() {
+                return;
+            }
+        }
+    });
+    #[cfg(windows)]
+    tokio::spawn(async move {
+        let mut last = terminal_size().ok();
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let current = terminal_size().ok();
+            if current != last {
+                last = current;
+                if sender.send(()).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    receiver
 }
 
 #[cfg(test)]

@@ -1518,6 +1518,8 @@ fn set_private_permissions(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1533,6 +1535,8 @@ fn ensure_private_file(path: &Path) -> io::Result<()> {
             ));
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1644,7 +1648,9 @@ async fn clean_failed_spawn(child: &mut tokio::process::Child, pid: Option<u32>,
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
     use tempfile::TempDir;
@@ -2387,16 +2393,19 @@ mod tests {
     #[tokio::test]
     async fn discovery_is_private_probeable_and_removed_after_shutdown() {
         let server = TestServer::start().await;
-        let path = discovery_path(&server.data_dir);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let endpoint_path = mcp_endpoint_path(&server.data_dir);
-        let endpoint_mode = std::fs::metadata(&endpoint_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(endpoint_mode, 0o600);
+        #[cfg(unix)]
+        {
+            let path = discovery_path(&server.data_dir);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let endpoint_path = mcp_endpoint_path(&server.data_dir);
+            let endpoint_mode = std::fs::metadata(&endpoint_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(endpoint_mode, 0o600);
+        }
         assert_eq!(Discovery::read(&server.data_dir).unwrap(), server.discovery);
         assert!(probe(&server.discovery).await);
 
@@ -2567,6 +2576,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timed_out_discovery_reaps_the_spawned_daemon() {
         let temp = tempfile::tempdir().unwrap();

@@ -18,11 +18,16 @@ workman-core.workspace = true
 workmand = { path = "../workmand" }
 base64 = "0.22.1"
 futures-util = "0.3.31"
-libc = "0.2.177"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = "0.29.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.177"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile = "3.21.0"

@@ -702,18 +702,17 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap, ffi::OsString, fs, os::unix::fs::PermissionsExt, path::Path,
-        time::Duration,
-    };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::{collections::BTreeMap, ffi::OsString, time::Duration};
+    use std::{fs, path::Path};
 
     use workman_core::{AgentTool, AgentToolSource};
 
-    use super::{
-        DoctorEnvironment, apply_config_in, check_agent_tools_in,
-        check_agent_tools_with_user_environment, command_executable, config_preview_in,
-        config_target,
-    };
+    #[cfg(unix)]
+    use super::{DoctorEnvironment, check_agent_tools_in, check_agent_tools_with_user_environment};
+    use super::{apply_config_in, command_executable, config_preview_in, config_target};
 
     fn tool(id: i64, name: &str, command: &str, tool_type: &str, enabled: bool) -> AgentTool {
         AgentTool {
@@ -728,6 +727,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn health_resolves_path_captures_versions_and_rolls_up_launches() {
         let temp = tempfile::tempdir().unwrap();
@@ -774,6 +774,7 @@ mod tests {
         assert!(!health.tools[2].launch_ready);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn health_uses_the_resolved_login_shell_environment() {
         let temp = tempfile::tempdir().unwrap();

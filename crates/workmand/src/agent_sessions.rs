@@ -1,7 +1,7 @@
 //! Passive discovery of conversation IDs written by supported agent CLIs.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     env,
     ffi::OsString,
     fs::{self, File},
@@ -10,11 +10,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -357,6 +360,7 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
             .is_some_and(|(path, root)| path.starts_with(root))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_tree_pids(root_pid: u32) -> HashSet<u32> {
     let mut system = System::new();
     system.refresh_processes_specifics(

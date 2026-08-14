@@ -1,3 +1,7 @@
+// Drives Unix fixtures (shebang scripts, permission bits, symlinks); Windows
+// fixture parity is tracked as follow-up work.
+#![cfg(unix)]
+
 use std::{collections::BTreeMap, error::Error, fs};
 
 use rmcp::{

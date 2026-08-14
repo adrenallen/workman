@@ -6,14 +6,18 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
+
+#[cfg(not(windows))]
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
 use crate::user_config::{UserConfigError, parse_user_config};
 
+#[cfg(not(windows))]
 const ENV_START: &[u8] = b"\x1eWORKMAN_ENV_START\x1f";
+#[cfg(not(windows))]
 const ENV_END: &[u8] = b"\x1eWORKMAN_ENV_END\x1f";
 
 /// User-facing description of Workman's active and inferred shell choice.
@@ -50,29 +54,40 @@ impl ResolvedUserEnvironment {
     /// Capture the environment after the same login shell used for PTY launches has sourced
     /// the user's profiles. Profile chatter is ignored using explicit byte sentinels.
     pub fn login_environment(&self) -> Result<BTreeMap<OsString, OsString>, String> {
-        let command = concat!(
-            "printf '\\036WORKMAN_ENV_START\\037'; ",
-            "/usr/bin/env -0; ",
-            "printf '\\036WORKMAN_ENV_END\\037'",
-        );
-        let output = Command::new(self.active_shell())
-            .args(["-l", "-c", command])
-            .envs(&self.pty_environment)
-            .output()
-            .map_err(|error| {
-                format!(
-                    "could not inspect login environment with {}: {error}",
-                    self.active_shell().display()
-                )
-            })?;
-        if !output.status.success() {
-            return Err(format!(
-                "login shell {} exited with {} while inspecting its environment",
-                self.active_shell().display(),
-                output.status
-            ));
+        // Windows has no login-shell profile pass; the daemon already carries the
+        // user-session environment, so extend it with the PTY baseline directly.
+        #[cfg(windows)]
+        {
+            let mut environment = env::vars_os().collect::<BTreeMap<_, _>>();
+            environment.extend(self.pty_environment.clone());
+            Ok(environment)
         }
-        parse_environment_capture(&output.stdout)
+        #[cfg(not(windows))]
+        {
+            let command = concat!(
+                "printf '\\036WORKMAN_ENV_START\\037'; ",
+                "/usr/bin/env -0; ",
+                "printf '\\036WORKMAN_ENV_END\\037'",
+            );
+            let output = Command::new(self.active_shell())
+                .args(["-l", "-c", command])
+                .envs(&self.pty_environment)
+                .output()
+                .map_err(|error| {
+                    format!(
+                        "could not inspect login environment with {}: {error}",
+                        self.active_shell().display()
+                    )
+                })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "login shell {} exited with {} while inspecting its environment",
+                    self.active_shell().display(),
+                    output.status
+                ));
+            }
+            parse_environment_capture(&output.stdout)
+        }
     }
 
     /// Resolve the complete environment for non-PTY subprocesses such as Git, GitHub CLI,
@@ -183,18 +198,78 @@ fn infer_shell_from(
         }
     }
 
-    #[cfg(target_os = "macos")]
-    let fallbacks = ["/bin/zsh", "/bin/bash", "/bin/sh"];
-    #[cfg(not(target_os = "macos"))]
-    let fallbacks = ["/bin/bash", "/bin/sh", "/bin/zsh"];
-    let path = fallbacks
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| executable_shell(path))
-        .unwrap_or_else(|| PathBuf::from(fallbacks[0]));
+    #[cfg(windows)]
+    {
+        windows_fallback_shell()
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let fallbacks = ["/bin/zsh", "/bin/bash", "/bin/sh"];
+        #[cfg(not(target_os = "macos"))]
+        let fallbacks = ["/bin/bash", "/bin/sh", "/bin/zsh"];
+        let path = fallbacks
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| executable_shell(path))
+            .unwrap_or_else(|| PathBuf::from(fallbacks[0]));
+        InferredShell {
+            warning: Some(format!(
+                "Workman could not infer the account login shell; using fallback {}.",
+                path.display()
+            )),
+            path,
+            source: "fallback",
+        }
+    }
+}
+
+/// Prefer PowerShell 7, then Windows PowerShell, then the command processor.
+///
+/// `SHELL` and the configured override still win through the shared inference
+/// order; this only chooses the default when nothing else names a shell.
+#[cfg(windows)]
+fn windows_fallback_shell() -> InferredShell {
+    let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(program_files) = env::var_os("ProgramFiles") {
+        candidates.push((
+            PathBuf::from(program_files)
+                .join("PowerShell")
+                .join("7")
+                .join("pwsh.exe"),
+            "PowerShell 7",
+        ));
+    }
+    if let Some(system_root) = env::var_os("SystemRoot") {
+        candidates.push((
+            PathBuf::from(system_root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+            "Windows PowerShell",
+        ));
+    }
+    if let Some(comspec) = env::var_os("COMSPEC") {
+        candidates.push((PathBuf::from(comspec), "COMSPEC"));
+    }
+    for (path, source) in &candidates {
+        if executable_shell(path) {
+            return InferredShell {
+                path: path.clone(),
+                source: *source,
+                warning: None,
+            };
+        }
+    }
+    let path = candidates
+        .into_iter()
+        .map(|(path, _)| path)
+        .next()
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"));
     InferredShell {
         warning: Some(format!(
-            "Workman could not infer the account login shell; using fallback {}.",
+            "Workman could not find PowerShell or the command processor; using fallback {}.",
             path.display()
         )),
         path,
@@ -306,6 +381,7 @@ fn default_lang() -> OsString {
     }
 }
 
+#[cfg(not(windows))]
 fn parse_environment_capture(bytes: &[u8]) -> Result<BTreeMap<OsString, OsString>, String> {
     let start = find_bytes(bytes, ENV_START)
         .map(|index| index + ENV_START.len())
@@ -339,6 +415,7 @@ fn parse_environment_capture(bytes: &[u8]) -> Result<BTreeMap<OsString, OsString
     }
 }
 
+#[cfg(not(windows))]
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -349,6 +426,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn inference_precedence_is_environment_then_account_then_passwd() {
         let environment = infer_shell_from(
@@ -368,6 +446,7 @@ mod tests {
         assert_eq!(account.source, "macOS account");
     }
 
+    #[cfg(unix)]
     #[test]
     fn captured_environment_ignores_profile_output_and_preserves_values() {
         let mut bytes = b"profile said hello\n".to_vec();
