@@ -86,6 +86,10 @@ struct KeyboardProtocolTracker {
     alternate_screen: bool,
     modify_other_keys: u8,
     scan: CsiScanState,
+    /// Plain `CSI 6 n` cursor probes seen but not yet answered. ConPTY emits one at
+    /// session start and withholds child output until the hosting terminal replies.
+    #[cfg(windows)]
+    cursor_probes: usize,
 }
 
 impl KeyboardProtocolTracker {
@@ -175,6 +179,10 @@ impl KeyboardProtocolTracker {
             }
             (b'>', b'n') if parameter(&parameters, 0, 2) == 4 => {
                 self.modify_other_keys = 0;
+            }
+            #[cfg(windows)]
+            (b'6', b'n') if parameters.iter().all(Option::is_none) => {
+                self.cursor_probes += 1;
             }
             (b'?', b'h') | (b'?', b'l')
                 if parameters
@@ -332,7 +340,8 @@ pub struct RenderedSearchMatch {
 
 /// Stateful Alacritty parser and terminal grid for one process.
 pub struct TerminalEmulator {
-    // Deliberately rendering-only: xterm is the sole live authority for terminal query replies.
+    // Deliberately rendering-only: xterm is the sole live authority for terminal query
+    // replies (except the Windows-only ConPTY cursor probe in `feed_with_replies`).
     // A listener here would emit a second DA/DSR/color response into the same PTY.
     terminal: Term<VoidListener>,
     parser: ansi::Processor,
@@ -362,8 +371,23 @@ impl TerminalEmulator {
     }
 
     fn feed_with_replies(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        let replies = self.keyboard_protocol.feed(bytes);
+        let mut replies = self.keyboard_protocol.feed(bytes);
         self.parser.advance(&mut self.terminal, bytes);
+        // ConPTY withholds all child output until its startup `CSI 6 n` probe is
+        // answered, and a headless daemon PTY has no live xterm frontend to answer
+        // it, so on Windows the daemon is the hosting terminal and must reply.
+        // Unix PTYs never stall on this query; xterm stays the sole authority there.
+        #[cfg(windows)]
+        {
+            let cursor_probes = std::mem::take(&mut self.keyboard_protocol.cursor_probes);
+            if cursor_probes > 0 {
+                let point = self.terminal.grid().cursor.point;
+                let report = format!("\x1b[{};{}R", point.line.0.max(0) + 1, point.column.0 + 1);
+                for _ in 0..cursor_probes {
+                    replies.push(report.clone().into_bytes());
+                }
+            }
+        }
         replies
     }
 
@@ -729,6 +753,26 @@ mod tests {
         assert_eq!(emulator.keyboard_protocol().modify_other_keys, 0);
         emulator.feed(b"\x1b[>4;3m");
         assert_eq!(emulator.keyboard_protocol().modify_other_keys, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_cursor_probe_is_answered_from_the_rendered_cursor() {
+        let mut emulator = TerminalEmulator::new(3, 20, 4);
+        let replies = emulator.feed_with_replies(b"ok\x1b[6n");
+        assert_eq!(replies, vec![b"\x1b[1;3R".to_vec()]);
+
+        // A probe split across PTY reads still produces exactly one report.
+        assert!(emulator.feed_with_replies(b"\x1b[6").is_empty());
+        let replies = emulator.feed_with_replies(b"n");
+        assert_eq!(replies, vec![b"\x1b[1;3R".to_vec()]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cursor_probes_stay_unanswered_where_the_live_frontend_replies() {
+        let mut emulator = TerminalEmulator::new(3, 20, 4);
+        assert!(emulator.feed_with_replies(b"ok\x1b[6n").is_empty());
     }
 
     #[test]
