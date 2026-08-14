@@ -25,7 +25,14 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw 'cargo was not found on PATH. Install Rust from https://rustup.rs and the Visual Studio Build Tools C++ workload, then re-run.'
+    # A shell opened before rustup finished installing has the old PATH.
+    $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+    if (Test-Path (Join-Path $cargoBin 'cargo.exe')) {
+        $env:Path = "$cargoBin;$env:Path"
+    }
+    else {
+        throw 'cargo was not found. Install Rust from https://rustup.rs and the Visual Studio Build Tools C++ workload, then re-run.'
+    }
 }
 
 if (-not $SkipFrontend) {
