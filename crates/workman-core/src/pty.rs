@@ -1160,6 +1160,57 @@ fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
     }
 }
 
+/// Removes the ConPTY cursor probe (`ESC [ 6 n`) from bytes destined for raw capture.
+///
+/// The probe is host-terminal traffic that the daemon itself answers, not process
+/// output: recording it would clutter `wrk logs` and replay a stale query to every
+/// live frontend that later receives the history. The emulator still sees the
+/// original bytes, so the daemon-side answer is unaffected. At most three bytes are
+/// held across reads while a potential probe prefix is unresolved.
+#[cfg(windows)]
+#[derive(Default)]
+struct ConptyProbeFilter {
+    held_prefix: usize,
+}
+
+#[cfg(windows)]
+impl ConptyProbeFilter {
+    const PROBE: &'static [u8] = b"\x1b[6n";
+
+    fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(self.held_prefix + bytes.len());
+        buffer.extend_from_slice(&Self::PROBE[..self.held_prefix]);
+        buffer.extend_from_slice(bytes);
+        self.held_prefix = 0;
+
+        let mut output = Vec::with_capacity(buffer.len());
+        let mut index = 0;
+        while index < buffer.len() {
+            if buffer[index] == 0x1b {
+                let remaining = &buffer[index..];
+                let compared = remaining.len().min(Self::PROBE.len());
+                if remaining[..compared] == Self::PROBE[..compared] {
+                    if compared == Self::PROBE.len() {
+                        index += compared;
+                        continue;
+                    }
+                    self.held_prefix = compared;
+                    break;
+                }
+            }
+            output.push(buffer[index]);
+            index += 1;
+        }
+        output
+    }
+
+    /// Release an unresolved prefix once the stream ends; it was real output.
+    fn flush(&mut self) -> Vec<u8> {
+        let held = std::mem::take(&mut self.held_prefix);
+        Self::PROBE[..held].to_vec()
+    }
+}
+
 fn capture_output(
     mut reader: Box<dyn Read + Send>,
     raw_output: RawOutput,
@@ -1171,6 +1222,8 @@ fn capture_output(
 ) {
     let mut profiler = PtyCaptureProfiler::new(Arc::clone(&metrics));
     let mut chunk = [0_u8; 8192];
+    #[cfg(windows)]
+    let mut probe_filter = ConptyProbeFilter::default();
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
@@ -1180,12 +1233,18 @@ fn capture_output(
                     .parsed_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
                 let replies = terminal_output.feed_with_replies(&chunk[..count]);
+                #[cfg(windows)]
+                let recorded = probe_filter.filter(&chunk[..count]);
+                #[cfg(windows)]
+                let recorded = recorded.as_slice();
+                #[cfg(not(windows))]
+                let recorded = &chunk[..count];
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
-                raw_output.push(&chunk[..count]);
+                raw_output.push(recorded);
                 if let Some(spill) = &output_spill {
-                    spill.push(&chunk[..count]);
+                    spill.push(recorded);
                 }
                 if !replies.is_empty() {
                     let mut writer = response_writer
@@ -1204,6 +1263,16 @@ fn capture_output(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // Unix PTYs commonly report EIO when their final slave closes.
             Err(_) => break,
+        }
+    }
+    #[cfg(windows)]
+    {
+        let held = probe_filter.flush();
+        if !held.is_empty() {
+            raw_output.push(&held);
+            if let Some(spill) = &output_spill {
+                spill.push(&held);
+            }
         }
     }
     profiler.report_final();
@@ -1581,6 +1650,22 @@ mod tests {
                 truncated: true,
             }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_probe_filter_drops_probes_and_keeps_everything_else() {
+        let mut filter = ConptyProbeFilter::default();
+        assert_eq!(filter.filter(b"before\x1b[6nafter"), b"beforeafter");
+        assert_eq!(filter.filter(b"\x1b[7n\x1b\x1b[6n"), b"\x1b[7n\x1b");
+
+        // A probe split across reads is dropped once it completes.
+        assert_eq!(filter.filter(b"tail\x1b[6"), b"tail");
+        assert_eq!(filter.filter(b"nrest"), b"rest");
+
+        // An unresolved prefix at stream end was real output.
+        assert_eq!(filter.filter(b"end\x1b["), b"end");
+        assert_eq!(filter.flush(), b"\x1b[");
     }
 
     #[tokio::test]
