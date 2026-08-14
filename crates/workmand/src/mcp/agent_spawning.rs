@@ -35,6 +35,8 @@ const KIMI_MCP_TEMPLATE_FILE: &str = ".workman-mcp-template.json";
 const KIMI_MCP_TOKEN_SENTINEL: &str = "__WORKMAN_KIMI_PROCESS_MCP_TOKEN__";
 #[cfg(windows)]
 const CLAUDE_MCP_CONFIG_FILE: &str = "workman-mcp.json";
+#[cfg(windows)]
+const GEMINI_SETTINGS_FILE: &str = "settings.json";
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -1220,6 +1222,23 @@ fn prepare_agent_launch(
         }
         McpLaunchAdapter::Gemini => {
             let command = command_with_args(command, extra_args)?;
+            #[cfg(windows)]
+            {
+                let gemini_home = gemini_settings_home(mcp_url)?;
+                env.insert(
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH".to_owned(),
+                    gemini_home
+                        .join(GEMINI_SETTINGS_FILE)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                env.insert(
+                    WORKMAN_EPHEMERAL_AGENT_HOME_ENV.to_owned(),
+                    gemini_home.to_string_lossy().into_owned(),
+                );
+                command
+            }
+            #[cfg(not(windows))]
             gemini_command_with_ephemeral_settings(&command, mcp_url)
         }
         McpLaunchAdapter::OpenCode => {
@@ -1595,8 +1614,8 @@ fn codex_launch_args(mcp_url: &str, purpose: AgentLaunchPurpose) -> Vec<String> 
     args
 }
 
-fn gemini_command_with_ephemeral_settings(command: &str, mcp_url: &str) -> String {
-    let settings = json!({
+fn gemini_settings_json(mcp_url: &str) -> String {
+    json!({
         "mcp": { "allowed": ["workman"] },
         "mcpServers": {
             "workman": {
@@ -1607,7 +1626,27 @@ fn gemini_command_with_ephemeral_settings(command: &str, mcp_url: &str) -> Strin
             }
         }
     })
-    .to_string();
+    .to_string()
+}
+
+/// Windows PowerShell cannot parse the POSIX prelude below, so there the
+/// daemon writes the ephemeral settings file itself into a private home the
+/// process registry already cleans up; the token stays the `$WORKMAN_MCP_TOKEN`
+/// reference Gemini resolves from its environment.
+#[cfg(windows)]
+fn gemini_settings_home(mcp_url: &str) -> Result<PathBuf, String> {
+    prepare_private_agent_home(
+        "gemini",
+        None,
+        GEMINI_SETTINGS_FILE,
+        GEMINI_SETTINGS_FILE,
+        &format!("{}\n", gemini_settings_json(mcp_url)),
+    )
+}
+
+#[cfg(not(windows))]
+fn gemini_command_with_ephemeral_settings(command: &str, mcp_url: &str) -> String {
+    let settings = gemini_settings_json(mcp_url);
     format!(
         "umask 077; workman_mcp_config_dir=$(mktemp -d \"${{TMPDIR:-/tmp}}/workman-gemini-mcp.XXXXXX\") || exit 1; \
          workman_mcp_config_file=\"$workman_mcp_config_dir/settings.json\"; \
@@ -1940,11 +1979,29 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(launch.command.contains("GEMINI_CLI_SYSTEM_SETTINGS_PATH"));
-        assert!(launch.command.contains("mktemp -d"));
-        assert!(launch.command.contains("http://127.0.0.1:43125/mcp"));
-        assert!(launch.command.contains("x-workman-mcp-token"));
-        assert!(launch.command.contains("$WORKMAN_MCP_TOKEN"));
+        #[cfg(not(windows))]
+        {
+            assert!(launch.command.contains("GEMINI_CLI_SYSTEM_SETTINGS_PATH"));
+            assert!(launch.command.contains("mktemp -d"));
+            assert!(launch.command.contains("http://127.0.0.1:43125/mcp"));
+            assert!(launch.command.contains("x-workman-mcp-token"));
+            assert!(launch.command.contains("$WORKMAN_MCP_TOKEN"));
+        }
+        // Windows writes the ephemeral settings daemon-side instead of through
+        // a POSIX prelude PowerShell could not parse.
+        #[cfg(windows)]
+        {
+            let settings_path =
+                PathBuf::from(launch.env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH").unwrap());
+            let settings = fs::read_to_string(&settings_path).unwrap();
+            assert!(settings.contains("http://127.0.0.1:43125/mcp"));
+            assert!(settings.contains("x-workman-mcp-token"));
+            assert!(settings.contains("$WORKMAN_MCP_TOKEN"));
+            let home = PathBuf::from(launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV).unwrap());
+            assert_eq!(settings_path.parent(), Some(home.as_path()));
+            assert!(launch.command.starts_with("gemini --approval-mode=yolo"));
+            let _ = fs::remove_dir_all(&home);
+        }
         assert!(
             launch
                 .command
