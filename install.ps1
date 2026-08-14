@@ -53,8 +53,13 @@ if (-not $SkipFrontend) {
 Write-Host '==> Building release binaries'
 Push-Location $repo
 try {
-    cargo build --release -p workman-cli -p workmand -p workman-desktop
+    cargo build --release -p workman-cli -p workmand
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+    # The desktop app must embed the frontend. Without tauri/custom-protocol a
+    # release still builds, but it opens a blank development WebView — the same
+    # contract scripts/tauri-dist-runner.sh enforces for packaged builds.
+    cargo build --release -p workman-desktop --features tauri/custom-protocol
+    if ($LASTEXITCODE -ne 0) { throw 'desktop build failed' }
 }
 finally { Pop-Location }
 
