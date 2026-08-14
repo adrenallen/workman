@@ -1,3 +1,7 @@
+// Drives Unix fixtures (POSIX shell one-liners on real PTYs, XDG data layouts);
+// Windows fixture parity is tracked as follow-up work.
+#![cfg(unix)]
+
 use std::{collections::BTreeMap, error::Error, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};

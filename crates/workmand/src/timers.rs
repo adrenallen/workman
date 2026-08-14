@@ -1156,8 +1156,10 @@ mod tests {
     const PROJECT_ID: ProjectId = 1;
     const DELIVERY_ID: ProcessId = 10;
     const WORKER_ID: ProcessId = 11;
+    #[cfg(unix)]
     const PASTE_TUI_ID: ProcessId = 13;
 
+    #[cfg(unix)]
     fn paste_sensitive_tui() -> &'static str {
         r#"true claude; stty raw -echo; printf '\033[?2004h❯ '; exec perl -e '$|=1; my $draft=""; my $enters=0; while (1) { my $n = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($n) && $n > 0; my $redraw=0; for my $character (split //, $chunk) { if ($character eq "\r") { $enters++; next if $enters == 1; print "\r\nSUBMITTED\r\nthinking...\r\nesc to interrupt\r\n"; sleep 5; exit 0; } $draft .= $character; $redraw=1; } print "\r\e[2K❯ DRAFT:$draft" if $redraw; }'"#
     }
@@ -1255,6 +1257,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_for_output(registry: &mut ProcessRegistry, process_id: ProcessId, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1270,6 +1273,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn delayed_timer_reloads_from_sqlite_and_injects_body_verbatim() {
         let mut registry = test_registry(false);
@@ -1410,6 +1414,7 @@ mod tests {
         assert_eq!(quarantined.fired_at, Some(1_001));
     }
 
+    #[cfg(unix)]
     #[test]
     fn short_timer_body_submits_outside_the_paste_burst_on_a_real_pty() {
         let mut registry = test_registry(false);
@@ -1453,6 +1458,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn already_satisfied_idle_all_delivers_immediately_to_a_real_pty() {
         let mut registry = test_registry(false);
@@ -1506,6 +1512,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pending_timer_refines_idle_to_waiting_until_delivery_starts_work() {
         let mut registry = test_registry(false);
@@ -1565,6 +1572,7 @@ mod tests {
         wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
     }
 
+    #[cfg(unix)]
     #[test]
     fn idle_watch_owner_is_waiting_even_when_delivery_targets_another_process() {
         let mut registry = test_registry(true);
@@ -1646,6 +1654,7 @@ mod tests {
         assert_eq!(status.waiting_on.len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn recently_prompted_process_does_not_satisfy_idle_all_before_output() {
         let mut registry = test_registry(true);
@@ -1670,6 +1679,7 @@ mod tests {
         assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn pending_timer_survives_store_and_registry_reopen() {
         let temp = tempfile::tempdir().unwrap();
@@ -1767,6 +1777,7 @@ mod tests {
         assert_eq!(timer.due_at, 150);
     }
 
+    #[cfg(unix)]
     #[test]
     fn pause_resume_preserves_remaining_delay_and_cancel_deletes() {
         let mut registry = test_registry(false);
@@ -1827,6 +1838,7 @@ mod tests {
         assert!(registry.store().get_timer(cancelled_id).unwrap().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn idle_any_requires_fresh_transition_all_can_be_satisfied_and_timeout_fires() {
         let mut registry = test_registry(true);
@@ -1945,6 +1957,7 @@ mod tests {
         wait_for_output(&mut registry, DELIVERY_ID, "received:[timeout wake]");
     }
 
+    #[cfg(unix)]
     #[test]
     fn idle_watch_ignores_a_transient_prompt_frame_and_fires_after_stable_idle() {
         const FLICKER_ID: ProcessId = 13;
@@ -2001,6 +2014,7 @@ mod tests {
         wait_for_output(&mut registry, DELIVERY_ID, "received:[stable idle wake]");
     }
 
+    #[cfg(unix)]
     #[test]
     fn focus_in_and_out_redraws_leave_an_idle_agent_idle_without_notifications() {
         const FOCUSED_ID: ProcessId = 14;
@@ -2060,6 +2074,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unwatched_done_agent_self_clears_without_rapidly_refiring() {
         let mut registry = test_registry(true);

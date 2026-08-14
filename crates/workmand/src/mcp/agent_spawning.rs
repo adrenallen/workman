@@ -1915,6 +1915,7 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn kimi_launch_uses_a_private_home_and_materializes_the_process_token() {
         let deep_check = kimi_deep_check_command(

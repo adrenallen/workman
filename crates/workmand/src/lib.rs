@@ -1941,6 +1941,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn status_stream_delivers_silent_process_exit_before_next_stats_sample() {
         let server = TestServer::start().await;

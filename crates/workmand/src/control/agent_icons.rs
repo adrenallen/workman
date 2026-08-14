@@ -347,6 +347,7 @@ mod tests {
         assert!(matches!(error, AgentIconError::UnsupportedFormat));
     }
 
+    #[cfg(unix)]
     #[test]
     fn override_accepts_a_terminal_escaped_clipboard_path() {
         let temp = tempfile::tempdir().unwrap();

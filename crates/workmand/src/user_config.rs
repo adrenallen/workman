@@ -958,8 +958,8 @@ mod tests {
     use super::save_user_shell_from_settings_at;
     use super::{
         UserAgentTool, delete_agent_tool_from_settings_at, parse_user_config,
-        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at,
-        select_update_key, sync_user_agent_tools, sync_user_config_file,
+        reorder_agent_tools_from_settings_at, save_agent_tool_from_settings_at, select_update_key,
+        sync_user_agent_tools, sync_user_config_file,
     };
 
     fn configured(name: &str, command: &str, tool_type: Option<&str>) -> UserAgentTool {

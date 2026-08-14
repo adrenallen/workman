@@ -1278,7 +1278,7 @@ mod tests {
         let desktop = Path::new("/tmp/workman-target/debug/workman-desktop");
         assert_eq!(
             daemon_executable_from(desktop, None, true),
-            Path::new("/tmp/workman-target/debug/workmand")
+            desktop.with_file_name(format!("workmand{}", env::consts::EXE_SUFFIX))
         );
     }
 
@@ -1331,6 +1331,9 @@ mod tests {
         assert_eq!(environment, (Some(data_dir), Some(config), Some(daemon)));
     }
 
+    // The per-todo visual-QA contract pins bundles under `/tmp`, which only
+    // exists on Unix hosts; the bundle flow itself is macOS-only.
+    #[cfg(unix)]
     #[test]
     fn native_visual_qa_bundle_requires_per_todo_tmp_paths() {
         let identifier = "com.workman.todo307";
