@@ -295,6 +295,7 @@ pub struct Todo {
     pub completed: bool,
     pub tags: Vec<String>,
     pub lock_actor: Option<String>,
+    pub lock_process_id: Option<ProcessId>,
     pub lock_expiry: Option<i64>,
 }
 
@@ -336,15 +337,18 @@ pub struct ProjectLock {
     pub project_id: ProjectId,
     pub key: String,
     pub owner_actor: String,
+    pub owner_process_id: Option<ProcessId>,
     pub acquired_at: i64,
     pub ttl_ms: i64,
 }
 
-/// A deferred prompt delivery owned by an MCP actor.
+/// A deferred prompt delivery owned by a durable process when one is available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timer {
     pub id: TimerId,
+    #[serde(skip_serializing)]
     pub owner_actor: String,
+    pub owner_process_id: Option<ProcessId>,
     pub delivery_process_id: ProcessId,
     pub body: String,
     pub kind: TimerKind,

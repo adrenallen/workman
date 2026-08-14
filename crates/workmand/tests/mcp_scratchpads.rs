@@ -206,10 +206,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         )?;
         assert_eq!(
             attribution,
-            (
-                "scratchpad-agent (agent 1)".into(),
-                "scratchpad-agent (agent 1)".into()
-            )
+            ("scratchpad-agent".into(), "scratchpad-agent".into())
         );
     }
 
@@ -223,14 +220,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         headings["scratchpad"]["content"],
         "# Shared Plan\n## Next Steps\n### Detail"
     );
-    assert_eq!(
-        headings["scratchpad"]["created_by"],
-        "scratchpad-agent (agent 1)"
-    );
-    assert_eq!(
-        headings["scratchpad"]["updated_by"],
-        "scratchpad-agent (agent 1)"
-    );
+    assert_eq!(headings["scratchpad"]["created_by"], "scratchpad-agent");
+    assert_eq!(headings["scratchpad"]["updated_by"], "scratchpad-agent");
     let section = call(
         &first,
         "scratchpad_read",
@@ -394,7 +385,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     .await;
     assert_eq!(tail["requested_lines"], 2);
     assert_eq!(tail["returned_lines"], 2);
-    assert_eq!(tail["updated_by"], "scratchpad-agent (agent 1)");
+    assert_eq!(tail["updated_by"], "scratchpad-agent");
     let listed = call(
         &first,
         "scratchpad_list",
@@ -402,10 +393,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     )
     .await;
     assert_eq!(listed["total_count"], 1);
-    assert_eq!(
-        listed["scratchpads"][0]["updated_by"],
-        "scratchpad-agent (agent 1)"
-    );
+    assert_eq!(listed["scratchpads"][0]["updated_by"], "scratchpad-agent");
     assert_eq!(listed["scratchpads"][0]["matched_fields"][0], "content");
     assert!(
         listed["scratchpads"][0]["match_snippet"]

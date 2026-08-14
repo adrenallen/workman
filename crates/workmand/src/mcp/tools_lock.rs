@@ -66,7 +66,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Release a live lease lock owned by this MCP actor")]
+    #[tool(
+        description = "Release a live lease lock owned by this MCP process; ownership survives MCP reconnects"
+    )]
     async fn lock_release(
         &self,
         Extension(parts): Extension<Parts>,
@@ -116,7 +118,11 @@ fn readable_lease(store: &Store, lease: LeaseView) -> serde_json::Value {
     json!({
         "project_id": lease.project_id,
         "lock_key": lease.lock_key,
-        "owner_actor": store.actor_display_label(&lease.owner_actor_id),
+        "owner_actor": store.ownership_display_label(
+            &lease.owner_actor_id,
+            lease.owner_process_id,
+        ),
+        "owner_process_id": lease.owner_process_id,
         "acquired_at": lease.acquired_at,
         "expires_at": lease.expires_at,
     })
@@ -133,7 +139,7 @@ fn lock_failure(store: Option<&Store>, error: LockServiceError) -> CallToolResul
             Some(store),
         ) => format!(
             "lock {lock_key:?} is held by {} until {expires_at}",
-            store.actor_display_label(owner_actor_id)
+            store.ownership_display_label(owner_actor_id, None)
         ),
         (
             LockServiceError::NotOwned {
@@ -142,8 +148,8 @@ fn lock_failure(store: Option<&Store>, error: LockServiceError) -> CallToolResul
             },
             Some(store),
         ) => format!(
-            "lock {lock_key:?} is owned by {}, not this actor",
-            store.actor_display_label(owner_actor_id)
+            "lock {lock_key:?} is owned by {}, not this process or session",
+            store.ownership_display_label(owner_actor_id, None)
         ),
         _ => error.to_string(),
     };

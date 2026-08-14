@@ -5,7 +5,7 @@ use std::{error::Error, fmt};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::{ProjectId, ProjectLock, Store, StoreError};
+use crate::{ProcessId, ProjectId, ProjectLock, Store, StoreError};
 
 pub const MAX_LOCK_KEY_BYTES: usize = 128;
 pub const MAX_LOCK_LEASE_TTL_MS: i64 = 86_400_000;
@@ -16,6 +16,7 @@ pub struct LeaseView {
     pub project_id: ProjectId,
     pub lock_key: String,
     pub owner_actor_id: String,
+    pub owner_process_id: Option<ProcessId>,
     pub acquired_at: i64,
     pub expires_at: i64,
 }
@@ -26,6 +27,7 @@ impl From<ProjectLock> for LeaseView {
             project_id: lock.project_id,
             lock_key: lock.key,
             owner_actor_id: lock.owner_actor,
+            owner_process_id: lock.owner_process_id,
             acquired_at: lock.acquired_at,
             expires_at: lock.acquired_at.saturating_add(lock.ttl_ms),
         }
@@ -91,7 +93,7 @@ impl fmt::Display for LockServiceError {
                 owner_actor_id,
             } => write!(
                 formatter,
-                "lock {lock_key:?} is owned by {owner_actor_id}, not this actor"
+                "lock {lock_key:?} is owned by {owner_actor_id}, not this process or session"
             ),
         }
     }
@@ -137,17 +139,30 @@ impl<'store> LockService<'store> {
         if !(1..=MAX_LOCK_LEASE_TTL_MS).contains(&lease_ttl_ms) {
             return Err(LockServiceError::InvalidLeaseTtl);
         }
+        let owner_process_id = self.actor_process_id(actor_id)?;
 
         let changed = self.store.connection().execute(
-            "INSERT INTO locks (project_id, key, owner_actor, acquired_at, ttl)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO locks (project_id, key, owner_actor, owner_process_id, acquired_at, ttl)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(project_id, key) DO UPDATE SET
                 owner_actor = excluded.owner_actor,
+                owner_process_id = excluded.owner_process_id,
                 acquired_at = excluded.acquired_at,
                 ttl = excluded.ttl
-             WHERE locks.owner_actor = excluded.owner_actor
+             WHERE (excluded.owner_process_id IS NOT NULL
+                    AND locks.owner_process_id = excluded.owner_process_id)
+                OR (excluded.owner_process_id IS NULL
+                    AND locks.owner_process_id IS NULL
+                    AND locks.owner_actor = excluded.owner_actor)
                 OR locks.acquired_at + locks.ttl <= excluded.acquired_at",
-            params![project_id, lock_key, actor_id, now_ms, lease_ttl_ms],
+            params![
+                project_id,
+                lock_key,
+                actor_id,
+                owner_process_id,
+                now_ms,
+                lease_ttl_ms
+            ],
         )?;
         if changed == 0 {
             let lease = self
@@ -174,11 +189,14 @@ impl<'store> LockService<'store> {
         self.require_project(project_id)?;
         validate_lock_key(lock_key)?;
         validate_actor(actor_id)?;
+        let owner_process_id = self.actor_process_id(actor_id)?;
         let changed = self.store.connection().execute(
             "DELETE FROM locks
-             WHERE project_id = ?1 AND key = ?2 AND owner_actor = ?3
-               AND acquired_at + ttl > ?4",
-            params![project_id, lock_key, actor_id, now_ms],
+             WHERE project_id = ?1 AND key = ?2
+               AND ((?4 IS NOT NULL AND owner_process_id = ?4)
+                    OR (?4 IS NULL AND owner_process_id IS NULL AND owner_actor = ?3))
+               AND acquired_at + ttl > ?5",
+            params![project_id, lock_key, actor_id, owner_process_id, now_ms],
         )?;
         if changed > 0 {
             return Ok(true);
@@ -226,6 +244,13 @@ impl<'store> LockService<'store> {
             .store
             .get_project_lock(project_id, lock_key)?
             .map(LeaseView::from))
+    }
+
+    fn actor_process_id(&self, actor_id: &str) -> LockServiceResult<Option<ProcessId>> {
+        Ok(self
+            .store
+            .get_actor(actor_id)?
+            .and_then(|actor| actor.process_id))
     }
 }
 

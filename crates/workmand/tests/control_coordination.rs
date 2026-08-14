@@ -440,7 +440,7 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
         json!({ "project_id": 1, "todo_id": created_id }),
     )
     .await;
-    assert_eq!(locked["locked_by"], "desktop-ui");
+    assert_eq!(locked["locked_by"], "user");
     let unlocked = rpc(
         &mut socket,
         "todo-unlock",
@@ -461,7 +461,7 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
         }),
     )
     .await;
-    assert_eq!(comment["actor"], "desktop-ui");
+    assert_eq!(comment["actor"], "user");
 
     let completed = rpc(
         &mut socket,

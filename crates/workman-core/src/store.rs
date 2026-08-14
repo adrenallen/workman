@@ -138,10 +138,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "grok_agent_preset",
         include_str!("../migrations/0026_grok_agent_preset.sql"),
     ),
+    (
+        27,
+        "process_ownership",
+        include_str!("../migrations/0027_process_ownership.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 26;
+pub const LATEST_SCHEMA_VERSION: i64 = 27;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -1563,8 +1568,9 @@ impl Store {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO todos (
-                id, project_id, title, body, status, priority, completed, lock_actor, lock_expiry
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                id, project_id, title, body, status, priority, completed, lock_actor,
+                lock_process_id, lock_expiry
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 title = excluded.title,
@@ -1573,6 +1579,7 @@ impl Store {
                 priority = excluded.priority,
                 completed = excluded.completed,
                 lock_actor = excluded.lock_actor,
+                lock_process_id = excluded.lock_process_id,
                 lock_expiry = excluded.lock_expiry",
             params![
                 todo.id,
@@ -1583,6 +1590,7 @@ impl Store {
                 todo.priority,
                 todo.completed,
                 todo.lock_actor,
+                todo.lock_process_id,
                 todo.lock_expiry,
             ],
         )?;
@@ -1602,7 +1610,7 @@ impl Store {
             .connection
             .query_row(
                 "SELECT id, project_id, title, body, status, priority, completed,
-                        lock_actor, lock_expiry
+                        lock_actor, lock_process_id, lock_expiry
                  FROM todos WHERE id = ?1",
                 [id],
                 |row| {
@@ -1616,7 +1624,8 @@ impl Store {
                         completed: row.get(6)?,
                         tags: Vec::new(),
                         lock_actor: row.get(7)?,
-                        lock_expiry: row.get(8)?,
+                        lock_process_id: row.get(8)?,
+                        lock_expiry: row.get(9)?,
                     })
                 },
             )
@@ -1782,16 +1791,18 @@ impl Store {
 
     pub fn put_project_lock(&self, lock: &ProjectLock) -> StoreResult<()> {
         self.connection.execute(
-            "INSERT INTO locks (project_id, key, owner_actor, acquired_at, ttl)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO locks (project_id, key, owner_actor, owner_process_id, acquired_at, ttl)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(project_id, key) DO UPDATE SET
                 owner_actor = excluded.owner_actor,
+                owner_process_id = excluded.owner_process_id,
                 acquired_at = excluded.acquired_at,
                 ttl = excluded.ttl",
             params![
                 lock.project_id,
                 lock.key,
                 lock.owner_actor,
+                lock.owner_process_id,
                 lock.acquired_at,
                 lock.ttl_ms,
             ],
@@ -1807,7 +1818,7 @@ impl Store {
         let lock = self
             .connection
             .query_row(
-                "SELECT project_id, key, owner_actor, acquired_at, ttl
+                "SELECT project_id, key, owner_actor, owner_process_id, acquired_at, ttl
                  FROM locks WHERE project_id = ?1 AND key = ?2",
                 params![project_id, key],
                 |row| {
@@ -1815,8 +1826,9 @@ impl Store {
                         project_id: row.get(0)?,
                         key: row.get(1)?,
                         owner_actor: row.get(2)?,
-                        acquired_at: row.get(3)?,
-                        ttl_ms: row.get(4)?,
+                        owner_process_id: row.get(3)?,
+                        acquired_at: row.get(4)?,
+                        ttl_ms: row.get(5)?,
                     })
                 },
             )
@@ -1828,11 +1840,12 @@ impl Store {
         let watch_list = to_json(&timer.watch_process_ids)?;
         self.connection.execute(
             "INSERT INTO timers (
-                id, owner_actor, delivery_process_id, body, kind, watch_list, interval,
-                loop, max_wait_deadline, paused, fired, fired_at, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                id, owner_actor, owner_process_id, delivery_process_id, body, kind, watch_list,
+                interval, loop, max_wait_deadline, paused, fired, fired_at, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 owner_actor = excluded.owner_actor,
+                owner_process_id = excluded.owner_process_id,
                 delivery_process_id = excluded.delivery_process_id,
                 body = excluded.body,
                 kind = excluded.kind,
@@ -1847,6 +1860,7 @@ impl Store {
             params![
                 timer.id,
                 timer.owner_actor,
+                timer.owner_process_id,
                 timer.delivery_process_id,
                 timer.body,
                 timer.kind,
@@ -1867,25 +1881,26 @@ impl Store {
         let timer = self
             .connection
             .query_row(
-                "SELECT id, owner_actor, delivery_process_id, body, kind, watch_list,
-                        interval, loop, max_wait_deadline, paused, fired, fired_at, created_at
+                "SELECT id, owner_actor, owner_process_id, delivery_process_id, body, kind,
+                        watch_list, interval, loop, max_wait_deadline, paused, fired, fired_at, created_at
                  FROM timers WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(Timer {
                         id: row.get(0)?,
                         owner_actor: row.get(1)?,
-                        delivery_process_id: row.get(2)?,
-                        body: row.get(3)?,
-                        kind: row.get(4)?,
-                        watch_process_ids: json_from_row(row, 5)?,
-                        interval_ms: row.get(6)?,
-                        repeating: row.get(7)?,
-                        max_wait_deadline: row.get(8)?,
-                        paused: row.get(9)?,
-                        fired: row.get(10)?,
-                        fired_at: row.get(11)?,
-                        created_at: row.get(12)?,
+                        owner_process_id: row.get(2)?,
+                        delivery_process_id: row.get(3)?,
+                        body: row.get(4)?,
+                        kind: row.get(5)?,
+                        watch_process_ids: json_from_row(row, 6)?,
+                        interval_ms: row.get(7)?,
+                        repeating: row.get(8)?,
+                        max_wait_deadline: row.get(9)?,
+                        paused: row.get(10)?,
+                        fired: row.get(11)?,
+                        fired_at: row.get(12)?,
+                        created_at: row.get(13)?,
                     })
                 },
             )
@@ -1960,30 +1975,33 @@ impl Store {
         Ok(actor)
     }
 
-    /// Resolve a stored server-issued actor id into stable, human-readable attribution.
-    /// Already-readable user/service labels are returned unchanged.
+    /// Resolve actor attribution through the actor's current process name.
+    /// Process-less MCP sessions deliberately receive a neutral label rather than exposing IDs.
     pub fn actor_display_label(&self, actor_id: &str) -> String {
+        if matches!(actor_id, "desktop-ui" | "workman" | "user") {
+            return "user".into();
+        }
         if !actor_id.starts_with("mcp-") {
             return actor_id.to_string();
         }
 
         let actor = self.get_actor(actor_id).ok().flatten();
-        if actor.is_none() && !looks_like_mcp_actor_id(actor_id) {
-            return actor_id.to_string();
-        }
         let process = actor
             .and_then(|actor| actor.process_id)
             .and_then(|process_id| self.get_process(process_id).ok().flatten());
         if let Some(process) = process {
-            let role = if process.kind == ProcessKind::Agent {
-                "agent"
-            } else {
-                "process"
-            };
-            return format!("{} ({role} {})", process.name, process.id);
+            return process.name;
         }
 
-        external_actor_label(actor_id)
+        "session".into()
+    }
+
+    /// Resolve durable ownership through a process ID before falling back to actor attribution.
+    pub fn ownership_display_label(&self, actor_id: &str, process_id: Option<ProcessId>) -> String {
+        process_id
+            .and_then(|process_id| self.get_process(process_id).ok().flatten())
+            .map(|process| process.name)
+            .unwrap_or_else(|| self.actor_display_label(actor_id))
     }
 
     /// Exercise a temporary write/read/delete cycle on the active SQLite connection.
@@ -2009,34 +2027,6 @@ impl Store {
         transaction.commit()?;
         Ok(value == "ok")
     }
-}
-
-fn external_actor_label(actor_id: &str) -> String {
-    let suffix: String = actor_id
-        .strip_prefix("mcp-")
-        .unwrap_or(actor_id)
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    if suffix.is_empty() {
-        "external agent".into()
-    } else {
-        format!("external agent ({suffix})")
-    }
-}
-
-fn looks_like_mcp_actor_id(actor_id: &str) -> bool {
-    actor_id.strip_prefix("mcp-").is_some_and(|suffix| {
-        suffix.len() >= 12
-            && suffix
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-    })
 }
 
 fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {

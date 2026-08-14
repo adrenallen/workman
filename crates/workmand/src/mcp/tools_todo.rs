@@ -258,7 +258,7 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = actor_label(registry.store(), &actor);
-        let service = TodoService::attributed(registry.store(), actor_label.clone());
+        let service = TodoService::attributed(registry.store(), actor.id.clone());
         let created = match service.create(
             project.id,
             NewTodo {
@@ -373,7 +373,7 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = actor_label(registry.store(), &actor);
-        let service = TodoService::attributed(registry.store(), actor_label.clone());
+        let service = TodoService::attributed(registry.store(), actor.id.clone());
         let updated = match service.update(
             project.id,
             args.todo_id,
@@ -564,7 +564,7 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = actor_label(registry.store(), &actor);
-        let service = TodoService::attributed(registry.store(), actor_label.clone());
+        let service = TodoService::attributed(registry.store(), actor.id.clone());
         match service.comment_create_as(
             project.id,
             args.todo_id,
@@ -675,8 +675,7 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = actor_label(registry.store(), &actor);
-        let service = TodoService::attributed(registry.store(), actor_label);
+        let service = TodoService::attributed(registry.store(), actor.id.clone());
         match service.lock(
             project.id,
             args.todo_id,
@@ -689,7 +688,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Release a todo lock owned by this MCP actor")]
+    #[tool(
+        description = "Release a todo lock owned by this MCP process; ownership survives MCP reconnects"
+    )]
     async fn todo_unlock(
         &self,
         Extension(parts): Extension<Parts>,
@@ -700,8 +701,7 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = actor_label(registry.store(), &actor);
-        match TodoService::attributed(registry.store(), actor_label).unlock(
+        match TodoService::attributed(registry.store(), actor.id.clone()).unlock(
             project.id,
             args.todo_id,
             &actor.id,
@@ -713,7 +713,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Mark a todo complete or incomplete and optionally release this actor's lock"
+        description = "Mark a todo complete or incomplete and optionally release this MCP process's lock"
     )]
     async fn todo_complete(
         &self,
@@ -725,8 +725,7 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        let actor_label = actor_label(registry.store(), &actor);
-        match TodoService::attributed(registry.store(), actor_label).complete(
+        match TodoService::attributed(registry.store(), actor.id.clone()).complete(
             project.id,
             args.todo_id,
             &actor.id,

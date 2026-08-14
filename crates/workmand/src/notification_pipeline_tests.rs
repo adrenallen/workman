@@ -128,6 +128,7 @@ impl ScriptedPipeline {
             .put_timer(&Timer {
                 id: timer_id,
                 owner_actor: "notification-harness".into(),
+                owner_process_id: None,
                 delivery_process_id: PROCESS_ID,
                 body: "consumed watch delivery".into(),
                 kind: TimerKind::IdleAny,
@@ -466,6 +467,7 @@ fn watched_completion_is_suppressed_for_row_dot_badge_and_os_delivery() {
         .put_timer(&Timer {
             id: 433,
             owner_actor: "notification-harness".into(),
+            owner_process_id: None,
             delivery_process_id: PROCESS_ID,
             body: "react to completion".into(),
             kind: TimerKind::IdleAny,

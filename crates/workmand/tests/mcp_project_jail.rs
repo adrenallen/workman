@@ -218,6 +218,7 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
             "timer_set",
             json!({ "project_id": 2, "delay_ms": 1000, "body": "no" }),
         ),
+        ("timer_list", json!({ "project_id": 2 })),
         (
             "lock_acquire",
             json!({ "project_id": 2, "lock_key": "foreign", "lease_ttl_seconds": 60 }),

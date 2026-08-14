@@ -257,6 +257,7 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
         registry.store().put_timer(&Timer {
             id: 900,
             owner_actor: "observer-owner".into(),
+            owner_process_id: Some(observer_id),
             delivery_process_id: observer_id,
             body: "child finished".into(),
             kind: TimerKind::IdleAny,

@@ -43,7 +43,8 @@ async fn connect(endpoint: String, bearer_token: String) -> Result<Client, Box<d
 }
 
 #[tokio::test]
-async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<dyn Error>> {
+async fn todo_lock_ownership_survives_actor_rotation_and_rejects_other_processes()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let first_path = temp.path().join("one");
     let second_path = temp.path().join("two");
@@ -90,6 +91,28 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry.store().put_process(&Process {
+            id: 2,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "other-todo-agent".into(),
+            command: Some("true".into()),
+            working_dir: first_path.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 1,
+        })?;
         registry.store().put_project(&Project {
             id: 2,
             path: second_path.to_string_lossy().into_owned(),
@@ -107,9 +130,11 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let second = connect(endpoint, discovery.token.clone()).await?;
+    let second = connect(endpoint.clone(), discovery.token.clone()).await?;
+    let other = connect(endpoint, discovery.token.clone()).await?;
     call(&first, "identify_session", json!({ "process_id": 1 })).await;
     call(&second, "identify_session", json!({ "process_id": 1 })).await;
+    call(&other, "identify_session", json!({ "process_id": 2 })).await;
     let first_identity = call(&first, "whoami", json!({})).await;
     let second_identity = call(&second, "whoami", json!({})).await;
     assert_ne!(first_identity["actor_id"], second_identity["actor_id"]);
@@ -196,45 +221,54 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     let first_lock = invoke(
         &first,
         "todo_lock",
-        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60 }),
+        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60, "response_mode": "rich" }),
     );
     let second_lock = invoke(
         &second,
         "todo_lock",
-        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60 }),
+        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60, "response_mode": "rich" }),
     );
     let (first_result, second_result) = tokio::join!(first_lock, second_lock);
-    let first_won = first_result.is_error != Some(true);
-    let second_won = second_result.is_error != Some(true);
-    assert_ne!(
-        first_won, second_won,
-        "exactly one MCP actor must acquire the lease"
-    );
-    let loser_result = if first_won {
-        &second_result
-    } else {
-        &first_result
-    };
-    assert_eq!(loser_result.is_error, Some(true));
+    assert_ne!(first_result.is_error, Some(true));
+    assert_ne!(second_result.is_error, Some(true));
     assert_eq!(
-        loser_result.structured_content.as_ref().unwrap()["code"],
-        "todo_locked"
+        second_result.structured_content.as_ref().unwrap()["locked_by"],
+        "todo-agent"
     );
 
-    let (winner, loser) = if first_won {
-        (&first, &second)
-    } else {
-        (&second, &first)
-    };
+    let other_result = invoke(
+        &other,
+        "todo_lock",
+        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60 }),
+    )
+    .await;
+    assert_eq!(other_result.is_error, Some(true));
+    assert_eq!(
+        other_result.structured_content.as_ref().unwrap()["code"],
+        "todo_locked"
+    );
+    let wrong_unlock = invoke(&other, "todo_unlock", json!({ "todo_id": todo_id })).await;
+    assert_eq!(wrong_unlock.is_error, Some(true));
+    assert_eq!(
+        wrong_unlock.structured_content.as_ref().unwrap()["code"],
+        "todo_lock_not_owned"
+    );
+    call(&second, "todo_unlock", json!({ "todo_id": todo_id })).await;
+    call(
+        &first,
+        "todo_lock",
+        json!({ "todo_id": todo_id, "lease_ttl_seconds": 60 }),
+    )
+    .await;
     let completed = call(
-        winner,
+        &second,
         "todo_complete",
         json!({ "todo_id": todo_id, "completed": true }),
     )
     .await;
     assert_eq!(completed["completed"], true);
     call(
-        loser,
+        &other,
         "todo_lock",
         json!({ "todo_id": todo_id, "lease_ttl_seconds": 60 }),
     )
@@ -287,7 +321,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
     assert_eq!(rich["todo"]["completed"], true);
     assert_eq!(rich["comments"].as_array().unwrap().len(), 1);
     assert_eq!(
-        rich["comments"][0]["actor"], "todo-agent (agent 1)",
+        rich["comments"][0]["actor"], "todo-agent",
         "client-supplied actor names must not cross the server trust boundary"
     );
     {
@@ -302,21 +336,33 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
         assert!(
             activity_actors
                 .iter()
-                .all(|actor| actor == "todo-agent (agent 1)")
+                .all(|actor| actor.starts_with("mcp-"))
         );
         let stored_comment_actor: String = registry.store().connection().query_row(
             "SELECT actor FROM todo_comments WHERE id = ?1",
             [comment_id],
             |row| row.get(0),
         )?;
-        assert_eq!(stored_comment_actor, "todo-agent (agent 1)");
+        assert_eq!(
+            stored_comment_actor,
+            first_identity["actor_id"].as_str().unwrap()
+        );
         registry.store().connection().execute(
             "INSERT INTO todo_activity (todo_id, actor, kind, created_at)
              VALUES (?1, ?2, 'locked', 9999999999999)",
             rusqlite::params![todo_id, first_identity["actor_id"].as_str().unwrap()],
         )?;
         let activity = TodoService::new(registry.store()).activity_list(1, todo_id, 10_000)?;
-        assert_eq!(activity.last().unwrap().actor, "todo-agent (agent 1)");
+        assert_eq!(activity.last().unwrap().actor, "todo-agent");
+        registry.store().connection().execute(
+            "UPDATE processes SET name = 'renamed-todo-agent' WHERE id = 1",
+            [],
+        )?;
+        let activity = TodoService::new(registry.store()).activity_list(1, todo_id, 10_000)?;
+        assert_eq!(activity.last().unwrap().actor, "renamed-todo-agent");
+        let comments =
+            TodoService::new(registry.store()).comment_list(1, todo_id, 0, Some(10), 10_000)?;
+        assert_eq!(comments.comments[0].actor, "renamed-todo-agent");
         let external_actor_id = "mcp-0123456789abcdef";
         registry.store().put_actor(&Actor {
             id: external_actor_id.into(),
@@ -332,7 +378,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
             rusqlite::params![todo_id, external_actor_id],
         )?;
         let activity = TodoService::new(registry.store()).activity_list(1, todo_id, 10_000)?;
-        assert_eq!(activity.last().unwrap().actor, "external agent (abcdef)");
+        assert_eq!(activity.last().unwrap().actor, "session");
         assert!(!activity.last().unwrap().actor.contains(external_actor_id));
     }
     let listed = call(
@@ -366,6 +412,7 @@ async fn concurrent_mcp_sessions_cannot_double_claim_a_todo() -> Result<(), Box<
 
     let _ = first.cancel().await;
     let _ = second.cancel().await;
+    let _ = other.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())

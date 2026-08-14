@@ -49,7 +49,7 @@ fn todo_activity_records_lifecycle_edges_without_renewal_noise() {
             TodoActivityKind::Reopened,
         ]
     );
-    assert_eq!(activity[1].actor, "desktop-ui");
+    assert_eq!(activity[1].actor, "user");
 }
 
 fn create_todo(service: &TodoService<'_>, project_id: i64, title: &str) -> i64 {

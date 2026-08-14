@@ -155,7 +155,9 @@ impl WorkmanMcp {
         self.set_idle_timer(&parts, args, TimerKind::IdleAll).await
     }
 
-    #[tool(description = "Cancel and delete one timer owned by this MCP actor")]
+    #[tool(
+        description = "Cancel and delete one timer owned by this MCP process; ownership survives MCP reconnects"
+    )]
     async fn timer_cancel(
         &self,
         Extension(parts): Extension<Parts>,
@@ -185,7 +187,7 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Pause one active timer owned by this MCP actor")]
+    #[tool(description = "Pause one active timer owned by this MCP process")]
     async fn timer_pause(
         &self,
         Extension(parts): Extension<Parts>,
@@ -194,7 +196,7 @@ impl WorkmanMcp {
         self.change_timer_pause(&parts, args, true).await
     }
 
-    #[tool(description = "Resume one paused timer owned by this MCP actor")]
+    #[tool(description = "Resume one paused timer owned by this MCP process")]
     async fn timer_resume(
         &self,
         Extension(parts): Extension<Parts>,
@@ -203,14 +205,16 @@ impl WorkmanMcp {
         self.change_timer_pause(&parts, args, false).await
     }
 
-    #[tool(description = "List timers owned by this MCP actor in the effective project")]
+    #[tool(
+        description = "List all timers visible in the effective project, including owner process, schedule, watch list, and state; mutations remain owner-process-only"
+    )]
     async fn timer_list(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<TimerListArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
@@ -218,7 +222,7 @@ impl WorkmanMcp {
             .limit
             .unwrap_or(DEFAULT_TIMER_LIST_LIMIT)
             .clamp(1, MAX_TIMER_LIST_LIMIT);
-        match TimerService::new(&mut registry).list(&actor.id, project.id, limit, now_millis()) {
+        match TimerService::new(&mut registry).list(project.id, limit, now_millis()) {
             Ok(timers) => success(json!({ "timers": timers })),
             Err(error) => timer_failure(error),
         }

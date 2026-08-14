@@ -263,6 +263,79 @@ fn version_one_database_migrates_mcp_identity_schema() {
 }
 
 #[test]
+fn process_ownership_migration_backfills_actor_links_and_timer_fallback() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open connection");
+    connection
+        .execute_batch(
+            "CREATE TABLE processes (id INTEGER PRIMARY KEY);
+             CREATE TABLE actors (id TEXT PRIMARY KEY, process_id INTEGER);
+             CREATE TABLE timers (
+                id INTEGER PRIMARY KEY,
+                owner_actor TEXT NOT NULL,
+                delivery_process_id INTEGER NOT NULL
+             );
+             CREATE TABLE todos (
+                id INTEGER PRIMARY KEY,
+                lock_actor TEXT
+             );
+             CREATE TABLE locks (
+                project_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                owner_actor TEXT NOT NULL,
+                PRIMARY KEY (project_id, key)
+             );
+             INSERT INTO processes(id) VALUES (10), (11), (20), (30);
+             INSERT INTO actors(id, process_id) VALUES
+                ('timer-owner', 10), ('todo-owner', 20), ('lease-owner', 30);
+             INSERT INTO timers(id, owner_actor, delivery_process_id) VALUES
+                (1, 'timer-owner', 11), (2, 'missing-actor', 11);
+             INSERT INTO todos(id, lock_actor) VALUES
+                (3, 'todo-owner'), (4, 'missing-actor'), (5, NULL);
+             INSERT INTO locks(project_id, key, owner_actor) VALUES
+                (1, 'mapped', 'lease-owner'), (1, 'fallback', 'missing-actor');",
+        )
+        .expect("create legacy ownership rows");
+
+    connection
+        .execute_batch(include_str!("../migrations/0027_process_ownership.sql"))
+        .expect("apply process ownership migration");
+
+    let timers = connection
+        .prepare("SELECT id, owner_process_id FROM timers ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(timers, [(1, 10), (2, 11)]);
+
+    let todos = connection
+        .prepare("SELECT id, lock_process_id FROM todos ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(todos, [(3, Some(20)), (4, None), (5, None)]);
+
+    let locks = connection
+        .prepare("SELECT key, owner_process_id FROM locks ORDER BY key")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        locks,
+        [("fallback".into(), None), ("mapped".into(), Some(30))]
+    );
+}
+
+#[test]
 fn unique_agent_session_migration_clears_ambiguous_legacy_ids() {
     let connection = rusqlite::Connection::open_in_memory().expect("open connection");
     connection
@@ -574,12 +647,10 @@ fn domain_records_round_trip_through_store() {
         store.get_actor_by_session_id(&actor.session_id).unwrap(),
         Some(actor.clone())
     );
-    assert_eq!(store.actor_display_label(&actor.id), "codex-w1 (agent 3)");
-    assert_eq!(
-        store.actor_display_label("mcp-0123456789abcdef"),
-        "external agent (abcdef)"
-    );
-    assert_eq!(store.actor_display_label("desktop-ui"), "desktop-ui");
+    assert_eq!(store.actor_display_label(&actor.id), "codex-w1");
+    assert_eq!(store.actor_display_label("mcp-0123456789abcdef"), "session");
+    assert_eq!(store.actor_display_label("desktop-ui"), "user");
+    assert_eq!(store.actor_display_label("workman"), "user");
 
     let prerequisite = Todo {
         id: 4,
@@ -591,6 +662,7 @@ fn domain_records_round_trip_through_store() {
         completed: true,
         tags: vec!["core".into(), "m0".into()],
         lock_actor: None,
+        lock_process_id: None,
         lock_expiry: None,
     };
     store.put_todo(&prerequisite).expect("put prerequisite");
@@ -609,6 +681,7 @@ fn domain_records_round_trip_through_store() {
         completed: false,
         tags: vec!["sqlite".into(), "core".into()],
         lock_actor: Some(actor.id.clone()),
+        lock_process_id: actor.process_id,
         lock_expiry: Some(1_700_000_030_000),
     };
     store.put_todo(&todo).expect("put todo");
@@ -658,6 +731,7 @@ fn domain_records_round_trip_through_store() {
         project_id: project.id,
         key: "schema".into(),
         owner_actor: actor.id.clone(),
+        owner_process_id: actor.process_id,
         acquired_at: 1_700_000_002_000,
         ttl_ms: 30_000,
     };
@@ -670,6 +744,7 @@ fn domain_records_round_trip_through_store() {
     let timer = Timer {
         id: 8,
         owner_actor: actor.id.clone(),
+        owner_process_id: actor.process_id,
         delivery_process_id: process.id,
         body: "Check worker status".into(),
         kind: TimerKind::IdleAll,

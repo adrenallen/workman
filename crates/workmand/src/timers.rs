@@ -143,6 +143,8 @@ struct TimerRuntime {
 pub(crate) struct TimerView {
     #[serde(flatten)]
     pub timer: Timer,
+    pub owner_process_name: Option<String>,
+    pub owner_label: String,
     pub due_at: i64,
     pub paused_at: Option<i64>,
 }
@@ -202,7 +204,8 @@ impl<'a> TimerService<'a> {
         if repeat_every_ms.is_some_and(|interval| interval <= 0) {
             return Err(TimerError::InvalidRepeatInterval);
         }
-        self.validate_agent_targets(&owner_actor, delivery_process_id, &[])?;
+        let owner_process_id = self.owner_process_id(&owner_actor)?;
+        self.validate_agent_targets(&owner_actor, owner_process_id, delivery_process_id, &[])?;
         let repeating = loop_timer || repeat_every_ms.is_some();
         let repeat_interval = if repeating {
             Some(repeat_every_ms.unwrap_or(delay_ms).max(1))
@@ -213,6 +216,7 @@ impl<'a> TimerService<'a> {
         let timer = Timer {
             id: self.next_timer_id()?,
             owner_actor,
+            owner_process_id,
             delivery_process_id,
             body,
             kind: TimerKind::Delay,
@@ -230,7 +234,7 @@ impl<'a> TimerService<'a> {
             ..TimerRuntime::default()
         };
         self.insert(&timer, &runtime)?;
-        Ok(TimerView::new(timer, runtime))
+        self.view(timer, runtime)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -250,7 +254,13 @@ impl<'a> TimerService<'a> {
         if watch_process_ids.is_empty() {
             return Err(TimerError::EmptyWatchList);
         }
-        self.validate_agent_targets(&owner_actor, delivery_process_id, &watch_process_ids)?;
+        let owner_process_id = self.owner_process_id(&owner_actor)?;
+        self.validate_agent_targets(
+            &owner_actor,
+            owner_process_id,
+            delivery_process_id,
+            &watch_process_ids,
+        )?;
         debug_assert!(matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll));
 
         let watch_process_ids = watch_process_ids
@@ -281,6 +291,7 @@ impl<'a> TimerService<'a> {
         let timer = Timer {
             id: self.next_timer_id()?,
             owner_actor,
+            owner_process_id,
             delivery_process_id,
             body,
             kind,
@@ -299,7 +310,7 @@ impl<'a> TimerService<'a> {
             watch_state,
         };
         self.insert(&timer, &runtime)?;
-        Ok(IdleTimerOutcome::Created(TimerView::new(timer, runtime)))
+        Ok(IdleTimerOutcome::Created(self.view(timer, runtime)?))
     }
 
     pub(crate) fn cancel(
@@ -315,7 +326,7 @@ impl<'a> TimerService<'a> {
             .connection()
             .execute("DELETE FROM timers WHERE id = ?1", [timer_id])
             .map_err(persistence)?;
-        Ok(TimerView::new(timer, runtime))
+        self.view(timer, runtime)
     }
 
     pub(crate) fn pause(
@@ -335,7 +346,7 @@ impl<'a> TimerService<'a> {
             runtime.paused_at = Some(now_ms);
             self.update(&timer, &runtime)?;
         }
-        Ok(TimerView::new(timer, runtime))
+        self.view(timer, runtime)
     }
 
     pub(crate) fn resume(
@@ -361,12 +372,11 @@ impl<'a> TimerService<'a> {
             timer.max_wait_deadline = Some(runtime.due_at);
             self.update(&timer, &runtime)?;
         }
-        Ok(TimerView::new(timer, runtime))
+        self.view(timer, runtime)
     }
 
     pub(crate) fn list(
         &mut self,
-        owner_actor: &str,
         project_id: ProjectId,
         limit: usize,
         now_ms: i64,
@@ -380,13 +390,13 @@ impl<'a> TimerService<'a> {
                     "SELECT timer.id
                      FROM timers AS timer
                      JOIN processes AS process ON process.id = timer.delivery_process_id
-                     WHERE timer.owner_actor = ?1 AND process.project_id = ?2
+                     WHERE process.project_id = ?1
                      ORDER BY timer.created_at DESC, timer.id DESC
-                     LIMIT ?3",
+                     LIMIT ?2",
                 )
                 .map_err(persistence)?;
             let rows = statement
-                .query_map((owner_actor, project_id, limit as i64), |row| row.get(0))
+                .query_map((project_id, limit as i64), |row| row.get(0))
                 .map_err(persistence)?;
             let mut timer_ids = Vec::new();
             for row in rows {
@@ -401,7 +411,7 @@ impl<'a> TimerService<'a> {
                 continue;
             };
             let runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
-            views.push(TimerView::new(timer, runtime));
+            views.push(self.view(timer, runtime)?);
         }
         Ok(views)
     }
@@ -437,7 +447,7 @@ impl<'a> TimerService<'a> {
                 continue;
             };
             let runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
-            views.push(TimerView::new(timer, runtime));
+            views.push(self.view(timer, runtime)?);
         }
         Ok(views)
     }
@@ -454,6 +464,7 @@ impl<'a> TimerService<'a> {
             }
             match self.validate_agent_targets(
                 &timer.owner_actor,
+                timer.owner_process_id,
                 timer.delivery_process_id,
                 &timer.watch_process_ids,
             ) {
@@ -532,7 +543,7 @@ impl<'a> TimerService<'a> {
                 delivery_process_id: timer.delivery_process_id,
                 reason,
                 fired_at: now_ms,
-                timer: TimerView::new(timer, runtime),
+                timer: self.view(timer, runtime)?,
             });
         }
         Ok(fired)
@@ -548,7 +559,6 @@ impl<'a> TimerService<'a> {
             .registry
             .store()
             .get_timer(timer_id)?
-            .filter(|timer| timer.owner_actor == owner_actor)
             .ok_or(TimerError::NotFound(timer_id))?;
         let delivery = self
             .registry
@@ -557,19 +567,37 @@ impl<'a> TimerService<'a> {
             .filter(|process| process.project_id == project_id)
             .ok_or(TimerError::NotFound(timer_id))?;
         debug_assert_eq!(delivery.id, timer.delivery_process_id);
+        let actor_process_id = self
+            .registry
+            .store()
+            .get_actor(owner_actor)?
+            .and_then(|actor| actor.process_id);
+        let authorized = match timer.owner_process_id {
+            Some(owner_process_id) => actor_process_id == Some(owner_process_id),
+            None => timer.owner_actor == owner_actor,
+        };
+        if !authorized {
+            return Err(TimerError::NotFound(timer_id));
+        }
         Ok(timer)
     }
 
     fn validate_agent_targets(
         &self,
         owner_actor: &str,
+        owner_process_id: Option<ProcessId>,
         delivery_process_id: ProcessId,
         watch_process_ids: &[ProcessId],
     ) -> TimerResult<()> {
-        let Some(actor) = self.registry.store().get_actor(owner_actor)? else {
-            return Ok(());
+        let owner_process_id = match owner_process_id {
+            Some(process_id) => Some(process_id),
+            None => self
+                .registry
+                .store()
+                .get_actor(owner_actor)?
+                .and_then(|actor| actor.process_id),
         };
-        let Some(owner_process_id) = actor.process_id else {
+        let Some(owner_process_id) = owner_process_id else {
             return Ok(());
         };
         let Some(owner_process) = self.registry.store().get_process(owner_process_id)? else {
@@ -591,6 +619,34 @@ impl<'a> TimerService<'a> {
             }
         }
         Ok(())
+    }
+
+    fn owner_process_id(&self, owner_actor: &str) -> TimerResult<Option<ProcessId>> {
+        Ok(self
+            .registry
+            .store()
+            .get_actor(owner_actor)?
+            .and_then(|actor| actor.process_id))
+    }
+
+    fn view(&self, timer: Timer, runtime: TimerRuntime) -> TimerResult<TimerView> {
+        let owner_process_name = timer
+            .owner_process_id
+            .map(|process_id| self.registry.store().get_process(process_id))
+            .transpose()?
+            .flatten()
+            .map(|process| process.name);
+        let owner_label = owner_process_name.clone().unwrap_or_else(|| {
+            self.registry
+                .store()
+                .ownership_display_label(&timer.owner_actor, None)
+        });
+        Ok(TimerView::new(
+            timer,
+            owner_process_name,
+            owner_label,
+            runtime,
+        ))
     }
 
     fn next_timer_id(&self) -> TimerResult<TimerId> {
@@ -798,9 +854,16 @@ pub(crate) fn advance_watch_progress(progress: &mut WatchProgress, idle: bool) {
 }
 
 impl TimerView {
-    fn new(timer: Timer, runtime: TimerRuntime) -> Self {
+    fn new(
+        timer: Timer,
+        owner_process_name: Option<String>,
+        owner_label: String,
+        runtime: TimerRuntime,
+    ) -> Self {
         Self {
             timer,
+            owner_process_name,
+            owner_label,
             due_at: runtime.due_at,
             paused_at: runtime.paused_at,
         }
@@ -1082,7 +1145,7 @@ mod tests {
         );
 
         let timers = TimerService::new(&mut registry)
-            .list("actor-delay", PROJECT_ID, 10, 1_050)
+            .list(PROJECT_ID, 10, 1_050)
             .unwrap();
         assert!(timers[0].timer.fired);
     }
@@ -1162,6 +1225,7 @@ mod tests {
             .put_timer(&Timer {
                 id: 999,
                 owner_actor: "jailed-timer-owner".into(),
+                owner_process_id: Some(DELIVERY_ID),
                 delivery_process_id: FOREIGN_PROCESS_ID,
                 body: "legacy escape".into(),
                 kind: TimerKind::Delay,
@@ -1276,7 +1340,7 @@ mod tests {
         );
         assert!(
             TimerService::new(&mut registry)
-                .list("actor-immediate", PROJECT_ID, 10, 2_000)
+                .list(PROJECT_ID, 10, 2_000)
                 .unwrap()
                 .is_empty()
         );
@@ -1534,7 +1598,7 @@ mod tests {
         );
         assert_eq!(TimerService::new(&mut registry).tick(130).unwrap().len(), 1);
         let timer = TimerService::new(&mut registry)
-            .list("actor-repeat", PROJECT_ID, 1, 130)
+            .list(PROJECT_ID, 1, 130)
             .unwrap()
             .pop()
             .unwrap();
@@ -1623,7 +1687,7 @@ mod tests {
         wait_for_output(&mut registry, DELIVERY_ID, "received:[already idle]");
         assert!(
             TimerService::new(&mut registry)
-                .list("actor-all", PROJECT_ID, 10, 0)
+                .list(PROJECT_ID, 10, 0)
                 .unwrap()
                 .is_empty()
         );

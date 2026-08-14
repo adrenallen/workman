@@ -6,8 +6,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    NotificationType, ProjectId, Store, StoreError, Todo, TodoComment, TodoCommentId, TodoId,
-    TodoPriority, TodoStatus,
+    NotificationType, ProcessId, ProjectId, Store, StoreError, Todo, TodoComment, TodoCommentId,
+    TodoId, TodoPriority, TodoStatus,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -229,7 +229,12 @@ impl fmt::Display for TodoServiceError {
             Self::Locked { todo_id, owner } => {
                 write!(formatter, "todo {todo_id} is locked by {owner}")
             }
-            Self::LockNotOwned(id) => write!(formatter, "this actor does not own todo {id}'s lock"),
+            Self::LockNotOwned(id) => {
+                write!(
+                    formatter,
+                    "this process or session does not own todo {id}'s lock"
+                )
+            }
         }
     }
 }
@@ -807,26 +812,32 @@ impl<'store> TodoService<'store> {
             ));
         }
         self.require_todo(project_id, todo_id, now_ms)?;
-        let current_actor = self
+        let owner_process_id = self.actor_process_id(actor)?;
+        let current = self
             .store
             .get_todo(todo_id)?
-            .and_then(|todo| todo.lock_actor);
-        let new_claim = current_actor.as_deref() != Some(actor);
+            .ok_or(TodoServiceError::TodoNotFound(todo_id))?;
+        let new_claim = !owns_todo_lock(&current, actor, owner_process_id);
         let expiry = now_ms
             .checked_add(lease_ttl_ms)
             .ok_or_else(|| TodoServiceError::InvalidInput("lease duration is too large".into()))?;
         let changed = self.store.connection().execute(
             "UPDATE todos SET
                  lock_acquired_at = CASE
-                   WHEN lock_actor = ?1 AND lock_expiry > ?5
+                   WHEN ((?6 IS NOT NULL AND lock_process_id = ?6)
+                         OR (?6 IS NULL AND lock_process_id IS NULL AND lock_actor = ?1))
+                        AND lock_expiry > ?5
                      THEN COALESCE(lock_acquired_at, ?5)
                    ELSE ?5
                  END,
                  lock_actor = ?1,
-                 lock_expiry = ?2
+                 lock_expiry = ?2,
+                 lock_process_id = ?6
              WHERE id = ?3 AND project_id = ?4
-               AND (lock_actor IS NULL OR lock_expiry IS NULL OR lock_expiry <= ?5 OR lock_actor = ?1)",
-            params![actor, expiry, todo_id, project_id, now_ms],
+               AND (lock_actor IS NULL OR lock_expiry IS NULL OR lock_expiry <= ?5
+                    OR (?6 IS NOT NULL AND lock_process_id = ?6)
+                    OR (?6 IS NULL AND lock_process_id IS NULL AND lock_actor = ?1))",
+            params![actor, expiry, todo_id, project_id, now_ms, owner_process_id],
         )?;
         if changed == 0 {
             let todo = self.require_todo(project_id, todo_id, now_ms)?;
@@ -849,10 +860,14 @@ impl<'store> TodoService<'store> {
         now_ms: i64,
     ) -> TodoServiceResult<TodoView> {
         self.require_todo(project_id, todo_id, now_ms)?;
+        let owner_process_id = self.actor_process_id(actor)?;
         let changed = self.store.connection().execute(
-            "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL, lock_acquired_at = NULL
-             WHERE id = ?1 AND project_id = ?2 AND lock_actor = ?3",
-            params![todo_id, project_id, actor],
+            "UPDATE todos SET lock_actor = NULL, lock_process_id = NULL,
+                              lock_expiry = NULL, lock_acquired_at = NULL
+             WHERE id = ?1 AND project_id = ?2
+               AND ((?4 IS NOT NULL AND lock_process_id = ?4)
+                    OR (?4 IS NULL AND lock_process_id IS NULL AND lock_actor = ?3))",
+            params![todo_id, project_id, actor, owner_process_id],
         )?;
         if changed == 0 {
             return Err(TodoServiceError::LockNotOwned(todo_id));
@@ -871,6 +886,13 @@ impl<'store> TodoService<'store> {
         now_ms: i64,
     ) -> TodoServiceResult<(TodoView, Vec<TodoId>)> {
         let current = self.require_todo(project_id, todo_id, now_ms)?;
+        let owner_process_id = self.actor_process_id(actor)?;
+        let current_lock = self
+            .store
+            .get_todo(todo_id)?
+            .ok_or(TodoServiceError::TodoNotFound(todo_id))?;
+        let release_owned_lock =
+            release_lock && owns_todo_lock(&current_lock, actor, owner_process_id);
         let status = if completed {
             TodoStatus::Completed
         } else if current.status == TodoStatus::Completed {
@@ -880,13 +902,12 @@ impl<'store> TodoService<'store> {
         };
         self.store.connection().execute(
             "UPDATE todos SET completed = ?1, status = ?2,
-                 lock_actor = CASE WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_actor END,
-                 lock_expiry = CASE WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_expiry END,
-                 lock_acquired_at = CASE
-                   WHEN ?3 AND lock_actor = ?4 THEN NULL ELSE lock_acquired_at
-                 END
-             WHERE id = ?5 AND project_id = ?6",
-            params![completed, status, release_lock, actor, todo_id, project_id],
+                 lock_actor = CASE WHEN ?3 THEN NULL ELSE lock_actor END,
+                 lock_process_id = CASE WHEN ?3 THEN NULL ELSE lock_process_id END,
+                 lock_expiry = CASE WHEN ?3 THEN NULL ELSE lock_expiry END,
+                 lock_acquired_at = CASE WHEN ?3 THEN NULL ELSE lock_acquired_at END
+             WHERE id = ?4 AND project_id = ?5",
+            params![completed, status, release_owned_lock, todo_id, project_id],
         )?;
         if current.completed != completed {
             self.record_activity(
@@ -925,7 +946,8 @@ impl<'store> TodoService<'store> {
             [todo_id],
         )?;
         transaction.execute(
-            "UPDATE todos SET project_id = ?1, lock_actor = NULL, lock_expiry = NULL,
+            "UPDATE todos SET project_id = ?1, lock_actor = NULL, lock_process_id = NULL,
+                 lock_expiry = NULL,
                  lock_acquired_at = NULL,
                  sort_order = (SELECT COALESCE(MAX(sort_order), -1) + 1
                                FROM todos WHERE project_id = ?1)
@@ -1023,11 +1045,13 @@ impl<'store> TodoService<'store> {
     fn hydrate(&self, mut todo: Todo, now_ms: i64) -> TodoServiceResult<TodoView> {
         if todo.lock_expiry.is_some_and(|expiry| expiry <= now_ms) {
             self.store.connection().execute(
-                "UPDATE todos SET lock_actor = NULL, lock_expiry = NULL, lock_acquired_at = NULL
+                "UPDATE todos SET lock_actor = NULL, lock_process_id = NULL,
+                                  lock_expiry = NULL, lock_acquired_at = NULL
                  WHERE id = ?1 AND lock_expiry <= ?2",
                 params![todo.id, now_ms],
             )?;
             todo.lock_actor = None;
+            todo.lock_process_id = None;
             todo.lock_expiry = None;
         }
         let blocker_ids = query_ids(
@@ -1062,10 +1086,10 @@ impl<'store> TodoService<'store> {
             completed: todo.completed,
             sort_order,
             assignee,
-            locked_by: todo
-                .lock_actor
-                .as_deref()
-                .map(|actor| self.store.actor_display_label(actor)),
+            locked_by: todo.lock_actor.as_deref().map(|actor| {
+                self.store
+                    .ownership_display_label(actor, todo.lock_process_id)
+            }),
             lock_expiry: todo.lock_expiry,
             comment_count,
             tags: todo.tags,
@@ -1077,6 +1101,13 @@ impl<'store> TodoService<'store> {
 
     fn write_actor<'actor>(&'actor self, fallback: &'actor str) -> &'actor str {
         self.actor_label.as_deref().unwrap_or(fallback)
+    }
+
+    fn actor_process_id(&self, actor: &str) -> TodoServiceResult<Option<ProcessId>> {
+        Ok(self
+            .store
+            .get_actor(actor)?
+            .and_then(|actor| actor.process_id))
     }
 
     fn todo_matches_query(&self, todo: &TodoView, needle: &str) -> TodoServiceResult<bool> {
@@ -1199,6 +1230,13 @@ fn normalize_tags(tags: Vec<String>) -> TodoServiceResult<Vec<String>> {
 fn deduplicate_ids(ids: Vec<TodoId>) -> Vec<TodoId> {
     let mut seen = HashSet::new();
     ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
+fn owns_todo_lock(todo: &Todo, actor: &str, process_id: Option<ProcessId>) -> bool {
+    match todo.lock_process_id {
+        Some(owner_process_id) => process_id == Some(owner_process_id),
+        None => todo.lock_actor.as_deref() == Some(actor),
+    }
 }
 
 fn validate_reorder_ids(

@@ -38,7 +38,8 @@ async fn connect(endpoint: String, token: String) -> Result<Client, Box<dyn Erro
 }
 
 #[tokio::test]
-async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn Error>> {
+async fn lock_ownership_survives_actor_rotation_and_rejects_other_processes()
+-> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_path = temp.path().join("project");
     std::fs::create_dir_all(&project_path)?;
@@ -67,7 +68,7 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
             kind: ProcessKind::Agent,
             name: "lock-agent".into(),
             command: Some("true".into()),
-            working_dir: project.path,
+            working_dir: project.path.clone(),
             env: BTreeMap::new(),
             auto_start: false,
             auto_restart: false,
@@ -83,6 +84,28 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry.store().put_process(&Process {
+            id: 2,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "other-lock-agent".into(),
+            command: Some("true".into()),
+            working_dir: project.path,
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 1,
+        })?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -91,9 +114,11 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let second = connect(endpoint, discovery.token.clone()).await?;
+    let second = connect(endpoint.clone(), discovery.token.clone()).await?;
+    let other = connect(endpoint, discovery.token.clone()).await?;
     call(&first, "identify_session", json!({ "process_id": 1 })).await;
     call(&second, "identify_session", json!({ "process_id": 1 })).await;
+    call(&other, "identify_session", json!({ "process_id": 2 })).await;
     let first_actor = call(&first, "whoami", json!({})).await["actor_id"]
         .as_str()
         .unwrap()
@@ -121,11 +146,21 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     )
     .await;
     assert_eq!(acquired["acquired"], true);
-    assert_eq!(acquired["lease"]["owner_actor"], "lock-agent (agent 1)");
+    assert_eq!(acquired["lease"]["owner_actor"], "lock-agent");
+    assert_eq!(acquired["lease"]["owner_process_id"], 1);
     assert!(acquired["lease"].get("owner_actor_id").is_none());
     assert!(!acquired.to_string().contains(&first_actor));
-    let denied = invoke(
+    let renewed_after_rotation = call(
         &second,
+        "lock_acquire",
+        json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
+    )
+    .await;
+    assert_eq!(renewed_after_rotation["acquired"], true);
+    assert_eq!(renewed_after_rotation["lease"]["owner_process_id"], 1);
+
+    let denied = invoke(
+        &other,
         "lock_acquire",
         json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
@@ -134,7 +169,7 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     assert_eq!(denied.structured_content.unwrap()["code"], "lock_held");
 
     let wrong_release = invoke(
-        &second,
+        &other,
         "lock_release",
         json!({ "lock_key": "shared.schema" }),
     )
@@ -145,22 +180,23 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
         "lock_not_owned"
     );
     let released = call(
-        &first,
+        &second,
         "lock_release",
         json!({ "lock_key": "shared.schema" }),
     )
     .await;
     assert_eq!(released["released"], true);
     let acquired = call(
-        &second,
+        &other,
         "lock_acquire",
         json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
-    assert_eq!(acquired["lease"]["owner_actor"], "lock-agent (agent 1)");
+    assert_eq!(acquired["lease"]["owner_actor"], "other-lock-agent");
+    assert_eq!(acquired["lease"]["owner_process_id"], 2);
     assert!(!acquired.to_string().contains(&second_actor));
     call(
-        &second,
+        &other,
         "lock_release",
         json!({ "lock_key": "shared.schema" }),
     )
@@ -183,18 +219,19 @@ async fn second_mcp_session_waits_for_release_or_expiry() -> Result<(), Box<dyn 
     .await;
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     let acquired_after_expiry = call(
-        &second,
+        &other,
         "lock_acquire",
         json!({ "lock_key": "short.lease", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(
         acquired_after_expiry["lease"]["owner_actor"],
-        "lock-agent (agent 1)"
+        "other-lock-agent"
     );
 
     let _ = first.cancel().await;
     let _ = second.cancel().await;
+    let _ = other.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())

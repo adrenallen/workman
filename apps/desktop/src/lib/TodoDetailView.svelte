@@ -297,8 +297,8 @@
             {#if detail.todo.completed}<RotateCcwIcon class="size-4" aria-hidden="true" /> Reopen{:else}<CheckIcon class="size-4" aria-hidden="true" /> Complete{/if}
           </DropdownMenu.Item>
           {#if onLock}
-            <DropdownMenu.Item disabled={busy || Boolean(detail.todo.locked_by && detail.todo.locked_by !== 'desktop-ui')} onclick={() => void onLock(!detail!.todo.locked_by)}>
-              {#if detail.todo.locked_by}<UnlockIcon class="size-4" aria-hidden="true" /> Release claim{:else}<LockIcon class="size-4" aria-hidden="true" /> Claim for desktop{/if}
+            <DropdownMenu.Item disabled={busy || Boolean(detail.todo.locked_by && detail.todo.locked_by !== 'user')} onclick={() => void onLock(!detail!.todo.locked_by)}>
+              {#if detail.todo.locked_by}<UnlockIcon class="size-4" aria-hidden="true" /> Release claim{:else}<LockIcon class="size-4" aria-hidden="true" /> Claim for me{/if}
             </DropdownMenu.Item>
           {/if}
           {#if onTransfer && projectOptions.length > 0}

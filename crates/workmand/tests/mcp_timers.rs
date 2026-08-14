@@ -7,7 +7,7 @@ use std::{
 use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, ClientInfo},
+    model::{CallToolRequestParams, CallToolResult, ClientInfo},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -44,6 +44,17 @@ async fn call(
     result
         .structured_content
         .unwrap_or_else(|| panic!("{name} returned no structured content"))
+}
+
+async fn invoke(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    name: &'static str,
+    arguments_value: Value,
+) -> CallToolResult {
+    client
+        .call_tool(CallToolRequestParams::new(name).with_arguments(arguments(arguments_value)))
+        .await
+        .unwrap_or_else(|error| panic!("{name} failed: {error}"))
 }
 
 async fn wait_for_output(
@@ -198,9 +209,14 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     )]);
     let owner_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-            .custom_headers(owner_headers),
+            .custom_headers(owner_headers.clone()),
     );
     let owner = ClientInfo::default().serve(owner_transport).await?;
+    let rotated_owner_transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
+            .custom_headers(owner_headers),
+    );
+    let rotated_owner = ClientInfo::default().serve(rotated_owner_transport).await?;
 
     let delayed = call(
         &owner,
@@ -209,6 +225,10 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     )
     .await;
     assert_eq!(delayed["timer"]["delivery_process_id"], DELIVERY_ID);
+    assert_eq!(delayed["timer"]["owner_process_id"], DELIVERY_ID);
+    assert_eq!(delayed["timer"]["owner_process_name"], "orchestrator");
+    assert_eq!(delayed["timer"]["owner_label"], "orchestrator");
+    assert!(delayed["timer"].get("owner_actor").is_none());
     wait_for_output(&registry, DELIVERY_ID, "received:[literal $(wake) [one]]").await?;
 
     let paused = call(
@@ -317,6 +337,35 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     let owner_timers = call(&owner, "timer_list", json!({ "limit": 100 })).await;
     assert!(owner_timers["timers"].as_array().unwrap().len() >= 4);
 
+    let reconnect_timer = call(
+        &owner,
+        "timer_set",
+        json!({ "delay_ms": 10_000, "body": "cancel after reconnect" }),
+    )
+    .await;
+    let reconnect_timer_id = reconnect_timer["timer"]["id"].as_i64().unwrap();
+    registry.lock().await.store().connection().execute(
+        "UPDATE processes SET name = 'orchestrator-renamed' WHERE id = ?1",
+        [DELIVERY_ID],
+    )?;
+    let rotated_timers = call(
+        &rotated_owner,
+        "timer_list",
+        json!({ "project_id": PROJECT_ID, "limit": 100 }),
+    )
+    .await;
+    assert!(
+        rotated_timers["timers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|timer| {
+                timer["id"] == reconnect_timer_id
+                    && timer["owner_process_id"] == DELIVERY_ID
+                    && timer["owner_process_name"] == "orchestrator-renamed"
+            })
+    );
+
     let other_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint)
             .auth_header(discovery.token.clone()),
@@ -334,9 +383,43 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         json!({ "project_id": PROJECT_ID, "limit": 100 }),
     )
     .await;
-    assert!(other_timers["timers"].as_array().unwrap().is_empty());
+    assert!(
+        other_timers["timers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|timer| {
+                timer["id"] == reconnect_timer_id && timer["owner_process_id"] == DELIVERY_ID
+            })
+    );
+    let denied = invoke(
+        &other,
+        "timer_cancel",
+        json!({ "project_id": PROJECT_ID, "timer_id": reconnect_timer_id }),
+    )
+    .await;
+    assert_eq!(denied.is_error, Some(true));
+    assert_eq!(
+        denied.structured_content.unwrap()["code"],
+        "timer_not_found"
+    );
+    call(
+        &rotated_owner,
+        "timer_cancel",
+        json!({ "project_id": PROJECT_ID, "timer_id": reconnect_timer_id }),
+    )
+    .await;
+    assert!(
+        registry
+            .lock()
+            .await
+            .store()
+            .get_timer(reconnect_timer_id)?
+            .is_none()
+    );
 
     let _ = other.cancel().await;
+    let _ = rotated_owner.cancel().await;
     let _ = owner.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;

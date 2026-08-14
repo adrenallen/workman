@@ -15,11 +15,7 @@ pub struct ClaimedTodo {
 }
 
 impl Store {
-    /// Resolve every unexpired todo lease held by actors attached to `process_id`.
-    ///
-    /// A process may have multiple MCP sessions (and therefore multiple actors),
-    /// so this deliberately joins through all matching actors rather than assuming
-    /// a one-to-one identity.
+    /// Resolve every unexpired todo lease held by `process_id`.
     pub fn claimed_todos_for_process(
         &self,
         process_id: ProcessId,
@@ -28,9 +24,8 @@ impl Store {
         let mut statement = self.connection().prepare(
             "SELECT todo.id, todo.project_id, todo.title,
                     todo.lock_acquired_at, todo.lock_expiry
-             FROM actors AS actor
-             JOIN todos AS todo ON todo.lock_actor = actor.id
-             WHERE actor.process_id = ?1
+             FROM todos AS todo
+             WHERE todo.lock_process_id = ?1
                AND todo.lock_expiry IS NOT NULL
                AND todo.lock_expiry > ?2
              ORDER BY COALESCE(todo.lock_acquired_at, todo.lock_expiry), todo.id",

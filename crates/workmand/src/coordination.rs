@@ -239,7 +239,7 @@ fn todo_detail(params: Value, store: &Store) -> ControlResult {
 
 fn todo_create(params: Value, store: &Store) -> ControlResult {
     let params: CreateTodoParams = params_as(params)?;
-    let service = TodoService::new(store);
+    let service = TodoService::attributed(store, "user");
     let todo = service
         .create(
             params.project_id,
@@ -264,11 +264,11 @@ fn todo_create(params: Value, store: &Store) -> ControlResult {
 
 fn todo_complete(params: Value, store: &Store) -> ControlResult {
     let params: CompleteTodoParams = params_as(params)?;
-    let (todo, affected_todo_ids) = TodoService::new(store)
+    let (todo, affected_todo_ids) = TodoService::attributed(store, "user")
         .complete(
             params.project_id,
             params.todo_id,
-            "desktop-ui",
+            "user",
             params.completed,
             false,
             now_millis(),
@@ -282,7 +282,7 @@ fn todo_complete(params: Value, store: &Store) -> ControlResult {
 
 fn todo_update(params: Value, store: &Store) -> ControlResult {
     let params: UpdateTodoParams = params_as(params)?;
-    TodoService::new(store)
+    TodoService::attributed(store, "user")
         .update(
             params.project_id,
             params.todo_id,
@@ -301,11 +301,11 @@ fn todo_update(params: Value, store: &Store) -> ControlResult {
 
 fn todo_comment(params: Value, store: &Store) -> ControlResult {
     let params: CommentTodoParams = params_as(params)?;
-    TodoService::new(store)
+    TodoService::attributed(store, "user")
         .comment_create(
             params.project_id,
             params.todo_id,
-            "desktop-ui",
+            "user",
             params.body,
             now_millis(),
         )
@@ -315,11 +315,11 @@ fn todo_comment(params: Value, store: &Store) -> ControlResult {
 
 fn todo_lock(params: Value, store: &Store) -> ControlResult {
     let params: TodoParams = params_as(params)?;
-    TodoService::new(store)
+    TodoService::attributed(store, "user")
         .lock(
             params.project_id,
             params.todo_id,
-            "desktop-ui",
+            "user",
             20 * 60 * 1_000,
             now_millis(),
         )
@@ -329,13 +329,8 @@ fn todo_lock(params: Value, store: &Store) -> ControlResult {
 
 fn todo_unlock(params: Value, store: &Store) -> ControlResult {
     let params: TodoParams = params_as(params)?;
-    TodoService::new(store)
-        .unlock(
-            params.project_id,
-            params.todo_id,
-            "desktop-ui",
-            now_millis(),
-        )
+    TodoService::attributed(store, "user")
+        .unlock(params.project_id, params.todo_id, "user", now_millis())
         .map(json_value)
         .map_err(todo_error)
 }
@@ -434,7 +429,7 @@ fn scratchpad_read(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_create(params: Value, store: &Store) -> ControlResult {
     let params: CreateScratchpadParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .write(
             params.project_id,
             None,
@@ -457,7 +452,7 @@ fn scratchpad_reorder(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_update(params: Value, store: &Store) -> ControlResult {
     let params: UpdateScratchpadParams = params_as(params)?;
-    let service = ScratchpadService::new(store);
+    let service = ScratchpadService::attributed(store, "user");
     let current = service
         .read(
             params.project_id,
@@ -496,7 +491,7 @@ fn scratchpad_update(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_rename(params: Value, store: &Store) -> ControlResult {
     let params: RenameScratchpadParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .rename(
             params.project_id,
             params.scratchpad_id,
@@ -509,7 +504,7 @@ fn scratchpad_rename(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_set_tags(params: Value, store: &Store) -> ControlResult {
     let params: SetScratchpadTagsParams = params_as(params)?;
-    let service = ScratchpadService::new(store);
+    let service = ScratchpadService::attributed(store, "user");
     let current = service
         .read(
             params.project_id,
@@ -535,7 +530,7 @@ fn scratchpad_set_tags(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_archive(params: Value, store: &Store) -> ControlResult {
     let params: ScratchpadRevisionParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .archive(
             params.project_id,
             params.scratchpad_id,
