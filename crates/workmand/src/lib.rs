@@ -1568,6 +1568,62 @@ async fn probe_inner(discovery: &Discovery) -> io::Result<bool> {
     Ok(response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200"))
 }
 
+/// Keeps this process's standard handles out of a spawned child's handle table.
+///
+/// Windows copies every inheritable parent handle into a child created with
+/// explicit standard handles, so a shell pipeline reading this process's output
+/// would otherwise wait on the long-lived daemon even though the daemon's own
+/// stdio is null. Prior inheritance flags are restored on drop.
+#[cfg(windows)]
+struct StdHandleInheritanceGuard {
+    restore: Vec<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+#[cfg(windows)]
+impl StdHandleInheritanceGuard {
+    fn disable() -> Self {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+
+        let mut restore = Vec::new();
+        // SAFETY: standard pseudo-handles are process-owned, and toggling the
+        // inherit flag only changes what future children may receive.
+        unsafe {
+            for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let handle = GetStdHandle(std_handle);
+                let mut flags = 0_u32;
+                if handle.is_null() || GetHandleInformation(handle, &mut flags) == 0 {
+                    continue;
+                }
+                if flags & HANDLE_FLAG_INHERIT != 0
+                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
+                {
+                    restore.push(handle);
+                }
+            }
+        }
+        Self { restore }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StdHandleInheritanceGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+        for handle in self.restore.drain(..) {
+            // SAFETY: the handle was valid when captured and standard handles
+            // live for the process; this only re-enables future inheritance.
+            let _ =
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+    }
+}
+
 /// Return a live daemon discovery record, spawning `daemon_executable` when necessary.
 pub async fn discover_or_spawn(
     data_dir: impl AsRef<Path>,
@@ -1595,13 +1651,18 @@ pub async fn discover_or_spawn(
         ));
     }
 
-    let mut child = Command::new(daemon_executable.as_ref())
+    #[cfg(windows)]
+    let inheritance_guard = StdHandleInheritanceGuard::disable();
+    let child = Command::new(daemon_executable.as_ref())
         .arg("--data-dir")
         .arg(data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn();
+    #[cfg(windows)]
+    drop(inheritance_guard);
+    let mut child = child?;
     let child_pid = child.id();
     let deadline = Instant::now() + wait_timeout;
 
