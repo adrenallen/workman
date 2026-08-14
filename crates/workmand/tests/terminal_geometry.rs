@@ -1,7 +1,3 @@
-// Drives Unix fixtures (POSIX shell one-liners on real PTYs, XDG data layouts);
-// Windows fixture parity is tracked as follow-up work.
-#![cfg(unix)]
-
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -10,13 +6,26 @@ use std::{
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store};
 use workmand::ProcessRegistry;
 
+/// Print the PTY's "rows cols" once, then stay alive until stopped.
+fn size_report_command() -> &'static str {
+    #[cfg(unix)]
+    {
+        "stty size; exec sleep 30"
+    }
+    #[cfg(windows)]
+    {
+        // PowerShell reports "rows cols" to match stty's order.
+        "\"$($Host.UI.RawUI.WindowSize.Height) $($Host.UI.RawUI.WindowSize.Width)\"; Start-Sleep 30"
+    }
+}
+
 fn process(id: i64, kind: ProcessKind, working_dir: &str) -> Process {
     Process {
         id,
         project_id: 1,
         kind,
         name: format!("geometry-{id}"),
-        command: Some("stty size; exec sleep 30".into()),
+        command: Some(size_report_command().into()),
         working_dir: working_dir.into(),
         env: BTreeMap::new(),
         auto_start: false,

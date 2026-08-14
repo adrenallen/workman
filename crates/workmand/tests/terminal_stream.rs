@@ -1,7 +1,3 @@
-// Drives Unix fixtures (POSIX shell one-liners on real PTYs, XDG data layouts);
-// Windows fixture parity is tracked as follow-up work.
-#![cfg(unix)]
-
 use std::{collections::BTreeMap, error::Error, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
@@ -146,8 +142,15 @@ async fn websocket_streams_raw_bytes_for_only_the_attached_process() -> Result<(
 }
 
 fn test_process(id: i64, label: &str, working_dir: &str) -> Process {
+    #[cfg(unix)]
     let command = format!(
         "printf '\\033[?1004h\\033[>1u\\033[>4;2m'; i=0; while [ \"$i\" -lt 30000 ]; do printf '{label}:%05d\\n' \"$i\"; i=$((i+1)); done; sleep 5"
+    );
+    // The first label line shares the mode-prefix write, so the replay snapshot
+    // taken at readiness always contains it.
+    #[cfg(windows)]
+    let command = format!(
+        "Write-Host -NoNewline \"$([char]27)[?1004h$([char]27)[>1u$([char]27)[>4;2m{label}:00000`n\"; (1..29999 | ForEach-Object {{ \"{label}:{{0:d5}}\" -f $_ }}) -join \"`n\"; Start-Sleep 5"
     );
     Process {
         id,
