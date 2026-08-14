@@ -2214,7 +2214,7 @@ fn desktop_launch_target(identity: RuntimeIdentity) -> Option<DesktopLaunchTarge
     }
 
     [
-        directory.join("workman-desktop"),
+        directory.join(format!("workman-desktop{}", env::consts::EXE_SUFFIX)),
         directory
             .join("bundle/macos")
             .join(identity.app_bundle_name())

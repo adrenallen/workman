@@ -3,6 +3,13 @@
   import { Button } from '$lib/components/ui/button';
   import * as Dialog from '$lib/components/ui/dialog';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
+  import {
+    altModifierLabel as alt,
+    primaryModifier,
+    primaryModifierLabel as mod,
+    shiftModifierLabel as shift,
+    terminalUnfocusKeys
+  } from './primaryModifier';
 
   interface Props {
     onClose: () => void;
@@ -14,9 +21,9 @@
     {
       title: 'Move through the workspace',
       shortcuts: [
-        { keys: ['⌘', '← / →'], label: 'Move between project rail, tree, and main frame' },
-        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process' },
-        { keys: ['⌘', '⌥', '← / →'], label: 'Panel traversal alias' },
+        { keys: [mod, '← / →'], label: 'Move between project rail, tree, and main frame' },
+        { keys: [mod, '↑ / ↓'], label: 'Select the previous or next process' },
+        { keys: [mod, alt, '← / →'], label: 'Panel traversal alias' },
         { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
         { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
         { keys: ['↵'], label: 'Open or activate the focused row' }
@@ -25,27 +32,29 @@
     {
       title: 'Jump and act',
       shortcuts: [
-        { keys: ['⌘', 'K'], label: 'Quick jump or create in any project' },
-        { keys: ['⇧', 'F10'], label: 'Open the focused row’s context menu' },
-        { keys: ['⌥', '↑ / ↓'], label: 'Reorder the focused project or process' },
-        { keys: ['⌘', '/'], label: 'Show or close this shortcuts reference' },
+        { keys: [mod, 'K'], label: 'Quick jump or create in any project' },
+        { keys: [shift, 'F10'], label: 'Open the focused row’s context menu' },
+        { keys: [alt, '↑ / ↓'], label: 'Reorder the focused project or process' },
+        { keys: [mod, '/'], label: 'Show or close this shortcuts reference' },
         { keys: ['esc'], label: 'Close the active overlay or dialog' }
       ]
     },
     {
       title: 'Panels and terminal',
       shortcuts: [
-        { keys: ['⌘', 'B'], label: 'Collapse or expand the project rail' },
-        { keys: ['⌘', '⇧', 'B'], label: 'Collapse or expand the project tree' },
-        { keys: ['⌘', 'U'], label: 'Unfocus the terminal and return to the project tree' },
-        { keys: ['⌘', 'F'], label: 'Search the focused terminal buffer' },
+        { keys: [mod, 'B'], label: 'Collapse or expand the project rail' },
+        { keys: [mod, shift, 'B'], label: 'Collapse or expand the project tree' },
+        { keys: terminalUnfocusKeys, label: 'Unfocus the terminal and return to the project tree' },
+        { keys: [mod, 'F'], label: 'Search the focused terminal buffer' },
         { keys: ['Tab', '↵'], label: 'Use Unfocus, Previous, and Next in the process bar' }
       ]
     }
   ];
 
+  const unfocusLabel = terminalUnfocusKeys.join(terminalUnfocusKeys[0] === '⌘' ? '' : '+');
+
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape' || (event.metaKey && event.key === '/')) {
+    if (event.key === 'Escape' || (primaryModifier(event) && event.key === '/')) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -89,7 +98,7 @@
     </ScrollArea>
 
     <footer>
-      <span>Text fields keep Home/End. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
+      <span>Text fields keep Home/End. Terminal input keeps every key except <strong>{unfocusLabel} Unfocus</strong>.</span>
       <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
   </Dialog.Content>
