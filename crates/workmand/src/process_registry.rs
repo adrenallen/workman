@@ -893,6 +893,15 @@ impl ProcessRegistry {
         let capture = tool_type.as_deref().and_then(|tool_type| {
             SessionCapture::new(tool_type, &process.working_dir, &process.env, started_at)
         });
+        // A captured ID only resumes once its conversation is on disk. Claude
+        // registers IDs at startup, so a session that exited before its first
+        // message would wedge every relaunch into an unresumable --resume.
+        let previous_session = previous_session.filter(|session| {
+            match (&capture, session.session_id.as_deref()) {
+                (Some(capture), Some(session_id)) => capture.session_resumable(session_id),
+                _ => true,
+            }
+        });
         let needs_continue_check = process.exited_at.is_some()
             && previous_session
                 .as_ref()
