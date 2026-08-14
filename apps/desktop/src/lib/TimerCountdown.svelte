@@ -82,7 +82,7 @@
       `${schedule}: ${new Date(value.due_at).toLocaleString()}`,
       `Watch list: ${watchList}`,
       `Delivery target: process #${value.delivery_process_id}`,
-      `Created by: ${value.owner_actor}`,
+      `Created by: ${value.owner_label}`,
       `Created: ${new Date(value.created_at).toLocaleString()}`,
       `Message: ${value.body}`
     ];
@@ -99,7 +99,7 @@
       {#each timers as timer (timer.id)}
         <article title={detail(timer)}>
           <div><strong>{kindName(timer)}</strong><span>{scheduleLabel(timer)}</span></div>
-          <small>To process #{timer.delivery_process_id} · by {timer.owner_actor}</small>
+          <small>To process #{timer.delivery_process_id} · by {timer.owner_label}</small>
         </article>
       {/each}
     {/if}

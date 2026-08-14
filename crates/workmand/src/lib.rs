@@ -545,6 +545,7 @@ async fn control_session(
     let control_settings = settings.clone();
     let control_shutdown_request = shutdown_request.clone();
     let control_worktree_operations = worktree_operations.clone();
+    let control_timer_events = timer_events.clone();
     let control_invalidations = concurrent_invalidations.clone();
     let control_live_stats = live_stats.clone();
     let control_mcp_url = mcp_url.clone();
@@ -576,6 +577,7 @@ async fn control_session(
                         &control_input_router,
                         &control_mcp_url,
                         control_settings.data_dir(),
+                        &control_timer_events,
                     )
                     .await
                 }
@@ -636,6 +638,7 @@ async fn control_session(
                                     &input_router,
                                     &mcp_url,
                                     settings.data_dir(),
+                                    &timer_events,
                                 ).await,
                             };
                             status_subscription.status_invalidations.invalidate();

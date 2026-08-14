@@ -35,6 +35,8 @@ pub(crate) enum TimerError {
     InvalidDelay,
     InvalidRepeatInterval,
     InvalidMaxWait,
+    ConflictingSchedule,
+    IntervalNotEditable(TimerId),
     CrossProjectTarget {
         owner_project_id: ProjectId,
         target_process_id: ProcessId,
@@ -53,6 +55,8 @@ impl TimerError {
             Self::InvalidDelay => "invalid_delay",
             Self::InvalidRepeatInterval => "invalid_repeat_interval",
             Self::InvalidMaxWait => "invalid_max_wait",
+            Self::ConflictingSchedule => "conflicting_timer_schedule",
+            Self::IntervalNotEditable(_) => "timer_interval_not_editable",
             Self::CrossProjectTarget { .. } => "timer_cross_project_target",
         }
     }
@@ -74,6 +78,13 @@ impl fmt::Display for TimerError {
             Self::InvalidMaxWait => {
                 formatter.write_str("max_wait_ms must fit in a signed 64-bit value")
             }
+            Self::ConflictingSchedule => {
+                formatter.write_str("provide due_at or delay_ms, not both")
+            }
+            Self::IntervalNotEditable(timer_id) => write!(
+                formatter,
+                "timer {timer_id} is not recurring, so its interval cannot be edited"
+            ),
             Self::CrossProjectTarget {
                 owner_project_id,
                 target_process_id,
@@ -109,6 +120,15 @@ impl From<RegistryError> for TimerError {
 }
 
 pub(crate) type TimerResult<T> = Result<T, TimerError>;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TimerEdit {
+    pub body: Option<String>,
+    pub due_at: Option<i64>,
+    pub delay_ms: Option<i64>,
+    pub interval_ms: Option<i64>,
+    pub paused: Option<bool>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WatchProgress {
@@ -416,6 +436,132 @@ impl<'a> TimerService<'a> {
         Ok(views)
     }
 
+    /// Return every timer in one project for the authenticated human control surface.
+    pub(crate) fn list_project(
+        &mut self,
+        project_id: ProjectId,
+        now_ms: i64,
+    ) -> TimerResult<Vec<TimerView>> {
+        let timer_ids = {
+            let mut statement = self
+                .registry
+                .store()
+                .connection()
+                .prepare(
+                    "SELECT timer.id
+                     FROM timers AS timer
+                     JOIN processes AS process ON process.id = timer.delivery_process_id
+                     WHERE process.project_id = ?1
+                     ORDER BY timer.fired ASC,
+                              timer.paused ASC,
+                              COALESCE(
+                                (SELECT due_at FROM timer_runtime WHERE timer_id = timer.id),
+                                timer.max_wait_deadline,
+                                timer.created_at
+                              ),
+                              timer.id",
+                )
+                .map_err(persistence)?;
+            let rows = statement
+                .query_map([project_id], |row| row.get(0))
+                .map_err(persistence)?;
+            let mut timer_ids = Vec::new();
+            for row in rows {
+                timer_ids.push(row.map_err(persistence)?);
+            }
+            timer_ids
+        };
+
+        let mut views = Vec::with_capacity(timer_ids.len());
+        for timer_id in timer_ids {
+            let Some(timer) = self.registry.store().get_timer(timer_id)? else {
+                continue;
+            };
+            let runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
+            views.push(self.view(timer, runtime)?);
+        }
+        Ok(views)
+    }
+
+    /// Edit any timer in one project. This is reserved for the authenticated human surface.
+    pub(crate) fn edit_project_timer(
+        &mut self,
+        project_id: ProjectId,
+        timer_id: TimerId,
+        edit: TimerEdit,
+        now_ms: i64,
+    ) -> TimerResult<TimerView> {
+        if edit.due_at.is_some() && edit.delay_ms.is_some() {
+            return Err(TimerError::ConflictingSchedule);
+        }
+        if edit.delay_ms.is_some_and(|delay| delay < 0) || edit.due_at.is_some_and(|due| due < 0) {
+            return Err(TimerError::InvalidDelay);
+        }
+        if edit.interval_ms.is_some_and(|interval| interval <= 0) {
+            return Err(TimerError::InvalidRepeatInterval);
+        }
+
+        let mut timer = self.project_timer(project_id, timer_id)?;
+        if timer.fired && !timer.repeating {
+            return Err(TimerError::Inactive(timer_id));
+        }
+        if edit.interval_ms.is_some() && !timer.repeating {
+            return Err(TimerError::IntervalNotEditable(timer_id));
+        }
+        let mut runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
+        let schedule_changed = edit.due_at.is_some() || edit.delay_ms.is_some();
+        if let Some(body) = edit.body {
+            timer.body = body;
+        }
+        if let Some(due_at) = edit
+            .due_at
+            .or_else(|| edit.delay_ms.map(|delay| now_ms.saturating_add(delay)))
+        {
+            runtime.due_at = due_at;
+            timer.max_wait_deadline = Some(due_at);
+        }
+        if let Some(interval_ms) = edit.interval_ms {
+            timer.interval_ms = Some(interval_ms);
+        }
+        if let Some(paused) = edit.paused {
+            match (timer.paused, paused) {
+                (false, true) => {
+                    timer.paused = true;
+                    runtime.paused_at = Some(now_ms);
+                }
+                (true, false) => {
+                    if !schedule_changed && let Some(paused_at) = runtime.paused_at {
+                        runtime.due_at = runtime
+                            .due_at
+                            .saturating_add(now_ms.saturating_sub(paused_at).max(0));
+                        timer.max_wait_deadline = Some(runtime.due_at);
+                    }
+                    timer.paused = false;
+                    runtime.paused_at = None;
+                }
+                _ => {}
+            }
+        }
+        self.update(&timer, &runtime)?;
+        self.view(timer, runtime)
+    }
+
+    /// Delete any timer in one project. This is reserved for the authenticated human surface.
+    pub(crate) fn delete_project_timer(
+        &mut self,
+        project_id: ProjectId,
+        timer_id: TimerId,
+    ) -> TimerResult<TimerView> {
+        let timer = self.project_timer(project_id, timer_id)?;
+        let runtime = self.runtime_or_reconstruct(&timer, timer.created_at)?;
+        self.registry
+            .store()
+            .connection()
+            .execute("DELETE FROM timers WHERE id = ?1", [timer_id])
+            .map_err(persistence)?;
+        self.view(timer, runtime)
+    }
+
     /// Return every active or paused timer for status-stream reconciliation.
     pub(crate) fn list_active(&mut self, now_ms: i64) -> TimerResult<Vec<TimerView>> {
         let timer_ids = {
@@ -579,6 +725,20 @@ impl<'a> TimerService<'a> {
         if !authorized {
             return Err(TimerError::NotFound(timer_id));
         }
+        Ok(timer)
+    }
+
+    fn project_timer(&self, project_id: ProjectId, timer_id: TimerId) -> TimerResult<Timer> {
+        let timer = self
+            .registry
+            .store()
+            .get_timer(timer_id)?
+            .ok_or(TimerError::NotFound(timer_id))?;
+        self.registry
+            .store()
+            .get_process(timer.delivery_process_id)?
+            .filter(|process| process.project_id == project_id)
+            .ok_or(TimerError::NotFound(timer_id))?;
         Ok(timer)
     }
 

@@ -40,6 +40,7 @@
   import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import { killSubprocess, listSubprocesses } from './subprocesses';
   import TimerCountdown from './TimerCountdown.svelte';
+  import TimerPanel from './TimerPanel.svelte';
   import { projectDisplayName, pullRequestInteraction, pullRequestLabel } from './worktrees';
 
   let {
@@ -68,6 +69,7 @@
   let activeProcessId = $state<number | null>(null);
   let statusWidth = $state(1_200);
   let pullRequestListOpen = $state(false);
+  let timerPanelOpen = $state(false);
 
   const stats = $derived($liveStats.processes[process.id] ?? null);
   const activity = $derived(processActivity(process, stats ?? undefined));
@@ -94,11 +96,12 @@
       if (overflowOpen && !overflowRoot?.contains(event.target as Node)) closeOverflow();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && (popoverOpen || daemonPopoverOpen || overflowOpen)) {
+      if (event.key === 'Escape' && (popoverOpen || daemonPopoverOpen || overflowOpen || timerPanelOpen)) {
         event.preventDefault();
         closePopover();
         daemonPopoverOpen = false;
         closeOverflow();
+        timerPanelOpen = false;
       }
     };
     document.addEventListener('pointerdown', handlePointerDown);
@@ -121,6 +124,7 @@
     popoverOpen = false;
     daemonPopoverOpen = false;
     overflowOpen = false;
+    timerPanelOpen = false;
     freshChildren = [];
     confirmingPid = null;
   });
@@ -288,7 +292,24 @@
       <span class="uptime-prefix">up</span>
       <span class="uptime-value">{formatDuration(stats?.uptime_seconds)}</span>
     </span>
-    <TimerCountdown processId={process.id} density={timerDensity} />
+    <Popover.Root bind:open={timerPanelOpen}>
+      <Popover.Trigger>
+        {#snippet child({ props })}
+          <button
+            {...props}
+            type="button"
+            class="timer-trigger"
+            title="Manage project timers"
+            aria-label="Manage project timers"
+          >
+            <TimerCountdown processId={process.id} density={timerDensity} />
+          </button>
+        {/snippet}
+      </Popover.Trigger>
+      <Popover.Content side="top" align="end" sideOffset={8} class="!w-auto !p-2.5">
+        <TimerPanel {client} projectId={project.id} {processes} {onError} />
+      </Popover.Content>
+    </Popover.Root>
     <strong class="process-name" title={process.name}>{process.name}</strong>
     {#if pullRequest}
       {#if pullRequestMode === 'direct'}
@@ -668,6 +689,18 @@
     gap: 4px;
     color: var(--muted-foreground);
     font-variant-numeric: tabular-nums;
+  }
+
+  .timer-trigger {
+    display: flex;
+    min-width: 0;
+    align-items: stretch;
+    padding: 0;
+  }
+
+  .timer-trigger:hover,
+  .timer-trigger:focus-visible {
+    background: var(--popover);
   }
 
   .uptime {

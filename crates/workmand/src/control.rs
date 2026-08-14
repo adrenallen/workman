@@ -11,12 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
     AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectFolder, ProjectId, ProjectLayoutEntry, Store,
+    ProjectFolder, ProjectId, ProjectLayoutEntry, Store, TimerId,
 };
 
 use crate::{
     DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService, RegistryError,
     SharedProcessRegistry,
+    timer_events::{TimerLifecycleEvent, TimerLifecycleHub, TimerLifecycleKind},
+    timers::{TimerEdit, TimerError, TimerService},
 };
 
 pub(crate) mod agent_icons;
@@ -35,6 +37,33 @@ struct ControlRequest {
 #[derive(Debug, Deserialize)]
 struct ProcessIdParams {
     process_id: ProcessId,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimerProjectParams {
+    project_id: ProjectId,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimerTargetParams {
+    project_id: ProjectId,
+    timer_id: TimerId,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimerUpdateParams {
+    project_id: ProjectId,
+    timer_id: TimerId,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    due_at: Option<i64>,
+    #[serde(default)]
+    delay_ms: Option<i64>,
+    #[serde(default)]
+    interval_ms: Option<i64>,
+    #[serde(default)]
+    paused: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -434,6 +463,7 @@ pub(crate) async fn handle_text(
     input_router: &crate::ProcessInputRouter,
     mcp_url: &str,
     data_dir: &Path,
+    timer_events: &TimerLifecycleHub,
 ) -> String {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return text.to_owned();
@@ -450,6 +480,7 @@ pub(crate) async fn handle_text(
         input_router,
         mcp_url,
         data_dir,
+        timer_events,
     )
     .await;
     match result {
@@ -470,6 +501,7 @@ async fn dispatch(
     input_router: &crate::ProcessInputRouter,
     mcp_url: &str,
     data_dir: &Path,
+    timer_events: &TimerLifecycleHub,
 ) -> Result<Value, (&'static str, String)> {
     let readiness = ReadinessService::default();
     match method {
@@ -754,6 +786,66 @@ async fn dispatch(
     }
 
     let mut registry = registry.lock().await;
+    match method {
+        "timer.list" | "timers.list" => {
+            let params: TimerProjectParams = params_as(params)?;
+            let timers = TimerService::new(&mut registry)
+                .list_project(params.project_id, crate::timers::now_millis())
+                .map_err(timer_error)?;
+            return Ok(json!({ "project_id": params.project_id, "timers": timers }));
+        }
+        "timer.update" | "timers.update" => {
+            let params: TimerUpdateParams = params_as(params)?;
+            let now = crate::timers::now_millis();
+            let lifecycle_kind = match params.paused {
+                Some(true) => TimerLifecycleKind::Paused,
+                Some(false) => TimerLifecycleKind::Resumed,
+                None => TimerLifecycleKind::Updated,
+            };
+            let timer = TimerService::new(&mut registry)
+                .edit_project_timer(
+                    params.project_id,
+                    params.timer_id,
+                    TimerEdit {
+                        body: params.body,
+                        due_at: params.due_at,
+                        delay_ms: params.delay_ms,
+                        interval_ms: params.interval_ms,
+                        paused: params.paused,
+                    },
+                    now,
+                )
+                .map_err(timer_error)?;
+            timer_events.publish(TimerLifecycleEvent::for_timer(
+                lifecycle_kind,
+                params.project_id,
+                timer.clone(),
+                now,
+                None,
+            ));
+            return Ok(json!({ "project_id": params.project_id, "timer": timer }));
+        }
+        "timer.delete" | "timers.delete" => {
+            let params: TimerTargetParams = params_as(params)?;
+            let now = crate::timers::now_millis();
+            let timer = TimerService::new(&mut registry)
+                .delete_project_timer(params.project_id, params.timer_id)
+                .map_err(timer_error)?;
+            timer_events.publish(TimerLifecycleEvent::for_timer(
+                TimerLifecycleKind::Cancelled,
+                params.project_id,
+                timer,
+                now,
+                None,
+            ));
+            return Ok(json!({
+                "project_id": params.project_id,
+                "timer_id": params.timer_id,
+                "deleted": true,
+            }));
+        }
+        _ => {}
+    }
     if let Some(result) = crate::context_actions::dispatch(method, params.clone(), &mut registry) {
         return result;
     }
@@ -1353,6 +1445,10 @@ fn config_error(error: crate::ConfigError) -> (&'static str, String) {
 }
 
 fn readiness_error(error: ReadinessError) -> (&'static str, String) {
+    (error.code(), error.to_string())
+}
+
+fn timer_error(error: TimerError) -> (&'static str, String) {
     (error.code(), error.to_string())
 }
 

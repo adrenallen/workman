@@ -229,6 +229,51 @@ async fn subscribe(socket: &mut Socket) -> Result<(), Box<dyn Error>> {
     }
 }
 
+async fn control_call(
+    socket: &mut Socket,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, Box<dyn Error>> {
+    socket
+        .send(Message::Text(
+            json!({ "id": id, "method": method, "params": params })
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    loop {
+        let message = socket.next().await.ok_or("websocket closed")??;
+        let Message::Text(message) = message else {
+            continue;
+        };
+        let response: Value = serde_json::from_str(&message)?;
+        if response["id"] != id {
+            continue;
+        }
+        assert_eq!(response["ok"], true, "{method} returned {response}");
+        return Ok(response["result"].clone());
+    }
+}
+
+async fn wait_for_output(
+    registry: &SharedProcessRegistry,
+    process_id: i64,
+    needle: &str,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let output = registry.lock().await.rendered_output(process_id)?.text;
+        if output.contains(needle) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("process {process_id} output did not contain {needle:?}").into());
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+}
+
 async fn next_timer_status(
     socket: &mut Socket,
     predicate: impl Fn(&Value) -> bool,
@@ -273,6 +318,102 @@ fn lifecycle(event: &Value, kind: &str, timer_id: Option<i64>, reason: Option<&s
                 && reason.is_none_or(|reason| candidate["reason"] == reason)
         })
     })
+}
+
+#[tokio::test]
+async fn human_timer_control_updates_delivery_and_delete_prevents_fire()
+-> Result<(), Box<dyn Error>> {
+    let server = TestServer::start().await?;
+    let client = server.mcp_client().await?;
+    let (mut socket, _) = connect_async(server.ws_request()).await?;
+
+    let doomed = call(
+        &client,
+        "timer_set",
+        json!({ "delay_ms": 1_000, "body": "deleted timer body" }),
+    )
+    .await;
+    let doomed_id = doomed["timer"]["id"].as_i64().unwrap();
+    let deleted = control_call(
+        &mut socket,
+        "delete-timer",
+        "timer.delete",
+        json!({ "project_id": PROJECT_ID, "timer_id": doomed_id }),
+    )
+    .await?;
+    assert_eq!(deleted["deleted"], true);
+    let after_delete = control_call(
+        &mut socket,
+        "list-after-delete",
+        "timer.list",
+        json!({ "project_id": PROJECT_ID }),
+    )
+    .await?;
+    assert!(
+        after_delete["timers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|timer| timer["id"] != doomed_id)
+    );
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(
+        !server
+            .registry
+            .lock()
+            .await
+            .rendered_output(DELIVERY_ID)?
+            .text
+            .contains("deleted timer body")
+    );
+
+    let editable = call(
+        &client,
+        "timer_set",
+        json!({ "delay_ms": 5_000, "body": "old timer body" }),
+    )
+    .await;
+    let editable_id = editable["timer"]["id"].as_i64().unwrap();
+    let updated = control_call(
+        &mut socket,
+        "update-timer",
+        "timer.update",
+        json!({
+            "project_id": PROJECT_ID,
+            "timer_id": editable_id,
+            "delay_ms": 75,
+            "body": "edited timer body"
+        }),
+    )
+    .await?;
+    assert_eq!(updated["timer"]["body"], "edited timer body");
+    wait_for_output(
+        &server.registry,
+        DELIVERY_ID,
+        "received:[edited timer body]",
+    )
+    .await?;
+    let output = server
+        .registry
+        .lock()
+        .await
+        .rendered_output(DELIVERY_ID)?
+        .text;
+    assert!(!output.contains("old timer body"));
+
+    let listed = control_call(
+        &mut socket,
+        "list-timers",
+        "timer.list",
+        json!({ "project_id": PROJECT_ID }),
+    )
+    .await?;
+    assert!(listed["timers"].as_array().unwrap().iter().any(|timer| {
+        timer["id"] == editable_id && timer["body"] == "edited timer body" && timer["fired"] == true
+    }));
+
+    let _ = client.cancel().await;
+    server.stop().await
 }
 
 async fn wait_for_state(

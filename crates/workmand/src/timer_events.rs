@@ -23,6 +23,7 @@ pub(crate) enum TimerLifecycleKind {
     Fired,
     Delivered,
     Cancelled,
+    Updated,
     Paused,
     Resumed,
 }

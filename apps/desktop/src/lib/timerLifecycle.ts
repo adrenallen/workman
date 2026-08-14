@@ -6,12 +6,15 @@ export type TimerLifecycleKind =
   | 'fired'
   | 'delivered'
   | 'cancelled'
+  | 'updated'
   | 'paused'
   | 'resumed';
 
 export interface TimerView {
   id: number;
-  owner_actor: string;
+  owner_process_id: number | null;
+  owner_process_name: string | null;
+  owner_label: string;
   delivery_process_id: number;
   body: string;
   kind: TimerKind;
@@ -39,10 +42,16 @@ export interface TimerLifecycleEvent {
 }
 
 const mutableLiveTimers = writable<Record<number, TimerView>>({});
+const mutableTimerLifecycleRevision = writable(0);
 
 /** Active and paused timers reconciled from the existing process status stream. */
 export const liveTimers: Readable<Record<number, TimerView>> = readable({}, (set) =>
   mutableLiveTimers.subscribe(set)
+);
+
+/** Advances whenever a lifecycle mutation should refresh project-wide timer history. */
+export const timerLifecycleRevision: Readable<number> = readable(0, (set) =>
+  mutableTimerLifecycleRevision.subscribe(set)
 );
 
 /** Called only by the daemon event adapter. */
@@ -71,8 +80,10 @@ export function updateTimerLifecycle(
 
     return next;
   });
+  if (events.length > 0) mutableTimerLifecycleRevision.update((revision) => revision + 1);
 }
 
 export function resetTimerLifecycle(): void {
   mutableLiveTimers.set({});
+  mutableTimerLifecycleRevision.set(0);
 }
