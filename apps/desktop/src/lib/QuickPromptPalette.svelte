@@ -1,6 +1,5 @@
 <script lang="ts">
   import FileTextIcon from '@lucide/svelte/icons/file-text';
-  import SearchIcon from '@lucide/svelte/icons/search';
   import * as Command from '$lib/components/ui/command';
   import * as Dialog from '$lib/components/ui/dialog';
   import QuickPromptEditor from './QuickPromptEditor.svelte';
@@ -19,7 +18,7 @@
   interface Props {
     client: DaemonClient;
     canInsert: boolean;
-    onInsert: (prompt: QuickPrompt, submit: boolean) => void;
+    onInsert: (prompt: QuickPrompt, submit: boolean) => boolean;
     onClose: () => void;
     onError: (message: string) => void;
   }
@@ -30,6 +29,7 @@
   let query = $state('');
   let selectedValue = $state('');
   let editorOpen = $state(false);
+  let insertFailed = $state(false);
   let filtered = $derived(filterQuickPrompts(snapshot.prompts, query));
   let activePrompt = $derived(
     filtered.find((prompt) => String(prompt.id) === selectedValue) ?? filtered[0] ?? null
@@ -52,7 +52,7 @@
 
   function choose(prompt: QuickPrompt | null, submit: boolean): void {
     if (!prompt || !canInsert) return;
-    onInsert(prompt, submit);
+    insertFailed = !onInsert(prompt, submit);
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -108,9 +108,9 @@
           />
         </div>
 
-        {#if !canInsert}
+        {#if !canInsert || insertFailed}
           <div class="border-b border-border bg-muted px-3 py-2 text-xs font-medium text-foreground" role="status">
-            Select a running agent first
+            {insertFailed ? 'The selected agent terminal is no longer available' : 'Select a running agent first'}
           </div>
         {/if}
 

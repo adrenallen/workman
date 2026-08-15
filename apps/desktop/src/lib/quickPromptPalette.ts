@@ -1,4 +1,5 @@
 import type { QuickPrompt } from './quickPrompts';
+import { fuzzySubsequenceScore } from './navigation.ts';
 
 export type QuickPromptPaletteAction = 'insert' | 'insert-and-send' | 'new' | null;
 
@@ -8,6 +9,11 @@ interface PaletteKeyEvent {
   ctrlKey?: boolean;
   altKey?: boolean;
   shiftKey?: boolean;
+}
+
+export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
+  return event.metaKey && Boolean(event.shiftKey) && !event.ctrlKey && !event.altKey
+    && event.key.toLowerCase() === 'p';
 }
 
 /** Interpret only palette-owned actions; arrow navigation remains owned by Command. */
@@ -29,8 +35,8 @@ export function filterQuickPrompts(prompts: QuickPrompt[], query: string): Quick
       prompt,
       index,
       score: Math.max(
-        fuzzyScore(needle, prompt.name.toLocaleLowerCase()) ?? Number.NEGATIVE_INFINITY,
-        fuzzyScore(needle, prompt.body.toLocaleLowerCase()) ?? Number.NEGATIVE_INFINITY
+        fuzzySubsequenceScore(needle, prompt.name) ?? Number.NEGATIVE_INFINITY,
+        fuzzySubsequenceScore(needle, prompt.body) ?? Number.NEGATIVE_INFINITY
       )
     }))
     .filter((candidate) => Number.isFinite(candidate.score))
@@ -40,23 +46,4 @@ export function filterQuickPrompts(prompts: QuickPrompt[], query: string): Quick
 
 export function quickPromptPreview(body: string): string {
   return body.replace(/\s+/g, ' ').trim();
-}
-
-function fuzzyScore(needle: string, haystack: string): number | null {
-  const substring = haystack.indexOf(needle);
-  if (substring >= 0) return 1_000 - substring - Math.max(0, haystack.length - needle.length) / 100;
-
-  let cursor = 0;
-  let first = -1;
-  let previous = -2;
-  let contiguous = 0;
-  for (const character of needle) {
-    const index = haystack.indexOf(character, cursor);
-    if (index < 0) return null;
-    if (first < 0) first = index;
-    if (index === previous + 1) contiguous += 1;
-    previous = index;
-    cursor = index + 1;
-  }
-  return 100 + contiguous * 8 - first - (previous - first - needle.length);
 }

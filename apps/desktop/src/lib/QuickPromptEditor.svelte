@@ -73,7 +73,7 @@
       <div class="grid gap-3 p-3">
         <label class="grid gap-1.5 text-xs font-semibold text-foreground">
           <span>Name</span>
-          <Input bind:value={name} maxlength={120} placeholder="Review for regressions" autofocus />
+          <Input bind:value={name} maxlength={120} placeholder="Review for regressions" />
         </label>
         <label class="grid gap-1.5 text-xs font-semibold text-foreground">
           <span>Prompt</span>

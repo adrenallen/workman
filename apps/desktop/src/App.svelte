@@ -872,14 +872,22 @@
     quickPromptOpen = false;
   }
 
-  function insertQuickPrompt(prompt: QuickPrompt, submit: boolean): void {
+  function insertQuickPrompt(prompt: QuickPrompt, submit: boolean): boolean {
     if (
       selectedProcess?.kind !== 'agent'
       || selectedProcess.status !== 'running'
-      || !terminalView?.insertQuickPrompt(prompt.body, submit)
-    ) return;
+      || terminalView === null
+    ) {
+      reportError(new Error('Open a running agent terminal before inserting a quick prompt.'));
+      return false;
+    }
+    if (!terminalView.insertQuickPrompt(prompt.body, submit)) {
+      reportError(new Error('The selected agent terminal is no longer available.'));
+      return false;
+    }
     closeQuickPrompts();
     void tick().then(() => terminalView?.focusInput());
+    return true;
   }
 
   function openShortcuts(): void {
@@ -4184,6 +4192,7 @@
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}
                 onContextMenu={showContextMenu}
+                onQuickPrompts={openQuickPrompts}
                 onUnfocus={unfocusSelectedProcess}
               />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
@@ -4364,7 +4373,7 @@
 {#if quickPromptOpen}
   <QuickPromptPalette
     {client}
-    canInsert={selectedProcess?.kind === 'agent' && selectedProcess.status === 'running'}
+    canInsert={terminalView !== null && selectedProcess?.kind === 'agent' && selectedProcess.status === 'running'}
     onInsert={insertQuickPrompt}
     onClose={closeQuickPrompts}
     onError={reportError}

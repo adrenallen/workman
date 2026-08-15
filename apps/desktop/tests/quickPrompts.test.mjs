@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   filterQuickPrompts,
+  isQuickPromptPaletteShortcut,
   quickPromptPaletteAction,
   quickPromptPreview
 } from '../src/lib/quickPromptPalette.ts';
@@ -21,6 +22,8 @@ function prompt(id, name, body, sortOrder = id) {
 }
 
 test('palette actions distinguish insert, insert-and-send, and new prompt', () => {
+  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', metaKey: true, shiftKey: true }), true);
+  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', metaKey: true }), false);
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false }),
     'insert'
@@ -102,13 +105,15 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   ]);
 
   assert.match(app, /event\.metaKey && event\.shiftKey[\s\S]*event\.key\.toLowerCase\(\) === 'p'/);
-  assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
+  assert.match(app, /onQuickPrompts=\{openQuickPrompts\}/);
+  assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{terminalView !== null && selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /⌘Enter · insert &amp; send/);
   assert.match(palette, /<QuickPromptEditor/);
   assert.match(terminal, /export function insertQuickPrompt/);
+  assert.match(terminal, /attachCustomKeyEventHandler[\s\S]*isQuickPromptPaletteShortcut\(event\)[\s\S]*onQuickPrompts\?\.\(\)[\s\S]*return false/);
   assert.match(terminal, /instance\.paste\(text\)/);
   assert.match(terminal, /if \(submit\)[\s\S]*encoder\.encode\('\\r'\)/);
   assert.match(settings, /<QuickPromptsCard/);

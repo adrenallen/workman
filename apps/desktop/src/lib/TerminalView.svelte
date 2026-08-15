@@ -27,6 +27,7 @@
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { hasRetainedTerminalOutput } from './terminalFirstPaint';
+  import { isQuickPromptPaletteShortcut } from './quickPromptPalette';
   import {
     AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
     clipboardImagePasteRoute,
@@ -48,6 +49,7 @@
     onStart,
     onError,
     onContextMenu,
+    onQuickPrompts,
     onUnfocus
   }: {
     client: DaemonClient;
@@ -58,6 +60,7 @@
     onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
+    onQuickPrompts?: () => void;
     onUnfocus?: () => void;
   } = $props();
 
@@ -221,6 +224,12 @@
     }
 
     instance.attachCustomKeyEventHandler((event) => {
+      if (isQuickPromptPaletteShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type === 'keydown') onQuickPrompts?.();
+        return false;
+      }
       let userKeyToken: number | null = null;
       if (event.type === 'keydown') {
         userKeyToken = ++nextUserKeyToken;
