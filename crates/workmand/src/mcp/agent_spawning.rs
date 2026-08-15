@@ -19,7 +19,8 @@ use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use uuid::Uuid;
 use workman_core::{
     AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
-    ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId, attention::AttentionState,
+    ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
+    attention::{AttentionState, DEFAULT_IDLE_AFTER},
 };
 
 use super::{
@@ -910,46 +911,92 @@ fn schedule_initial_prompt(
                 let mut registry = registry.lock().await;
                 let now = Instant::now();
                 if now >= hard_deadline {
-                    eprintln!(
-                        "process {process_id}: initial prompt was not delivered within {}s; stopping without bypassing a pending dialog",
-                        INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        format!(
+                            "initial prompt dropped (reason: hard_cap) after {}s without a safe delivery point",
+                            INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                        ),
                     );
                     return;
                 }
-                let agent_state = match registry.agent_attention_snapshot(process_id) {
-                    Ok(agent_state) => agent_state,
+                let agent_state = match registry.get_status(process_id) {
+                    Ok(status) => status.agent_state,
                     Err(error) => {
-                        eprintln!("process {process_id}: initial prompt delivery stopped: {error}");
+                        let _ = registry.record_process_event(
+                            process_id,
+                            "initial_prompt_dropped",
+                            format!(
+                                "initial prompt dropped (reason: submit_failed): status unavailable: {error}"
+                            ),
+                        );
                         return;
                     }
                 };
                 if agent_state.state == AttentionState::Exited {
-                    eprintln!(
-                        "process {process_id}: agent exited before its initial prompt could be delivered"
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        "initial prompt dropped (reason: exited) before a safe delivery point",
                     );
                     return;
                 }
                 let dialog = match registry.pending_dialog(process_id) {
                     Ok(dialog) => dialog,
                     Err(error) => {
-                        eprintln!("process {process_id}: initial prompt delivery stopped: {error}");
+                        let _ = registry.record_process_event(
+                            process_id,
+                            "initial_prompt_dropped",
+                            format!(
+                                "initial prompt dropped (reason: submit_failed): dialog state unavailable: {error}"
+                            ),
+                        );
                         return;
                     }
                 };
                 if dialog.is_some() {
                     None
                 } else {
+                    let output_observed = agent_state.last_output_at.is_some();
                     let ready = matches!(
                         agent_state.state,
                         AttentionState::Idle | AttentionState::NeedsInput
-                    );
-                    (ready || now >= ready_deadline).then(|| {
-                        (
-                            registry
-                                .submit_input(process_id, prompt.as_bytes())
-                                .map_err(|error| error.to_string()),
-                            !ready,
-                        )
+                    ) && output_observed;
+                    let quiet_fallback = now >= ready_deadline
+                        && output_observed
+                        && agent_state
+                            .last_output_seconds
+                            .is_some_and(|seconds| seconds >= DEFAULT_IDLE_AFTER.as_secs_f64());
+                    (ready || quiet_fallback).then(|| {
+                        let used_fallback = !ready;
+                        let result = registry
+                            .submit_input(process_id, prompt.as_bytes())
+                            .map_err(|error| error.to_string());
+                        match &result {
+                            Ok(_) => {
+                                let suffix = if used_fallback {
+                                    " using the observed-output quiet fallback"
+                                } else {
+                                    ""
+                                };
+                                let _ = registry.record_process_event(
+                                    process_id,
+                                    "initial_prompt_delivered",
+                                    format!("initial prompt delivered{suffix}"),
+                                );
+                            }
+                            Err(error) => {
+                                let _ = registry.record_process_event(
+                                    process_id,
+                                    "initial_prompt_dropped",
+                                    format!(
+                                        "initial prompt dropped (reason: submit_failed): {error}"
+                                    ),
+                                );
+                            }
+                        }
+                        (result, used_fallback)
                     })
                 }
             };

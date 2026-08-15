@@ -93,6 +93,14 @@ while (1) {
     Ok(())
 }
 
+fn write_exiting_agent(path: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -101,6 +109,8 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     std::fs::create_dir(&project_dir)?;
     let fake_agent = temp.path().join("fake-agent.sh");
     write_fake_agent(&fake_agent)?;
+    let exiting_agent = temp.path().join("exiting-agent.sh");
+    write_exiting_agent(&exiting_agent)?;
     let data_dir = temp.path().join("state");
 
     let server = DaemonServer::bind(DaemonConfig {
@@ -151,6 +161,49 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
+
+    let exiting_tool = rpc(
+        &mut socket,
+        30,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "Exiting agent",
+                "command": exiting_agent,
+                "tool_type": "custom",
+                "enabled": true
+            }
+        }),
+    )
+    .await;
+    let exiting_tool_id = exiting_tool["result"]["id"].as_i64().unwrap();
+    let exiting_spawn = rpc(
+        &mut socket,
+        31,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_tool_id": exiting_tool_id,
+            "prompt": "This prompt must be dropped."
+        }),
+    )
+    .await;
+    let exiting_process_id = exiting_spawn["result"]["process_id"].as_i64().unwrap();
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = registry.lock().await.get_status(exiting_process_id)?;
+        if status.events.iter().any(|event| {
+            event.kind == "initial_prompt_dropped" && event.message.contains("reason: exited")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "exited agent did not publish an initial-prompt drop event: {:?}",
+            status.events
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let template = rpc(
         &mut socket,
@@ -329,6 +382,11 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
                 output.find("agent-ready").unwrap() < output.find("agent-answer:").unwrap(),
                 "initial prompt arrived before the delayed readiness marker: {output}"
             );
+            let status = registry.lock().await.get_status(template_process_id)?;
+            assert!(status.events.iter().any(|event| {
+                event.kind == "initial_prompt_delivered"
+                    && event.message.contains("initial prompt delivered")
+            }));
             break;
         }
         assert!(
@@ -383,8 +441,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     }
 
     let statuses = rpc(&mut socket, 8, "process.list", json!({ "project_id": 7 })).await;
-    assert_eq!(statuses["result"][0]["agent_tool_id"], tool_id);
-    assert!(statuses["result"][0]["agent_state"]["state"].is_string());
+    let spawned_status = statuses["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|status| status["id"] == process_id)
+        .unwrap();
+    assert_eq!(spawned_status["agent_tool_id"], tool_id);
+    assert!(spawned_status["agent_state"]["state"].is_string());
 
     let closed = rpc(
         &mut socket,
@@ -403,6 +467,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_template["result"]["status"], "stopped");
+    let closed_exiting = rpc(
+        &mut socket,
+        33,
+        "process.close",
+        json!({ "process_id": exiting_process_id }),
+    )
+    .await;
+    assert_eq!(closed_exiting["result"]["status"], "exited");
     let deleted_template = rpc(
         &mut socket,
         29,
@@ -419,6 +491,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(deleted["result"]["deleted"], true);
+    let deleted_exiting_tool = rpc(
+        &mut socket,
+        32,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": exiting_tool_id }),
+    )
+    .await;
+    assert_eq!(deleted_exiting_tool["result"]["deleted"], true);
 
     socket.close(None).await?;
     let _ = shutdown_tx.send(());
