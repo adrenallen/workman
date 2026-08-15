@@ -43,8 +43,10 @@ export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
 /** Interpret palette-owned navigation and selection actions. */
 export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPaletteAction {
   const key = event.key.toLowerCase();
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') return null;
   const vimNavigation = Boolean(event.ctrlKey) && ['n', 'j', 'p', 'k'].includes(key);
-  const navigationKey = event.key.startsWith('Arrow')
+  const navigationKey = event.key === 'ArrowUp'
+    || event.key === 'ArrowDown'
     || event.key === 'Home'
     || event.key === 'End'
     || event.key === 'PageUp'
@@ -56,8 +58,7 @@ export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPal
   if (event.key === 'ArrowUp') return event.metaKey ? 'first' : 'previous';
   if (event.key === 'Home') return 'first';
   if (event.key === 'End') return 'last';
-  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight'
-    || event.key === 'PageUp' || event.key === 'PageDown') return 'swallow';
+  if (event.key === 'PageUp' || event.key === 'PageDown') return 'swallow';
   if (vimNavigation) {
     if (event.metaKey || event.altKey) return 'swallow';
     return key === 'n' || key === 'j' ? 'next' : 'previous';

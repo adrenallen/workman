@@ -94,7 +94,7 @@
     </ScrollArea>
 
     <footer>
-      <span>Text fields keep Home/End. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
+      <span>Text fields keep Home/End; quick-prompt search uses them for first/last. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
       <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
   </Dialog.Content>

@@ -50,6 +50,19 @@ test('palette actions distinguish insert, insert-and-send, and new prompt', () =
 });
 
 test('palette actions own arrow and boundary navigation', () => {
+  assert.equal(quickPromptPaletteAction({ key: 'ArrowLeft', metaKey: false }), null);
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowLeft', metaKey: false, shiftKey: true }),
+    null
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowRight', metaKey: true }),
+    null
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowLeft', metaKey: false, altKey: true }),
+    null
+  );
   assert.equal(quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false }), 'next');
   assert.equal(quickPromptPaletteAction({ key: 'ArrowUp', metaKey: false }), 'previous');
   assert.equal(quickPromptPaletteAction({ key: 'Home', metaKey: false }), 'first');
@@ -173,11 +186,12 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
   assert.match(palette, /<Command\.Input[\s\S]*autofocus/);
+  assert.match(palette, /aria-activedescendant=\{activePrompt \? `quick-prompt-option-\$\{activePrompt\.id\}` : undefined\}/);
   assert.match(palette, /vimBindings=\{false\}/);
   assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
-  assert.match(palette, /⌘Enter · insert &amp; send/);
+  assert.match(palette, /⌘Enter · insert and send/);
   assert.match(palette, /<QuickPromptEditor/);
   assert.match(palette, />Retry<\/Button>/);
   assert.match(palette, />New quick prompt<\/Button>/);
@@ -197,4 +211,5 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
     'Close the palette'
   ]) assert.match(card, new RegExp(hint));
   assert.match(shortcuts, /\['⌘', '⇧', 'P'\], label: 'Open quick prompts for the selected agent'/);
+  assert.match(shortcuts, /quick-prompt search uses them for first\/last/);
 });

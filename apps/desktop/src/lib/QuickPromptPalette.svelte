@@ -128,6 +128,7 @@
             autofocus
             placeholder="Search prompt names and text"
             aria-label="Search quick prompts"
+            aria-activedescendant={activePrompt ? `quick-prompt-option-${activePrompt.id}` : undefined}
             oninput={() => (selectedIndex = 0)}
             onkeydown={handleKeydown}
           />
@@ -182,7 +183,7 @@
         <footer class="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
           <span>↑↓ · navigate</span>
           <span>Enter · insert</span>
-          <span>⌘Enter · insert &amp; send</span>
+          <span>⌘Enter · insert and send</span>
           <span>⌘N · new quick prompt</span>
           <span class="ml-auto">Esc · close</span>
         </footer>

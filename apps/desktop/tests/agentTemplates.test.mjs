@@ -92,7 +92,15 @@ test('new-agent dialog keeps template and agent choices independent and persiste
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
   assert.match(source, /w-\[min\(880px,calc\(100vw-24px\)\)\] !max-w-none/);
-  assert.match(source, /class="min-h-56 resize-y text-sm leading-6"[\s\S]*rows=\{11\}/);
+  assert.match(source, /class="min-h-\[17rem\] resize-y text-sm leading-6"/);
+  assert.doesNotMatch(source, /rows=\{11\}/);
+  assert.match(source, /onOpenAutoFocus=\{focusPromptOnOpen\}/);
+  assert.match(source, /bind:ref=\{promptTextarea\}/);
+  assert.match(source, /if \(enabledTools\.length === 0\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
+  assert.match(source, /<span>Template <span class="font-normal text-muted-foreground">\(optional\)<\/span><\/span>/);
+  assert.match(source, /<span>Prompt <span class="font-normal text-muted-foreground">\(optional\)<\/span><\/span>/);
+  assert.match(source, /class="whitespace-normal text-xs font-normal leading-4 text-muted-foreground"/);
+  assert.doesNotMatch(source, /class="truncate text-xs font-normal text-muted-foreground"/);
   assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
   assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
   assert.match(card, /Agent disabled/);

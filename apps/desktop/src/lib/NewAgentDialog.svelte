@@ -58,6 +58,7 @@
   let launchArgs = $state('');
   let advancedOpen = $state(false);
   let previewOpen = $state(true);
+  let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   let initialized = false;
 
   const enabledTools = $derived(tools.filter((tool) => tool.enabled));
@@ -189,6 +190,12 @@
     event.preventDefault();
     void submit();
   }
+
+  function focusPromptOnOpen(event: Event): void {
+    if (enabledTools.length === 0) return;
+    event.preventDefault();
+    requestAnimationFrame(() => promptTextarea?.focus());
+  }
 </script>
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
@@ -196,6 +203,7 @@
     class="w-[min(880px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl"
     showCloseButton={false}
     aria-label="New agent"
+    onOpenAutoFocus={focusPromptOnOpen}
   >
     <form onsubmit={(event) => { event.preventDefault(); void submit(); }}>
       <header class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
@@ -211,9 +219,9 @@
       <section class="grid max-h-[calc(100dvh-10rem)] gap-3 overflow-y-auto p-4">
         <div class="grid gap-3 sm:grid-cols-2">
           <label class="grid content-start gap-1.5 text-sm font-medium" for="new-agent-template">
-            Template <span class="font-normal text-muted-foreground">(optional)</span>
+            <span>Template <span class="font-normal text-muted-foreground">(optional)</span></span>
             <Select.Root type="single" value={templateChoice} disabled={loading || busy} onValueChange={selectTemplate}>
-              <Select.Trigger id="new-agent-template" class="w-full">
+              <Select.Trigger id="new-agent-template" class="w-full text-left">
                 {selectedTemplate?.name ?? 'None'}
               </Select.Trigger>
               <Select.Content>
@@ -241,10 +249,12 @@
           <label class="grid content-start gap-1.5 text-sm font-medium" for="new-agent-tool">
             Agent
             <Select.Root type="single" value={agentChoice} disabled={loading || busy} onValueChange={selectAgent}>
-              <Select.Trigger id="new-agent-tool" class="w-full">
+              <Select.Trigger id="new-agent-tool" class="w-full text-left">
                 {#if selectedTool}
-                  <AgentBrandMark tool={selectedTool} size={16} />
-                  <span class="truncate">{selectedTool.name}</span>
+                  <span class="flex min-w-0 items-center gap-1.5">
+                    <AgentBrandMark tool={selectedTool} size={16} />
+                    <span class="truncate">{selectedTool.name}</span>
+                  </span>
                 {:else}
                   Select an agent
                 {/if}
@@ -259,7 +269,7 @@
               </Select.Content>
             </Select.Root>
             {#if agentOverridden && templateDefaultTool}
-              <span class="truncate text-xs font-normal text-muted-foreground" title={`Template default: ${templateDefaultTool.name}. Template launch args are skipped for other agents.`}>
+              <span class="whitespace-normal text-xs font-normal leading-4 text-muted-foreground">
                 Template default: {templateDefaultTool.name}. Template launch args are skipped for other agents.
               </span>
             {/if}
@@ -282,12 +292,12 @@
         {/if}
 
         <label class="grid gap-1.5 text-sm font-medium" for="new-agent-prompt">
-          Prompt <span class="font-normal text-muted-foreground">(optional)</span>
+          <span>Prompt <span class="font-normal text-muted-foreground">(optional)</span></span>
           <Textarea
             id="new-agent-prompt"
-            class="min-h-56 resize-y text-sm leading-6"
+            class="min-h-[17rem] resize-y text-sm leading-6"
+            bind:ref={promptTextarea}
             bind:value={prompt}
-            rows={11}
             placeholder="What should this agent work on?"
             disabled={busy}
             onkeydown={handleKeydown}
@@ -304,11 +314,11 @@
           <Collapsible.Content>
             <div class="grid gap-3 border-t border-border p-3 sm:grid-cols-2">
               <label class="grid gap-1.5 text-sm font-medium" for="new-agent-name">
-                Name <span class="font-normal text-muted-foreground">(optional)</span>
+                <span>Name <span class="font-normal text-muted-foreground">(optional)</span></span>
                 <Input id="new-agent-name" bind:value={launchName} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} onkeydown={handleKeydown} />
               </label>
               <label class="grid gap-1.5 text-sm font-medium" for="new-agent-args">
-                Extra launch args <span class="font-normal text-muted-foreground">(optional)</span>
+                <span>Extra launch args <span class="font-normal text-muted-foreground">(optional)</span></span>
                 <Input id="new-agent-args" bind:value={launchArgs} placeholder='--model "gpt-5"' disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} onkeydown={handleKeydown} />
               </label>
             </div>
