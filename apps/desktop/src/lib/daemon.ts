@@ -25,6 +25,12 @@ import type {
   SpawnAgentResult
 } from './agentTools';
 import type {
+  AgentTemplate,
+  AgentTemplateInput,
+  AgentTemplatesClient,
+  DeleteAgentTemplateResult
+} from './agentTemplates';
+import type {
   DeleteQuickPromptResult,
   QuickPrompt,
   QuickPromptInput,
@@ -312,7 +318,9 @@ interface QueuedTerminalInput {
   data: number[];
 }
 
-export class DaemonClient implements CoordinationClient, AgentToolsClient, QuickPromptsClient {
+export class DaemonClient
+  implements CoordinationClient, AgentToolsClient, AgentTemplatesClient, QuickPromptsClient
+{
   private sequence = 0;
   private pending = new Map<string, PendingRequest>();
   private connected = false;
@@ -715,6 +723,24 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient, Quick
 
   reorderQuickPrompts(quickPromptIds: number[]): Promise<QuickPrompt[]> {
     return this.request('quick_prompts.reorder', { quick_prompt_ids: quickPromptIds });
+  }
+
+  listAgentTemplates(): Promise<AgentTemplate[]> {
+    return this.request('agent_templates.list', {});
+  }
+
+  saveAgentTemplate(template: AgentTemplateInput): Promise<AgentTemplate> {
+    return this.request('agent_templates.save', { template });
+  }
+
+  deleteAgentTemplate(agentTemplateId: number): Promise<DeleteAgentTemplateResult> {
+    return this.request('agent_templates.delete', { agent_template_id: agentTemplateId });
+  }
+
+  reorderAgentTemplates(agentTemplateIds: number[]): Promise<AgentTemplate[]> {
+    return this.request('agent_templates.reorder', {
+      agent_template_ids: agentTemplateIds
+    });
   }
 
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {

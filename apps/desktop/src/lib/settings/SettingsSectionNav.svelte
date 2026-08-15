@@ -4,6 +4,7 @@
   import BellIcon from '@lucide/svelte/icons/bell';
   import InfoIcon from '@lucide/svelte/icons/info';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
+  import NotebookTabsIcon from '@lucide/svelte/icons/notebook-tabs';
   import MonitorIcon from '@lucide/svelte/icons/monitor';
   import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
   import PanelLeftIcon from '@lucide/svelte/icons/panel-left';
@@ -27,6 +28,7 @@
     sidebar: PanelLeftIcon,
     hotkeys: KeyboardIcon,
     notifications: BellIcon,
+    templates: NotebookTabsIcon,
     agents: BotIcon,
     'quick-prompts': MessageSquareTextIcon,
     tools: MonitorIcon,

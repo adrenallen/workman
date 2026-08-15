@@ -5,15 +5,19 @@
   import AgentStatusIndicator from './components/ds/AgentStatusIndicator.svelte';
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import ConfirmationDialog from './ConfirmationDialog.svelte';
+  import NewAgentDialog, { type NewAgentSubmission } from './NewAgentDialog.svelte';
   import { submitOnEnter } from './formInputConventions';
   import TerminalView from './TerminalView.svelte';
   import {
     getAgentToolsStore,
-    parseExtraArgs,
     type AgentTool,
     type AgentToolInput,
     type AgentToolsSnapshot
   } from './agentTools';
+  import {
+    getAgentTemplatesStore,
+    type AgentTemplatesSnapshot
+  } from './agentTemplates';
   import type { ProcessView } from './daemon';
   import type { AgentsPanelProps } from './workspace';
   import { projectDisplayName } from './worktrees';
@@ -32,18 +36,18 @@
   // The App owns one DaemonClient for the lifetime of this mounted section.
   // svelte-ignore state_referenced_locally
   const toolStore = getAgentToolsStore(client);
+  // svelte-ignore state_referenced_locally
+  const templateStore = getAgentTemplatesStore(client);
   let toolSnapshot = $state<AgentToolsSnapshot>(toolStore.current());
+  let templateSnapshot = $state<AgentTemplatesSnapshot>(templateStore.current());
   let editingTool = $state<AgentToolInput | null>(null);
   let spawnTool = $state<AgentTool | null>(null);
   let removeToolRequest = $state<AgentTool | null>(null);
-  let launchName = $state('');
-  let launchArgs = $state('');
   let prompt = $state('');
   let saving = $state(false);
   let launching = $state(false);
   let prompting = $state(false);
   let closingId = $state<number | null>(null);
-  let spawnNameInput = $state<HTMLInputElement>();
   let toolNameInput = $state<HTMLInputElement>();
   let mounted = false;
   let seenSpawnSignal: number | null = null;
@@ -71,10 +75,14 @@
         openDefaultSpawn();
       }
     });
-    void toolStore.refresh().catch(reportCause);
+    const unsubscribeTemplates = templateStore.subscribe((snapshot) => {
+      templateSnapshot = snapshot;
+    });
+    void Promise.all([toolStore.refresh(), templateStore.refresh()]).catch(reportCause);
     return () => {
       mounted = false;
       unsubscribe();
+      unsubscribeTemplates();
     };
   });
 
@@ -154,27 +162,15 @@
       return;
     }
     spawnTool = tool;
-    launchName = '';
-    launchArgs = '';
-    queueMicrotask(() => spawnNameInput?.focus());
   }
 
-  async function spawnAgent(): Promise<void> {
-    if (!spawnTool || launching) return;
-    let extraArgs: string[];
-    try {
-      extraArgs = parseExtraArgs(launchArgs);
-    } catch (cause) {
-      reportCause(cause);
-      return;
-    }
+  async function spawnAgent(submission: NewAgentSubmission): Promise<void> {
+    if (launching) return;
     launching = true;
     try {
       const result = await client.spawnAgent({
-        project_id: project.id,
-        agent_tool_id: spawnTool.id,
-        name: launchName.trim() || undefined,
-        extra_args: extraArgs
+        ...submission.input,
+        project_id: project.id
       });
       spawnTool = null;
       onSelectProcess(result.process_id);
@@ -383,32 +379,17 @@
 {/if}
 
 {#if spawnTool}
-  <div class="dialog-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) spawnTool = null; }}>
-    <form class="dialog spawn-dialog" aria-label={`Spawn ${spawnTool.name}`} onsubmit={(event) => { event.preventDefault(); void spawnAgent(); }}>
-      <header>
-        <div>
-          <span class="eyebrow">New agent</span>
-          <h3>Launch {spawnTool.name}</h3>
-        </div>
-        <button type="button" aria-label="Close" onclick={() => spawnTool = null}>×</button>
-      </header>
-      <div class="launch-command"><span>$</span><code>{spawnTool.command}</code></div>
-      <label>
-        <span>Session name <i>optional</i></span>
-        <input bind:this={spawnNameInput} bind:value={launchName} placeholder={`${spawnTool.name.toLowerCase()} worker`} />
-      </label>
-      <label>
-        <span>Extra arguments <i>optional</i></span>
-        <input bind:value={launchArgs} autocapitalize="off" autocorrect="off" spellcheck={false} placeholder='--model "gpt-5"' />
-        <small>Quotes group one argument. Workman passes each value without shell reinterpretation.</small>
-      </label>
-      <footer>
-        <span></span><span></span>
-        <button type="button" onclick={() => spawnTool = null}>Cancel</button>
-        <button class="primary" type="submit" disabled={launching}>{launching ? 'Launching…' : 'Launch agent'}</button>
-      </footer>
-    </form>
-  </div>
+  <NewAgentDialog
+    projectId={project.id}
+    tools={toolSnapshot.tools}
+    templates={templateSnapshot.templates}
+    loading={toolSnapshot.loading || templateSnapshot.loading}
+    busy={launching}
+    initialChoice={{ kind: 'tool', id: spawnTool.id }}
+    onSpawn={spawnAgent}
+    onClose={() => (spawnTool = null)}
+    onError={onError}
+  />
 {/if}
 
 {#if removeToolRequest}
@@ -464,8 +445,7 @@
   .quiet-summary,
   .prompt-composer,
   .dialog label,
-  .dialog footer,
-  .launch-command {
+  .dialog footer {
     font-family: 'JetBrains Mono Variable', monospace;
   }
 
@@ -1009,12 +989,6 @@
     text-transform: uppercase;
   }
 
-  .dialog label i {
-    color: #536d77;
-    font-style: normal;
-    font-weight: 500;
-  }
-
   .dialog input:not([type='checkbox']) {
     width: 100%;
     box-sizing: border-box;
@@ -1078,22 +1052,6 @@
     border-color: #654348;
     color: #cd8d88;
     background: #281d22;
-  }
-
-  .launch-command {
-    display: flex;
-    gap: 8px;
-    margin: 14px 17px 1px;
-    border: 1px solid #2c4850;
-    border-radius: 3px;
-    padding: 9px 10px;
-    color: #789099;
-    background: #0b181d;
-    font-size: var(--font-size-sm);
-  }
-
-  .launch-command span {
-    color: var(--signal);
   }
 
   @media (max-width: 920px) {

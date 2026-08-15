@@ -19,6 +19,7 @@
   } from './nativeMenu';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
+  import AgentTemplatesCard from './settings/AgentTemplatesCard.svelte';
   import AboutUpdatesCard from './settings/AboutUpdatesCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
@@ -249,6 +250,8 @@
         <HotkeysCard />
       {:else if $settingsSection === 'notifications'}
         <NotificationsCard />
+      {:else if $settingsSection === 'templates'}
+        <AgentTemplatesCard {client} connected={connection.status === 'connected'} {onError} />
       {:else if $settingsSection === 'agents'}
         {#if project}
           <div class="section-stack">

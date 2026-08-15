@@ -13,7 +13,6 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
-  import AgentBrandMark from './lib/AgentBrandMark.svelte';
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
@@ -27,6 +26,7 @@
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
+  import NewAgentDialog, { type NewAgentSubmission } from './lib/NewAgentDialog.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
@@ -61,6 +61,10 @@
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
   import type { QuickPrompt } from './lib/quickPrompts';
+  import {
+    getAgentTemplatesStore,
+    type AgentTemplate
+  } from './lib/agentTemplates';
   import {
     planAgentCascade,
     type AgentCascadeAction,
@@ -227,6 +231,7 @@
 
   const client = new DaemonClient();
   const agentToolsStore = getAgentToolsStore(client);
+  const agentTemplatesStore = getAgentTemplatesStore(client);
   const projectRailBounds = { min: 176, max: 340 };
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
@@ -304,11 +309,16 @@
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
+  let agentTemplates = $state<AgentTemplate[]>([]);
+  let preferredAgentToolId = $state<number | null>(null);
   let agentToolsLoading = $state(false);
 
   $effect(() => agentToolsStore.subscribe((snapshot) => {
     registeredAgentTools = snapshot.tools;
     agentTools = snapshot.tools.filter((tool) => tool.enabled);
+  }));
+  $effect(() => agentTemplatesStore.subscribe((snapshot) => {
+    agentTemplates = snapshot.templates;
   }));
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
@@ -1295,7 +1305,7 @@
             tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           }
           if (!tool) throw new Error(`Agent tool ${target.agentToolName} is no longer enabled`);
-          await spawnAgent(tool);
+          await openAgentDialog(tool.id);
           return;
         }
         case 'add-command':
@@ -2147,12 +2157,18 @@
     else if (retry === 'agent') void openAgentDialog();
   }
 
-  async function openAgentDialog(): Promise<void> {
+  async function openAgentDialog(preferredToolId: number | null = null): Promise<void> {
+    preferredAgentToolId = preferredToolId;
     dialog = 'agent';
     agentToolsLoading = true;
     try {
-      registeredAgentTools = await client.listAgentTools();
+      const [tools, templates] = await Promise.all([
+        agentToolsStore.refresh(true),
+        agentTemplatesStore.refresh(true)
+      ]);
+      registeredAgentTools = tools;
       agentTools = registeredAgentTools.filter((tool) => tool.enabled);
+      agentTemplates = templates;
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -2160,15 +2176,25 @@
     }
   }
 
-  async function spawnAgent(tool: AgentTool): Promise<void> {
+  async function spawnAgent(
+    tool: AgentTool,
+    requestedInput?: NewAgentSubmission['input'],
+    template: AgentTemplate | null = null
+  ): Promise<void> {
     const project = selectedProject;
     if (!project) return;
+    const input = requestedInput ?? {
+      project_id: project.id,
+      agent_tool_id: tool.id,
+      extra_args: []
+    };
+    const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
     const optimistic = createOptimisticProcess({
       id: optimisticId,
       project,
       kind: 'agent',
-      name: tool.name,
+      name: optimisticName,
       command: tool.command,
       agentToolId: tool.id,
       retry: 'agent'
@@ -2180,14 +2206,10 @@
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
-    selection = projectTreeSelection('agent', optimisticId, project.id, tool.name);
+    selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
     await tick();
     try {
-      const result = await client.spawnAgent({
-        project_id: project.id,
-        agent_tool_id: tool.id,
-        extra_args: []
-      });
+      const result = await client.spawnAgent({ ...input, project_id: project.id });
       await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
       optimisticProcesses = optimisticProcesses.filter(
@@ -4431,10 +4453,9 @@
   />
 {/if}
 
-{#if dialog && dialog !== 'command'}
+{#if dialog === 'todo'}
   <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
-    {#if dialog === 'todo'}
-      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
+    <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
       <form class="dialog-surface" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
         <header>
           <div><span>New todo</span><h2>Add work to the tree</h2></div>
@@ -4457,34 +4478,30 @@
         </div>
         <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
       </form>
-      </Dialog.Content>
-    {:else if dialog === 'agent'}
-      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Add agent">
-      <section class="dialog-surface">
-        <header>
-          <div><span>New agent</span><h2>Choose an agent tool</h2></div>
-          <IconButton label="Close agent picker" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
-        </header>
-        <div class="agent-choices">
-          {#if agentToolsLoading}
-            <p>Loading agent tools…</p>
-          {:else}
-            {#each agentTools as tool (tool.id)}
-              <button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}>
-                <span class="agent-choice-mark"><AgentBrandMark {tool} size={20} /></span>
-                <span class="agent-choice-copy"><strong>{tool.name}</strong><small>{tool.command}</small></span>
-                <span class="agent-choice-action">Spawn</span>
-              </button>
-            {:else}
-              <p>No enabled agent tools. Add one in Settings.</p>
-            {/each}
-          {/if}
-        </div>
-        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
-      </section>
-      </Dialog.Content>
-    {/if}
+    </Dialog.Content>
   </Dialog.Root>
+{/if}
+
+{#if dialog === 'agent' && selectedProject}
+  <NewAgentDialog
+    projectId={selectedProject.id}
+    tools={registeredAgentTools}
+    templates={agentTemplates}
+    initialChoice={preferredAgentToolId === null ? null : { kind: 'tool', id: preferredAgentToolId }}
+    loading={agentToolsLoading}
+    busy={detailBusy}
+    onSpawn={(submission) => spawnAgent(submission.tool, submission.input, submission.template)}
+    onClose={() => (dialog = null)}
+    onOpenSettings={() => {
+      dialog = null;
+      todoBrowserOpen = false;
+      scratchpadBrowserOpen = false;
+      processOverviewKind = null;
+      selectSettingsSection('templates');
+      settingsOpen = true;
+    }}
+    onError={(message) => reportError(new Error(message))}
+  />
 {/if}
 
 {#if dialog === 'command' && selectedProject}
@@ -4618,16 +4635,6 @@
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
   .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }
-  .agent-choices > button { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 0; border-bottom: 1px solid var(--border); padding: 7px 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
-  .agent-choices > button:hover { background: var(--accent); }
-  .agent-choice-mark { display: grid; width: 24px; height: 24px; place-items: center; color: var(--text-soft); }
-  .agent-choice-copy { display: grid; min-width: 0; gap: 2px; }
-  .agent-choice-copy strong { font-size: var(--font-size-sm); }
-  .agent-choice-copy small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-choice-action { color: var(--text-soft); font-size: var(--font-size-sm); }
-  .agent-choices p { margin: 0; padding: 13px; color: var(--text-soft); font-size: var(--font-size-sm); }
-
   @media (max-width: 760px) {
     .project-copy small { display: none; }
   }

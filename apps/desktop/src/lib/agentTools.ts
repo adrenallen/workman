@@ -77,9 +77,11 @@ export interface AgentToolDeepCheck {
 
 export interface SpawnAgentInput {
   project_id: number;
-  agent_tool_id: number;
+  agent_tool_id?: number;
+  agent_template_id?: number;
   name?: string;
   extra_args: string[];
+  prompt?: string;
 }
 
 export interface SpawnAgentResult {
