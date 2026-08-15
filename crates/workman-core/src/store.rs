@@ -7,8 +7,8 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
     Actor, AgentLaunchMode, AgentSession, AgentTool, Process, ProcessId, ProcessKind, Profile,
-    ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, Scratchpad, Timer, Todo,
-    TodoBlocker, TodoComment, TodoId, WorktreeRepository, WorktreeRepositoryId,
+    ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, QuickPrompt, Scratchpad, Timer,
+    Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository, WorktreeRepositoryId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -143,10 +143,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "process_ownership",
         include_str!("../migrations/0027_process_ownership.sql"),
     ),
+    (
+        29,
+        "quick_prompts",
+        include_str!("../migrations/0029_quick_prompts.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 27;
+pub const LATEST_SCHEMA_VERSION: i64 = 29;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -631,6 +636,41 @@ impl Store {
                     ],
                 )?;
                 icon_pairs.push((old_id, next_id));
+            }
+
+            let prompts = {
+                let mut statement = transaction.prepare(
+                    "SELECT name, body, sort_order
+                     FROM quick_prompts WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_prompt_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM quick_prompts",
+                [],
+                |row| row.get(0),
+            )?;
+            for (position, (name, body, sort_order)) in prompts.into_iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO quick_prompts (
+                        id, profile_id, name, body, sort_order, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch(), unixepoch())",
+                    params![
+                        first_prompt_id + position as i64,
+                        profile_id,
+                        name,
+                        body,
+                        sort_order,
+                    ],
+                )?;
             }
         }
         transaction.commit()?;
@@ -1261,6 +1301,99 @@ impl Store {
     pub fn delete_agent_tool(&self, id: i64) -> StoreResult<bool> {
         Ok(self.connection.execute(
             "DELETE FROM agent_tools
+             WHERE id = ?1
+               AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+            [id],
+        )? > 0)
+    }
+
+    pub fn list_profile_quick_prompts(
+        &self,
+        profile_id: ProfileId,
+    ) -> StoreResult<Vec<QuickPrompt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, body, sort_order, created_at, updated_at
+             FROM quick_prompts WHERE profile_id = ?1 ORDER BY sort_order, id",
+        )?;
+        Ok(statement
+            .query_map([profile_id], quick_prompt_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_quick_prompts(&self) -> StoreResult<Vec<QuickPrompt>> {
+        self.list_profile_quick_prompts(self.active_profile_id()?)
+    }
+
+    pub fn get_quick_prompt(&self, id: i64) -> StoreResult<Option<QuickPrompt>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT q.id, q.name, q.body, q.sort_order, q.created_at, q.updated_at
+                 FROM quick_prompts AS q
+                 JOIN profiles AS p ON p.id = q.profile_id AND p.active = 1
+                 WHERE q.id = ?1",
+                [id],
+                quick_prompt_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn put_quick_prompt(&self, prompt: &QuickPrompt) -> StoreResult<()> {
+        let profile_id = self.active_profile_id()?;
+        self.connection.execute(
+            "INSERT INTO quick_prompts (
+                id, profile_id, name, body, sort_order, created_at, updated_at
+             ) VALUES (
+                ?1, ?4, ?2, ?3,
+                COALESCE((SELECT MAX(sort_order) + 1 FROM quick_prompts WHERE profile_id = ?4), 0),
+                unixepoch(), unixepoch()
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                body = excluded.body,
+                updated_at = unixepoch()
+             WHERE quick_prompts.profile_id = excluded.profile_id",
+            params![prompt.id, prompt.name, prompt.body, profile_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn reorder_quick_prompts(&self, ordered_ids: &[i64]) -> StoreResult<()> {
+        let existing = self
+            .list_quick_prompts()?
+            .into_iter()
+            .map(|prompt| prompt.id)
+            .collect::<HashSet<_>>();
+        let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+        if requested.len() != ordered_ids.len() || requested != existing {
+            return Err(StoreError::InvalidReorder(
+                "quick prompt order must contain every saved prompt exactly once".to_owned(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for (position, id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE quick_prompts SET sort_order = ?1, updated_at = unixepoch()
+                 WHERE id = ?2
+                   AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+                params![position as i64, id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn next_quick_prompt_id(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM quick_prompts",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn delete_quick_prompt(&self, id: i64) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM quick_prompts
              WHERE id = ?1
                AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
             [id],
@@ -2064,6 +2197,17 @@ fn profile_from_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
         project_count: usize::try_from(project_count).unwrap_or(usize::MAX),
         agent_tool_count: usize::try_from(agent_tool_count).unwrap_or(usize::MAX),
         created_at: row.get(5)?,
+    })
+}
+
+fn quick_prompt_from_row(row: &Row<'_>) -> rusqlite::Result<QuickPrompt> {
+    Ok(QuickPrompt {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        body: row.get(2)?,
+        sort_order: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 

@@ -13,6 +13,7 @@ pub type ProfileId = i64;
 pub type WorktreeRepositoryId = i64;
 pub type ProcessId = i64;
 pub type AgentToolId = i64;
+pub type QuickPromptId = i64;
 pub type TodoId = i64;
 pub type TodoCommentId = i64;
 pub type ScratchpadId = i64;
@@ -244,6 +245,17 @@ pub struct AgentTool {
     pub resume_args: Option<String>,
     /// Shell arguments appended to continue the cwd-scoped latest session.
     pub continue_args: Option<String>,
+}
+
+/// One reusable prompt snippet owned by a workspace profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickPrompt {
+    pub id: QuickPromptId,
+    pub name: String,
+    pub body: String,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// Durable conversation identity and the strategy used for an agent's latest launch.

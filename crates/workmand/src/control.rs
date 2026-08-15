@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
     AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectFolder, ProjectId, ProjectLayoutEntry, Store, TimerId,
+    ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store, TimerId,
 };
 
 use crate::{
@@ -416,6 +416,29 @@ struct AgentToolIconParams {
 #[derive(Debug, Deserialize)]
 struct AgentToolOrderParams {
     agent_tool_ids: Vec<AgentToolId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptParams {
+    prompt: QuickPromptInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptInput {
+    #[serde(default)]
+    id: Option<i64>,
+    name: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptIdParams {
+    quick_prompt_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptOrderParams {
+    quick_prompt_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1254,6 +1277,73 @@ async fn dispatch(
             .map(|tools| json_value(agent_icons::views(tools, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
         }
+        "quick_prompts.list" => {
+            return registry
+                .store()
+                .list_quick_prompts()
+                .map(json_value)
+                .map_err(quick_prompt_store_error);
+        }
+        "quick_prompts.save" => {
+            let params: QuickPromptParams = params_as(params)?;
+            let name = params.prompt.name.trim();
+            if name.is_empty() {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name cannot be empty".to_owned(),
+                ));
+            }
+            let id = match params.prompt.id {
+                Some(id) => id,
+                None => registry
+                    .store()
+                    .next_quick_prompt_id()
+                    .map_err(quick_prompt_store_error)?,
+            };
+            registry
+                .store()
+                .put_quick_prompt(&QuickPrompt {
+                    id,
+                    name: name.to_owned(),
+                    body: params.prompt.body,
+                    sort_order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .map_err(quick_prompt_store_error)?;
+            return registry
+                .store()
+                .get_quick_prompt(id)
+                .map_err(quick_prompt_store_error)?
+                .map(json_value)
+                .ok_or((
+                    "quick_prompt_not_found",
+                    format!("quick prompt {id} does not belong to the active profile"),
+                ));
+        }
+        "quick_prompts.delete" => {
+            let params: QuickPromptIdParams = params_as(params)?;
+            let deleted = registry
+                .store()
+                .delete_quick_prompt(params.quick_prompt_id)
+                .map_err(quick_prompt_store_error)?;
+            return Ok(json!({
+                "quick_prompt_id": params.quick_prompt_id,
+                "deleted": deleted,
+            }));
+        }
+        "quick_prompts.reorder" => {
+            let params: QuickPromptOrderParams = params_as(params)?;
+            registry
+                .store()
+                .reorder_quick_prompts(&params.quick_prompt_ids)
+                .map_err(quick_prompt_store_error)?;
+            return registry
+                .store()
+                .list_quick_prompts()
+                .map(json_value)
+                .map_err(quick_prompt_store_error);
+        }
         _ => {}
     }
 
@@ -1422,6 +1512,10 @@ fn json_value(value: impl serde::Serialize) -> Value {
 
 fn registry_error(error: RegistryError) -> (&'static str, String) {
     (error.code(), error.to_string())
+}
+
+fn quick_prompt_store_error(error: workman_core::StoreError) -> (&'static str, String) {
+    ("quick_prompt_error", error.to_string())
 }
 
 fn config_error(error: crate::ConfigError) -> (&'static str, String) {
