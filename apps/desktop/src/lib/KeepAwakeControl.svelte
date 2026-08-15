@@ -11,7 +11,8 @@
   import {
     armKeepAwake,
     disarmKeepAwake,
-    evaluateKeepAwake,
+    evaluateKeepAwakeAtCurrentTime,
+    evaluateKeepAwakeConnection,
     initialKeepAwakeState,
     runningAgents,
     type KeepAwakeMode
@@ -48,10 +49,12 @@
   let mode = $state<KeepAwakeMode>('all');
   let specificAgentId = $state('');
   let machine = $state(initialKeepAwakeState());
+  let machineGeneration = $state(0);
   let autoReleasePending = false;
-  let now = $state(Date.now());
+  let clockTick = $state(0);
+  let lastConnectedAt = $state(Date.now());
   let availableAgents = $derived(runningAgents(processes));
-  let evaluation = $derived(evaluateKeepAwake(machine, processes, now));
+  let evaluation = $derived(evaluateKeepAwakeAtCurrentTime(machine, processes, clockTick));
   let selectedAgent = $derived(
     availableAgents.find((process) => String(process.id) === specificAgentId) ?? null
   );
@@ -97,12 +100,30 @@
   });
 
   $effect(() => {
-    if (!machine.armed || connectionStatus !== 'disconnected') return;
+    if (connectionStatus === 'connected') lastConnectedAt = Date.now();
+  });
+
+  $effect(() => {
+    if (!machine.armed || connectionStatus === 'connected') return;
+    const connection = evaluateKeepAwakeConnection(
+      lastConnectedAt,
+      connectionStatus,
+      Date.now()
+    );
+    if (connection.shouldDisarm) {
+      void disarm('Keep awake stopped because the daemon disconnected.', true);
+      return;
+    }
     const timeout = window.setTimeout(() => {
-      if (machine.armed && connectionStatus === 'disconnected') {
+      const current = evaluateKeepAwakeConnection(
+        lastConnectedAt,
+        connectionStatus,
+        Date.now()
+      );
+      if (machine.armed && current.shouldDisarm) {
         void disarm('Keep awake stopped because the daemon disconnected.', true);
       }
-    }, 60_000);
+    }, connection.recheckInMs ?? 60_000);
     return () => window.clearTimeout(timeout);
   });
 
@@ -111,7 +132,7 @@
     let pollCount = 0;
     void syncNativeStatus();
     const timer = window.setInterval(() => {
-      now = Date.now();
+      clockTick += 1;
       pollCount += 1;
       if (machine.armed && pollCount % 3 === 0) void syncNativeStatus();
     }, 1_000);
@@ -128,7 +149,14 @@
         if (!active) return;
         supported = status.supported;
         if (status.warning) warning = status.warning;
-        if (machine.armed && !status.active) machine = disarmKeepAwake(machine);
+        if (!machine.armed && status.active) {
+          mode = 'all';
+          machine = armKeepAwake('all', null);
+          machineGeneration += 1;
+        } else if (machine.armed && !status.active) {
+          machine = disarmKeepAwake(machine);
+          machineGeneration += 1;
+        }
       } catch (cause) {
         if (active) warning = message(cause);
       }
@@ -164,7 +192,8 @@
         mode,
         mode === 'specific' ? Number(specificAgentId) : null
       );
-      now = Date.now();
+      machineGeneration += 1;
+      clockTick += 1;
     } catch (cause) {
       warning = message(cause);
     } finally {
@@ -178,11 +207,16 @@
   ): Promise<void> {
     if (busy) return;
     busy = true;
+    const generation = machineGeneration;
     try {
       await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
-      machine = disarmKeepAwake(machine);
+      const disarmed = machine.armed && machineGeneration === generation;
+      if (disarmed) {
+        machine = disarmKeepAwake(machine);
+        machineGeneration += 1;
+      }
       warning = reason;
-      if (notifyDisconnect) {
+      if (notifyDisconnect && disarmed) {
         await deliverNativeSystemNotification(
           'Keep awake released — daemon disconnected',
           'Your Mac may sleep normally again.'
@@ -196,21 +230,34 @@
   }
 
   async function releaseAutomatically(): Promise<void> {
+    if (busy || autoReleasePending || !machine.armed) return;
+    busy = true;
     autoReleasePending = true;
+    const generation = machineGeneration;
     try {
       await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
     } catch (cause) {
       warning = message(cause);
-      machine = { ...machine, idleSince: Date.now() };
+      if (machine.armed && machineGeneration === generation) {
+        machine = { ...machine, idleSince: Date.now() };
+      }
       autoReleasePending = false;
+      busy = false;
       return;
     }
-    machine = disarmKeepAwake(machine);
+    const disarmed = machine.armed && machineGeneration === generation;
+    if (disarmed) {
+      machine = disarmKeepAwake(machine);
+      machineGeneration += 1;
+    }
     autoReleasePending = false;
-    await deliverNativeSystemNotification(
-      'Keep awake released — all watched agents idle',
-      'Your Mac may sleep normally again.'
-    );
+    busy = false;
+    if (disarmed) {
+      await deliverNativeSystemNotification(
+        'Keep awake released — all watched agents idle',
+        'Your Mac may sleep normally again.'
+      );
+    }
   }
 
   function message(cause: unknown): string {

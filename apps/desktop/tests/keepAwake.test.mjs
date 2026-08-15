@@ -5,6 +5,8 @@ import test from 'node:test';
 import {
   armKeepAwake,
   evaluateKeepAwake,
+  evaluateKeepAwakeAtCurrentTime,
+  evaluateKeepAwakeConnection,
   KEEP_AWAKE_SETTLE_MS,
   shouldSubscribeProcessStatuses
 } from '../src/lib/keepAwake.ts';
@@ -17,7 +19,7 @@ const files = {
   shortcuts: new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url)
 };
 
-function agent(id, attention, status = 'running') {
+function agent(id, attention, status = 'running', lastOutputAt = 1) {
   return {
     id,
     kind: 'agent',
@@ -27,7 +29,8 @@ function agent(id, attention, status = 'running') {
       working: attention === 'working',
       needs_input: attention === 'needs_input',
       waiting: attention === 'waiting',
-      idle: attention === 'idle' || attention === 'waiting'
+      idle: attention === 'idle' || attention === 'waiting',
+      last_output_at: lastOutputAt
     }
   };
 }
@@ -52,6 +55,25 @@ test('all agents must stay idle for the full settle window', () => {
   assert.equal(settling.releaseInSeconds, 60);
   assert.equal(evaluateKeepAwake(settling.state, idle, 5_000 + KEEP_AWAKE_SETTLE_MS - 1).shouldRelease, false);
   assert.equal(evaluateKeepAwake(settling.state, idle, 5_000 + KEEP_AWAKE_SETTLE_MS).shouldRelease, true);
+});
+
+test('a status push releases against the current clock without waiting for a UI tick', () => {
+  const realDateNow = Date.now;
+  let currentTime = 1_000;
+  Date.now = () => currentTime;
+  try {
+    const initial = armKeepAwake('all', null);
+    const settling = evaluateKeepAwakeAtCurrentTime(initial, [agent(1, 'idle')], 0);
+    currentTime += KEEP_AWAKE_SETTLE_MS;
+    const statusPush = evaluateKeepAwakeAtCurrentTime(
+      settling.state,
+      [{ ...agent(1, 'idle'), agent_state: { ...agent(1, 'idle').agent_state } }],
+      0
+    );
+    assert.equal(statusPush.shouldRelease, true);
+  } finally {
+    Date.now = realDateNow;
+  }
 });
 
 test('working inside the settle window resets the idle timer', () => {
@@ -106,6 +128,38 @@ test('all-agent mode waits when agents appear after an empty first snapshot', ()
   assert.equal(appeared.state.idleSince, null);
 });
 
+test('all-agent mode treats an idle agent with no output as not ready to release', () => {
+  const evaluation = evaluateKeepAwake(
+    armKeepAwake('all', null),
+    [agent(4, 'idle', 'starting', null)],
+    1_000
+  );
+  assert.deepEqual(evaluation.waitingAgentIds, [4]);
+  assert.equal(evaluation.state.idleSince, null);
+});
+
+test('disconnect duration survives connecting and disconnected oscillation', () => {
+  let lastConnectedAt = 1_000;
+  for (const [status, now, shouldDisarm] of [
+    ['disconnected', 10_000, false],
+    ['connecting', 30_000, false],
+    ['disconnected', 59_000, false],
+    ['connecting', 61_000, true]
+  ]) {
+    const evaluation = evaluateKeepAwakeConnection(lastConnectedAt, status, now);
+    lastConnectedAt = evaluation.lastConnectedAt;
+    assert.equal(evaluation.shouldDisarm, shouldDisarm);
+  }
+
+  const reconnected = evaluateKeepAwakeConnection(lastConnectedAt, 'connected', 70_000);
+  assert.equal(reconnected.lastConnectedAt, 70_000);
+  assert.equal(
+    evaluateKeepAwakeConnection(reconnected.lastConnectedAt, 'disconnected', 80_000)
+      .shouldDisarm,
+    false
+  );
+});
+
 test('armed keep awake retains process statuses while the document is hidden', () => {
   assert.equal(shouldSubscribeProcessStatuses(true, false), true);
   assert.equal(shouldSubscribeProcessStatuses(false, true), true);
@@ -125,8 +179,11 @@ test('header, quick jump, and shortcuts expose keep awake', async () => {
   assert.match(control, /Until a specific agent is idle/);
   assert.match(control, /keep_awake_start/);
   assert.match(control, /keep_awake_stop/);
-  assert.match(control, /connectionStatus !== 'disconnected'/);
-  assert.match(control, /60_000/);
+  assert.match(control, /evaluateKeepAwakeAtCurrentTime\(machine, processes, clockTick\)/);
+  assert.match(control, /evaluateKeepAwakeConnection/);
+  assert.match(control, /!machine\.armed && status\.active/);
+  assert.match(control, /machineGeneration === generation/);
+  assert.match(control, /if \(busy \|\| autoReleasePending \|\| !machine\.armed\) return/);
   assert.match(control, /Keep awake released — daemon disconnected/);
   assert.match(control, /var\(--font-mono\)/);
   assert.match(navigation, /type: 'keep-awake'/);
