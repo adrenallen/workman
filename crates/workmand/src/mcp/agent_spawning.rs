@@ -1066,15 +1066,15 @@ async fn spawn_registered_agent_for(
             return Err(error);
         }
     };
-    if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
-        if let Err(error) =
+    if auto_acknowledge_dialogs
+        && supports_first_run_dialog_ack(&tool_type)
+        && let Err(error) =
             auto_acknowledge_initial_dialog(registry.clone(), result.process_id).await
-        {
-            eprintln!(
-                "process {}: initial dialog auto-acknowledgment failed; continuing with the live process: {error}",
-                result.process_id
-            );
-        }
+    {
+        eprintln!(
+            "process {}: initial dialog auto-acknowledgment failed; continuing with the live process: {error}",
+            result.process_id
+        );
     }
     Ok(result)
 }
