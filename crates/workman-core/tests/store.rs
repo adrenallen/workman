@@ -61,6 +61,7 @@ fn fresh_database_migrates_to_current_schema() {
             "project_folders",
             "project_worktrees",
             "projects",
+            "quick_prompts",
             "schema_migrations",
             "scratchpad_tags",
             "scratchpads",
