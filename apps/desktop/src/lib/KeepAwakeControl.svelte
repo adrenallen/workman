@@ -144,9 +144,10 @@
     };
 
     async function syncNativeStatus(): Promise<void> {
+      const statusGeneration = machineGeneration;
       try {
         const status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
-        if (!active) return;
+        if (!active || machineGeneration !== statusGeneration) return;
         supported = status.supported;
         if (status.warning) warning = status.warning;
         if (!machine.armed && status.active) {
@@ -158,7 +159,7 @@
           machineGeneration += 1;
         }
       } catch (cause) {
-        if (active) warning = message(cause);
+        if (active && machineGeneration === statusGeneration) warning = message(cause);
       }
     }
   });

@@ -182,6 +182,10 @@ test('header, quick jump, and shortcuts expose keep awake', async () => {
   assert.match(control, /evaluateKeepAwakeAtCurrentTime\(machine, processes, clockTick\)/);
   assert.match(control, /evaluateKeepAwakeConnection/);
   assert.match(control, /!machine\.armed && status\.active/);
+  assert.match(
+    control,
+    /const statusGeneration = machineGeneration;[\s\S]*?keep_awake_status[\s\S]*?if \(!active \|\| machineGeneration !== statusGeneration\) return;/
+  );
   assert.match(control, /machineGeneration === generation/);
   assert.match(control, /if \(busy \|\| autoReleasePending \|\| !machine\.armed\) return/);
   assert.match(control, /Keep awake released — daemon disconnected/);
