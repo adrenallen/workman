@@ -69,7 +69,7 @@
   function beginNew(): void {
     const tool = toolSnapshot.tools.find((candidate) => candidate.enabled);
     if (!tool) {
-      onError('Add or enable an agent tool before creating an agent template');
+      onError('Add or enable an agent before creating an agent template');
       return;
     }
     draft = { name: '', agentToolId: tool.id, extraArgs: '', prompt: '' };
@@ -156,7 +156,7 @@
     <div>
       <span class="text-xs font-medium text-muted-foreground">Active profile</span>
       <h2 id="agent-templates-title" class="mt-0.5 text-base font-semibold">Agent templates</h2>
-      <p class="mt-1 text-sm text-muted-foreground">Pair an agent tool with launch arguments and a reusable prompt.</p>
+      <p class="mt-1 text-sm text-muted-foreground">Pair an agent with launch arguments and a reusable prompt.</p>
     </div>
     <Button size="sm" disabled={!connected || draft !== null} onclick={beginNew}>
       <PlusIcon size={14} />New template
@@ -188,7 +188,7 @@
           <div class="min-w-0">
             <div class="flex min-w-0 items-center gap-2">
               <strong class="truncate text-sm font-medium">{template.name}</strong>
-              <span class="shrink-0 text-xs text-muted-foreground">{tool?.name ?? 'Missing agent tool'}</span>
+              <span class="shrink-0 text-xs text-muted-foreground">{tool?.name ?? 'Missing agent'}</span>
             </div>
             <p class="mt-0.5 truncate text-xs text-muted-foreground">
               {template.extra_args.length ? formatExtraArgs(template.extra_args) : 'No extra launch args'} · {template.prompt || 'No template prompt'}
@@ -217,11 +217,11 @@
         <label class="grid gap-1.5 text-sm font-medium" for="template-name">Name
           <Input id="template-name" bind:value={draft.name} placeholder="Implementation worker" required disabled={saving} />
         </label>
-        <label class="grid gap-1.5 text-sm font-medium" for="template-tool">Agent tool
+        <label class="grid gap-1.5 text-sm font-medium" for="template-tool">Agent
           <Select.Root type="single" value={String(draft.agentToolId)} disabled={saving} onValueChange={(value) => { if (value) draft!.agentToolId = Number(value); }}>
             <Select.Trigger id="template-tool" class="w-full">
               {@const currentTool = toolSnapshot.tools.find((tool) => tool.id === draft?.agentToolId)}
-              {#if currentTool}<AgentBrandMark tool={currentTool} size={16} />{currentTool.name}{:else}Select an agent tool{/if}
+              {#if currentTool}<AgentBrandMark tool={currentTool} size={16} />{currentTool.name}{:else}Select an agent{/if}
             </Select.Trigger>
             <Select.Content>
               {#each toolSnapshot.tools as tool (tool.id)}
@@ -255,7 +255,7 @@
 {#if removeRequest}
   <ConfirmationDialog
     title={`Delete ${removeRequest.name}?`}
-    description="This removes the agent template from the active profile. Agent tools and existing processes are unchanged."
+    description="This removes the agent template from the active profile. Agents and existing processes are unchanged."
     confirmLabel="Delete template"
     onConfirm={() => void confirmRemove()}
     onClose={() => (removeRequest = null)}

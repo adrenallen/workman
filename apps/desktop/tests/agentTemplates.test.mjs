@@ -69,9 +69,15 @@ test('new-agent dialog groups templates and tools and persists the selected choi
   assert.match(source, /\{#each templates as template/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
   assert.match(source, /agent disabled/);
+  assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
+  assert.doesNotMatch(source, /No enabled agent tools/);
   assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
   assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
   assert.match(card, /Agent disabled/);
+  assert.match(card, /Pair an agent with launch arguments and a reusable prompt\./);
+  assert.match(card, /Select an agent/);
+  assert.match(card, /Missing agent/);
+  assert.doesNotMatch(card, /agent tools?/i);
   assert.match(daemon, /listAgentTemplates\(\)[\s\S]*requestOptional\('agent_templates\.list', \{\}, \[\]\)/);
 });
 

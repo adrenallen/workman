@@ -253,7 +253,7 @@
         </Collapsible.Root>
 
         {#if !loading && enabledTools.length === 0}
-          <p class="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">No enabled agent tools. Add or enable one in Settings.</p>
+          <p class="rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">No enabled agents. Add or enable one in Settings.</p>
         {/if}
       </section>
 
