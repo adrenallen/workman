@@ -42,6 +42,11 @@ const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_PROMPT_HARD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const AGENT_TEMPLATE_NAME_MAX_CHARS: usize = 120;
+const AGENT_TEMPLATE_PROMPT_MAX_BYTES: usize = 64 * 1024;
+const AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS: usize = 64;
+const AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES: usize = 4 * 1024;
+const INITIAL_PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -458,6 +463,9 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<SpawnAgentArgs>,
     ) -> CallToolResult {
+        if let Err(error) = validate_initial_prompt(args.initial_prompt.as_deref()) {
+            return failure("invalid_params", error);
+        }
         let (project, spawned_by_process_id) = {
             let mut registry = self.registry.lock().await;
             match scoped_project(&mut registry, &parts, args.project_id) {
@@ -510,18 +518,7 @@ pub(crate) fn save_agent_template_from_settings(
     prompt: String,
 ) -> Result<AgentTemplate, String> {
     let name = name.trim().to_owned();
-    if name.is_empty() {
-        return Err("agent template name cannot be empty".to_owned());
-    }
-    if name.contains('\0') {
-        return Err("agent template name may not contain NUL bytes".to_owned());
-    }
-    if prompt.contains('\0') {
-        return Err("agent template prompt may not contain NUL bytes".to_owned());
-    }
-    if extra_args.iter().any(|arg| arg.contains('\0')) {
-        return Err("agent template arguments may not contain NUL bytes".to_owned());
-    }
+    validate_agent_template_fields(&name, &prompt, &extra_args)?;
     load_agent_tool(registry, agent_tool_id)?;
     if let Some(id) = id
         && registry
@@ -568,6 +565,60 @@ pub(crate) fn save_agent_template_from_settings(
         .get_agent_template(template.id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("agent template {} was not found after saving", template.id))
+}
+
+fn validate_agent_template_fields(
+    name: &str,
+    prompt: &str,
+    extra_args: &[String],
+) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("agent template name cannot be empty".to_owned());
+    }
+    if name.chars().count() > AGENT_TEMPLATE_NAME_MAX_CHARS {
+        return Err(format!(
+            "agent template name must be {AGENT_TEMPLATE_NAME_MAX_CHARS} characters or fewer"
+        ));
+    }
+    if prompt.len() > AGENT_TEMPLATE_PROMPT_MAX_BYTES {
+        return Err(format!(
+            "agent template prompt must be {AGENT_TEMPLATE_PROMPT_MAX_BYTES} bytes or fewer"
+        ));
+    }
+    if extra_args.len() > AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS {
+        return Err(format!(
+            "agent template may have at most {AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS} arguments"
+        ));
+    }
+    let extra_args_bytes = extra_args.iter().try_fold(0usize, |total, arg| {
+        total
+            .checked_add(arg.len())
+            .ok_or_else(|| "agent template argument size exceeds the supported range".to_owned())
+    })?;
+    if extra_args_bytes > AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES {
+        return Err(format!(
+            "agent template arguments must total {AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES} bytes or fewer"
+        ));
+    }
+    if name.contains('\0') {
+        return Err("agent template name may not contain NUL bytes".to_owned());
+    }
+    if prompt.contains('\0') {
+        return Err("agent template prompt may not contain NUL bytes".to_owned());
+    }
+    if extra_args.iter().any(|arg| arg.contains('\0')) {
+        return Err("agent template arguments may not contain NUL bytes".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_initial_prompt(prompt: Option<&str>) -> Result<(), String> {
+    if prompt.is_some_and(|prompt| prompt.len() > INITIAL_PROMPT_MAX_BYTES) {
+        return Err(format!(
+            "initial prompt must be {INITIAL_PROMPT_MAX_BYTES} bytes or fewer"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn reorder_agent_templates_from_settings(
@@ -812,6 +863,7 @@ pub(crate) async fn spawn_registered_agent(
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
 ) -> Result<SpawnResult, String> {
+    validate_initial_prompt(initial_prompt.as_deref())?;
     let resolved = {
         let registry = registry.lock().await;
         resolve_agent_spawn(
@@ -2014,6 +2066,72 @@ mod tests {
             Some("Prompt only".into())
         );
         assert_eq!(compose_initial_prompt(Some("\n"), None), None);
+    }
+
+    #[test]
+    fn agent_template_and_initial_prompt_limits_accept_boundaries_and_reject_excess() {
+        let boundary_args = vec!["x".repeat(64); AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS];
+        assert_eq!(
+            boundary_args.iter().map(String::len).sum::<usize>(),
+            AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES
+        );
+        assert!(
+            validate_agent_template_fields(
+                &"n".repeat(AGENT_TEMPLATE_NAME_MAX_CHARS),
+                &"p".repeat(AGENT_TEMPLATE_PROMPT_MAX_BYTES),
+                &boundary_args,
+            )
+            .is_ok()
+        );
+        assert!(validate_initial_prompt(Some(&"p".repeat(INITIAL_PROMPT_MAX_BYTES))).is_ok());
+
+        assert_eq!(
+            validate_agent_template_fields(
+                &"n".repeat(AGENT_TEMPLATE_NAME_MAX_CHARS + 1),
+                "",
+                &[],
+            )
+            .unwrap_err(),
+            "agent template name must be 120 characters or fewer"
+        );
+        assert_eq!(
+            validate_agent_template_fields(
+                "name",
+                &"p".repeat(AGENT_TEMPLATE_PROMPT_MAX_BYTES + 1),
+                &[],
+            )
+            .unwrap_err(),
+            "agent template prompt must be 65536 bytes or fewer"
+        );
+        assert_eq!(
+            validate_agent_template_fields(
+                "name",
+                "",
+                &vec![String::new(); AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS + 1],
+            )
+            .unwrap_err(),
+            "agent template may have at most 64 arguments"
+        );
+        assert_eq!(
+            validate_agent_template_fields(
+                "name",
+                "",
+                &["x".repeat(AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES + 1)],
+            )
+            .unwrap_err(),
+            "agent template arguments must total 4096 bytes or fewer"
+        );
+        assert_eq!(
+            validate_initial_prompt(Some(&"p".repeat(INITIAL_PROMPT_MAX_BYTES + 1))).unwrap_err(),
+            "initial prompt must be 65536 bytes or fewer"
+        );
+    }
+
+    #[test]
+    fn agent_template_fields_reject_nul_bytes() {
+        assert!(validate_agent_template_fields("bad\0name", "", &[]).is_err());
+        assert!(validate_agent_template_fields("name", "bad\0prompt", &[]).is_err());
+        assert!(validate_agent_template_fields("name", "", &["bad\0argument".into()]).is_err());
     }
 
     #[test]

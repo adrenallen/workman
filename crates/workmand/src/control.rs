@@ -574,6 +574,8 @@ async fn dispatch(
         }
         "agents.spawn" => {
             let params: SpawnAgentParams = params_as(params.clone())?;
+            crate::mcp::agent_spawning::validate_initial_prompt(params.prompt.as_deref())
+                .map_err(|error| ("invalid_params", error))?;
             let project = {
                 let registry = registry.lock().await;
                 registry
@@ -1333,14 +1335,39 @@ async fn dispatch(
                     "quick prompt name must be 120 characters or fewer".to_owned(),
                 ));
             }
+            if name.contains('\0') {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name may not contain NUL bytes".to_owned(),
+                ));
+            }
             if params.prompt.body.len() > 64 * 1024 {
                 return Err((
                     "invalid_params",
                     "quick prompt body must be 65536 bytes or fewer".to_owned(),
                 ));
             }
+            if params.prompt.body.contains('\0') {
+                return Err((
+                    "invalid_params",
+                    "quick prompt body may not contain NUL bytes".to_owned(),
+                ));
+            }
             let id = match params.prompt.id {
-                Some(id) => id,
+                Some(id) => {
+                    if registry
+                        .store()
+                        .get_quick_prompt(id)
+                        .map_err(quick_prompt_store_error)?
+                        .is_none()
+                    {
+                        return Err((
+                            "quick_prompt_not_found",
+                            format!("quick prompt {id} does not belong to the active profile"),
+                        ));
+                    }
+                    id
+                }
                 None => registry
                     .store()
                     .next_quick_prompt_id()

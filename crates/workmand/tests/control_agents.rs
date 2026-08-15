@@ -221,6 +221,54 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(template["ok"].as_bool().unwrap());
     let template_id = template["result"]["id"].as_i64().unwrap();
+
+    for (id, template, expected) in [
+        (
+            34,
+            json!({
+                "name": "x".repeat(121),
+                "agent_tool_id": tool_id
+            }),
+            "agent template name must be 120 characters or fewer",
+        ),
+        (
+            35,
+            json!({
+                "name": "Large prompt",
+                "agent_tool_id": tool_id,
+                "prompt": "x".repeat(64 * 1024 + 1)
+            }),
+            "agent template prompt must be 65536 bytes or fewer",
+        ),
+        (
+            36,
+            json!({
+                "name": "Many arguments",
+                "agent_tool_id": tool_id,
+                "extra_args": vec![""; 65]
+            }),
+            "agent template may have at most 64 arguments",
+        ),
+        (
+            37,
+            json!({
+                "name": "Large arguments",
+                "agent_tool_id": tool_id,
+                "extra_args": ["x".repeat(4 * 1024 + 1)]
+            }),
+            "agent template arguments must total 4096 bytes or fewer",
+        ),
+    ] {
+        let rejected = rpc(
+            &mut socket,
+            id,
+            "agent_templates.save",
+            json!({ "template": template }),
+        )
+        .await;
+        assert_eq!(rejected["error"]["code"], "agent_template_error");
+        assert_eq!(rejected["error"]["message"], expected);
+    }
     let templates = rpc(&mut socket, 24, "agent_templates.list", json!({})).await;
     assert_eq!(templates["result"].as_array().unwrap().len(), 1);
     assert_eq!(templates["result"][0]["name"], "Review worker");
@@ -318,6 +366,23 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(enabled["result"]["enabled"], true);
+
+    let oversized_prompt = rpc(
+        &mut socket,
+        38,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_tool_id": tool_id,
+            "prompt": "x".repeat(64 * 1024 + 1)
+        }),
+    )
+    .await;
+    assert_eq!(oversized_prompt["error"]["code"], "invalid_params");
+    assert_eq!(
+        oversized_prompt["error"]["message"],
+        "initial prompt must be 65536 bytes or fewer"
+    );
 
     let spawned = rpc(
         &mut socket,

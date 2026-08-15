@@ -130,6 +130,41 @@ async fn websocket_round_trips_quick_prompt_crud_and_order() -> Result<(), Box<d
         "quick prompt body must be 65536 bytes or fewer"
     );
 
+    for (id, name, body, expected) in [
+        (
+            11,
+            "bad\0name",
+            "body",
+            "quick prompt name may not contain NUL bytes",
+        ),
+        (
+            12,
+            "name",
+            "bad\0body",
+            "quick prompt body may not contain NUL bytes",
+        ),
+    ] {
+        let nul = rpc(
+            &mut socket,
+            id,
+            "quick_prompts.save",
+            json!({ "prompt": { "name": name, "body": body } }),
+        )
+        .await;
+        assert_eq!(nul["error"]["code"], "invalid_params");
+        assert_eq!(nul["error"]["message"], expected);
+    }
+
+    let stale_id = 9_000_000_000_i64;
+    let stale = rpc(
+        &mut socket,
+        13,
+        "quick_prompts.save",
+        json!({ "prompt": { "id": stale_id, "name": "Stale", "body": "No resurrection." } }),
+    )
+    .await;
+    assert_eq!(stale["error"]["code"], "quick_prompt_not_found");
+
     let second = rpc(
         &mut socket,
         3,
@@ -138,6 +173,11 @@ async fn websocket_round_trips_quick_prompt_crud_and_order() -> Result<(), Box<d
     )
     .await;
     let second_id = second["result"]["id"].as_i64().unwrap();
+    assert_eq!(
+        second_id,
+        first_id + 1,
+        "a stale id must not affect allocation"
+    );
 
     let updated = rpc(
         &mut socket,

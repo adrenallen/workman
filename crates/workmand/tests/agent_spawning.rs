@@ -209,6 +209,21 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         "spawn_failed"
     );
 
+    let oversized_prompt = parent
+        .call_tool(
+            CallToolRequestParams::new("spawn_agent").with_arguments(arguments(json!({
+                "project_id": 7,
+                "agent_tool_id": 99,
+                "initial_prompt": "x".repeat(64 * 1024 + 1)
+            }))),
+        )
+        .await?;
+    assert_eq!(oversized_prompt.is_error, Some(true));
+    assert_eq!(
+        oversized_prompt.structured_content.unwrap()["code"],
+        "invalid_params"
+    );
+
     let terminal = call(
         &parent,
         "spawn_process",
