@@ -25,6 +25,7 @@
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
+  import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
@@ -235,6 +236,7 @@
   let projects = $state<Project[]>([]);
   let projectFolders = $state<ProjectFolder[]>([]);
   let processes = $state<ProcessView[]>([]);
+  let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
@@ -314,6 +316,7 @@
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let keepAwakeOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
@@ -593,6 +596,7 @@
     }).catch(reportError);
     const stopStatuses = client.onProcessStatuses((next) => {
       if (!active) return;
+      profileProcesses = next;
       cacheProcessStatuses(next);
       if (selectedProject) {
         applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
@@ -1269,6 +1273,9 @@
             processOverviewKind = null;
             settingsOpen = true;
           }
+          return;
+        case 'keep-awake':
+          keepAwakeOpen = true;
           return;
         case 'new-worktree':
           if (selectedProject) await openWorktreeDialog('create', selectedProject);
@@ -3948,6 +3955,14 @@
           {#if projectRailCollapsed}<ChevronRightIcon size={15} />{:else}<ChevronLeftIcon size={15} />{/if}
         {/snippet}
       </IconButton>
+      <div class="keep-awake-slot">
+        <KeepAwakeControl
+          processes={profileProcesses}
+          {projects}
+          connectionStatus={connection.status}
+          bind:open={keepAwakeOpen}
+        />
+      </div>
       <div class="notification-slot">
         <NotificationsCenter
           {notifications}
@@ -4510,6 +4525,7 @@
   .brand-mark { display: grid; width: 24px; height: 24px; flex: none; place-items: center; pointer-events: none; }
   .brand-mark img { display: block; width: 24px; height: 24px; }
   .notification-slot { display: flex; flex: none; }
+  .keep-awake-slot { display: flex; flex: none; }
 
   .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
@@ -4550,11 +4566,12 @@
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
-  .project-rail.collapsed .brand { display: grid; min-height: 84px; grid-template-rows: 28px 28px 24px; align-content: center; justify-content: center; gap: 0; padding: 2px; }
+  .project-rail.collapsed .brand { display: grid; min-height: 112px; grid-template-rows: 28px 28px 28px 24px; align-content: center; justify-content: center; gap: 0; padding: 2px; }
   .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
   .project-rail.collapsed .brand-mark { grid-row: 1; place-self: center; }
-  .project-rail.collapsed .notification-slot { grid-row: 2; place-self: center; }
-  .project-rail.collapsed :global(.brand-collapse) { grid-row: 3; width: 24px; height: 24px; place-self: center; }
+  .project-rail.collapsed .keep-awake-slot { grid-row: 2; place-self: center; }
+  .project-rail.collapsed .notification-slot { grid-row: 3; place-self: center; }
+  .project-rail.collapsed :global(.brand-collapse) { grid-row: 4; width: 24px; height: 24px; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
   .project-rail.collapsed .folder-children { display: contents; }
