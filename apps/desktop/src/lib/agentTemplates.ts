@@ -129,19 +129,28 @@ export function getAgentTemplatesStore(client: AgentTemplatesClient): AgentTempl
 }
 
 export type AgentChoice =
-  | { kind: 'template'; id: number }
+  | { kind: 'template'; id: number; agentToolId?: number }
   | { kind: 'tool'; id: number };
 
 export const lastAgentChoiceStorageKey = 'workman.new-agent.last-choice.v1';
 
 export function choiceValue(choice: AgentChoice): string {
+  if (choice.kind === 'template' && choice.agentToolId !== undefined) {
+    return `template:${choice.id}:tool:${choice.agentToolId}`;
+  }
   return `${choice.kind}:${choice.id}`;
 }
 
 export function parseChoiceValue(value: string): AgentChoice | null {
-  const match = /^(template|tool):(\d+)$/.exec(value);
-  if (!match) return null;
-  return { kind: match[1] as AgentChoice['kind'], id: Number(match[2]) };
+  const toolMatch = /^tool:(\d+)$/.exec(value);
+  if (toolMatch) return { kind: 'tool', id: Number(toolMatch[1]) };
+  const templateMatch = /^template:(\d+)(?::tool:(\d+))?$/.exec(value);
+  if (!templateMatch) return null;
+  return {
+    kind: 'template',
+    id: Number(templateMatch[1]),
+    ...(templateMatch[2] ? { agentToolId: Number(templateMatch[2]) } : {})
+  };
 }
 
 export function chooseInitialAgentChoice(
@@ -150,13 +159,20 @@ export function chooseInitialAgentChoice(
   storedValue: string | null
 ): AgentChoice | null {
   const stored = storedValue ? parseChoiceValue(storedValue) : null;
-  if (
-    stored?.kind === 'template'
-    && templates.some((template) =>
-      template.id === stored.id
-      && tools.some((tool) => tool.enabled && tool.id === template.agent_tool_id)
-    )
-  ) return stored;
+  if (stored?.kind === 'template') {
+    const template = templates.find((candidate) => candidate.id === stored.id);
+    const defaultEnabled = template
+      && tools.some((tool) => tool.enabled && tool.id === template.agent_tool_id);
+    if (template && defaultEnabled) {
+      const overrideEnabled = stored.agentToolId !== undefined
+        && tools.some((tool) => tool.enabled && tool.id === stored.agentToolId);
+      return {
+        kind: 'template',
+        id: template.id,
+        agentToolId: overrideEnabled ? stored.agentToolId : template.agent_tool_id
+      };
+    }
+  }
   if (stored?.kind === 'tool' && tools.some((tool) => tool.enabled && tool.id === stored.id)) {
     return stored;
   }

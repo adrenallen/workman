@@ -9,7 +9,6 @@
     choiceValue,
     chooseInitialAgentChoice,
     lastAgentChoiceStorageKey,
-    parseChoiceValue,
     type AgentChoice,
     type AgentTemplate
   } from './agentTemplates';
@@ -52,7 +51,8 @@
     onError = () => undefined
   }: Props = $props();
 
-  let choice = $state('');
+  let templateChoice = $state('none');
+  let agentChoice = $state('');
   let prompt = $state('');
   let launchName = $state('');
   let launchArgs = $state('');
@@ -66,29 +66,33 @@
       enabledTools.some((tool) => tool.id === template.agent_tool_id)
     )
   );
-  const selectedChoice = $derived(parseChoiceValue(choice));
   const selectedTemplate = $derived(
-    selectedChoice?.kind === 'template'
-      ? availableTemplates.find((template) => template.id === selectedChoice.id) ?? null
-      : null
+    availableTemplates.find((template) => templateChoice === `template:${template.id}`) ?? null
   );
   const selectedTool = $derived(
+    enabledTools.find((tool) => agentChoice === `tool:${tool.id}`) ?? null
+  );
+  const templateDefaultTool = $derived(
     selectedTemplate
-      ? enabledTools.find((tool) => tool.id === selectedTemplate.agent_tool_id) ?? null
-      : selectedChoice?.kind === 'tool'
-        ? enabledTools.find((tool) => tool.id === selectedChoice.id) ?? null
-        : null
+      ? tools.find((tool) => tool.id === selectedTemplate.agent_tool_id) ?? null
+      : null
+  );
+  const agentOverridden = $derived(
+    selectedTemplate !== null
+      && selectedTool !== null
+      && selectedTool.id !== selectedTemplate.agent_tool_id
   );
 
   $effect(() => {
-    const valid = selectedTool !== null;
+    const valid = selectedTool !== null
+      && (templateChoice === 'none' || selectedTemplate !== null);
     if (initialized && valid) return;
     const initial = chooseInitialAgentChoice(
       availableTemplates,
       enabledTools,
       initialChoice ? choiceValue(initialChoice) : readLastChoice()
     );
-    choice = initial ? choiceValue(initial) : '';
+    applyChoice(initial);
     initialized = true;
   });
 
@@ -100,17 +104,59 @@
     }
   }
 
-  function rememberChoice(value = choice): void {
+  function rememberChoice(selected = currentChoice()): void {
+    if (!selected) return;
     try {
-      localStorage.setItem(lastAgentChoiceStorageKey, value);
+      localStorage.setItem(lastAgentChoiceStorageKey, choiceValue(selected));
     } catch {
       // Spawning remains available if webview storage is unavailable.
     }
   }
 
-  function selectChoice(value: string | undefined): void {
-    choice = value ?? '';
-    if (choice) rememberChoice(choice);
+  function currentChoice(): AgentChoice | null {
+    if (!selectedTool) return null;
+    return selectedTemplate
+      ? { kind: 'template', id: selectedTemplate.id, agentToolId: selectedTool.id }
+      : { kind: 'tool', id: selectedTool.id };
+  }
+
+  function applyChoice(selected: AgentChoice | null): void {
+    if (!selected) {
+      templateChoice = 'none';
+      agentChoice = '';
+      return;
+    }
+    if (selected.kind === 'template') {
+      const template = availableTemplates.find((candidate) => candidate.id === selected.id);
+      if (template) {
+        templateChoice = `template:${template.id}`;
+        agentChoice = `tool:${selected.agentToolId ?? template.agent_tool_id}`;
+        return;
+      }
+    }
+    templateChoice = 'none';
+    agentChoice = `tool:${selected.id}`;
+  }
+
+  function selectTemplate(value: string | undefined): void {
+    const template = availableTemplates.find((candidate) => value === `template:${candidate.id}`);
+    if (!template) {
+      templateChoice = 'none';
+      rememberChoice(selectedTool ? { kind: 'tool', id: selectedTool.id } : null);
+      return;
+    }
+    templateChoice = `template:${template.id}`;
+    agentChoice = `tool:${template.agent_tool_id}`;
+    rememberChoice({ kind: 'template', id: template.id, agentToolId: template.agent_tool_id });
+  }
+
+  function selectAgent(value: string | undefined): void {
+    const tool = enabledTools.find((candidate) => value === `tool:${candidate.id}`);
+    if (!tool) return;
+    agentChoice = `tool:${tool.id}`;
+    rememberChoice(selectedTemplate
+      ? { kind: 'template', id: selectedTemplate.id, agentToolId: tool.id }
+      : { kind: 'tool', id: tool.id });
   }
 
   async function submit(): Promise<void> {
@@ -127,7 +173,7 @@
       input: {
         project_id: projectId,
         ...(selectedTemplate
-          ? { agent_template_id: selectedTemplate.id }
+          ? { agent_template_id: selectedTemplate.id, agent_tool_id: selectedTool.id }
           : { agent_tool_id: selectedTool.id }),
         name: launchName.trim() || undefined,
         extra_args: extraArgs,
@@ -155,7 +201,7 @@
       <header class="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <span class="text-xs font-medium text-muted-foreground">New agent</span>
-          <h2 class="mt-0.5 text-base font-semibold">Choose a template or agent</h2>
+          <h2 class="mt-0.5 text-base font-semibold">Choose a template and agent</h2>
         </div>
         <IconButton label="Close new agent" disabled={busy} onclick={onClose}>
           {#snippet icon()}<XIcon size={14} />{/snippet}
@@ -163,53 +209,62 @@
       </header>
 
       <section class="grid max-h-[calc(100dvh-10rem)] gap-3 overflow-y-auto p-4">
-        <label class="grid gap-1.5 text-sm font-medium" for="new-agent-choice">
-          Launch with
-          <Select.Root type="single" value={choice} disabled={loading || busy} onValueChange={selectChoice}>
-            <Select.Trigger id="new-agent-choice" class="w-full">
-              {#if selectedTool}
-                <AgentBrandMark tool={selectedTool} size={16} />
-                <span class="truncate">{selectedTemplate?.name ?? selectedTool.name}</span>
-                <span class="ml-auto text-xs text-muted-foreground">{selectedTemplate ? 'Template' : 'Agent'}</span>
-              {:else}
-                Select an agent
-              {/if}
-            </Select.Trigger>
-            <Select.Content>
-              {#if templates.length > 0}
-                <Select.Group>
-                  <Select.GroupHeading>Templates</Select.GroupHeading>
-                  {#each templates as template (template.id)}
-                    {@const tool = tools.find((candidate) => candidate.id === template.agent_tool_id)}
-                    {#if tool}
-                      <Select.Item
-                        value={`template:${template.id}`}
-                        label={template.name}
-                        disabled={!tool.enabled}
-                      >
-                        <AgentBrandMark {tool} size={16} />
-                        <span>{template.name}</span>
-                        <span class="text-xs text-muted-foreground">
-                          {tool.name}{#if !tool.enabled} · agent disabled{/if}
-                        </span>
-                      </Select.Item>
-                    {/if}
-                  {/each}
-                </Select.Group>
-                <Select.Separator />
-              {/if}
-              <Select.Group>
-                <Select.GroupHeading>Agents</Select.GroupHeading>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="grid content-start gap-1.5 text-sm font-medium" for="new-agent-template">
+            Template <span class="font-normal text-muted-foreground">(optional)</span>
+            <Select.Root type="single" value={templateChoice} disabled={loading || busy} onValueChange={selectTemplate}>
+              <Select.Trigger id="new-agent-template" class="w-full">
+                {selectedTemplate?.name ?? 'None'}
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Item value="none" label="None">None</Select.Item>
+                {#each templates as template (template.id)}
+                  {@const tool = tools.find((candidate) => candidate.id === template.agent_tool_id)}
+                  {#if tool}
+                    <Select.Item
+                      value={`template:${template.id}`}
+                      label={template.name}
+                      disabled={!tool.enabled}
+                    >
+                      <AgentBrandMark {tool} size={16} />
+                      <span>{template.name}</span>
+                      <span class="text-xs text-muted-foreground">
+                        {tool.name}{#if !tool.enabled} · agent disabled{/if}
+                      </span>
+                    </Select.Item>
+                  {/if}
+                {/each}
+              </Select.Content>
+            </Select.Root>
+          </label>
+
+          <label class="grid content-start gap-1.5 text-sm font-medium" for="new-agent-tool">
+            Agent
+            <Select.Root type="single" value={agentChoice} disabled={loading || busy} onValueChange={selectAgent}>
+              <Select.Trigger id="new-agent-tool" class="w-full">
+                {#if selectedTool}
+                  <AgentBrandMark tool={selectedTool} size={16} />
+                  <span class="truncate">{selectedTool.name}</span>
+                {:else}
+                  Select an agent
+                {/if}
+              </Select.Trigger>
+              <Select.Content>
                 {#each enabledTools as tool (tool.id)}
                   <Select.Item value={`tool:${tool.id}`} label={tool.name}>
                     <AgentBrandMark {tool} size={16} />
                     <span>{tool.name}</span>
                   </Select.Item>
                 {/each}
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
-        </label>
+              </Select.Content>
+            </Select.Root>
+            {#if agentOverridden && templateDefaultTool}
+              <span class="truncate text-xs font-normal text-muted-foreground" title={`Template default: ${templateDefaultTool.name}. Template launch args are skipped for other agents.`}>
+                Template default: {templateDefaultTool.name}. Template launch args are skipped for other agents.
+              </span>
+            {/if}
+          </label>
+        </div>
 
         {#if selectedTemplate}
           <Collapsible.Root bind:open={previewOpen} class="overflow-hidden rounded-md border border-border bg-muted/20">
