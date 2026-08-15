@@ -193,7 +193,7 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <Dialog.Content
-    class="max-w-[560px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl"
+    class="w-[min(880px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl"
     showCloseButton={false}
     aria-label="New agent"
   >
@@ -283,7 +283,15 @@
 
         <label class="grid gap-1.5 text-sm font-medium" for="new-agent-prompt">
           Prompt <span class="font-normal text-muted-foreground">(optional)</span>
-          <Textarea id="new-agent-prompt" bind:value={prompt} rows={5} placeholder="What should this agent work on?" disabled={busy} onkeydown={handleKeydown} />
+          <Textarea
+            id="new-agent-prompt"
+            class="min-h-56 resize-y text-sm leading-6"
+            bind:value={prompt}
+            rows={11}
+            placeholder="What should this agent work on?"
+            disabled={busy}
+            onkeydown={handleKeydown}
+          />
           <span class="text-xs font-normal text-muted-foreground">Cmd+Enter spawns. Shift+Enter adds a line.</span>
         </label>
 

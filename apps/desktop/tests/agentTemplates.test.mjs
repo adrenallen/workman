@@ -91,6 +91,8 @@ test('new-agent dialog keeps template and agent choices independent and persiste
   assert.match(source, /agent disabled/);
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
+  assert.match(source, /w-\[min\(880px,calc\(100vw-24px\)\)\] !max-w-none/);
+  assert.match(source, /class="min-h-56 resize-y text-sm leading-6"[\s\S]*rows=\{11\}/);
   assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
   assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
   assert.match(card, /Agent disabled/);
