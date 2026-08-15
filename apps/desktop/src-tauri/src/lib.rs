@@ -375,6 +375,7 @@ fn keep_awake_status(state: State<'_, KeepAwakeState>) -> KeepAwakeStatus {
     keep_awake_status_from(&inner)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn keep_awake_command(pid: u32) -> Command {
     let mut command = Command::new("/usr/bin/caffeinate");
     command.args(["-i", "-w", &pid.to_string()]);

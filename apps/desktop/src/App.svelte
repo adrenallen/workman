@@ -25,6 +25,7 @@
   import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
   import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
+  import { shouldSubscribeProcessStatuses } from './lib/keepAwake';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
   import NewAgentDialog, { type NewAgentSubmission } from './lib/NewAgentDialog.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
@@ -243,6 +244,8 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let keepAwakeArmed = $state(false);
+  let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
   let coordination = $state<CoordinationSnapshot | null>(null);
@@ -320,6 +323,13 @@
   $effect(() => agentTemplatesStore.subscribe((snapshot) => {
     agentTemplates = snapshot.templates;
   }));
+  $effect(() => {
+    if (connection.status !== 'connected') return;
+    const request = shouldSubscribeProcessStatuses(documentVisible, keepAwakeArmed)
+      ? client.subscribeProcessStatuses()
+      : client.unsubscribeProcessStatuses();
+    void request.catch(reportError);
+  });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
@@ -567,12 +577,7 @@
       if (documentVisible === visible) return;
       documentVisible = visible;
       document.documentElement.classList.toggle('workman-document-hidden', !documentVisible);
-      if (connection.status !== 'connected') return;
-      if (!documentVisible) {
-        void client.unsubscribeProcessStatuses().catch(reportError);
-        return;
-      }
-      void client.subscribeProcessStatuses().catch(reportError);
+      if (connection.status !== 'connected' || !documentVisible) return;
       if (!busy) void refreshProjects();
       if (selectedProject) {
         void refreshProcesses(selectedProject.id);
@@ -724,7 +729,6 @@
     }
     if (reconnected) {
       if (documentVisible) {
-        void client.subscribeProcessStatuses().catch(reportError);
         void refreshProjects();
         if (status.version_compatible) void refreshNotifications();
       }
@@ -3991,6 +3995,8 @@
           {projects}
           connectionStatus={connection.status}
           bind:open={keepAwakeOpen}
+          bind:armed={keepAwakeArmed}
+          bind:supported={keepAwakeSupported}
         />
       </div>
       <div class="notification-slot">
@@ -4363,6 +4369,7 @@
     index={navigationIndex}
     currentProjectId={selectedProject?.id ?? null}
     {agentTools}
+    {keepAwakeSupported}
     recentKeys={quickJumpRecentKeys}
     loading={quickJumpLoading}
     onChoose={chooseQuickJumpTarget}

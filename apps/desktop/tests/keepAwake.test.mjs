@@ -5,7 +5,8 @@ import test from 'node:test';
 import {
   armKeepAwake,
   evaluateKeepAwake,
-  KEEP_AWAKE_SETTLE_MS
+  KEEP_AWAKE_SETTLE_MS,
+  shouldSubscribeProcessStatuses
 } from '../src/lib/keepAwake.ts';
 
 const files = {
@@ -34,7 +35,7 @@ function agent(id, attention, status = 'running') {
 test('waiting, needs input, and working are not full idle', () => {
   for (const attention of ['waiting', 'needs_input', 'working']) {
     const processes = [agent(1, attention)];
-    const state = armKeepAwake('all', null, processes);
+    const state = armKeepAwake('all', null);
     const evaluation = evaluateKeepAwake(state, processes, 1_000);
     assert.deepEqual(evaluation.waitingAgentIds, [1]);
     assert.equal(evaluation.releaseInSeconds, null);
@@ -43,8 +44,8 @@ test('waiting, needs input, and working are not full idle', () => {
   }
 });
 
-test('all watched agents must stay idle for the full settle window', () => {
-  const initial = armKeepAwake('all', null, [agent(1, 'working'), agent(2, 'waiting')]);
+test('all agents must stay idle for the full settle window', () => {
+  const initial = armKeepAwake('all', null);
   const idle = [agent(1, 'idle'), agent(2, 'idle')];
   const settling = evaluateKeepAwake(initial, idle, 5_000);
 
@@ -54,7 +55,7 @@ test('all watched agents must stay idle for the full settle window', () => {
 });
 
 test('working inside the settle window resets the idle timer', () => {
-  const initial = armKeepAwake('all', null, [agent(1, 'working')]);
+  const initial = armKeepAwake('all', null);
   const settling = evaluateKeepAwake(initial, [agent(1, 'idle')], 1_000);
   const flapped = evaluateKeepAwake(settling.state, [agent(1, 'working')], 30_000);
   const restarted = evaluateKeepAwake(flapped.state, [agent(1, 'idle')], 31_000);
@@ -65,7 +66,7 @@ test('working inside the settle window resets the idle timer', () => {
 });
 
 test('a closed or exited specific agent counts as satisfied', () => {
-  const initial = armKeepAwake('specific', 7, [agent(7, 'working')]);
+  const initial = armKeepAwake('specific', 7);
   const closed = evaluateKeepAwake(initial, [], 1_000);
   assert.equal(closed.releaseInSeconds, 60);
   assert.equal(evaluateKeepAwake(closed.state, [], 61_000).shouldRelease, true);
@@ -73,10 +74,42 @@ test('a closed or exited specific agent counts as satisfied', () => {
 });
 
 test('all-agent mode with no running agents settles before release', () => {
-  const initial = armKeepAwake('all', null, []);
+  const initial = armKeepAwake('all', null);
   const settling = evaluateKeepAwake(initial, [], 500);
   assert.equal(settling.releaseInSeconds, 60);
   assert.equal(evaluateKeepAwake(settling.state, [], 60_500).shouldRelease, true);
+});
+
+test('all-agent mode watches agents spawned after arming', () => {
+  const initial = armKeepAwake('all', null);
+  const settling = evaluateKeepAwake(initial, [agent(1, 'idle')], 1_000);
+  const spawned = evaluateKeepAwake(
+    settling.state,
+    [agent(1, 'idle'), agent(2, 'working')],
+    30_000
+  );
+
+  assert.deepEqual(initial.watchedAgentIds, []);
+  assert.deepEqual(spawned.waitingAgentIds, [2]);
+  assert.equal(spawned.state.idleSince, null);
+  assert.equal(spawned.shouldRelease, false);
+});
+
+test('all-agent mode waits when agents appear after an empty first snapshot', () => {
+  const initial = armKeepAwake('all', null);
+  const empty = evaluateKeepAwake(initial, [], 1_000);
+  const appeared = evaluateKeepAwake(empty.state, [agent(3, 'waiting')], 40_000);
+
+  assert.equal(empty.releaseInSeconds, 60);
+  assert.deepEqual(appeared.waitingAgentIds, [3]);
+  assert.equal(appeared.releaseInSeconds, null);
+  assert.equal(appeared.state.idleSince, null);
+});
+
+test('armed keep awake retains process statuses while the document is hidden', () => {
+  assert.equal(shouldSubscribeProcessStatuses(true, false), true);
+  assert.equal(shouldSubscribeProcessStatuses(false, true), true);
+  assert.equal(shouldSubscribeProcessStatuses(false, false), false);
 });
 
 test('header, quick jump, and shortcuts expose keep awake', async () => {
@@ -85,12 +118,19 @@ test('header, quick jump, and shortcuts expose keep awake', async () => {
   );
 
   assert.match(app, /<KeepAwakeControl/);
+  assert.match(app, /bind:armed=\{keepAwakeArmed\}/);
+  assert.match(app, /shouldSubscribeProcessStatuses\(documentVisible, keepAwakeArmed\)/);
   assert.match(control, /CoffeeIcon/);
   assert.match(control, /Until all agents are idle/);
   assert.match(control, /Until a specific agent is idle/);
   assert.match(control, /keep_awake_start/);
   assert.match(control, /keep_awake_stop/);
+  assert.match(control, /connectionStatus !== 'disconnected'/);
+  assert.match(control, /60_000/);
+  assert.match(control, /Keep awake released — daemon disconnected/);
+  assert.match(control, /var\(--font-mono\)/);
   assert.match(navigation, /type: 'keep-awake'/);
+  assert.match(palette, /if \(keepAwakeSupported\)/);
   assert.match(palette, /label: 'Keep awake…'/);
   assert.match(shortcuts, /Open Keep awake… in quick jump/);
 });

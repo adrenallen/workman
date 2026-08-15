@@ -24,6 +24,8 @@
     projects: Project[];
     connectionStatus: ConnectionStatus['status'];
     open?: boolean;
+    armed?: boolean;
+    supported?: boolean;
   }
 
   interface NativeKeepAwakeStatus {
@@ -36,10 +38,11 @@
     processes,
     projects,
     connectionStatus,
-    open = $bindable(false)
+    open = $bindable(false),
+    armed = $bindable(false),
+    supported = $bindable(false)
   }: Props = $props();
 
-  let supported = $state<boolean | null>(null);
   let busy = $state(false);
   let warning = $state<string | null>(null);
   let mode = $state<KeepAwakeMode>('all');
@@ -55,23 +58,28 @@
   let triggerLabel = $derived.by(() => {
     if (warning) return warning;
     if (!machine.armed) return 'Keep Mac awake until agents idle';
-    if (mode === 'specific') {
+    if (machine.mode === 'specific') {
       const name = processName(machine.watchedAgentIds[0]);
       return `Keeping Mac awake until ${name ?? 'the watched agent'} is idle`;
     }
-    return 'Keeping Mac awake until all watched agents are idle';
+    return 'Keeping Mac awake until all agents are idle';
   });
   let statusLine = $derived.by(() => {
     if (warning) return warning;
     if (!machine.armed) return 'Ready to prevent system idle sleep.';
     if (evaluation.releaseInSeconds !== null) {
-      return `All watched agents idle — releasing in ${evaluation.releaseInSeconds}s`;
+      const subject = machine.mode === 'all' ? 'All agents' : 'Watched agent';
+      return `${subject} idle — releasing in ${evaluation.releaseInSeconds}s`;
     }
     const names = evaluation.waitingAgentIds
       .map(processName)
       .filter((name): name is string => name !== null);
     const count = evaluation.waitingAgentIds.length;
     return `Waiting on ${count} ${count === 1 ? 'agent' : 'agents'}: ${names.join(', ')}`;
+  });
+
+  $effect(() => {
+    armed = machine.armed;
   });
 
   $effect(() => {
@@ -89,10 +97,12 @@
   });
 
   $effect(() => {
-    if (!machine.armed || connectionStatus === 'connected') return;
+    if (!machine.armed || connectionStatus !== 'disconnected') return;
     const timeout = window.setTimeout(() => {
-      if (machine.armed) void disarm('Keep awake stopped because the daemon disconnected.');
-    }, 10_000);
+      if (machine.armed && connectionStatus === 'disconnected') {
+        void disarm('Keep awake stopped because the daemon disconnected.', true);
+      }
+    }, 60_000);
     return () => window.clearTimeout(timeout);
   });
 
@@ -152,8 +162,7 @@
       }
       machine = armKeepAwake(
         mode,
-        mode === 'specific' ? Number(specificAgentId) : null,
-        processes
+        mode === 'specific' ? Number(specificAgentId) : null
       );
       now = Date.now();
     } catch (cause) {
@@ -163,13 +172,22 @@
     }
   }
 
-  async function disarm(reason: string | null = null): Promise<void> {
+  async function disarm(
+    reason: string | null = null,
+    notifyDisconnect = false
+  ): Promise<void> {
     if (busy) return;
     busy = true;
     try {
       await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
       machine = disarmKeepAwake(machine);
       warning = reason;
+      if (notifyDisconnect) {
+        await deliverNativeSystemNotification(
+          'Keep awake released — daemon disconnected',
+          'Your Mac may sleep normally again.'
+        );
+      }
     } catch (cause) {
       warning = message(cause);
     } finally {
@@ -292,7 +310,7 @@
   fieldset input { accent-color: var(--agent-state-waiting); }
   .agent-select { display: grid; }
   .agent-select :global([data-slot='select-trigger']) { width: 100%; }
-  p { min-height: 31px; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); background: var(--card); color: var(--text-soft); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; line-height: 1.45; }
+  p { min-height: 31px; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); background: var(--card); color: var(--text-soft); font: var(--font-size-xs) var(--font-mono); line-height: 1.45; }
   p.warning { border-color: color-mix(in srgb, var(--destructive) 40%, var(--border)); color: var(--destructive); }
   :global(.keep-awake-popover > button:last-child) { width: 100%; }
 </style>

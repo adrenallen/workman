@@ -31,6 +31,7 @@
     index: Record<number, NavigationProjectSnapshot>;
     currentProjectId: number | null;
     agentTools: AgentTool[];
+    keepAwakeSupported: boolean;
     recentKeys: string[];
     loading: boolean;
     onChoose: (target: AppNavigationTarget) => void;
@@ -62,6 +63,7 @@
     index,
     currentProjectId,
     agentTools,
+    keepAwakeSupported,
     recentKeys,
     loading,
     onChoose,
@@ -97,16 +99,18 @@
       target: { type: 'settings', projectId: currentProject?.id },
       creation: false
     });
-    next.push({
-      key: 'action:keep-awake',
-      kind: 'action',
-      label: 'Keep awake…',
-      detail: 'Keep this Mac awake until agents are fully idle',
-      projectName: currentProject ? projectLabel(currentProject) : null,
-      searchText: 'keep awake caffeinate sleep idle agents mac',
-      target: { type: 'keep-awake' },
-      creation: false
-    });
+    if (keepAwakeSupported) {
+      next.push({
+        key: 'action:keep-awake',
+        kind: 'action',
+        label: 'Keep awake…',
+        detail: 'Keep this Mac awake until agents are fully idle',
+        projectName: currentProject ? projectLabel(currentProject) : null,
+        searchText: 'keep awake caffeinate sleep idle agents mac',
+        target: { type: 'keep-awake' },
+        creation: false
+      });
+    }
 
     for (const project of projects) {
       const name = projectLabel(project);

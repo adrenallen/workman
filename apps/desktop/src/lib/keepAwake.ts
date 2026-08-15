@@ -37,14 +37,20 @@ export function runningAgents<T extends KeepAwakeAgent>(processes: T[]): T[] {
   );
 }
 
+export function shouldSubscribeProcessStatuses(
+  documentVisible: boolean,
+  keepAwakeArmed: boolean
+): boolean {
+  return documentVisible || keepAwakeArmed;
+}
+
 export function armKeepAwake(
   mode: KeepAwakeMode,
-  specificAgentId: number | null,
-  processes: KeepAwakeAgent[]
+  specificAgentId: number | null
 ): KeepAwakeMachineState {
   const watchedAgentIds = mode === 'specific'
     ? specificAgentId === null ? [] : [specificAgentId]
-    : runningAgents(processes).map((process) => process.id);
+    : [];
 
   return {
     armed: true,
@@ -80,7 +86,10 @@ export function evaluateKeepAwake(
   }
 
   const byId = new Map(processes.map((process) => [process.id, process]));
-  const waitingAgentIds = state.watchedAgentIds.filter((id) => {
+  const currentAgentIds = state.mode === 'all'
+    ? runningAgents(processes).map((process) => process.id)
+    : state.watchedAgentIds;
+  const waitingAgentIds = currentAgentIds.filter((id) => {
     const process = byId.get(id);
     if (!process || !liveStatuses.has(process.status)) return false;
     return process.agent_state.state !== 'idle';
