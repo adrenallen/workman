@@ -127,6 +127,7 @@
         <div class="border-b border-border p-2">
           <Command.Input
             bind:value={query}
+            autofocus
             placeholder="Search prompt names and text"
             aria-label="Search quick prompts"
             aria-activedescendant={activePrompt ? `quick-prompt-option-${activePrompt.id}` : undefined}

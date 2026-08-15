@@ -143,6 +143,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{terminalView !== null && selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
+  assert.match(palette, /<Command\.Input[\s\S]*autofocus/);
   assert.match(palette, /aria-activedescendant=\{activePrompt/);
   assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(palette, /↑↓ · navigate/);
