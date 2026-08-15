@@ -8,7 +8,7 @@
 
   import AgentBrandMark from '../AgentBrandMark.svelte';
   import type { AgentTool, AgentToolsSnapshot } from '../agentTools';
-  import { getAgentToolsStore, parseExtraArgs } from '../agentTools';
+  import { formatExtraArgs, getAgentToolsStore, parseExtraArgs } from '../agentTools';
   import {
     getAgentTemplatesStore,
     type AgentTemplate,
@@ -144,12 +144,6 @@
 
   function toolFor(template: AgentTemplate): AgentTool | null {
     return toolSnapshot.tools.find((tool) => tool.id === template.agent_tool_id) ?? null;
-  }
-
-  function formatExtraArgs(args: string[]): string {
-    return args
-      .map((arg) => (/^[\w./:@%+=,-]+$/.test(arg) ? arg : JSON.stringify(arg)))
-      .join(' ');
   }
 
   function message(cause: unknown): string {

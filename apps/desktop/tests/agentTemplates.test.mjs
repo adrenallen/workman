@@ -5,10 +5,10 @@ import test from 'node:test';
 import {
   choiceValue,
   chooseInitialAgentChoice,
-  composeTemplatePrompt,
   lastAgentChoiceStorageKey,
   parseChoiceValue
 } from '../src/lib/agentTemplates.ts';
+import { formatExtraArgs, parseExtraArgs } from '../src/lib/extraArgs.ts';
 
 const tools = [
   { id: 7, name: 'Codex', enabled: true },
@@ -19,14 +19,18 @@ const templates = [
   { id: 13, name: 'Disabled tool template', agent_tool_id: 8 }
 ];
 
-test('template prompt composition trims edges and inserts exactly one blank line', () => {
-  assert.equal(
-    composeTemplatePrompt('  Keep changes focused.\n', '\nImplement the dialog.  '),
-    'Keep changes focused.\n\nImplement the dialog.'
-  );
-  assert.equal(composeTemplatePrompt(' Template only ', '   '), 'Template only');
-  assert.equal(composeTemplatePrompt('', ' Prompt only '), 'Prompt only');
-  assert.equal(composeTemplatePrompt('  ', '\n'), undefined);
+test('extra argument formatting round-trips whitespace and quoted characters', () => {
+  const args = [
+    '--model',
+    'fast model',
+    'line one\nline two',
+    'column\tvalue',
+    'literal\\nsequence',
+    'say "hello"',
+    "it's ready",
+    ''
+  ];
+  assert.deepEqual(parseExtraArgs(formatExtraArgs(args)), args);
 });
 
 test('last agent choice is validated and otherwise falls back to the first enabled tool', () => {

@@ -4,7 +4,7 @@
   import XIcon from '@lucide/svelte/icons/x';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
-  import type { AgentTool, SpawnAgentInput } from './agentTools';
+  import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
   import {
     choiceValue,
     chooseInitialAgentChoice,
@@ -20,8 +20,6 @@
   import { Input } from './components/ui/input';
   import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
-  import { parseExtraArgs } from './agentTools';
-
   export interface NewAgentSubmission {
     input: SpawnAgentInput;
     tool: AgentTool;

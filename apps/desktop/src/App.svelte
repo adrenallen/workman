@@ -2164,7 +2164,9 @@
       ? null
       : agentTools.find((candidate) => candidate.id === optimistic.process.agent_tool_id) ?? null;
     dismissOptimisticProcess(optimistic.process.id);
-    if (retry === 'agent' && tool) void spawnAgent(tool);
+    if (retry === 'agent' && tool && optimistic.agentSpawnInput) {
+      void spawnAgent(tool, optimistic.agentSpawnInput);
+    }
     else if (retry === 'command') openAddCommand();
     else if (retry === 'agent') void openAgentDialog();
   }
@@ -2193,13 +2195,18 @@
     requestedInput?: NewAgentSubmission['input'],
     template: AgentTemplate | null = null
   ): Promise<void> {
-    const project = selectedProject;
-    if (!project) return;
-    const input = requestedInput ?? {
-      project_id: project.id,
+    const currentProject = selectedProject;
+    if (!currentProject) return;
+    const requested = requestedInput ?? {
+      project_id: currentProject.id,
       agent_tool_id: tool.id,
       extra_args: []
     };
+    const project = requested.project_id === currentProject.id
+      ? currentProject
+      : projects.find((candidate) => candidate.id === requested.project_id) ?? null;
+    if (!project) return;
+    const input = { ...requested, extra_args: [...requested.extra_args] };
     const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
     const optimistic = createOptimisticProcess({
@@ -2209,7 +2216,8 @@
       name: optimisticName,
       command: tool.command,
       agentToolId: tool.id,
-      retry: 'agent'
+      retry: 'agent',
+      agentSpawnInput: input
     });
     optimisticProcesses = [...optimisticProcesses, optimistic];
     dialog = null;
@@ -2221,7 +2229,7 @@
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
     await tick();
     try {
-      const result = await client.spawnAgent({ ...input, project_id: project.id });
+      const result = await client.spawnAgent(input);
       await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
       optimisticProcesses = optimisticProcesses.filter(

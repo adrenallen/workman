@@ -163,10 +163,3 @@ export function chooseInitialAgentChoice(
   const firstTool = tools.find((tool) => tool.enabled);
   return firstTool ? { kind: 'tool', id: firstTool.id } : null;
 }
-
-export function composeTemplatePrompt(templatePrompt: string, prompt: string): string | undefined {
-  const template = templatePrompt.trim();
-  const caller = prompt.trim();
-  if (template && caller) return `${template}\n\n${caller}`;
-  return template || caller || undefined;
-}
