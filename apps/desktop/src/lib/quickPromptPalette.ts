@@ -12,11 +12,14 @@ interface SearchablePrompt {
 
 const searchablePromptCache = new WeakMap<QuickPrompt, SearchablePrompt>();
 
+export type QuickPromptNavigationAction = 'next' | 'previous' | 'first' | 'last';
+
 export type QuickPromptPaletteAction =
   | 'next'
   | 'previous'
   | 'first'
   | 'last'
+  | 'swallow'
   | 'insert'
   | 'insert-and-send'
   | 'new'
@@ -39,19 +42,47 @@ export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
 
 /** Interpret palette-owned navigation and selection actions. */
 export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPaletteAction {
-  if (event.isComposing || event.keyCode === 229) return null;
-  if (event.ctrlKey || event.altKey) return null;
-  if (!event.metaKey) {
-    if (event.key === 'ArrowDown') return 'next';
-    if (event.key === 'ArrowUp') return 'previous';
-    if (event.key === 'Home') return 'first';
-    if (event.key === 'End') return 'last';
+  const key = event.key.toLowerCase();
+  const vimNavigation = Boolean(event.ctrlKey) && ['n', 'j', 'p', 'k'].includes(key);
+  const navigationKey = event.key.startsWith('Arrow')
+    || event.key === 'Home'
+    || event.key === 'End'
+    || event.key === 'PageUp'
+    || event.key === 'PageDown'
+    || vimNavigation;
+  if (event.isComposing || event.keyCode === 229) return navigationKey ? 'swallow' : null;
+
+  if (event.key === 'ArrowDown') return event.metaKey ? 'last' : 'next';
+  if (event.key === 'ArrowUp') return event.metaKey ? 'first' : 'previous';
+  if (event.key === 'Home') return 'first';
+  if (event.key === 'End') return 'last';
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+    || event.key === 'PageUp' || event.key === 'PageDown') return 'swallow';
+  if (vimNavigation) {
+    if (event.metaKey || event.altKey) return 'swallow';
+    return key === 'n' || key === 'j' ? 'next' : 'previous';
   }
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter') {
+    if (event.shiftKey || event.ctrlKey || event.altKey) return 'swallow';
     return event.metaKey ? 'insert-and-send' : 'insert';
   }
-  if (event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'n') return 'new';
+  if (event.metaKey && !event.shiftKey && key === 'n') return 'new';
   return null;
+}
+
+/** Resolve palette navigation without relying on Command's internal selection state. */
+export function moveQuickPromptSelection(
+  selectedIndex: number,
+  itemCount: number,
+  action: QuickPromptNavigationAction
+): number {
+  if (itemCount <= 0) return 0;
+  if (action === 'first') return 0;
+  if (action === 'last') return itemCount - 1;
+  const current = Math.min(Math.max(selectedIndex, 0), itemCount - 1);
+  return action === 'next'
+    ? (current + 1) % itemCount
+    : (current - 1 + itemCount) % itemCount;
 }
 
 /** Fuzzy subsequence search across both the saved name and body, with substring priority. */

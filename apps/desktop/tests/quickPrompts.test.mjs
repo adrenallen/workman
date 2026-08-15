@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   filterQuickPrompts,
   isQuickPromptPaletteShortcut,
+  moveQuickPromptSelection,
   quickPromptPaletteAction,
   quickPromptPreview,
   sanitizeQuickPromptBody
@@ -36,7 +37,7 @@ test('palette actions distinguish insert, insert-and-send, and new prompt', () =
   assert.equal(quickPromptPaletteAction({ key: 'n', metaKey: true }), 'new');
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false, shiftKey: true }),
-    null
+    'swallow'
   );
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false, isComposing: true }),
@@ -55,12 +56,39 @@ test('palette actions own arrow and boundary navigation', () => {
   assert.equal(quickPromptPaletteAction({ key: 'End', metaKey: false }), 'last');
   assert.equal(
     quickPromptPaletteAction({ key: 'ArrowDown', metaKey: true }),
-    null
+    'last'
+  );
+  assert.equal(quickPromptPaletteAction({ key: 'ArrowUp', metaKey: true }), 'first');
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false, altKey: true }),
+    'next'
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'n', metaKey: false, ctrlKey: true }),
+    'next'
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'p', metaKey: false, ctrlKey: true }),
+    'previous'
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'PageDown', metaKey: false }),
+    'swallow'
   );
   assert.equal(
     quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false, isComposing: true }),
-    null
+    'swallow'
   );
+});
+
+test('palette selection wraps and clamps without Command state', () => {
+  assert.equal(moveQuickPromptSelection(0, 3, 'previous'), 2);
+  assert.equal(moveQuickPromptSelection(2, 3, 'next'), 0);
+  assert.equal(moveQuickPromptSelection(99, 3, 'previous'), 1);
+  assert.equal(moveQuickPromptSelection(-4, 3, 'next'), 1);
+  assert.equal(moveQuickPromptSelection(1, 3, 'first'), 0);
+  assert.equal(moveQuickPromptSelection(1, 3, 'last'), 2);
+  assert.equal(moveQuickPromptSelection(4, 0, 'next'), 0);
 });
 
 test('palette searches names and multiline bodies with compact previews', () => {
@@ -145,7 +173,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
   assert.match(palette, /<Command\.Input[\s\S]*autofocus/);
-  assert.match(palette, /aria-activedescendant=\{activePrompt/);
+  assert.match(palette, /vimBindings=\{false\}/);
   assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);

@@ -7,9 +7,10 @@
   import type { DaemonClient } from './daemon';
   import {
     filterQuickPrompts,
+    moveQuickPromptSelection,
     quickPromptPaletteAction,
     quickPromptPreview,
-    type QuickPromptPaletteAction
+    type QuickPromptNavigationAction
   } from './quickPromptPalette';
   import {
     getQuickPromptsStore,
@@ -59,6 +60,7 @@
     if (!action) return;
     event.preventDefault();
     event.stopPropagation();
+    if (action === 'swallow') return;
     if (action === 'next' || action === 'previous' || action === 'first' || action === 'last') {
       moveSelection(action);
       return;
@@ -71,15 +73,10 @@
   }
 
   function moveSelection(
-    action: Extract<QuickPromptPaletteAction, 'next' | 'previous' | 'first' | 'last'>
+    action: QuickPromptNavigationAction
   ): void {
     if (filtered.length === 0) return;
-    if (action === 'first') selectedIndex = 0;
-    else if (action === 'last') selectedIndex = filtered.length - 1;
-    else {
-      const delta = action === 'next' ? 1 : -1;
-      selectedIndex = (selectedIndex + delta + filtered.length) % filtered.length;
-    }
+    selectedIndex = moveQuickPromptSelection(selectedIndex, filtered.length, action);
     const prompt = filtered[selectedIndex];
     if (prompt) {
       queueMicrotask(() =>
@@ -108,6 +105,7 @@
         value={selectedValue}
         shouldFilter={false}
         disablePointerSelection
+        vimBindings={false}
         class="max-h-[min(560px,calc(100dvh-32px))] rounded-lg p-0"
         label="Quick prompts"
       >
@@ -130,7 +128,6 @@
             autofocus
             placeholder="Search prompt names and text"
             aria-label="Search quick prompts"
-            aria-activedescendant={activePrompt ? `quick-prompt-option-${activePrompt.id}` : undefined}
             oninput={() => (selectedIndex = 0)}
             onkeydown={handleKeydown}
           />
