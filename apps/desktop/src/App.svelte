@@ -37,6 +37,7 @@
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
+  import QuickPromptPalette from './lib/QuickPromptPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import { submitOnEnter } from './lib/formInputConventions';
@@ -58,6 +59,7 @@
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
+  import type { QuickPrompt } from './lib/quickPrompts';
   import {
     planAgentCascade,
     type AgentCascadeAction,
@@ -310,6 +312,7 @@
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
   let quickJumpOpen = $state(false);
+  let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
@@ -362,6 +365,10 @@
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
   let removeWorktreeForceRequired = $state(false);
+  let terminalView = $state<{
+    insertQuickPrompt: (text: string, submit?: boolean) => boolean;
+    focusInput: () => void;
+  } | null>(null);
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
   let importError = $state<string | null>(null);
@@ -763,7 +770,16 @@
       else openQuickJump();
       return;
     }
-    if (quickJumpOpen || shortcutsOpen) return;
+    if (
+      event.metaKey && event.shiftKey && !event.altKey && !event.ctrlKey
+      && event.key.toLowerCase() === 'p'
+    ) {
+      event.preventDefault();
+      if (quickPromptOpen) closeQuickPrompts();
+      else openQuickPrompts();
+      return;
+    }
+    if (quickJumpOpen || quickPromptOpen || shortcutsOpen) return;
     if (event.key === 'Escape' && (treeMultiSelection?.ids.length ?? 0) > 0) {
       event.preventDefault();
       treeMultiSelection = null;
@@ -822,6 +838,7 @@
 
   function openQuickJump(): void {
     shortcutsOpen = false;
+    quickPromptOpen = false;
     quickJumpRecentKeys = readRecentNavigationKeys();
     quickJumpOpen = true;
     void refreshQuickJumpIndex(true);
@@ -831,8 +848,29 @@
     quickJumpOpen = false;
   }
 
+  function openQuickPrompts(): void {
+    quickJumpOpen = false;
+    shortcutsOpen = false;
+    quickPromptOpen = true;
+  }
+
+  function closeQuickPrompts(): void {
+    quickPromptOpen = false;
+  }
+
+  function insertQuickPrompt(prompt: QuickPrompt, submit: boolean): void {
+    if (
+      selectedProcess?.kind !== 'agent'
+      || selectedProcess.status !== 'running'
+      || !terminalView?.insertQuickPrompt(prompt.body, submit)
+    ) return;
+    closeQuickPrompts();
+    void tick().then(() => terminalView?.focusInput());
+  }
+
   function openShortcuts(): void {
     quickJumpOpen = false;
+    quickPromptOpen = false;
     shortcutsOpen = true;
   }
 
@@ -4100,6 +4138,7 @@
           {#key selectedProcess.id}
             <div class="terminal-view">
               <TerminalView
+                bind:this={terminalView}
                 {client}
                 process={selectedProcess}
                 connected={connection.status === 'connected'}
@@ -4282,6 +4321,16 @@
     loading={quickJumpLoading}
     onChoose={chooseQuickJumpTarget}
     onClose={closeQuickJump}
+  />
+{/if}
+
+{#if quickPromptOpen}
+  <QuickPromptPalette
+    {client}
+    canInsert={selectedProcess?.kind === 'agent' && selectedProcess.status === 'running'}
+    onInsert={insertQuickPrompt}
+    onClose={closeQuickPrompts}
+    onError={reportError}
   />
 {/if}
 

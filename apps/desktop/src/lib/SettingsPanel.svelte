@@ -34,6 +34,7 @@
   import SidebarCard from './settings/SidebarCard.svelte';
   import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
   import ProfilesCard from './settings/ProfilesCard.svelte';
+  import QuickPromptsCard from './settings/QuickPromptsCard.svelte';
 
   let { client, project, connection, onError, onProfileSwitched }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
@@ -264,6 +265,8 @@
             onRetry={() => {}}
           />
         {/if}
+      {:else if $settingsSection === 'quick-prompts'}
+        <QuickPromptsCard {client} connected={connection.status === 'connected'} {onError} />
       {:else if $settingsSection === 'tools'}
         <OpenersCard />
       {:else if $settingsSection === 'mcp'}

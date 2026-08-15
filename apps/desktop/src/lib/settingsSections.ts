@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | 'hotkeys'
   | 'notifications'
   | 'agents'
+  | 'quick-prompts'
   | 'tools'
   | 'mcp'
   | 'daemon'
@@ -31,6 +32,7 @@ export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'hotkeys', label: 'Hotkeys', icon: '⌘', description: 'Keyboard reference', local: true },
   { id: 'notifications', label: 'Notifications', icon: '○', description: 'OS banners and attention', local: true },
   { id: 'agents', label: 'Agents', icon: '◎', description: 'Runtimes and tools', local: false },
+  { id: 'quick-prompts', label: 'Quick prompts', icon: 'P', description: 'Reusable terminal text', local: false },
   { id: 'tools', label: 'Tools', icon: '⌁', description: 'External openers', local: true },
   { id: 'mcp', label: 'MCP', icon: '◇', description: 'Agent connection', local: false },
   { id: 'daemon', label: 'Daemon', icon: '◉', description: 'Local runtime', local: false },

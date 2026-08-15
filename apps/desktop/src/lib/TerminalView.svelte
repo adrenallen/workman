@@ -124,6 +124,24 @@
     focusRequested: boolean;
   }
 
+  /** Insert through xterm so bracketed-paste mode and replay-safe input ordering are preserved. */
+  export function insertQuickPrompt(text: string, submit = false): boolean {
+    const instance = terminal;
+    if (!instance || process.status !== 'running') return false;
+    pendingUserKeyTokens.push(++nextUserKeyToken);
+    instance.paste(text);
+    if (submit) {
+      queueInput(encoder.encode('\r'), true);
+      flushInput();
+    }
+    instance.focus();
+    return true;
+  }
+
+  export function focusInput(): void {
+    terminal?.focus();
+  }
+
   onMount(() => {
     const initialPalette = initialAppearance.terminalTheme.palette;
     appliedThemeSignature = Object.values(initialPalette).join('|');
