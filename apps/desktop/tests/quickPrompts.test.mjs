@@ -6,7 +6,8 @@ import {
   filterQuickPrompts,
   isQuickPromptPaletteShortcut,
   quickPromptPaletteAction,
-  quickPromptPreview
+  quickPromptPreview,
+  sanitizeQuickPromptBody
 } from '../src/lib/quickPromptPalette.ts';
 import { QuickPromptsStore } from '../src/lib/quickPrompts.ts';
 
@@ -37,6 +38,14 @@ test('palette actions distinguish insert, insert-and-send, and new prompt', () =
     quickPromptPaletteAction({ key: 'Enter', metaKey: false, shiftKey: true }),
     null
   );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'Enter', metaKey: false, isComposing: true }),
+    null
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'Enter', metaKey: false, keyCode: 229 }),
+    null
+  );
 });
 
 test('palette searches names and multiline bodies with compact previews', () => {
@@ -48,6 +57,16 @@ test('palette searches names and multiline bodies with compact previews', () => 
   assert.deepEqual(filterQuickPrompts(prompts, 'revi').map((candidate) => candidate.id), [2]);
   assert.deepEqual(filterQuickPrompts(prompts, 'int cov').map((candidate) => candidate.id), [2]);
   assert.equal(quickPromptPreview('one\n two\tthree'), 'one two three');
+});
+
+test('palette bounds cached body search and strips unsafe terminal controls', () => {
+  const insidePrefix = prompt(1, 'First', `${'x'.repeat(1_990)}find-me`);
+  const outsidePrefix = prompt(2, 'Second', `${'x'.repeat(2_000)}find-me`);
+  assert.deepEqual(filterQuickPrompts([insidePrefix, outsidePrefix], 'find-me').map(({ id }) => id), [1]);
+  assert.equal(
+    sanitizeQuickPromptBody(`\0one\ttwo\nthree\x1b[201~\rfour\u0085five`),
+    'one\ttwo\nthree[201~fourfive'
+  );
 });
 
 test('quick prompt store publishes daemon CRUD and reorder results', async () => {
@@ -112,9 +131,11 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /⌘Enter · insert &amp; send/);
   assert.match(palette, /<QuickPromptEditor/);
+  assert.match(palette, />Retry<\/Button>/);
+  assert.match(palette, />New quick prompt<\/Button>/);
   assert.match(terminal, /export function insertQuickPrompt/);
-  assert.match(terminal, /attachCustomKeyEventHandler[\s\S]*isQuickPromptPaletteShortcut\(event\)[\s\S]*onQuickPrompts\?\.\(\)[\s\S]*return false/);
-  assert.match(terminal, /instance\.paste\(text\)/);
+  assert.match(terminal, /attachCustomKeyEventHandler[\s\S]*onQuickPrompts && isQuickPromptPaletteShortcut\(event\)[\s\S]*onQuickPrompts\(\)[\s\S]*return false/);
+  assert.match(terminal, /instance\.paste\(sanitizeQuickPromptBody\(text\)\)/);
   assert.match(terminal, /if \(submit\)[\s\S]*encoder\.encode\('\\r'\)/);
   assert.match(settings, /<QuickPromptsCard/);
   assert.match(sections, /id: 'quick-prompts'/);

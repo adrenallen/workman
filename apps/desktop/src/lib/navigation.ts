@@ -123,6 +123,14 @@ export function recordRecentNavigation(target: AppNavigationTarget): void {
 export function fuzzySubsequenceScore(query: string, candidate: string): number | null {
   const needle = query.trim().toLocaleLowerCase();
   const haystack = candidate.toLocaleLowerCase();
+  return fuzzySubsequenceScoreNormalized(needle, haystack);
+}
+
+/** Score strings that the caller has already trimmed/lowercased. */
+export function fuzzySubsequenceScoreNormalized(
+  needle: string,
+  haystack: string
+): number | null {
   if (!needle) return 0;
 
   let score = 0;

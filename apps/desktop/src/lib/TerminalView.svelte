@@ -27,7 +27,10 @@
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { hasRetainedTerminalOutput } from './terminalFirstPaint';
-  import { isQuickPromptPaletteShortcut } from './quickPromptPalette';
+  import {
+    isQuickPromptPaletteShortcut,
+    sanitizeQuickPromptBody
+  } from './quickPromptPalette';
   import {
     AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
     clipboardImagePasteRoute,
@@ -132,7 +135,7 @@
     const instance = terminal;
     if (!instance || process.status !== 'running') return false;
     pendingUserKeyTokens.push(++nextUserKeyToken);
-    instance.paste(text);
+    instance.paste(sanitizeQuickPromptBody(text));
     if (submit) {
       queueInput(encoder.encode('\r'), true);
       flushInput();
@@ -224,10 +227,10 @@
     }
 
     instance.attachCustomKeyEventHandler((event) => {
-      if (isQuickPromptPaletteShortcut(event)) {
+      if (onQuickPrompts && isQuickPromptPaletteShortcut(event)) {
         event.preventDefault();
         event.stopPropagation();
-        if (event.type === 'keydown') onQuickPrompts?.();
+        if (event.type === 'keydown') onQuickPrompts();
         return false;
       }
       let userKeyToken: number | null = null;

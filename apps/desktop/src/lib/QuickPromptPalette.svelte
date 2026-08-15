@@ -1,5 +1,6 @@
 <script lang="ts">
   import FileTextIcon from '@lucide/svelte/icons/file-text';
+  import { Button } from '$lib/components/ui/button';
   import * as Command from '$lib/components/ui/command';
   import * as Dialog from '$lib/components/ui/dialog';
   import QuickPromptEditor from './QuickPromptEditor.svelte';
@@ -69,6 +70,10 @@
 
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
+  }
+
+  function retry(): void {
+    void store.refresh(true).catch((cause) => onError(message(cause)));
   }
 </script>
 
@@ -140,11 +145,13 @@
               <div class="grid min-h-28 place-content-center gap-1 text-center">
                 <strong class="text-sm text-foreground">Quick prompts unavailable</strong>
                 <span class="text-xs text-muted-foreground">{snapshot.error}</span>
+                <Button class="mt-2 justify-self-center" size="sm" onclick={retry}>Retry</Button>
               </div>
             {:else}
               <div class="grid min-h-28 place-content-center gap-1 text-center">
                 <strong class="text-sm text-foreground">{query ? 'No matching prompt' : 'No quick prompts saved'}</strong>
                 <span class="text-xs text-muted-foreground">Press ⌘N to create one.</span>
+                <Button class="mt-2 justify-self-center" size="sm" onclick={() => (editorOpen = true)}>New quick prompt</Button>
               </div>
             {/if}
           {/each}
