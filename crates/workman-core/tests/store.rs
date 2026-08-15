@@ -158,6 +158,88 @@ fn agent_templates_are_profile_scoped_reorderable_and_cascade_with_their_tool() 
 }
 
 #[test]
+fn copied_profiles_remap_agent_templates_and_keep_each_side_independent() {
+    let store = Store::open_in_memory().expect("open store");
+    let source_profile_id = store.active_profile_id().unwrap();
+    let source_tools = store.list_agent_tools().unwrap();
+    let source_templates = [
+        AgentTemplate {
+            id: store.next_agent_template_id().unwrap(),
+            profile_id: source_profile_id,
+            name: "Review".into(),
+            agent_tool_id: source_tools[0].id,
+            extra_args: vec!["--model".into(), "fast model".into()],
+            prompt: "Review the change carefully.".into(),
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        },
+        AgentTemplate {
+            id: store.next_agent_template_id().unwrap() + 1,
+            profile_id: source_profile_id,
+            name: "Implement".into(),
+            agent_tool_id: source_tools[1].id,
+            extra_args: vec!["--effort".into(), "high".into()],
+            prompt: "Implement the requested change.".into(),
+            sort_order: 1,
+            created_at: 0,
+            updated_at: 0,
+        },
+    ];
+    for template in &source_templates {
+        store.put_agent_template(template).unwrap();
+    }
+    let source_templates = store.list_agent_templates().unwrap();
+
+    let (copy, tool_id_pairs) = store.create_profile("Copy", true).unwrap();
+    let tool_id_map = tool_id_pairs.into_iter().collect::<BTreeMap<_, _>>();
+    let copied_templates = store.list_profile_agent_templates(copy.id).unwrap();
+    assert_eq!(copied_templates.len(), source_templates.len());
+    for (source, copied) in source_templates.iter().zip(&copied_templates) {
+        assert_ne!(copied.id, source.id);
+        assert_eq!(copied.profile_id, copy.id);
+        assert_eq!(copied.agent_tool_id, tool_id_map[&source.agent_tool_id]);
+        assert_eq!(copied.name, source.name);
+        assert_eq!(copied.extra_args, source.extra_args);
+        assert_eq!(copied.prompt, source.prompt);
+        assert_eq!(copied.sort_order, source.sort_order);
+    }
+
+    let mut edited_source = source_templates[0].clone();
+    edited_source.name = "Source review".into();
+    edited_source.prompt = "Source-only edit".into();
+    store.put_agent_template(&edited_source).unwrap();
+    assert_eq!(
+        store.list_profile_agent_templates(copy.id).unwrap()[0],
+        copied_templates[0]
+    );
+    assert!(store.delete_agent_template(source_templates[0].id).unwrap());
+    assert_eq!(
+        store.list_profile_agent_templates(copy.id).unwrap()[0],
+        copied_templates[0]
+    );
+
+    store.switch_profile(copy.id).unwrap();
+    let mut edited_copy = copied_templates[1].clone();
+    edited_copy.name = "Copied implementation".into();
+    edited_copy.extra_args.push("--copied-only".into());
+    store.put_agent_template(&edited_copy).unwrap();
+    assert_eq!(
+        store
+            .list_profile_agent_templates(source_profile_id)
+            .unwrap()[0],
+        source_templates[1]
+    );
+    assert!(store.delete_agent_template(copied_templates[1].id).unwrap());
+    assert_eq!(
+        store
+            .list_profile_agent_templates(source_profile_id)
+            .unwrap()[0],
+        source_templates[1]
+    );
+}
+
+#[test]
 fn fresh_and_legacy_agent_defaults_use_yolo_commands_without_rewriting_custom_tools() {
     let store = Store::open_in_memory().expect("open store");
     let expected = [

@@ -661,6 +661,19 @@ impl ProcessRegistry {
         self.status_view(process)
     }
 
+    /// Snapshot the live attention tracker without observing notifications or mutating the store.
+    pub(crate) fn agent_attention_snapshot(
+        &self,
+        process_id: ProcessId,
+    ) -> RegistryResult<AgentState> {
+        if let Some(output) = self.outputs.get(&process_id) {
+            return Ok(output.attention.snapshot());
+        }
+        let process = self.require(process_id)?;
+        let tool_type = self.tool_type_for(&process)?;
+        Ok(AgentState::exited(tool_type, process.exited_at))
+    }
+
     pub fn list(&mut self, project_id: Option<ProjectId>) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
         Ok(match project_id {

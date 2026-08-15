@@ -39,6 +39,7 @@ const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
 const DIALOG_CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
 const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const INITIAL_PROMPT_HARD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
@@ -901,18 +902,28 @@ fn schedule_initial_prompt(
     prompt: String,
 ) {
     tokio::spawn(async move {
-        let deadline = Instant::now() + INITIAL_PROMPT_READY_TIMEOUT;
+        let started = Instant::now();
+        let ready_deadline = started + INITIAL_PROMPT_READY_TIMEOUT;
+        let hard_deadline = started + INITIAL_PROMPT_HARD_TIMEOUT;
         loop {
             let delivery = {
                 let mut registry = registry.lock().await;
-                let status = match registry.get_status(process_id) {
-                    Ok(status) => status,
+                let now = Instant::now();
+                if now >= hard_deadline {
+                    eprintln!(
+                        "process {process_id}: initial prompt was not delivered within {}s; stopping without bypassing a pending dialog",
+                        INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                    );
+                    return;
+                }
+                let agent_state = match registry.agent_attention_snapshot(process_id) {
+                    Ok(agent_state) => agent_state,
                     Err(error) => {
                         eprintln!("process {process_id}: initial prompt delivery stopped: {error}");
                         return;
                     }
                 };
-                if status.agent_state.state == AttentionState::Exited {
+                if agent_state.state == AttentionState::Exited {
                     eprintln!(
                         "process {process_id}: agent exited before its initial prompt could be delivered"
                     );
@@ -929,18 +940,21 @@ fn schedule_initial_prompt(
                     None
                 } else {
                     let ready = matches!(
-                        status.agent_state.state,
+                        agent_state.state,
                         AttentionState::Idle | AttentionState::NeedsInput
                     );
-                    (ready || Instant::now() >= deadline).then(|| {
-                        registry
-                            .submit_input(process_id, prompt.as_bytes())
-                            .map_err(|error| error.to_string())
+                    (ready || now >= ready_deadline).then(|| {
+                        (
+                            registry
+                                .submit_input(process_id, prompt.as_bytes())
+                                .map_err(|error| error.to_string()),
+                            !ready,
+                        )
                     })
                 }
             };
-            if let Some(delivery) = delivery {
-                if Instant::now() >= deadline {
+            if let Some((delivery, used_fallback)) = delivery {
+                if used_fallback {
                     eprintln!(
                         "process {process_id}: initial prompt readiness was not detected within {}s; using fallback delivery",
                         INITIAL_PROMPT_READY_TIMEOUT.as_secs()
@@ -1053,7 +1067,14 @@ async fn spawn_registered_agent_for(
         }
     };
     if auto_acknowledge_dialogs && supports_first_run_dialog_ack(&tool_type) {
-        auto_acknowledge_initial_dialog(registry.clone(), result.process_id).await?;
+        if let Err(error) =
+            auto_acknowledge_initial_dialog(registry.clone(), result.process_id).await
+        {
+            eprintln!(
+                "process {}: initial dialog auto-acknowledgment failed; continuing with the live process: {error}",
+                result.process_id
+            );
+        }
     }
     Ok(result)
 }

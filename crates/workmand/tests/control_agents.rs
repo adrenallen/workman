@@ -69,6 +69,7 @@ use warnings;
 $| = 1;
 system('stty', 'raw', '-echo');
 print "agent-args:" . join('|', @ARGV) . "\r\n";
+select undef, undef, undef, 0.25;
 print "agent-ready\r\n\$";
 my $prompt = '';
 while (1) {
@@ -324,6 +325,10 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         ) {
             assert_eq!(output.matches("agent-answer:").count(), 1);
             assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
+            assert!(
+                output.find("agent-ready").unwrap() < output.find("agent-answer:").unwrap(),
+                "initial prompt arrived before the delayed readiness marker: {output}"
+            );
             break;
         }
         assert!(

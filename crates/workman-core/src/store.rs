@@ -1,6 +1,12 @@
 //! SQLite connection setup, schema migration, and domain persistence.
 
-use std::{collections::HashSet, error::Error, fmt, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    path::Path,
+    time::Duration,
+};
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
@@ -495,7 +501,8 @@ impl Store {
         Ok((profile, tool_ids))
     }
 
-    /// Create an inactive profile. `copy_active` snapshots membership, shell, and agent tools.
+    /// Create an inactive profile. `copy_active` snapshots membership, shell, agent tools,
+    /// templates, and quick prompts.
     /// The returned ID pairs map source agent-tool IDs to their independent copies so callers
     /// can clone custom icon files without putting filesystem paths in the database.
     pub fn create_profile(
@@ -656,6 +663,54 @@ impl Store {
                     ],
                 )?;
                 icon_pairs.push((old_id, next_id));
+            }
+
+            let tool_id_map = icon_pairs.iter().copied().collect::<HashMap<_, _>>();
+            let templates = {
+                let mut statement = transaction.prepare(
+                    "SELECT name, agent_tool_id, extra_args, prompt, sort_order
+                     FROM agent_templates WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_template_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_templates",
+                [],
+                |row| row.get(0),
+            )?;
+            for (position, (name, source_tool_id, extra_args, prompt, sort_order)) in
+                templates.into_iter().enumerate()
+            {
+                let copied_tool_id = tool_id_map.get(&source_tool_id).ok_or_else(|| {
+                    StoreError::InvalidProfile(format!(
+                        "agent template references uncopied tool {source_tool_id}"
+                    ))
+                })?;
+                transaction.execute(
+                    "INSERT INTO agent_templates (
+                        id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
+                        created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch(), unixepoch())",
+                    params![
+                        first_template_id + position as i64,
+                        profile_id,
+                        name,
+                        copied_tool_id,
+                        extra_args,
+                        prompt,
+                        sort_order,
+                    ],
+                )?;
             }
 
             let prompts = {
