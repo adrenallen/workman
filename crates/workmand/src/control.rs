@@ -10,8 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
-    AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store, TimerId,
+    AgentTemplateId, AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus,
+    Project, ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store, TimerId,
 };
 
 use crate::{
@@ -442,6 +442,33 @@ struct QuickPromptOrderParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentTemplateParams {
+    template: AgentTemplateInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateInput {
+    #[serde(default)]
+    id: Option<AgentTemplateId>,
+    name: String,
+    agent_tool_id: AgentToolId,
+    #[serde(default)]
+    extra_args: Vec<String>,
+    #[serde(default)]
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateIdParams {
+    agent_template_id: AgentTemplateId,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateOrderParams {
+    agent_template_ids: Vec<AgentTemplateId>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserShellParams {
     #[serde(default)]
     shell: Option<String>,
@@ -465,11 +492,16 @@ struct AgentToolDeepCheckParams {
 #[derive(Debug, Deserialize)]
 struct SpawnAgentParams {
     project_id: ProjectId,
-    agent_tool_id: AgentToolId,
+    #[serde(default)]
+    agent_tool_id: Option<AgentToolId>,
+    #[serde(default)]
+    agent_template_id: Option<AgentTemplateId>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     extra_args: Vec<String>,
+    #[serde(default)]
+    prompt: Option<String>,
     /// Automatically accept narrowly recognized first-run trust dialogs.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
@@ -554,8 +586,10 @@ async fn dispatch(
                 registry.clone(),
                 project,
                 params.agent_tool_id,
+                params.agent_template_id,
                 params.name,
                 params.extra_args,
+                params.prompt,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,
@@ -1343,6 +1377,45 @@ async fn dispatch(
                 .list_quick_prompts()
                 .map(json_value)
                 .map_err(quick_prompt_store_error);
+        }
+        "agent_templates.list" => {
+            return crate::mcp::agent_spawning::load_agent_templates(&registry)
+                .map(json_value)
+                .map_err(|error| ("agent_template_error", error));
+        }
+        "agent_templates.save" => {
+            let params: AgentTemplateParams = params_as(params)?;
+            return crate::mcp::agent_spawning::save_agent_template_from_settings(
+                &registry,
+                params.template.id,
+                params.template.name,
+                params.template.agent_tool_id,
+                params.template.extra_args,
+                params.template.prompt,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_template_error", error));
+        }
+        "agent_templates.delete" => {
+            let params: AgentTemplateIdParams = params_as(params)?;
+            let deleted = crate::mcp::agent_spawning::delete_agent_template_from_settings(
+                &registry,
+                params.agent_template_id,
+            )
+            .map_err(|error| ("agent_template_error", error))?;
+            return Ok(json!({
+                "agent_template_id": params.agent_template_id,
+                "deleted": deleted
+            }));
+        }
+        "agent_templates.reorder" => {
+            let params: AgentTemplateOrderParams = params_as(params)?;
+            return crate::mcp::agent_spawning::reorder_agent_templates_from_settings(
+                &registry,
+                &params.agent_template_ids,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_template_error", error));
         }
         _ => {}
     }

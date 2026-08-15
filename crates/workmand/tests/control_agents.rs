@@ -63,7 +63,28 @@ async fn rpc(
 fn write_fake_agent(path: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::write(
         path,
-        "#!/bin/sh\nprintf 'agent-ready\\n'\nIFS= read -r prompt\nprintf 'agent-answer:%s\\n' \"$prompt\"\nsleep 30\n",
+        r##"#!/usr/bin/perl
+use strict;
+use warnings;
+$| = 1;
+system('stty', 'raw', '-echo');
+print "agent-args:" . join('|', @ARGV) . "\r\n";
+print "agent-ready\r\n\$";
+my $prompt = '';
+while (1) {
+    my $chunk = '';
+    my $count = sysread(STDIN, $chunk, 4096);
+    exit 3 unless defined($count) && $count > 0;
+    for my $character (split //, $chunk) {
+        if ($character eq "\r") {
+            print "\r\nagent-answer:$prompt\r\n";
+            sleep 30;
+            exit 0;
+        }
+        $prompt .= $character;
+    }
+}
+"##,
     )?;
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_mode(0o700);
@@ -129,6 +150,34 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
+
+    let template = rpc(
+        &mut socket,
+        23,
+        "agent_templates.save",
+        json!({
+            "template": {
+                "name": "Review worker",
+                "agent_tool_id": tool_id,
+                "extra_args": ["--template", "alpha value"],
+                "prompt": "You are a careful reviewer."
+            }
+        }),
+    )
+    .await;
+    assert!(template["ok"].as_bool().unwrap());
+    let template_id = template["result"]["id"].as_i64().unwrap();
+    let templates = rpc(&mut socket, 24, "agent_templates.list", json!({})).await;
+    assert_eq!(templates["result"].as_array().unwrap().len(), 1);
+    assert_eq!(templates["result"][0]["name"], "Review worker");
+    let reordered = rpc(
+        &mut socket,
+        25,
+        "agent_templates.reorder",
+        json!({ "agent_template_ids": [template_id] }),
+    )
+    .await;
+    assert_eq!(reordered["result"][0]["id"], template_id);
 
     let clipboard_dir = temp.path().join("Application Support/terminal-clipboard");
     std::fs::create_dir_all(&clipboard_dir)?;
@@ -248,6 +297,57 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     );
     let process_id = spawned["result"]["process_id"].as_i64().unwrap();
 
+    let template_spawn = rpc(
+        &mut socket,
+        26,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "name": "template-worker",
+            "extra_args": ["--caller", "beta"],
+            "prompt": "Review line one.\nReview line two."
+        }),
+    )
+    .await;
+    assert!(template_spawn["ok"].as_bool().unwrap());
+    let template_process_id = template_spawn["result"]["process_id"].as_i64().unwrap();
+    let template_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(template_process_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains(
+            "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.",
+        ) {
+            assert_eq!(output.matches("agent-answer:").count(), 1);
+            assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
+            break;
+        }
+        assert!(
+            Instant::now() < template_deadline,
+            "template prompt was not delivered after readiness: {}",
+            output
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let conflicting = rpc(
+        &mut socket,
+        27,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": 1,
+            "extra_args": []
+        }),
+    )
+    .await;
+    assert_eq!(conflicting["error"]["code"], "spawn_failed");
+
     let prompted = rpc(
         &mut socket,
         7,
@@ -290,6 +390,22 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert_eq!(closed["result"]["id"], process_id);
     assert_eq!(closed["result"]["status"], "stopped");
+    let closed_template = rpc(
+        &mut socket,
+        28,
+        "process.close",
+        json!({ "process_id": template_process_id }),
+    )
+    .await;
+    assert_eq!(closed_template["result"]["status"], "stopped");
+    let deleted_template = rpc(
+        &mut socket,
+        29,
+        "agent_templates.delete",
+        json!({ "agent_template_id": template_id }),
+    )
+    .await;
+    assert_eq!(deleted_template["result"]["deleted"], true);
     let deleted = rpc(
         &mut socket,
         10,

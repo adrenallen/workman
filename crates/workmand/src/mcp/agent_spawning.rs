@@ -18,8 +18,8 @@ use serde_json::json;
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use uuid::Uuid;
 use workman_core::{
-    AgentTool, AgentToolId, AgentToolSource, Process, ProcessId, ProcessKind, ProcessSource,
-    ProcessStatus, Project, ProjectId,
+    AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
+    ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId, attention::AttentionState,
 };
 
 use super::{
@@ -38,6 +38,8 @@ const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
 const DIALOG_CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
 const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -72,13 +74,21 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    agent_tool_id: AgentToolId,
+    /// Agent-tool registry ID. Optional when agent_template_id is provided.
+    #[serde(default)]
+    agent_tool_id: Option<AgentToolId>,
+    /// Optional agent template. Its registered tool and launch arguments take precedence.
+    #[serde(default)]
+    agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
     /// Safely shell-quoted arguments appended to the registered agent command.
     #[serde(default)]
     extra_args: Vec<String>,
+    /// Optional first prompt delivered once the agent reaches a safe input state.
+    #[serde(default)]
+    initial_prompt: Option<String>,
     /// Automatically accept narrowly recognized first-run trust dialogs.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
@@ -141,6 +151,13 @@ struct PreparedRegisteredAgent {
     tool: AgentTool,
     requested_name: Option<String>,
     launch: AgentLaunchPlan,
+}
+
+#[derive(Debug)]
+struct ResolvedAgentSpawn {
+    agent_tool_id: AgentToolId,
+    extra_args: Vec<String>,
+    initial_prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +228,17 @@ impl WorkmanMcp {
         let registry = self.registry.lock().await;
         match load_agent_tools(&registry) {
             Ok(tools) => success(json!({ "agent_tools": tools })),
+            Err(error) => failure("store_error", error),
+        }
+    }
+
+    #[tool(
+        description = "List reusable agent templates for the active workspace profile. Returns { agent_templates: [...] }"
+    )]
+    async fn list_agent_templates(&self) -> CallToolResult {
+        let registry = self.registry.lock().await;
+        match load_agent_templates(&registry) {
+            Ok(templates) => success(json!({ "agent_templates": templates })),
             Err(error) => failure("store_error", error),
         }
     }
@@ -402,9 +430,11 @@ impl WorkmanMcp {
                 spawn_registered_agent(
                     self.registry.clone(),
                     project,
-                    agent_tool_id,
+                    Some(agent_tool_id),
+                    None,
                     args.name,
                     args.extra_args,
+                    None,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
                     spawned_by_process_id,
@@ -437,8 +467,10 @@ impl WorkmanMcp {
             self.registry.clone(),
             project,
             args.agent_tool_id,
+            args.agent_template_id,
             args.name,
             args.extra_args,
+            args.initial_prompt,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
             spawned_by_process_id,
@@ -455,6 +487,105 @@ pub(crate) fn load_agent_tools(registry: &ProcessRegistry) -> Result<Vec<AgentTo
     registry
         .store()
         .list_agent_tools()
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn load_agent_templates(
+    registry: &ProcessRegistry,
+) -> Result<Vec<AgentTemplate>, String> {
+    registry
+        .store()
+        .list_agent_templates()
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn save_agent_template_from_settings(
+    registry: &ProcessRegistry,
+    id: Option<AgentTemplateId>,
+    name: String,
+    agent_tool_id: AgentToolId,
+    extra_args: Vec<String>,
+    prompt: String,
+) -> Result<AgentTemplate, String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("agent template name cannot be empty".to_owned());
+    }
+    if name.contains('\0') {
+        return Err("agent template name may not contain NUL bytes".to_owned());
+    }
+    if prompt.contains('\0') {
+        return Err("agent template prompt may not contain NUL bytes".to_owned());
+    }
+    if extra_args.iter().any(|arg| arg.contains('\0')) {
+        return Err("agent template arguments may not contain NUL bytes".to_owned());
+    }
+    load_agent_tool(registry, agent_tool_id)?;
+    if let Some(id) = id
+        && registry
+            .store()
+            .get_agent_template(id)
+            .map_err(|error| error.to_string())?
+            .is_none()
+    {
+        return Err(format!("agent template {id} was not found"));
+    }
+    if load_agent_templates(registry)?
+        .iter()
+        .any(|template| Some(template.id) != id && template.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(format!(
+            "agent template name {name:?} is already registered"
+        ));
+    }
+    let template = AgentTemplate {
+        id: id.unwrap_or(
+            registry
+                .store()
+                .next_agent_template_id()
+                .map_err(|error| error.to_string())?,
+        ),
+        profile_id: registry
+            .store()
+            .active_profile_id()
+            .map_err(|error| error.to_string())?,
+        name,
+        agent_tool_id,
+        extra_args,
+        prompt: prompt.trim().to_owned(),
+        sort_order: 0,
+        created_at: 0,
+        updated_at: 0,
+    };
+    registry
+        .store()
+        .put_agent_template(&template)
+        .map_err(|error| error.to_string())?;
+    registry
+        .store()
+        .get_agent_template(template.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("agent template {} was not found after saving", template.id))
+}
+
+pub(crate) fn reorder_agent_templates_from_settings(
+    registry: &ProcessRegistry,
+    ordered_ids: &[AgentTemplateId],
+) -> Result<Vec<AgentTemplate>, String> {
+    registry
+        .store()
+        .reorder_agent_templates(ordered_ids)
+        .map_err(|error| error.to_string())?;
+    load_agent_templates(registry)
+}
+
+pub(crate) fn delete_agent_template_from_settings(
+    registry: &ProcessRegistry,
+    agent_template_id: AgentTemplateId,
+) -> Result<bool, String> {
+    registry
+        .store()
+        .delete_agent_template(agent_template_id)
         .map_err(|error| error.to_string())
 }
 
@@ -670,25 +801,159 @@ pub(crate) fn load_agent_tool(
 pub(crate) async fn spawn_registered_agent(
     registry: crate::SharedProcessRegistry,
     project: Project,
-    agent_tool_id: AgentToolId,
+    agent_tool_id: Option<AgentToolId>,
+    agent_template_id: Option<AgentTemplateId>,
     name: Option<String>,
     extra_args: Vec<String>,
+    initial_prompt: Option<String>,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
 ) -> Result<SpawnResult, String> {
-    spawn_registered_agent_for(
-        registry,
+    let resolved = {
+        let registry = registry.lock().await;
+        resolve_agent_spawn(
+            &registry,
+            agent_tool_id,
+            agent_template_id,
+            extra_args,
+            initial_prompt,
+        )?
+    };
+    let result = spawn_registered_agent_for(
+        registry.clone(),
         project,
-        agent_tool_id,
+        resolved.agent_tool_id,
         name,
-        extra_args,
+        resolved.extra_args,
         mcp_url,
         auto_acknowledge_dialogs,
         spawned_by_process_id,
         AgentLaunchPurpose::Normal,
     )
-    .await
+    .await?;
+    if let Some(prompt) = resolved.initial_prompt {
+        schedule_initial_prompt(registry, result.process_id, prompt);
+    }
+    Ok(result)
+}
+
+fn resolve_agent_spawn(
+    registry: &ProcessRegistry,
+    requested_agent_tool_id: Option<AgentToolId>,
+    agent_template_id: Option<AgentTemplateId>,
+    caller_extra_args: Vec<String>,
+    caller_prompt: Option<String>,
+) -> Result<ResolvedAgentSpawn, String> {
+    let Some(agent_template_id) = agent_template_id else {
+        let agent_tool_id = requested_agent_tool_id.ok_or_else(|| {
+            "agent_tool_id is required when no agent_template_id is provided".to_owned()
+        })?;
+        return Ok(ResolvedAgentSpawn {
+            agent_tool_id,
+            extra_args: caller_extra_args,
+            initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
+        });
+    };
+    let template = registry
+        .store()
+        .get_agent_template(agent_template_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!("agent template {agent_template_id} was not found in the active profile")
+        })?;
+    if requested_agent_tool_id.is_some_and(|id| id != template.agent_tool_id) {
+        return Err(format!(
+            "agent template {agent_template_id} uses agent tool {}; conflicting agent_tool_id was provided",
+            template.agent_tool_id
+        ));
+    }
+    let mut extra_args = template.extra_args;
+    extra_args.extend(caller_extra_args);
+    Ok(ResolvedAgentSpawn {
+        agent_tool_id: template.agent_tool_id,
+        extra_args,
+        initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
+    })
+}
+
+pub(crate) fn compose_initial_prompt(
+    template_prompt: Option<&str>,
+    caller_prompt: Option<&str>,
+) -> Option<String> {
+    let template_prompt = template_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    let caller_prompt = caller_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    match (template_prompt, caller_prompt) {
+        (Some(template), Some(caller)) => Some(format!("{template}\n\n{caller}")),
+        (Some(template), None) => Some(template.to_owned()),
+        (None, Some(caller)) => Some(caller.to_owned()),
+        (None, None) => None,
+    }
+}
+
+fn schedule_initial_prompt(
+    registry: crate::SharedProcessRegistry,
+    process_id: ProcessId,
+    prompt: String,
+) {
+    tokio::spawn(async move {
+        let deadline = Instant::now() + INITIAL_PROMPT_READY_TIMEOUT;
+        loop {
+            let delivery = {
+                let mut registry = registry.lock().await;
+                let status = match registry.get_status(process_id) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        eprintln!("process {process_id}: initial prompt delivery stopped: {error}");
+                        return;
+                    }
+                };
+                if status.agent_state.state == AttentionState::Exited {
+                    eprintln!(
+                        "process {process_id}: agent exited before its initial prompt could be delivered"
+                    );
+                    return;
+                }
+                let dialog = match registry.pending_dialog(process_id) {
+                    Ok(dialog) => dialog,
+                    Err(error) => {
+                        eprintln!("process {process_id}: initial prompt delivery stopped: {error}");
+                        return;
+                    }
+                };
+                if dialog.is_some() {
+                    None
+                } else {
+                    let ready = matches!(
+                        status.agent_state.state,
+                        AttentionState::Idle | AttentionState::NeedsInput
+                    );
+                    (ready || Instant::now() >= deadline).then(|| {
+                        registry
+                            .submit_input(process_id, prompt.as_bytes())
+                            .map_err(|error| error.to_string())
+                    })
+                }
+            };
+            if let Some(delivery) = delivery {
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "process {process_id}: initial prompt readiness was not detected within {}s; using fallback delivery",
+                        INITIAL_PROMPT_READY_TIMEOUT.as_secs()
+                    );
+                }
+                if let Err(error) = delivery {
+                    eprintln!("process {process_id}: initial prompt delivery failed: {error}");
+                }
+                return;
+            }
+            tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1661,6 +1926,26 @@ mod tests {
         assert!(supports_first_run_dialog_ack("claude-code"));
         assert!(supports_first_run_dialog_ack("codex"));
         assert!(!supports_first_run_dialog_ack("custom"));
+    }
+
+    #[test]
+    fn initial_prompt_composition_trims_edges_and_adds_one_blank_line() {
+        assert_eq!(
+            compose_initial_prompt(
+                Some("  Keep the change focused.\n"),
+                Some("\nImplement the dialog.  ")
+            ),
+            Some("Keep the change focused.\n\nImplement the dialog.".into())
+        );
+        assert_eq!(
+            compose_initial_prompt(Some(" Template only "), Some("  ")),
+            Some("Template only".into())
+        );
+        assert_eq!(
+            compose_initial_prompt(None, Some(" Prompt only ")),
+            Some("Prompt only".into())
+        );
+        assert_eq!(compose_initial_prompt(Some("\n"), None), None);
     }
 
     #[test]

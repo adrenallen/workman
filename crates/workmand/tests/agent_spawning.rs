@@ -16,7 +16,8 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    AgentTemplate, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus,
+    Project,
 };
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
@@ -124,6 +125,26 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             resume_args: None,
             continue_args: None,
         })?;
+        registry.store().put_agent_template(&AgentTemplate {
+            id: 300,
+            profile_id: 1,
+            name: "Scripted worker".into(),
+            agent_tool_id: 99,
+            extra_args: Vec::new(),
+            prompt: String::new(),
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        })?;
+        registry.store().connection().execute_batch(
+            "INSERT INTO profiles (id, name, active) VALUES (2, 'Other profile', 0);
+             INSERT INTO agent_tools (
+                id, name, display_name, command, tool_type, enabled, source, sort_order, profile_id
+             ) VALUES (199, 'other-profile-tool', 'Other tool', 'true', 'custom', 1, 'local', 0, 2);
+             INSERT INTO agent_templates (
+                id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order
+             ) VALUES (299, 2, 'Other template', 199, '[]', '', 0);",
+        )?;
         registry.store().put_process(&Process {
             id: 1,
             project_id: 7,
@@ -170,6 +191,23 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
+    let templates = call(&parent, "list_agent_templates", json!({})).await;
+    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 1);
+    assert_eq!(templates["agent_templates"][0]["id"], 300);
+
+    let cross_profile = parent
+        .call_tool(
+            CallToolRequestParams::new("spawn_agent").with_arguments(arguments(json!({
+                "project_id": 7,
+                "agent_template_id": 299
+            }))),
+        )
+        .await?;
+    assert_eq!(cross_profile.is_error, Some(true));
+    assert_eq!(
+        cross_profile.structured_content.unwrap()["code"],
+        "spawn_failed"
+    );
 
     let terminal = call(
         &parent,
@@ -196,7 +234,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         "spawn_agent",
         json!({
             "project_id": 7,
-            "agent_tool_id": 99,
+            "agent_template_id": 300,
             "name": "fake-worker",
             "extra_args": [context_file],
         }),
