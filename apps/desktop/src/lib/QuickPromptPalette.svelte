@@ -8,7 +8,8 @@
   import {
     filterQuickPrompts,
     quickPromptPaletteAction,
-    quickPromptPreview
+    quickPromptPreview,
+    type QuickPromptPaletteAction
   } from './quickPromptPalette';
   import {
     getQuickPromptsStore,
@@ -28,13 +29,12 @@
   let store = $derived(getQuickPromptsStore(client));
   let snapshot = $state<QuickPromptsSnapshot>({ prompts: [], loading: false, error: null });
   let query = $state('');
-  let selectedValue = $state('');
+  let selectedIndex = $state(0);
   let editorOpen = $state(false);
   let insertFailed = $state(false);
   let filtered = $derived(filterQuickPrompts(snapshot.prompts, query));
-  let activePrompt = $derived(
-    filtered.find((prompt) => String(prompt.id) === selectedValue) ?? filtered[0] ?? null
-  );
+  let activePrompt = $derived(filtered[selectedIndex] ?? null);
+  let selectedValue = $derived(activePrompt ? String(activePrompt.id) : '');
 
   $effect(() => {
     snapshot = store.current();
@@ -46,9 +46,7 @@
   });
 
   $effect(() => {
-    if (!filtered.some((prompt) => String(prompt.id) === selectedValue)) {
-      selectedValue = filtered[0] ? String(filtered[0].id) : '';
-    }
+    if (selectedIndex >= filtered.length) selectedIndex = Math.max(0, filtered.length - 1);
   });
 
   function choose(prompt: QuickPrompt | null, submit: boolean): void {
@@ -61,11 +59,33 @@
     if (!action) return;
     event.preventDefault();
     event.stopPropagation();
+    if (action === 'next' || action === 'previous' || action === 'first' || action === 'last') {
+      moveSelection(action);
+      return;
+    }
     if (action === 'new') {
       editorOpen = true;
       return;
     }
     choose(activePrompt, action === 'insert-and-send');
+  }
+
+  function moveSelection(
+    action: Extract<QuickPromptPaletteAction, 'next' | 'previous' | 'first' | 'last'>
+  ): void {
+    if (filtered.length === 0) return;
+    if (action === 'first') selectedIndex = 0;
+    else if (action === 'last') selectedIndex = filtered.length - 1;
+    else {
+      const delta = action === 'next' ? 1 : -1;
+      selectedIndex = (selectedIndex + delta + filtered.length) % filtered.length;
+    }
+    const prompt = filtered[selectedIndex];
+    if (prompt) {
+      queueMicrotask(() =>
+        document.getElementById(`quick-prompt-option-${prompt.id}`)?.scrollIntoView({ block: 'nearest' })
+      );
+    }
   }
 
   function message(cause: unknown): string {
@@ -85,9 +105,9 @@
       aria-labelledby="quick-prompt-palette-title"
     >
       <Command.Root
-        bind:value={selectedValue}
+        value={selectedValue}
         shouldFilter={false}
-        loop
+        disablePointerSelection
         class="max-h-[min(560px,calc(100dvh-32px))] rounded-lg p-0"
         label="Quick prompts"
       >
@@ -109,6 +129,8 @@
             bind:value={query}
             placeholder="Search prompt names and text"
             aria-label="Search quick prompts"
+            aria-activedescendant={activePrompt ? `quick-prompt-option-${activePrompt.id}` : undefined}
+            oninput={() => (selectedIndex = 0)}
             onkeydown={handleKeydown}
           />
         </div>
@@ -125,11 +147,13 @@
         </div>
 
         <Command.List class="min-h-28 max-h-80 p-1.5">
-          {#each filtered as prompt (prompt.id)}
+          {#each filtered as prompt, index (prompt.id)}
             <Command.Item
+              id={`quick-prompt-option-${prompt.id}`}
               value={String(prompt.id)}
               keywords={[prompt.name, prompt.body]}
               class="min-h-12 items-start gap-2 px-2 py-2"
+              onmouseenter={() => (selectedIndex = index)}
               onSelect={() => choose(prompt, false)}
             >
               <span class="mt-0.5 grid size-6 shrink-0 place-items-center border border-border bg-card text-muted-foreground" aria-hidden="true">
@@ -158,6 +182,7 @@
         </Command.List>
 
         <footer class="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+          <span>↑↓ · navigate</span>
           <span>Enter · insert</span>
           <span>⌘Enter · insert &amp; send</span>
           <span>⌘N · new quick prompt</span>

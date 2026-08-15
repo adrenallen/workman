@@ -12,7 +12,15 @@ interface SearchablePrompt {
 
 const searchablePromptCache = new WeakMap<QuickPrompt, SearchablePrompt>();
 
-export type QuickPromptPaletteAction = 'insert' | 'insert-and-send' | 'new' | null;
+export type QuickPromptPaletteAction =
+  | 'next'
+  | 'previous'
+  | 'first'
+  | 'last'
+  | 'insert'
+  | 'insert-and-send'
+  | 'new'
+  | null;
 
 interface PaletteKeyEvent {
   key: string;
@@ -29,10 +37,16 @@ export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
     && event.key.toLowerCase() === 'p';
 }
 
-/** Interpret only palette-owned actions; arrow navigation remains owned by Command. */
+/** Interpret palette-owned navigation and selection actions. */
 export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPaletteAction {
   if (event.isComposing || event.keyCode === 229) return null;
   if (event.ctrlKey || event.altKey) return null;
+  if (!event.metaKey) {
+    if (event.key === 'ArrowDown') return 'next';
+    if (event.key === 'ArrowUp') return 'previous';
+    if (event.key === 'Home') return 'first';
+    if (event.key === 'End') return 'last';
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     return event.metaKey ? 'insert-and-send' : 'insert';
   }

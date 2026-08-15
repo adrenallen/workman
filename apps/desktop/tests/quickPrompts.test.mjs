@@ -48,6 +48,21 @@ test('palette actions distinguish insert, insert-and-send, and new prompt', () =
   );
 });
 
+test('palette actions own arrow and boundary navigation', () => {
+  assert.equal(quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false }), 'next');
+  assert.equal(quickPromptPaletteAction({ key: 'ArrowUp', metaKey: false }), 'previous');
+  assert.equal(quickPromptPaletteAction({ key: 'Home', metaKey: false }), 'first');
+  assert.equal(quickPromptPaletteAction({ key: 'End', metaKey: false }), 'last');
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowDown', metaKey: true }),
+    null
+  );
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false, isComposing: true }),
+    null
+  );
+});
+
 test('palette searches names and multiline bodies with compact previews', () => {
   const prompts = [
     prompt(1, 'Release', 'Run all checks'),
@@ -128,6 +143,9 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{terminalView !== null && selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
+  assert.match(palette, /aria-activedescendant=\{activePrompt/);
+  assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /⌘Enter · insert &amp; send/);
   assert.match(palette, /<QuickPromptEditor/);
