@@ -86,6 +86,33 @@
     </Button>
   </header>
 
+  <aside class="grid gap-x-4 gap-y-2 border-b border-border bg-muted/10 px-3 py-2.5 sm:grid-cols-2" aria-label="Quick prompt keyboard shortcuts">
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>P</kbd></span>
+      <span>Open quick prompts for the selected agent</span>
+    </div>
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <span class="flex shrink-0 gap-1"><kbd>↑</kbd><kbd>↓</kbd></span>
+      <span>Move between prompts · Home/End first or last</span>
+    </div>
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <kbd class="shrink-0">Enter</kbd>
+      <span>Insert the highlighted prompt without sending</span>
+    </div>
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>Enter</kbd></span>
+      <span>Insert and send</span>
+    </div>
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>N</kbd></span>
+      <span>Create a quick prompt from the palette</span>
+    </div>
+    <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <kbd class="shrink-0">Esc</kbd>
+      <span>Close the palette</span>
+    </div>
+  </aside>
+
   {#if snapshot.loading && snapshot.prompts.length === 0}
     <div class="grid min-h-28 place-content-center text-xs text-muted-foreground" aria-live="polite">Loading quick prompts…</div>
   {:else if snapshot.prompts.length === 0}
@@ -142,6 +169,22 @@
     onClose={() => (editing = null)}
   />
 {/if}
+
+<style>
+  kbd {
+    display: inline-grid;
+    min-width: 22px;
+    min-height: 20px;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-bottom-color: color-mix(in srgb, var(--muted-foreground) 55%, var(--border));
+    border-radius: 3px;
+    padding: 1px 5px;
+    background: var(--accent);
+    color: var(--foreground);
+    font: var(--font-size-xs) 'JetBrains Mono Variable', monospace;
+  }
+</style>
 
 {#if removeRequest}
   <ConfirmationDialog

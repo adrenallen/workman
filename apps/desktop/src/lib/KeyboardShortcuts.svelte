@@ -30,7 +30,7 @@
           keys: ['⌘', 'K'],
           label: `Quick jump or create in any project${keepAwakeSupported ? ', including Keep awake…' : ''}`
         },
-        { keys: ['⌘', '⇧', 'P'], label: 'Search quick prompts for the selected agent' },
+        { keys: ['⌘', '⇧', 'P'], label: 'Open quick prompts for the selected agent' },
         { keys: ['⇧', 'F10'], label: 'Open the focused row’s context menu' },
         { keys: ['⌥', '↑ / ↓'], label: 'Reorder the focused project or process' },
         { keys: ['⌘', '/'], label: 'Show or close this shortcuts reference' },

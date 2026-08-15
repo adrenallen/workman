@@ -129,13 +129,14 @@ test('quick prompt store publishes daemon CRUD and reorder results', async () =>
 });
 
 test('app, palette, terminal, and settings wire the complete quick prompt flow', async () => {
-  const [app, palette, terminal, settings, sections, card] = await Promise.all([
+  const [app, palette, terminal, settings, sections, card, shortcuts] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/QuickPromptPalette.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/SettingsPanel.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/settingsSections.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../src/lib/settings/QuickPromptsCard.svelte', import.meta.url), 'utf8')
+    readFile(new URL('../src/lib/settings/QuickPromptsCard.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url), 'utf8')
   ]);
 
   assert.match(app, /event\.metaKey && event\.shiftKey[\s\S]*event\.key\.toLowerCase\(\) === 'p'/);
@@ -159,4 +160,13 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(settings, /<QuickPromptsCard/);
   assert.match(sections, /id: 'quick-prompts'/);
   for (const action of ['New prompt', 'Edit', 'Delete', 'Move']) assert.match(card, new RegExp(action));
+  for (const hint of [
+    'Open quick prompts for the selected agent',
+    'Move between prompts · Home/End first or last',
+    'Insert the highlighted prompt without sending',
+    'Insert and send',
+    'Create a quick prompt from the palette',
+    'Close the palette'
+  ]) assert.match(card, new RegExp(hint));
+  assert.match(shortcuts, /\['⌘', '⇧', 'P'\], label: 'Open quick prompts for the selected agent'/);
 });
