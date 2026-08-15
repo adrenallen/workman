@@ -973,14 +973,16 @@ fn schedule_initial_prompt(
                     );
                     return;
                 }
-                let agent_state = match registry.get_status(process_id) {
-                    Ok(status) => status.agent_state,
+                // Keep this hot poll on the tracker snapshot. `get_status` observes durable
+                // attention state and would perform database work on every 50 ms tick.
+                let agent_state = match registry.agent_attention_snapshot(process_id) {
+                    Ok(agent_state) => agent_state,
                     Err(error) => {
                         let _ = registry.record_process_event(
                             process_id,
                             "initial_prompt_dropped",
                             format!(
-                                "initial prompt dropped (reason: submit_failed): status unavailable: {error}"
+                                "initial prompt dropped (reason: submit_failed): attention unavailable: {error}"
                             ),
                         );
                         return;

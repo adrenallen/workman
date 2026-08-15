@@ -448,6 +448,10 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
                 "initial prompt arrived before the delayed readiness marker: {output}"
             );
             let status = registry.lock().await.get_status(template_process_id)?;
+            assert!(
+                status.agent_state.last_output_at.is_some(),
+                "readiness delivery must be backed by observed tracker output"
+            );
             assert!(status.events.iter().any(|event| {
                 event.kind == "initial_prompt_delivered"
                     && event.message.contains("initial prompt delivered")
