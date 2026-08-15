@@ -4407,7 +4407,7 @@
 {/if}
 
 {#if shortcutsOpen}
-  <KeyboardShortcuts onClose={closeShortcuts} />
+  <KeyboardShortcuts {keepAwakeSupported} onClose={closeShortcuts} />
 {/if}
 
 {#if agentCascadeRequest}

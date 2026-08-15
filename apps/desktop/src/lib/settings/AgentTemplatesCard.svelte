@@ -67,9 +67,9 @@
   });
 
   function beginNew(): void {
-    const tool = toolSnapshot.tools.find((candidate) => candidate.enabled) ?? toolSnapshot.tools[0];
+    const tool = toolSnapshot.tools.find((candidate) => candidate.enabled);
     if (!tool) {
-      onError('Add an agent tool before creating an agent template');
+      onError('Add or enable an agent tool before creating an agent template');
       return;
     }
     draft = { name: '', agentToolId: tool.id, extraArgs: '', prompt: '' };
@@ -225,8 +225,12 @@
             </Select.Trigger>
             <Select.Content>
               {#each toolSnapshot.tools as tool (tool.id)}
-                <Select.Item value={String(tool.id)} label={tool.name}>
-                  <AgentBrandMark {tool} size={16} />{tool.name}{#if !tool.enabled}<span class="text-xs text-muted-foreground">Disabled</span>{/if}
+                <Select.Item
+                  value={String(tool.id)}
+                  label={`${tool.name}${tool.enabled ? '' : ' (agent disabled)'}`}
+                  disabled={!tool.enabled}
+                >
+                  <AgentBrandMark {tool} size={16} />{tool.name}{#if !tool.enabled}<span class="text-xs text-muted-foreground">Agent disabled</span>{/if}
                 </Select.Item>
               {/each}
             </Select.Content>

@@ -132,5 +132,6 @@ test('header, quick jump, and shortcuts expose keep awake', async () => {
   assert.match(navigation, /type: 'keep-awake'/);
   assert.match(palette, /if \(keepAwakeSupported\)/);
   assert.match(palette, /label: 'Keep awake…'/);
-  assert.match(shortcuts, /Open Keep awake… in quick jump/);
+  assert.match(shortcuts, /keepAwakeSupported \? ', including Keep awake…' : ''/);
+  assert.doesNotMatch(shortcuts, /keys: \['⌘', 'K'\], label: 'Open Keep awake/);
 });

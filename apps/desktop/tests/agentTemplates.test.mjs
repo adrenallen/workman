@@ -53,10 +53,11 @@ test('last agent choice is validated and otherwise falls back to the first enabl
 });
 
 test('new-agent dialog groups templates and tools and persists the selected choice', async () => {
-  const source = await readFile(
-    new URL('../src/lib/NewAgentDialog.svelte', import.meta.url),
-    'utf8'
-  );
+  const [source, card, daemon] = await Promise.all([
+    readFile(new URL('../src/lib/NewAgentDialog.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
+  ]);
   assert.match(source, /<Select\.GroupHeading>Templates<\/Select\.GroupHeading>/);
   assert.match(source, /<Select\.GroupHeading>Agents<\/Select\.GroupHeading>/);
   assert.match(source, /agent_template_id: selectedTemplate\.id/);
@@ -65,6 +66,13 @@ test('new-agent dialog groups templates and tools and persists the selected choi
   assert.match(source, /onValueChange=\{selectChoice\}/);
   assert.match(source, /Template prompt is prepended/);
   assert.match(source, /event\.metaKey/);
+  assert.match(source, /\{#each templates as template/);
+  assert.match(source, /disabled=\{!tool\.enabled\}/);
+  assert.match(source, /agent disabled/);
+  assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
+  assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
+  assert.match(card, /Agent disabled/);
+  assert.match(daemon, /listAgentTemplates\(\)[\s\S]*requestOptional\('agent_templates\.list', \{\}, \[\]\)/);
 });
 
 test('all desktop spawn entry surfaces route through the shared new-agent dialog', async () => {

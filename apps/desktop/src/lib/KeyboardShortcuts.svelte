@@ -6,11 +6,12 @@
 
   interface Props {
     onClose: () => void;
+    keepAwakeSupported?: boolean;
   }
 
-  let { onClose }: Props = $props();
+  let { onClose, keepAwakeSupported = false }: Props = $props();
 
-  const groups = [
+  let groups = $derived([
     {
       title: 'Move through the workspace',
       shortcuts: [
@@ -25,9 +26,11 @@
     {
       title: 'Jump and act',
       shortcuts: [
-        { keys: ['⌘', 'K'], label: 'Quick jump or create in any project' },
+        {
+          keys: ['⌘', 'K'],
+          label: `Quick jump or create in any project${keepAwakeSupported ? ', including Keep awake…' : ''}`
+        },
         { keys: ['⌘', '⇧', 'P'], label: 'Search quick prompts for the selected agent' },
-        { keys: ['⌘', 'K'], label: 'Open Keep awake… in quick jump' },
         { keys: ['⇧', 'F10'], label: 'Open the focused row’s context menu' },
         { keys: ['⌥', '↑ / ↓'], label: 'Reorder the focused project or process' },
         { keys: ['⌘', '/'], label: 'Show or close this shortcuts reference' },
@@ -44,7 +47,7 @@
         { keys: ['Tab', '↵'], label: 'Use Unfocus, Previous, and Next in the process bar' }
       ]
     }
-  ];
+  ]);
 
   function handleKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape' || (event.metaKey && event.key === '/')) {

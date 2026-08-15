@@ -176,16 +176,22 @@
               {/if}
             </Select.Trigger>
             <Select.Content>
-              {#if availableTemplates.length > 0}
+              {#if templates.length > 0}
                 <Select.Group>
                   <Select.GroupHeading>Templates</Select.GroupHeading>
-                  {#each availableTemplates as template (template.id)}
-                    {@const tool = enabledTools.find((candidate) => candidate.id === template.agent_tool_id)}
+                  {#each templates as template (template.id)}
+                    {@const tool = tools.find((candidate) => candidate.id === template.agent_tool_id)}
                     {#if tool}
-                      <Select.Item value={`template:${template.id}`} label={template.name}>
+                      <Select.Item
+                        value={`template:${template.id}`}
+                        label={template.name}
+                        disabled={!tool.enabled}
+                      >
                         <AgentBrandMark {tool} size={16} />
                         <span>{template.name}</span>
-                        <span class="text-xs text-muted-foreground">{tool.name}</span>
+                        <span class="text-xs text-muted-foreground">
+                          {tool.name}{#if !tool.enabled} · agent disabled{/if}
+                        </span>
                       </Select.Item>
                     {/if}
                   {/each}

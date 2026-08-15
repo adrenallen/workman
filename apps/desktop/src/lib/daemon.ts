@@ -726,7 +726,7 @@ export class DaemonClient
   }
 
   listAgentTemplates(): Promise<AgentTemplate[]> {
-    return this.request('agent_templates.list', {});
+    return this.requestOptional('agent_templates.list', {}, []);
   }
 
   saveAgentTemplate(template: AgentTemplateInput): Promise<AgentTemplate> {
