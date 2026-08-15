@@ -492,8 +492,11 @@ struct AgentToolDeepCheckParams {
 #[derive(Debug, Deserialize)]
 struct SpawnAgentParams {
     project_id: ProjectId,
+    /// Optional registered agent. Overrides an agent template's default when both are present.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
+    /// Optional template. Its prompt always applies; its launch arguments apply only when the
+    /// effective agent is the template default.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     #[serde(default)]

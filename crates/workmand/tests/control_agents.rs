@@ -162,6 +162,22 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
 
+    let override_tool = rpc(
+        &mut socket,
+        39,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "Override agent",
+                "command": fake_agent,
+                "tool_type": "scripted",
+                "enabled": true
+            }
+        }),
+    )
+    .await;
+    let override_tool_id = override_tool["result"]["id"].as_i64().unwrap();
+
     let exiting_tool = rpc(
         &mut socket,
         30,
@@ -423,6 +439,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         json!({
             "project_id": 7,
             "agent_template_id": template_id,
+            "agent_tool_id": tool_id,
             "name": "template-worker",
             "extra_args": ["--caller", "beta"],
             "prompt": "Review line one.\nReview line two."
@@ -466,19 +483,102 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let conflicting = rpc(
+    let overridden = rpc(
         &mut socket,
         27,
         "agents.spawn",
         json!({
             "project_id": 7,
             "agent_template_id": template_id,
-            "agent_tool_id": 1,
-            "extra_args": []
+            "agent_tool_id": override_tool_id,
+            "name": "override-worker",
+            "extra_args": ["--caller", "override"],
+            "prompt": "Use the selected agent."
         }),
     )
     .await;
-    assert_eq!(conflicting["error"]["code"], "spawn_failed");
+    assert!(overridden["ok"].as_bool().unwrap());
+    let override_process_id = overridden["result"]["process_id"].as_i64().unwrap();
+    let override_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(override_process_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains("agent-answer:You are a careful reviewer.\n\nUse the selected agent.") {
+            assert!(output.contains("agent-args:--caller|override"));
+            assert!(!output.contains("--template"));
+            assert_eq!(
+                registry
+                    .lock()
+                    .await
+                    .get_status(override_process_id)?
+                    .process
+                    .agent_tool_id,
+                Some(override_tool_id)
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < override_deadline,
+            "overridden template prompt was not delivered after readiness: {}",
+            output
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let unknown_override = rpc(
+        &mut socket,
+        40,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": 999_999
+        }),
+    )
+    .await;
+    assert_eq!(unknown_override["error"]["code"], "spawn_failed");
+    assert_eq!(
+        unknown_override["error"]["message"],
+        "agent tool 999999 was not found"
+    );
+
+    let disabled_override = rpc(
+        &mut socket,
+        41,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "id": override_tool_id,
+                "name": "Override agent",
+                "command": fake_agent,
+                "tool_type": "scripted",
+                "enabled": false
+            }
+        }),
+    )
+    .await;
+    assert_eq!(disabled_override["result"]["enabled"], false);
+    let disabled_override_spawn = rpc(
+        &mut socket,
+        42,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": override_tool_id
+        }),
+    )
+    .await;
+    assert_eq!(disabled_override_spawn["error"]["code"], "spawn_failed");
+    assert!(
+        disabled_override_spawn["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is disabled")
+    );
 
     let prompted = rpc(
         &mut socket,
@@ -536,6 +636,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_template["result"]["status"], "stopped");
+    let closed_override = rpc(
+        &mut socket,
+        43,
+        "process.close",
+        json!({ "process_id": override_process_id }),
+    )
+    .await;
+    assert_eq!(closed_override["result"]["status"], "stopped");
     let closed_exiting = rpc(
         &mut socket,
         33,
@@ -560,6 +668,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(deleted["result"]["deleted"], true);
+    let deleted_override_tool = rpc(
+        &mut socket,
+        44,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": override_tool_id }),
+    )
+    .await;
+    assert_eq!(deleted_override_tool["result"]["deleted"], true);
     let deleted_exiting_tool = rpc(
         &mut socket,
         32,

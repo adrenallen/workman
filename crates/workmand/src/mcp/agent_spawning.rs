@@ -81,10 +81,13 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Optional when agent_template_id is provided.
+    /// Agent-tool registry ID. Optional when agent_template_id is provided; when both are set,
+    /// this overrides the template's default agent.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
-    /// Optional agent template. Its registered tool and launch arguments take precedence.
+    /// Optional agent template. Its default agent and launch arguments are used unless
+    /// agent_tool_id overrides the agent, in which case template launch arguments are skipped
+    /// and only the template prompt applies.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
@@ -850,6 +853,20 @@ pub(crate) fn load_agent_tool(
         .ok_or_else(|| format!("agent tool {agent_tool_id} was not found"))
 }
 
+fn load_enabled_agent_tool(
+    registry: &ProcessRegistry,
+    agent_tool_id: AgentToolId,
+) -> Result<AgentTool, String> {
+    let tool = load_agent_tool(registry, agent_tool_id)?;
+    if !tool.enabled {
+        return Err(format!(
+            "agent tool {} ({}) is disabled",
+            tool.id, tool.name
+        ));
+    }
+    Ok(tool)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_registered_agent(
     registry: crate::SharedProcessRegistry,
@@ -903,6 +920,7 @@ fn resolve_agent_spawn(
         let agent_tool_id = requested_agent_tool_id.ok_or_else(|| {
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
+        load_enabled_agent_tool(registry, agent_tool_id)?;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
             extra_args: caller_extra_args,
@@ -916,16 +934,16 @@ fn resolve_agent_spawn(
         .ok_or_else(|| {
             format!("agent template {agent_template_id} was not found in the active profile")
         })?;
-    if requested_agent_tool_id.is_some_and(|id| id != template.agent_tool_id) {
-        return Err(format!(
-            "agent template {agent_template_id} uses agent tool {}; conflicting agent_tool_id was provided",
-            template.agent_tool_id
-        ));
-    }
-    let mut extra_args = template.extra_args;
+    let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
+    load_enabled_agent_tool(registry, agent_tool_id)?;
+    let mut extra_args = if agent_tool_id == template.agent_tool_id {
+        template.extra_args
+    } else {
+        Vec::new()
+    };
     extra_args.extend(caller_extra_args);
     Ok(ResolvedAgentSpawn {
-        agent_tool_id: template.agent_tool_id,
+        agent_tool_id,
         extra_args,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
     })
@@ -1086,16 +1104,10 @@ async fn spawn_registered_agent_for(
     let (tool, user_environment) = {
         let registry = registry.lock().await;
         (
-            load_agent_tool(&registry, agent_tool_id)?,
+            load_enabled_agent_tool(&registry, agent_tool_id)?,
             registry.user_environment_resolver().clone(),
         )
     };
-    if !tool.enabled {
-        return Err(format!(
-            "agent tool {} ({}) is disabled",
-            tool.id, tool.name
-        ));
-    }
     if tool.command.trim().is_empty() {
         return Err(format!(
             "agent tool {} ({}) has no command",
@@ -2068,6 +2080,83 @@ mod tests {
             Some("Prompt only".into())
         );
         assert_eq!(compose_initial_prompt(Some("\n"), None), None);
+    }
+
+    #[test]
+    fn template_agent_overrides_skip_template_args_but_keep_its_prompt() {
+        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        for (id, name, enabled) in [
+            (91, "Default agent", true),
+            (92, "Override agent", true),
+            (93, "Disabled agent", false),
+        ] {
+            registry
+                .store()
+                .put_agent_tool(&AgentTool {
+                    id,
+                    name: name.into(),
+                    command: "agent-command".into(),
+                    tool_type: "custom".into(),
+                    enabled,
+                    source: AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 44,
+                profile_id: 1,
+                name: "Reviewer".into(),
+                agent_tool_id: 91,
+                extra_args: vec!["--template".into(), "model-a".into()],
+                prompt: "Review carefully.".into(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+
+        let default = resolve_agent_spawn(
+            &registry,
+            Some(91),
+            Some(44),
+            vec!["--caller".into()],
+            Some("Check this.".into()),
+        )
+        .unwrap();
+        assert_eq!(default.agent_tool_id, 91);
+        assert_eq!(default.extra_args, ["--template", "model-a", "--caller"]);
+        assert_eq!(
+            default.initial_prompt.as_deref(),
+            Some("Review carefully.\n\nCheck this.")
+        );
+
+        let overridden = resolve_agent_spawn(
+            &registry,
+            Some(92),
+            Some(44),
+            vec!["--caller".into()],
+            Some("Check this.".into()),
+        )
+        .unwrap();
+        assert_eq!(overridden.agent_tool_id, 92);
+        assert_eq!(overridden.extra_args, ["--caller"]);
+        assert_eq!(
+            overridden.initial_prompt.as_deref(),
+            Some("Review carefully.\n\nCheck this.")
+        );
+
+        assert_eq!(
+            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None).unwrap_err(),
+            "agent tool 999 was not found"
+        );
+        assert_eq!(
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None).unwrap_err(),
+            "agent tool 93 (Disabled agent) is disabled"
+        );
     }
 
     #[test]
