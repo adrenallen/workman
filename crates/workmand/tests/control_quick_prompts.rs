@@ -88,6 +88,48 @@ async fn websocket_round_trips_quick_prompt_crud_and_order() -> Result<(), Box<d
     assert_eq!(first["result"]["body"], "one\ntwo\nthree");
     let first_id = first["result"]["id"].as_i64().unwrap();
 
+    let duplicate = rpc(
+        &mut socket,
+        8,
+        "quick_prompts.save",
+        json!({ "prompt": { "name": "review", "body": "Duplicate." } }),
+    )
+    .await;
+    assert_eq!(duplicate["ok"], false);
+    assert_eq!(duplicate["error"]["code"], "quick_prompt_error");
+    assert_eq!(
+        duplicate["error"]["message"],
+        "A quick prompt named review already exists in this profile"
+    );
+
+    let long_name = rpc(
+        &mut socket,
+        9,
+        "quick_prompts.save",
+        json!({ "prompt": { "name": "x".repeat(121), "body": "Too long." } }),
+    )
+    .await;
+    assert_eq!(long_name["ok"], false);
+    assert_eq!(long_name["error"]["code"], "invalid_params");
+    assert_eq!(
+        long_name["error"]["message"],
+        "quick prompt name must be 120 characters or fewer"
+    );
+
+    let long_body = rpc(
+        &mut socket,
+        10,
+        "quick_prompts.save",
+        json!({ "prompt": { "name": "Large", "body": "x".repeat(64 * 1024 + 1) } }),
+    )
+    .await;
+    assert_eq!(long_body["ok"], false);
+    assert_eq!(long_body["error"]["code"], "invalid_params");
+    assert_eq!(
+        long_body["error"]["message"],
+        "quick prompt body must be 65536 bytes or fewer"
+    );
+
     let second = rpc(
         &mut socket,
         3,

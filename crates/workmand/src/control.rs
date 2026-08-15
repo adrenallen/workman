@@ -1327,6 +1327,18 @@ async fn dispatch(
                     "quick prompt name cannot be empty".to_owned(),
                 ));
             }
+            if name.chars().count() > 120 {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name must be 120 characters or fewer".to_owned(),
+                ));
+            }
+            if params.prompt.body.len() > 64 * 1024 {
+                return Err((
+                    "invalid_params",
+                    "quick prompt body must be 65536 bytes or fewer".to_owned(),
+                ));
+            }
             let id = match params.prompt.id {
                 Some(id) => id,
                 None => registry
@@ -1344,7 +1356,7 @@ async fn dispatch(
                     created_at: 0,
                     updated_at: 0,
                 })
-                .map_err(quick_prompt_store_error)?;
+                .map_err(|error| quick_prompt_save_error(error, name))?;
             return registry
                 .store()
                 .get_quick_prompt(id)
@@ -1589,6 +1601,20 @@ fn registry_error(error: RegistryError) -> (&'static str, String) {
 
 fn quick_prompt_store_error(error: workman_core::StoreError) -> (&'static str, String) {
     ("quick_prompt_error", error.to_string())
+}
+
+fn quick_prompt_save_error(error: workman_core::StoreError, name: &str) -> (&'static str, String) {
+    if let workman_core::StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, Some(detail))) =
+        &error
+        && code.code == rusqlite::ErrorCode::ConstraintViolation
+        && detail.contains("quick_prompts.profile_id, quick_prompts.name")
+    {
+        return (
+            "quick_prompt_error",
+            format!("A quick prompt named {name} already exists in this profile"),
+        );
+    }
+    quick_prompt_store_error(error)
 }
 
 fn config_error(error: crate::ConfigError) -> (&'static str, String) {
