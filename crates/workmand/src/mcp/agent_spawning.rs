@@ -15,6 +15,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use uuid::Uuid;
 use workman_core::{
@@ -32,8 +33,17 @@ use crate::ProcessRegistry;
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
-const KIMI_MCP_TEMPLATE_FILE: &str = ".workman-mcp-template.json";
-const KIMI_MCP_TOKEN_SENTINEL: &str = "__WORKMAN_KIMI_PROCESS_MCP_TOKEN__";
+const KIMI_PRIVATE_HOME_SEED_ENTRIES: &[&str] = &[
+    "config.toml",
+    "credentials",
+    "device_id",
+    "migrations-effort.json",
+    "oauth",
+    "region",
+    "tui.toml",
+    "workspace-trust",
+    "workspaces.json",
+];
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -218,7 +228,7 @@ impl McpLaunchAdapter {
             Self::Kimi => McpLaunchCapability {
                 supported: true,
                 mechanism: "private per-launch KIMI_CODE_HOME config",
-                note: "Workman injects a private Kimi Code home with the current URL and process token header; the user's mcp.json is never changed.",
+                note: "Workman injects a private Kimi Code home with the current URL and an environment-backed process bearer; mutable session state and the user's mcp.json remain isolated.",
             },
             Self::Unsupported => McpLaunchCapability {
                 supported: false,
@@ -1115,6 +1125,7 @@ async fn spawn_registered_agent_for(
         ));
     }
     let mcp_url = mcp_url.to_owned();
+    let working_dir = project.path.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         let resolved_environment = user_environment.resolve();
         let source_home = agent_source_home(&resolved_environment, &tool.tool_type);
@@ -1125,6 +1136,7 @@ async fn spawn_registered_agent_for(
             &extra_args,
             purpose,
             source_home.as_deref(),
+            auto_acknowledge_dialogs.then_some(Path::new(&working_dir)),
         )?;
         Ok::<_, String>(PreparedRegisteredAgent {
             tool,
@@ -1587,6 +1599,7 @@ fn prepare_agent_launch(
     extra_args: &[String],
     purpose: AgentLaunchPurpose,
     source_home: Option<&Path>,
+    auto_trusted_working_dir: Option<&Path>,
 ) -> Result<AgentLaunchPlan, String> {
     let adapter = mcp_launch_adapter(tool_type);
     let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
@@ -1615,6 +1628,7 @@ fn prepare_agent_launch(
                 "config.toml",
                 "config.toml",
                 &grok_config(source_home, mcp_url)?,
+                None,
             )?;
             env.insert(
                 "GROK_HOME".to_owned(),
@@ -1639,10 +1653,19 @@ fn prepare_agent_launch(
                 "kimi",
                 source_home,
                 "mcp.json",
-                KIMI_MCP_TEMPLATE_FILE,
-                &kimi_mcp_template(mcp_url),
+                "mcp.json",
+                &kimi_mcp_config(mcp_url),
+                Some(KIMI_PRIVATE_HOME_SEED_ENTRIES),
             )?;
-            let command = kimi_command_with_materialized_token(&command, &kimi_home);
+            // Kimi gates even a private-home MCP config on workspace trust. Honor the existing
+            // launch-level auto-ack choice inside this disposable home so prompt-mode checks and
+            // first missions cannot race the trust dialog; the user's trust store is untouched.
+            if let Some(working_dir) = auto_trusted_working_dir
+                && let Err(error) = seed_kimi_workspace_trust(&kimi_home, working_dir)
+            {
+                let _ = fs::remove_dir_all(&kimi_home);
+                return Err(error);
+            }
             env.insert(
                 "KIMI_CODE_HOME".to_owned(),
                 kimi_home.to_string_lossy().into_owned(),
@@ -1695,16 +1718,14 @@ fn agent_source_home(
         })
 }
 
-fn kimi_mcp_template(mcp_url: &str) -> String {
+fn kimi_mcp_config(mcp_url: &str) -> String {
     format!(
         "{}\n",
         json!({
             "mcpServers": {
                 "workman": {
                     "url": mcp_url,
-                    "headers": {
-                        "x-workman-mcp-token": KIMI_MCP_TOKEN_SENTINEL
-                    }
+                    "bearerTokenEnvVar": "WORKMAN_MCP_TOKEN"
                 }
             }
         })
@@ -1738,20 +1759,6 @@ fn kimi_deep_check_command(command: &str, extra_args: &[String]) -> Result<Strin
         .collect::<Vec<_>>()
         .join(" ");
     command_with_args(&command, extra_args)
-}
-
-fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
-    let template = shell_quote(&home.join(KIMI_MCP_TEMPLATE_FILE).to_string_lossy());
-    let config = shell_quote(&home.join("mcp.json").to_string_lossy());
-    format!(
-        "umask 077; [ -n \"$WORKMAN_MCP_TOKEN\" ] || exit 1; \
-         IFS= read -r workman_kimi_mcp_template < {template} || exit 1; \
-         case \"$workman_kimi_mcp_template\" in *{KIMI_MCP_TOKEN_SENTINEL}*) ;; *) exit 1 ;; esac; \
-         workman_kimi_mcp_prefix=${{workman_kimi_mcp_template%%{KIMI_MCP_TOKEN_SENTINEL}*}}; \
-         workman_kimi_mcp_suffix=${{workman_kimi_mcp_template#*{KIMI_MCP_TOKEN_SENTINEL}}}; \
-         printf '%s%s%s\\n' \"$workman_kimi_mcp_prefix\" \"$WORKMAN_MCP_TOKEN\" \"$workman_kimi_mcp_suffix\" > {config} || exit 1; \
-         {command}"
-    )
 }
 
 fn grok_config(source_home: Option<&Path>, mcp_url: &str) -> Result<String, String> {
@@ -1798,6 +1805,7 @@ fn prepare_private_agent_home(
     replaced_file: &str,
     replacement_file: &str,
     replacement: &str,
+    copied_source_entries: Option<&[&str]>,
 ) -> Result<PathBuf, String> {
     let home = env::temp_dir().join(format!("workman-{prefix}-mcp.{}", Uuid::new_v4().simple()));
     fs::create_dir(&home)
@@ -1834,6 +1842,22 @@ fn prepare_private_agent_home(
                     continue;
                 }
                 let target = home.join(entry.file_name());
+                if let Some(copied_source_entries) = copied_source_entries {
+                    let entry_name = entry.file_name();
+                    let Some(name) = entry_name.to_str() else {
+                        continue;
+                    };
+                    if !copied_source_entries.contains(&name) {
+                        continue;
+                    }
+                    copy_private_home_entry(&entry.path(), &target).map_err(|error| {
+                        format!(
+                            "copy private {prefix} config state from {}: {error}",
+                            entry.path().display()
+                        )
+                    })?;
+                    continue;
+                }
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(entry.path(), &target).map_err(|error| {
                     format!(
@@ -1869,6 +1893,88 @@ fn prepare_private_agent_home(
         return Err(error);
     }
     Ok(home)
+}
+
+fn copy_private_home_entry(source: &Path, target: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(format!(
+            "refusing to follow symlink {}",
+            source.display()
+        )));
+    }
+    if metadata.is_file() {
+        fs::copy(source, target)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "unsupported private-home entry {}",
+            source.display()
+        )));
+    }
+    fs::create_dir(target)?;
+    fs::set_permissions(target, metadata.permissions())?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_private_home_entry(&entry.path(), &target.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn seed_kimi_workspace_trust(home: &Path, working_dir: &Path) -> Result<(), String> {
+    let root = working_dir.to_string_lossy().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return Err("Kimi launch working directory cannot be empty".to_owned());
+    }
+    let basename = root.rsplit('/').next().unwrap_or(root);
+    let mut slug = String::new();
+    let mut replacing = false;
+    for character in basename.to_lowercase().chars() {
+        if character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '.' | '_' | '-')
+        {
+            slug.push(character);
+            replacing = false;
+        } else if !replacing {
+            slug.push('-');
+            replacing = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = &slug[..slug.len().min(40)];
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() || matches!(slug, "." | "..") {
+        "workspace"
+    } else {
+        slug
+    };
+    let digest = format!("{:x}", Sha256::digest(root.as_bytes()));
+    let trust_dir = home.join("workspace-trust");
+    fs::create_dir_all(&trust_dir)
+        .map_err(|error| format!("create private Kimi workspace trust directory: {error}"))?;
+    let trust_file = trust_dir.join(format!("wd_{slug}_{}", &digest[..12]));
+    fs::write(
+        &trust_file,
+        json!({
+            "root": root,
+            "trustedAt": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        })
+        .to_string(),
+    )
+    .map_err(|error| format!("write private Kimi workspace trust marker: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&trust_file, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("secure private Kimi workspace trust marker: {error}"))?;
+    }
+    Ok(())
 }
 
 fn mcp_launch_args(
@@ -2008,8 +2114,8 @@ fn agent_instructions(
     };
     let identity_guidance = if capability.supported {
         format!(
-            "Call whoami() through workman first to confirm that you auto-identify as process {}. Use identify_session(process_id={}) only if whoami cannot identify you.",
-            process.id, process.id
+            "Call whoami() through workman first. It must identify you as process {}. Never call identify_session to claim or change identity; if whoami is unidentified or names any other process, stop and report a launch-wiring error.",
+            process.id
         )
     } else {
         "The Workman MCP identity check is unavailable for this launch.".to_owned()
@@ -2316,6 +2422,7 @@ mod tests {
             &["--model".into(), "opus".into()],
             AgentLaunchPurpose::Normal,
             None,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -2333,6 +2440,7 @@ mod tests {
             "http://127.0.0.1:43123/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
             None,
         )
         .unwrap();
@@ -2352,6 +2460,7 @@ mod tests {
             &["--model".into(), "gpt-test".into()],
             AgentLaunchPurpose::Normal,
             None,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -2368,6 +2477,7 @@ mod tests {
             "http://127.0.0.1:43124/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
             None,
         )
         .unwrap();
@@ -2386,6 +2496,7 @@ mod tests {
             "http://127.0.0.1:43125/mcp",
             &["--model".into(), "gemini-test".into()],
             AgentLaunchPurpose::Normal,
+            None,
             None,
         )
         .unwrap();
@@ -2410,6 +2521,7 @@ mod tests {
             "http://127.0.0.1:43126/mcp",
             &["run".into(), "call workman".into()],
             AgentLaunchPurpose::Normal,
+            None,
             None,
         )
         .unwrap();
@@ -2449,6 +2561,7 @@ mod tests {
             &["--model".into(), "grok-test".into()],
             AgentLaunchPurpose::Normal,
             Some(source.path()),
+            None,
         )
         .unwrap();
         assert_eq!(launch.command, "grok --always-approve --model grok-test");
@@ -2478,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_launch_uses_a_private_home_and_materializes_the_process_token() {
+    fn kimi_launch_uses_private_state_and_an_environment_backed_process_bearer() {
         let deep_check = kimi_deep_check_command(
             "kimi --yolo --model 'kimi test'",
             &["--prompt".into(), "check".into()],
@@ -2497,6 +2610,23 @@ mod tests {
             "default_model = \"fixture\"\n",
         )
         .unwrap();
+        fs::create_dir(source.path().join("credentials")).unwrap();
+        fs::write(
+            source.path().join("credentials/login.json"),
+            "fixture-credential\n",
+        )
+        .unwrap();
+        fs::create_dir(source.path().join("workspace-trust")).unwrap();
+        fs::write(
+            source.path().join("workspace-trust/known-workspace"),
+            "fixture-trust\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("session_index.jsonl"),
+            "legacy-session\n",
+        )
+        .unwrap();
 
         let launch = prepare_agent_launch(
             "true",
@@ -2505,6 +2635,7 @@ mod tests {
             &["--model".into(), "kimi-test".into()],
             AgentLaunchPurpose::Normal,
             Some(source.path()),
+            Some(Path::new("/private/tmp/kimi-test-workspace")),
         )
         .unwrap();
         let home = PathBuf::from(launch.env.get("KIMI_CODE_HOME").unwrap());
@@ -2512,14 +2643,7 @@ mod tests {
             launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV),
             launch.env.get("KIMI_CODE_HOME")
         );
-        assert!(launch.command.contains("WORKMAN_MCP_TOKEN"));
-        assert!(!launch.command.contains("test-process-token"));
-        assert!(launch.command.ends_with("true --model kimi-test"));
-        assert!(!home.join("mcp.json").exists());
-        let template = fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE)).unwrap();
-        assert!(template.contains(KIMI_MCP_TOKEN_SENTINEL));
-        assert!(template.contains("x-workman-mcp-token"));
-        assert!(!template.contains("existing"));
+        assert_eq!(launch.command, "true --model kimi-test");
         assert_eq!(
             fs::read_to_string(source.path().join("mcp.json")).unwrap(),
             source_mcp
@@ -2528,13 +2652,22 @@ mod tests {
             fs::read_to_string(home.join("config.toml")).unwrap(),
             "default_model = \"fixture\"\n"
         );
-
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", &launch.command])
-            .env("WORKMAN_MCP_TOKEN", "test-process-token")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(home.join("credentials/login.json")).unwrap(),
+            "fixture-credential\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("workspace-trust/known-workspace")).unwrap(),
+            "fixture-trust\n"
+        );
+        let launch_trust_path = home
+            .join("workspace-trust")
+            .join("wd_kimi-test-workspace_fadd119bd9d8");
+        let launch_trust: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&launch_trust_path).unwrap()).unwrap();
+        assert_eq!(launch_trust["root"], "/private/tmp/kimi-test-workspace");
+        assert!(launch_trust["trustedAt"].as_u64().is_some());
+        assert!(!home.join("session_index.jsonl").exists());
         let config: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join("mcp.json")).unwrap()).unwrap();
         assert_eq!(
@@ -2542,19 +2675,39 @@ mod tests {
             "http://127.0.0.1:43127/mcp"
         );
         assert_eq!(
-            config["mcpServers"]["workman"]["headers"]["x-workman-mcp-token"],
-            "test-process-token"
+            config["mcpServers"]["workman"]["bearerTokenEnvVar"],
+            "WORKMAN_MCP_TOKEN"
+        );
+        assert!(config["mcpServers"]["workman"].get("headers").is_none());
+        fs::write(home.join("config.toml"), "private-change\n").unwrap();
+        fs::write(
+            home.join("workspace-trust/private-workspace"),
+            "private-trust\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(source.path().join("config.toml")).unwrap(),
+            "default_model = \"fixture\"\n"
         );
         assert!(
-            fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE))
-                .unwrap()
-                .contains(KIMI_MCP_TOKEN_SENTINEL)
+            !source
+                .path()
+                .join("workspace-trust/private-workspace")
+                .exists()
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 fs::metadata(home.join("mcp.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(launch_trust_path)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -2619,6 +2772,7 @@ mod tests {
         assert!(preamble.contains("server named workman"));
         assert!(preamble.contains("never a globally configured Solo"));
         assert!(preamble.contains("Call whoami() through workman first"));
+        assert!(preamble.contains("Never call identify_session to claim or change identity"));
         assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
         assert!(preamble.contains(
             "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with \

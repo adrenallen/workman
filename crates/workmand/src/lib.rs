@@ -1344,10 +1344,16 @@ async fn invalidate_status_after_mcp_request(
 }
 
 async fn valid_process_token(headers: &HeaderMap, registry: &SharedProcessRegistry) -> bool {
-    let Some(token) = headers
+    let token = headers
         .get(WORKMAN_MCP_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
-    else {
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        });
+    let Some(token) = token else {
         return false;
     };
     registry
