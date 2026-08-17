@@ -20,6 +20,7 @@ export const CONTEXT_ACTION_IDS = [
   'copy-title',
   'archive-scratchpad',
   'delete-scratchpad',
+  'discard-draft',
   'new-agent',
   'new-terminal',
   'add-command',
@@ -81,6 +82,7 @@ export const DESTRUCTIVE_CONTEXT_ACTION_IDS = [
   'close',
   'remove-command',
   'delete-scratchpad',
+  'discard-draft',
   'remove-project',
   'remove-worktree'
 ] as const satisfies readonly ContextActionId[];
@@ -107,6 +109,7 @@ const CONTEXT_ACTION_ICONS: Record<ContextActionId, ContextActionIcon> = {
   'copy-title': 'clipboard',
   'archive-scratchpad': 'archive',
   'delete-scratchpad': 'trash-2',
+  'discard-draft': 'trash-2',
   'new-agent': 'bot',
   'new-terminal': 'square-terminal',
   'add-command': 'play',

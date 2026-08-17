@@ -51,3 +51,47 @@ test('the optimistic retry path resubmits its saved agent payload', async () => 
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   assert.match(app, /spawnAgent\(tool, optimistic\.agentSpawnInput\)/);
 });
+
+test('failed optimistic commands retain and restore their complete draft', async () => {
+  const commandDraft = {
+    ...createCommandDraft(),
+    name: 'Vite',
+    command: 'npm run dev',
+    environment: 'PORT=3000',
+    saveMode: 'local',
+    touched: true
+  };
+  const optimistic = createOptimisticProcess({
+    id: -9,
+    project,
+    kind: 'command',
+    name: commandDraft.name,
+    command: commandDraft.command,
+    retry: 'command',
+    commandDraft
+  });
+  commandDraft.environment = 'MUTATED=1';
+  assert.equal(optimistic.commandDraft.environment, 'PORT=3000');
+
+  const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  assert.match(app, /retry === 'command' && optimistic\.commandDraft/);
+  assert.match(app, /replaceCreationDrafts\(\[\.\.\.creationDrafts, restored\]\)/);
+});
+
+function createCommandDraft() {
+  return {
+    id: -1,
+    projectId: 7,
+    kind: 'command',
+    createdAt: 1,
+    touched: false,
+    name: '',
+    command: '',
+    workingDir: '',
+    environment: '',
+    restartWhenChanged: '',
+    autoStart: true,
+    autoRestart: false,
+    saveMode: 'yml'
+  };
+}

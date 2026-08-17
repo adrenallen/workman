@@ -57,6 +57,8 @@ const BRIDGE_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const BRIDGE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const BRIDGE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(3);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const KEEP_AWAKE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
+const KEEP_AWAKE_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct BridgeState {
@@ -67,20 +69,32 @@ struct BridgeState {
 
 #[derive(Default)]
 struct KeepAwakeState {
-    inner: Mutex<KeepAwakeInner>,
+    inner: Arc<Mutex<KeepAwakeInner>>,
 }
 
 #[derive(Default)]
 struct KeepAwakeInner {
+    armed: bool,
     child: Option<Child>,
     warning: Option<String>,
+    notice: Option<String>,
+    respawn_count: u32,
+    last_loss_reason: Option<String>,
+    consecutive_spawn_failures: u32,
+    next_spawn_attempt_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct KeepAwakeStatus {
     supported: bool,
+    armed: bool,
     active: bool,
+    assertion_pid: Option<u32>,
     warning: Option<String>,
+    notice: Option<String>,
+    respawn_count: u32,
+    last_loss_reason: Option<String>,
+    retry_in_ms: Option<u64>,
 }
 
 impl KeepAwakeState {
@@ -90,12 +104,14 @@ impl KeepAwakeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         stop_keep_awake_child(&mut inner)?;
+        inner.armed = false;
         inner.warning = None;
-        Ok(KeepAwakeStatus {
-            supported: cfg!(target_os = "macos"),
-            active: false,
-            warning: None,
-        })
+        inner.notice = None;
+        inner.respawn_count = 0;
+        inner.last_loss_reason = None;
+        inner.consecutive_spawn_failures = 0;
+        inner.next_spawn_attempt_at = None;
+        Ok(keep_awake_status_from(&inner, Instant::now()))
     }
 
     fn stop_silently(&self) {
@@ -112,6 +128,10 @@ impl Drop for KeepAwakeState {
 enum BridgeCommand {
     Send(String),
     Restart(oneshot::Sender<Result<(), String>>),
+    Park {
+        stop_daemon: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 struct TerminalInput {
@@ -184,6 +204,12 @@ struct HelloResponse {
 #[derive(Clone, Serialize)]
 struct DaemonRestartResult {
     restarting: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct DesktopRelaunchCapability {
+    supported: bool,
+    app_bundle: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -323,6 +349,116 @@ async fn daemon_restart(
 }
 
 #[tauri::command]
+fn desktop_relaunch_capability() -> DesktopRelaunchCapability {
+    let executable = env::current_exe().ok();
+    let supported = executable
+        .as_deref()
+        .is_some_and(relaunch_supported_from_executable);
+    let app_bundle = executable
+        .as_deref()
+        .and_then(application_bundle_from_executable)
+        .and_then(|bundle| bundle.canonicalize().ok())
+        .map(|bundle| bundle.to_string_lossy().into_owned());
+    let supported = supported && app_bundle.is_some();
+    DesktopRelaunchCapability {
+        supported,
+        app_bundle,
+    }
+}
+
+/// Stop the replaced daemon before asking Tauri to reopen the replaced application bundle.
+///
+/// `refresh_application_bundle` swaps the bundle at the same path. Re-validate that the path in
+/// the install report is this running app, then park the bridge before requesting restart. The
+/// park acknowledgement is the readiness handshake: once it arrives, the old supervisor has no
+/// code path that can reconnect or respawn a daemon while the process is exiting.
+#[tauri::command]
+async fn desktop_restart_after_update(
+    confirm_processes_stopped: bool,
+    restart_daemon: bool,
+    installed_app_bundle: String,
+    state: State<'_, BridgeState>,
+    app: tauri::AppHandle,
+) -> Result<DaemonRestartResult, String> {
+    if !confirm_processes_stopped {
+        return Err("update restart requires confirmation that project processes will stop".into());
+    }
+    verify_relaunch_bundle(Path::new(&installed_app_bundle))?;
+    let (reply, receive) = oneshot::channel();
+    state
+        .sender
+        .send(BridgeCommand::Park {
+            stop_daemon: restart_daemon,
+            reply,
+        })
+        .await
+        .map_err(|_| "daemon bridge is not running".to_owned())?;
+    timeout(RESTART_TIMEOUT, receive)
+        .await
+        .map_err(|_| "timed out waiting for the desktop bridge to park".to_owned())?
+        .map_err(|_| "daemon bridge dropped the update restart request".to_owned())??;
+    app.request_restart();
+    Ok(DaemonRestartResult { restarting: true })
+}
+
+fn relaunch_supported_from_executable(executable: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(bundle) = application_bundle_from_executable(executable) else {
+            return false;
+        };
+        let path = bundle.to_string_lossy();
+        !path.contains("/AppTranslocation/")
+            && !path.starts_with("/private/var/folders/")
+            && executable.is_file()
+            && bundle.join("Contents/Info.plist").is_file()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = executable;
+        false
+    }
+}
+
+fn application_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
+    let contents = executable.parent()?.parent()?;
+    if contents.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    bundle
+        .extension()
+        .is_some_and(|extension| extension == "app")
+        .then(|| bundle.to_path_buf())
+}
+
+fn verify_relaunch_bundle(expected_bundle: &Path) -> Result<(), String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("could not locate the running Workman executable: {error}"))?;
+    if !relaunch_supported_from_executable(&executable) {
+        return Err(
+            "the running executable is not a relaunchable Workman application bundle".into(),
+        );
+    }
+    let running_bundle = application_bundle_from_executable(&executable)
+        .ok_or_else(|| "could not locate the running Workman application bundle".to_owned())?
+        .canonicalize()
+        .map_err(|error| format!("could not resolve the running Workman bundle: {error}"))?;
+    let expected_bundle = expected_bundle
+        .canonicalize()
+        .map_err(|error| format!("could not resolve the replaced Workman bundle: {error}"))?;
+    if running_bundle != expected_bundle {
+        return Err(format!(
+            "the update replaced {}, but this process is running from {}",
+            expected_bundle.display(),
+            running_bundle.display()
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn daemon_status(state: State<'_, BridgeState>) -> ConnectionStatus {
     lock_status(&state.status).clone()
 }
@@ -335,18 +471,18 @@ fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus,
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        refresh_keep_awake_child(&mut inner);
-        if inner.child.is_none() {
-            let child = keep_awake_command(std::process::id())
+        if !inner.armed {
+            begin_keep_awake_session(&mut inner);
+        }
+        let now = Instant::now();
+        sync_keep_awake_child_with(&mut inner, now, || {
+            keep_awake_command(std::process::id())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|error| format!("could not start macOS keep awake: {error}"))?;
-            inner.child = Some(child);
-            inner.warning = None;
-        }
-        Ok(keep_awake_status_from(&inner))
+        });
+        Ok(keep_awake_status_from(&inner, now))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -354,8 +490,14 @@ fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus,
         let _ = state;
         Ok(KeepAwakeStatus {
             supported: false,
+            armed: false,
             active: false,
+            assertion_pid: None,
             warning: None,
+            notice: None,
+            respawn_count: 0,
+            last_loss_reason: None,
+            retry_in_ms: None,
         })
     }
 }
@@ -365,14 +507,25 @@ fn keep_awake_stop(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus, 
     state.stop()
 }
 
+/// Read current intent/liveness and reap an exited owned child. Process repair is handled by the
+/// native watchdog so a status probe never spawns a helper or depends on webview timer delivery.
 #[tauri::command]
 fn keep_awake_status(state: State<'_, KeepAwakeState>) -> KeepAwakeStatus {
-    let mut inner = state
-        .inner
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    refresh_keep_awake_child(&mut inner);
-    keep_awake_status_from(&inner)
+    #[cfg(target_os = "macos")]
+    {
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        refresh_keep_awake_child(&mut inner);
+        keep_awake_status_from(&inner, Instant::now())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        keep_awake_status_from(&KeepAwakeInner::default(), Instant::now())
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -382,12 +535,88 @@ fn keep_awake_command(pid: u32) -> Command {
     command
 }
 
-fn keep_awake_status_from(inner: &KeepAwakeInner) -> KeepAwakeStatus {
+fn keep_awake_status_from(inner: &KeepAwakeInner, now: Instant) -> KeepAwakeStatus {
     KeepAwakeStatus {
         supported: cfg!(target_os = "macos"),
+        armed: inner.armed,
         active: inner.child.is_some(),
+        assertion_pid: inner.child.as_ref().map(Child::id),
         warning: inner.warning.clone(),
+        notice: inner.notice.clone(),
+        respawn_count: inner.respawn_count,
+        last_loss_reason: inner.last_loss_reason.clone(),
+        retry_in_ms: inner.next_spawn_attempt_at.map(|deadline| {
+            u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
+        }),
     }
+}
+
+fn begin_keep_awake_session(inner: &mut KeepAwakeInner) {
+    inner.armed = true;
+    inner.warning = None;
+    inner.notice = None;
+    inner.respawn_count = 0;
+    inner.last_loss_reason = None;
+    inner.consecutive_spawn_failures = 0;
+    inner.next_spawn_attempt_at = None;
+}
+
+fn sync_keep_awake_child_with(
+    inner: &mut KeepAwakeInner,
+    now: Instant,
+    spawn: impl FnOnce() -> std::io::Result<Child>,
+) {
+    refresh_keep_awake_child(inner);
+    if !inner.armed || inner.child.is_some() {
+        return;
+    }
+    if inner
+        .next_spawn_attempt_at
+        .is_some_and(|deadline| deadline > now)
+    {
+        return;
+    }
+
+    let prior_loss = inner.last_loss_reason.clone();
+    let prior_failures = inner.consecutive_spawn_failures;
+    match spawn() {
+        Ok(child) => {
+            inner.child = Some(child);
+            inner.warning = None;
+            inner.consecutive_spawn_failures = 0;
+            inner.next_spawn_attempt_at = None;
+            if let Some(reason) = prior_loss {
+                inner.respawn_count = inner.respawn_count.saturating_add(1);
+                inner.notice = Some(format!(
+                    "Keep awake assertion restored {}× since arming; last loss: {reason}",
+                    inner.respawn_count
+                ));
+            } else if prior_failures > 0 {
+                inner.notice = Some(format!(
+                    "Keep awake assertion started after {prior_failures} failed {}",
+                    if prior_failures == 1 {
+                        "attempt"
+                    } else {
+                        "attempts"
+                    }
+                ));
+            }
+        }
+        Err(error) => {
+            inner.consecutive_spawn_failures = inner.consecutive_spawn_failures.saturating_add(1);
+            let retry_delay = keep_awake_retry_delay(inner.consecutive_spawn_failures);
+            inner.next_spawn_attempt_at = now.checked_add(retry_delay);
+            inner.warning = Some(format!(
+                "Could not start macOS keep awake: {error}. Retrying in {}s.",
+                retry_delay.as_secs()
+            ));
+        }
+    }
+}
+
+fn keep_awake_retry_delay(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(6);
+    Duration::from_secs(1_u64 << exponent).min(KEEP_AWAKE_MAX_RETRY_DELAY)
 }
 
 fn refresh_keep_awake_child(inner: &mut KeepAwakeInner) {
@@ -398,15 +627,41 @@ fn refresh_keep_awake_child(inner: &mut KeepAwakeInner) {
         Ok(None) => {}
         Ok(Some(status)) => {
             inner.child = None;
-            inner.warning = Some(format!("Keep awake helper exited unexpectedly ({status})"));
+            let reason = format!("Keep awake helper exited unexpectedly ({status})");
+            inner.last_loss_reason = Some(reason.clone());
+            inner.warning = Some(reason);
+            inner.next_spawn_attempt_at = None;
         }
         Err(error) => {
             if let Some(mut child) = inner.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            inner.warning = Some(format!("Could not inspect keep awake helper: {error}"));
+            let reason = format!("Could not inspect keep awake helper: {error}");
+            inner.last_loss_reason = Some(reason.clone());
+            inner.warning = Some(reason);
+            inner.next_spawn_attempt_at = None;
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn run_keep_awake_watchdog(inner: Arc<Mutex<KeepAwakeInner>>) {
+    let mut timer = interval(KEEP_AWAKE_WATCHDOG_INTERVAL);
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        timer.tick().await;
+        let mut inner = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        sync_keep_awake_child_with(&mut inner, now, || {
+            keep_awake_command(std::process::id())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        });
     }
 }
 
@@ -497,6 +752,8 @@ pub fn run() {
             daemon_send_input,
             daemon_restart,
             daemon_status,
+            desktop_relaunch_capability,
+            desktop_restart_after_update,
             keep_awake_start,
             keep_awake_stop,
             keep_awake_status,
@@ -517,6 +774,10 @@ pub fn run() {
                 task_state,
                 receiver,
                 input_receiver,
+            ));
+            #[cfg(target_os = "macos")]
+            tauri::async_runtime::spawn(run_keep_awake_watchdog(
+                app.state::<KeepAwakeState>().inner.clone(),
             ));
             Ok(())
         })
@@ -878,6 +1139,18 @@ async fn run_bridge(
                                     let _ = reply.send(result);
                                     if restarting {
                                         break;
+                                    }
+                                }
+                                BridgeCommand::Park { stop_daemon, reply } => {
+                                    let result = if stop_daemon {
+                                        stop_discovered_daemon(&discovery).await
+                                    } else {
+                                        Ok(())
+                                    };
+                                    let parked = result.is_ok();
+                                    let _ = reply.send(result);
+                                    if parked {
+                                        return;
                                     }
                                 }
                             }
@@ -1412,6 +1685,21 @@ async fn embedded_shutdown_signal() {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn relaunch_requires_an_application_bundle_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Workman.app");
+        let executable = bundle.join("Contents/MacOS/workman");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), b"fixture").unwrap();
+        assert!(relaunch_supported_from_executable(&executable));
+        assert!(!relaunch_supported_from_executable(Path::new(
+            "/tmp/target/debug/workman"
+        )));
+    }
+
     #[test]
     fn keep_awake_command_prevents_idle_sleep_until_desktop_exits() {
         let command = keep_awake_command(42_424);
@@ -1428,14 +1716,166 @@ mod tests {
     #[test]
     fn keep_awake_state_starts_inactive_without_a_warning() {
         let inner = KeepAwakeInner::default();
+        let now = Instant::now();
         assert_eq!(
-            keep_awake_status_from(&inner),
+            keep_awake_status_from(&inner, now),
             KeepAwakeStatus {
                 supported: cfg!(target_os = "macos"),
+                armed: false,
                 active: false,
+                assertion_pid: None,
                 warning: None,
+                notice: None,
+                respawn_count: 0,
+                last_loss_reason: None,
+                retry_in_ms: None,
             }
         );
+    }
+
+    #[test]
+    fn disarmed_keep_awake_never_spawns() {
+        let attempts = std::cell::Cell::new(0);
+        let mut inner = KeepAwakeInner::default();
+        sync_keep_awake_child_with(&mut inner, Instant::now(), || {
+            attempts.set(attempts.get() + 1);
+            test_keep_awake_child()
+        });
+        assert_eq!(attempts.get(), 0);
+        assert!(inner.child.is_none());
+    }
+
+    #[test]
+    fn requested_keep_awake_assertion_is_checked_reaped_and_respawned() {
+        let mut inner = KeepAwakeInner::default();
+        begin_keep_awake_session(&mut inner);
+        let now = Instant::now();
+        sync_keep_awake_child_with(&mut inner, now, test_keep_awake_child);
+        let first_pid = inner.child.as_ref().map(Child::id).unwrap();
+
+        let child = inner.child.as_mut().unwrap();
+        child.kill().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+
+        sync_keep_awake_child_with(
+            &mut inner,
+            now + Duration::from_secs(1),
+            test_keep_awake_child,
+        );
+        let status = keep_awake_status_from(&inner, now + Duration::from_secs(1));
+        let replacement_pid = status.assertion_pid.unwrap();
+        assert!(status.armed);
+        assert!(status.active);
+        assert_ne!(status.assertion_pid, Some(first_pid));
+        assert_eq!(status.respawn_count, 1);
+        assert!(status.warning.is_none());
+        assert!(
+            status
+                .notice
+                .as_deref()
+                .is_some_and(|warning| warning.contains("assertion restored"))
+        );
+        assert!(
+            status
+                .last_loss_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("exited unexpectedly"))
+        );
+
+        stop_keep_awake_child(&mut inner).unwrap();
+        assert!(inner.child.is_none());
+        #[cfg(unix)]
+        assert!(!test_process_exists(replacement_pid));
+    }
+
+    #[test]
+    fn spawn_failure_keeps_intent_and_rate_limits_retries() {
+        let attempts = std::cell::Cell::new(0);
+        let mut inner = KeepAwakeInner::default();
+        begin_keep_awake_session(&mut inner);
+        let now = Instant::now();
+        sync_keep_awake_child_with(&mut inner, now, || {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "temporary process limit",
+            ))
+        });
+        let failed = keep_awake_status_from(&inner, now);
+        assert!(failed.armed);
+        assert!(!failed.active);
+        assert_eq!(attempts.get(), 1);
+        assert!(
+            failed
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("Retrying"))
+        );
+
+        sync_keep_awake_child_with(&mut inner, now + Duration::from_millis(500), || {
+            attempts.set(attempts.get() + 1);
+            test_keep_awake_child()
+        });
+        assert_eq!(attempts.get(), 1);
+        assert!(inner.child.is_none());
+
+        sync_keep_awake_child_with(
+            &mut inner,
+            now + Duration::from_secs(1),
+            test_keep_awake_child,
+        );
+        let recovered = keep_awake_status_from(&inner, now + Duration::from_secs(1));
+        assert!(recovered.active);
+        assert!(recovered.warning.is_none());
+        assert!(
+            recovered
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("after 1 failed attempt"))
+        );
+        stop_keep_awake_child(&mut inner).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_targets_only_the_state_owned_child() {
+        let owned = test_keep_awake_child().unwrap();
+        let owned_pid = owned.id();
+        let mut unrelated = test_keep_awake_child().unwrap();
+        let unrelated_pid = unrelated.id();
+        let mut inner = KeepAwakeInner {
+            armed: true,
+            child: Some(owned),
+            ..KeepAwakeInner::default()
+        };
+
+        stop_keep_awake_child(&mut inner).unwrap();
+        assert!(inner.child.is_none());
+        assert!(!test_process_exists(owned_pid));
+        assert!(test_process_exists(unrelated_pid));
+
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+
+    fn test_keep_awake_child() -> std::io::Result<Child> {
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    }
+
+    #[cfg(unix)]
+    fn test_process_exists(pid: u32) -> bool {
+        Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     #[test]

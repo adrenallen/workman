@@ -22,9 +22,9 @@ test('a missing CLI becomes a plain one-click recovery offer that continues the 
   assert.equal(copy.buttonLabel, 'Repair CLI and update');
   assert.equal(copy.confirmLabel, 'Repair and update');
   assert.match(copy.dialogDescription, /wrk and workmand launchers are missing/);
-  assert.match(copy.dialogDescription, /durable versioned layout/);
   assert.match(copy.dialogDescription, /repair the launchers in ~\/.local\/bin/);
   assert.match(copy.dialogDescription, /update the desktop app/);
+  assert.match(copy.dialogDescription, /restart the app and daemon automatically/);
 });
 
 test('the current desktop release can repair the CLI without a newer update', () => {
@@ -34,7 +34,8 @@ test('the current desktop release can repair the CLI without a newer update', ()
   assert.equal(updateActionAvailable(update), true);
   assert.equal(copy.buttonLabel, 'Repair command-line tools');
   assert.equal(copy.confirmLabel, 'Repair CLI');
-  assert.match(copy.dialogDescription, /download and verify 0\.1\.6/);
+  assert.match(copy.dialogDescription, /download, verify, and install 0\.1\.6/);
+  assert.match(copy.dialogDescription, /restart the app and daemon automatically/);
 });
 
 test('a healthy current install shows no recovery action or recovery copy', () => {
@@ -45,4 +46,5 @@ test('a healthy current install shows no recovery action or recovery copy', () =
   assert.equal(copy.buttonLabel, 'Update now');
   assert.doesNotMatch(copy.dialogTitle, /repair/i);
   assert.doesNotMatch(copy.dialogDescription, /missing|repair/i);
+  assert.match(copy.dialogDescription, /restart the app and daemon automatically/);
 });

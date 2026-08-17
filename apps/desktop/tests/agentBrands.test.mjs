@@ -73,7 +73,7 @@ test('tree renders the brand mark before the subprocess count without changing s
 
 test('new-agent picker renders the shared brand mark for every tool option', async () => {
   const source = await readFile(
-    new URL('../src/lib/NewAgentDialog.svelte', import.meta.url),
+    new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url),
     'utf8'
   );
   const toolLoop = source.indexOf('{#each enabledTools as tool (tool.id)}');
