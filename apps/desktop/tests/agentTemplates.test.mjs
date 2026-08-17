@@ -127,6 +127,7 @@ test('desktop spawn entry surfaces route through the inline draft panel', async 
   assert.match(app, /await openAgentDraft\(tool\.id\)/);
   assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
   assert.match(draftPanel, /Template prompt is prepended/);
-  assert.match(draftPanel, /requestAnimationFrame\(\(\) => promptTextarea\?\.focus\(\)\)/);
+  assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
+  assert.match(draftPanel, /metadataLoaded \? `Unavailable template #\$\{draft\.templateId\}` : 'Loading template…'/);
   assert.match(agentsPanel, /<NewAgentDialog/);
 });
