@@ -4,6 +4,39 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.9 - 2026-08-17
+
+Workman 0.1.9 adds flexible workspace and agent workflows, expands project controls, and keeps
+terminal input and agent launches responsive through slow runtime operations.
+
+### Workspaces and projects
+
+- Add switchable workspace profiles and project folders in the rail, plus desktop project timer
+  controls.
+- Make worktree creation and removal safer with explicit starting refs, guarded local deletion,
+  and resilient cleanup.
+- Show multiple pull requests per branch with merged PRs in purple, add command edit/removal
+  controls, and wrap long todo and scratchpad titles.
+
+### Agents and prompts
+
+- Add reusable agent templates with a default agent and per-spawn overrides, a wider new-agent
+  dialog, and a fully keyboard-driven Command-Shift-P quick-prompt palette with hotkey guidance.
+- Add the Grok preset and state detection, Kimi and DeepSeek brand marks, branded agent picking,
+  and automatic per-launch Workman MCP wiring for Kimi and Grok.
+- Add desktop keep-awake lifecycle controls that can remain armed until agents become idle.
+
+### Terminal experience
+
+- Add a terminal context menu and Command-Up/Command-Down process cycling while preserving the
+  shortcuts for terminal-level navigation.
+- Keep terminal input responsive during agent spawns and daemon stalls, and correctly handle
+  clipboard images sent to agents.
+
+### Runtime and installation
+
+- Scope MCP ownership to durable processes and fix hosted installer verification of durable paths.
+
 ## 0.1.8 - 2026-08-12
 
 Workman 0.1.8 makes agent identity more expressive, multi-session work easier to manage, and
