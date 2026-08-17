@@ -5410,7 +5410,4 @@
   .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
   .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
-  @media (max-width: 760px) {
-    .project-copy small { display: none; }
-  }
 </style>
