@@ -58,8 +58,10 @@
     importMessage = null;
     try {
       const report = await importTerminalTheme(client);
-      importMessage = report.message;
-      applyTerminalThemeImport(report);
+      const result = applyTerminalThemeImport(report);
+      importMessage = result.profileFontSkipped
+        ? `${report.message} ${result.profileFontSkipped} is not available to Workman, so the current font and size were kept.`
+        : report.message;
     } catch (cause) {
       importMessage = cause instanceof Error ? cause.message : String(cause);
     } finally {

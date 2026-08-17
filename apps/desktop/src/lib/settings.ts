@@ -111,11 +111,19 @@ export function importTerminalTheme(client: DaemonClient): Promise<TerminalTheme
   return client.control<TerminalThemeImportReport>('settings.terminal_theme_import');
 }
 
-export function applyTerminalThemeImport(report: TerminalThemeImportReport): boolean {
+export interface TerminalThemeApplyResult {
+  applied: boolean;
+  profileFontSkipped: string | null;
+}
+
+export function applyTerminalThemeImport(report: TerminalThemeImportReport): TerminalThemeApplyResult {
   const patch = terminalAppearancePatchFromImport(report, currentAppearance());
-  if (!patch) return false;
+  if (!patch) return { applied: false, profileFontSkipped: null };
+  const profileFontSkipped = report.terminalStyle?.fontFamily && patch.terminalFont !== 'profile'
+    ? report.terminalStyle.fontFamily
+    : null;
   updateAppearance(patch);
-  return true;
+  return { applied: true, profileFontSkipped };
 }
 
 /** Import the native profile once on a stock install without replacing an explicit user theme. */

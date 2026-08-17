@@ -166,7 +166,15 @@
 
   onMount(() => {
     const initialPalette = initialAppearance.terminalTheme.palette;
-    const initialProfileOptions = terminalProfileXtermOptions(initialAppearance.terminalProfileStyle);
+    const initialFontFamily = terminalFontCss(
+      initialAppearance.terminalFont,
+      initialAppearance.terminalProfileStyle
+    );
+    const initialProfileOptions = terminalProfileXtermOptions(
+      initialAppearance.terminalProfileStyle,
+      initialFontFamily,
+      initialAppearance.terminalFontSize
+    );
     appliedThemeSignature = Object.values(initialPalette).join('|');
     const activateLink = (event: MouseEvent, uri: string) => {
       if (!event.metaKey || event.button !== 0) return;
@@ -183,10 +191,7 @@
     };
     const instance = new Terminal({
       ...initialProfileOptions,
-      fontFamily: terminalFontCss(
-        initialAppearance.terminalFont,
-        initialAppearance.terminalProfileStyle
-      ),
+      fontFamily: initialFontFamily,
       fontSize: initialAppearance.terminalFontSize,
       linkHandler: {
         activate: activateLink,
@@ -343,7 +348,11 @@
     if (!instance) return;
 
     const family = terminalFontCss(settings.terminalFont, settings.terminalProfileStyle);
-    const profileOptions = terminalProfileXtermOptions(settings.terminalProfileStyle);
+    const profileOptions = terminalProfileXtermOptions(
+      settings.terminalProfileStyle,
+      family,
+      settings.terminalFontSize
+    );
     const typographyChanged = instance.options.fontFamily !== family
       || instance.options.fontSize !== settings.terminalFontSize
       || instance.options.lineHeight !== profileOptions.lineHeight

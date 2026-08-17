@@ -1,12 +1,9 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 
 const PROFILE_HOME_ENV: &str = "WORKMAN_TERMINAL_PROFILE_HOME";
@@ -46,7 +43,7 @@ pub(super) struct TerminalProfileStyle {
     font_family: Option<String>,
     font_size: Option<f64>,
     line_height: Option<f64>,
-    letter_spacing: Option<i64>,
+    character_width_multiplier: Option<f64>,
     cursor_style: Option<String>,
     cursor_blink: Option<bool>,
     draw_bold_text_in_bright_colors: Option<bool>,
@@ -97,11 +94,11 @@ pub(super) fn import_terminal_theme() -> TerminalThemeImport {
 
 fn import_terminal_theme_from(home: &Path) -> TerminalThemeImport {
     let mut attempted = Vec::new();
-    // Workman is a macOS desktop app and should initially match the native Terminal.app profile.
-    // iTerm remains the next supported source and every source remains available to manual import.
+    // Prefer an installed third-party terminal before Terminal.app. This preserves the manual
+    // import behavior for iTerm users while stock Macs still fall through to Terminal.app.
     let sources: [fn(&Path) -> Option<Candidate>; 6] = [
-        import_terminal_app,
         import_iterm2,
+        import_terminal_app,
         import_ghostty,
         import_kitty,
         import_alacritty,
@@ -123,8 +120,8 @@ fn import_terminal_theme_from(home: &Path) -> TerminalThemeImport {
             };
         }
         attempted.push(match attempted.len() {
-            0 => "Terminal.app",
-            1 => "iTerm2",
+            0 => "iTerm2",
+            1 => "Terminal.app",
             2 => "Ghostty",
             3 => "kitty",
             4 => "Alacritty",
@@ -148,29 +145,29 @@ fn not_found(message: &str) -> TerminalThemeImport {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn import_iterm2(home: &Path) -> Option<Candidate> {
     let path = home.join("Library/Preferences/com.googlecode.iterm2.plist");
-    if !path.is_file() {
-        return None;
-    }
-    let default_guid = plutil_raw_file(&path, "Default Bookmark Guid");
+    let root = plist::Value::from_file(path).ok()?;
+    let root = root.as_dictionary()?;
+    let default_guid = root.get("Default Bookmark Guid").and_then(plist_string);
+    let bookmarks = root.get("New Bookmarks")?.as_array()?;
     let mut selected = None;
-    for index in 0..128 {
-        let base = format!("New Bookmarks.{index}");
-        let Some(guid) = plutil_raw_file(&path, &format!("{base}.Guid")) else {
-            break;
-        };
+    for bookmark in bookmarks {
+        let bookmark = bookmark.as_dictionary()?;
+        let guid = bookmark.get("Guid").and_then(plist_string)?;
         if selected.is_none() || default_guid.as_deref() == Some(guid.as_str()) {
-            selected = Some((index, guid));
+            selected = Some(bookmark);
         }
-        if default_guid.as_deref() == selected.as_ref().map(|(_, guid)| guid.as_str()) {
+        if default_guid.as_deref() == Some(guid.as_str()) {
             break;
         }
     }
-    let (index, _) = selected?;
-    let base = format!("New Bookmarks.{index}");
-    let profile =
-        plutil_raw_file(&path, &format!("{base}.Name")).unwrap_or_else(|| "Default".to_owned());
+    let selected = selected?;
+    let profile = selected
+        .get("Name")
+        .and_then(plist_string)
+        .unwrap_or_else(|| "Default".to_owned());
     let mut colors = BTreeMap::new();
     for (target, source) in [
         ("background", "Background Color"),
@@ -178,67 +175,84 @@ fn import_iterm2(home: &Path) -> Option<Candidate> {
         ("cursor", "Cursor Color"),
         ("selection", "Selection Color"),
     ] {
-        if let Some(color) = iterm_color(&path, &format!("{base}.{source}")) {
+        if let Some(color) = selected.get(source).and_then(iterm_color) {
             colors.insert(target.to_owned(), color);
         }
     }
     for (index, name) in COLOR_NAMES.iter().enumerate() {
-        if let Some(color) = iterm_color(&path, &format!("{base}.Ansi {index} Color")) {
+        if let Some(color) = selected
+            .get(&format!("Ansi {index} Color"))
+            .and_then(iterm_color)
+        {
             colors.insert((*name).to_owned(), color);
         }
     }
     let mut candidate = candidate("iTerm2", profile, colors)?;
-    candidate.terminal_style = Some(iterm_style(&path, &base));
+    candidate.terminal_style = Some(iterm_style(selected));
     Some(candidate)
 }
 
-fn iterm_style(path: &Path, base: &str) -> TerminalProfileStyle {
-    let font = plutil_raw_file(path, &format!("{base}.Normal Font"))
+#[cfg(not(target_os = "macos"))]
+fn import_iterm2(_home: &Path) -> Option<Candidate> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn iterm_style(profile: &plist::Dictionary) -> TerminalProfileStyle {
+    let font = profile
+        .get("Normal Font")
+        .and_then(plist_string)
         .and_then(|font| parse_named_font(&font));
     let font_size = font.as_ref().map(|(_, size)| *size);
-    let horizontal_spacing = plutil_number_file(path, &format!("{base}.Horizontal Spacing"));
     TerminalProfileStyle {
         font_family: font.map(|(family, _)| family),
         font_size,
-        line_height: plutil_number_file(path, &format!("{base}.Vertical Spacing"))
-            .map(normalize_line_height),
-        letter_spacing: horizontal_spacing
-            .zip(font_size)
-            .map(|(ratio, size)| ((ratio - 1.0) * size).round() as i64),
-        cursor_style: plutil_raw_file(path, &format!("{base}.Cursor Type")).and_then(|value| {
-            match value.as_str() {
-                "0" => Some("block".to_owned()),
+        line_height: profile
+            .get("Vertical Spacing")
+            .and_then(plist_number)
+            .and_then(normalize_line_height),
+        character_width_multiplier: profile
+            .get("Horizontal Spacing")
+            .and_then(plist_number)
+            .and_then(normalize_width_multiplier),
+        // iTerm's profile enum is 0=underline, 1=vertical bar, 2=box. This differs from
+        // both Terminal.app and iTerm's proprietary CursorShape escape sequence.
+        cursor_style: profile.get("Cursor Type").and_then(plist_scalar).and_then(
+            |value| match value.as_str() {
+                "0" => Some("underline".to_owned()),
                 "1" => Some("bar".to_owned()),
-                "2" => Some("underline".to_owned()),
+                "2" => Some("block".to_owned()),
                 _ => None,
-            }
-        }),
-        cursor_blink: plutil_bool_file(path, &format!("{base}.Blinking Cursor")),
-        draw_bold_text_in_bright_colors: plutil_bool_file(path, &format!("{base}.Use Bright Bold")),
+            },
+        ),
+        cursor_blink: profile.get("Blinking Cursor").and_then(plist_bool),
+        draw_bold_text_in_bright_colors: profile.get("Use Bright Bold").and_then(plist_bool),
     }
 }
 
-fn iterm_color(path: &Path, key: &str) -> Option<String> {
-    let red = plutil_raw_file(path, &format!("{key}.Red Component"))?
-        .parse()
-        .ok()?;
-    let green = plutil_raw_file(path, &format!("{key}.Green Component"))?
-        .parse()
-        .ok()?;
-    let blue = plutil_raw_file(path, &format!("{key}.Blue Component"))?
-        .parse()
-        .ok()?;
+#[cfg(target_os = "macos")]
+fn iterm_color(value: &plist::Value) -> Option<String> {
+    let color = value.as_dictionary()?;
+    let red = color.get("Red Component").and_then(plist_number)?;
+    let green = color.get("Green Component").and_then(plist_number)?;
+    let blue = color.get("Blue Component").and_then(plist_number)?;
     Some(rgb_hex(red, green, blue))
 }
 
+#[cfg(target_os = "macos")]
 fn import_terminal_app(home: &Path) -> Option<Candidate> {
     let path = home.join("Library/Preferences/com.apple.Terminal.plist");
-    if !path.is_file() {
-        return None;
-    }
-    let profile = plutil_raw_file(&path, "Default Window Settings")
-        .or_else(|| plutil_raw_file(&path, "Startup Window Settings"))?;
-    let base = format!("Window Settings.{profile}");
+    let root = plist::Value::from_file(path).ok()?;
+    let root = root.as_dictionary()?;
+    let profile = root
+        .get("Default Window Settings")
+        .and_then(plist_string)
+        .or_else(|| root.get("Startup Window Settings").and_then(plist_string))?;
+    let settings = root
+        .get("Window Settings")?
+        .as_dictionary()?
+        .get(&profile)?
+        .as_dictionary()?;
     let mut colors = BTreeMap::new();
     for (target, source) in [
         ("background", "BackgroundColor"),
@@ -246,7 +260,7 @@ fn import_terminal_app(home: &Path) -> Option<Candidate> {
         ("cursor", "CursorColor"),
         ("selection", "SelectionColor"),
     ] {
-        if let Some(color) = terminal_app_color(&path, &format!("{base}.{source}")) {
+        if let Some(color) = settings.get(source).and_then(terminal_app_color) {
             colors.insert(target.to_owned(), color);
         }
     }
@@ -269,58 +283,69 @@ fn import_terminal_app(home: &Path) -> Option<Candidate> {
         "ANSIBrightWhiteColor",
     ];
     for (target, source) in COLOR_NAMES.iter().zip(terminal_names) {
-        if let Some(color) = terminal_app_color(&path, &format!("{base}.{source}")) {
+        if let Some(color) = settings.get(source).and_then(terminal_app_color) {
             colors.insert((*target).to_owned(), color);
         }
     }
     let mut candidate = candidate("Terminal.app", profile, colors)?;
-    candidate.terminal_style = Some(terminal_app_style(&path, &base));
+    candidate.terminal_style = Some(terminal_app_style(settings));
     Some(candidate)
 }
 
-fn terminal_app_style(path: &Path, base: &str) -> TerminalProfileStyle {
-    let font = plutil_raw_file(path, &format!("{base}.Font"))
-        .and_then(|value| BASE64.decode(value).ok())
-        .and_then(|archive| terminal_app_font(&archive));
+#[cfg(not(target_os = "macos"))]
+fn import_terminal_app(_home: &Path) -> Option<Candidate> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_app_style(profile: &plist::Dictionary) -> TerminalProfileStyle {
+    let font = profile
+        .get("Font")
+        .and_then(plist::Value::as_data)
+        .and_then(terminal_app_font);
     let font_size = font.as_ref().map(|(_, size)| *size);
-    let width_spacing = plutil_number_file(path, &format!("{base}.FontWidthSpacing"));
     TerminalProfileStyle {
         font_family: font.map(|(family, _)| family),
         font_size,
-        line_height: plutil_number_file(path, &format!("{base}.FontHeightSpacing"))
-            .map(normalize_line_height),
-        letter_spacing: width_spacing
-            .zip(font_size)
-            .map(|(ratio, size)| ((ratio - 1.0) * size).round() as i64),
+        line_height: profile
+            .get("FontHeightSpacing")
+            .and_then(plist_number)
+            .and_then(normalize_line_height),
+        character_width_multiplier: profile
+            .get("FontWidthSpacing")
+            .and_then(plist_number)
+            .and_then(normalize_width_multiplier),
         // Terminal.app stores 0=block, 1=underline, and 2=vertical bar. Missing keys mean its
         // native block/non-blinking defaults, which are also xterm's defaults.
-        cursor_style: plutil_raw_file(path, &format!("{base}.CursorType")).and_then(|value| {
-            match value.as_str() {
+        cursor_style: profile.get("CursorType").and_then(plist_scalar).and_then(
+            |value| match value.as_str() {
                 "0" => Some("block".to_owned()),
                 "1" => Some("underline".to_owned()),
                 "2" => Some("bar".to_owned()),
                 _ => None,
-            }
-        }),
-        cursor_blink: plutil_bool_file(path, &format!("{base}.CursorBlink")),
-        // Terminal.app leaves this key absent for its disabled default. xterm defaults it on,
-        // so report the native default explicitly instead of silently brightening bold ANSI text.
-        draw_bold_text_in_bright_colors: Some(
-            plutil_bool_file(path, &format!("{base}.UseBrightBold")).unwrap_or(false),
+            },
         ),
+        cursor_blink: profile.get("CursorBlink").and_then(plist_bool),
+        // The key is absent from stock profiles and Terminal.app's registered default is not
+        // represented in the plist. Preserve "unknown" instead of inventing a global default.
+        draw_bold_text_in_bright_colors: profile.get("UseBrightBold").and_then(plist_bool),
     }
 }
 
+#[cfg(target_os = "macos")]
 fn terminal_app_font(archive: &[u8]) -> Option<(String, f64)> {
     let archive = plist::Value::from_reader(std::io::Cursor::new(archive)).ok()?;
-    let objects = archive.as_dictionary()?.get("$objects")?.as_array()?;
-    let font_size = objects
-        .iter()
-        .find_map(|object| object.as_dictionary()?.get("NSSize")?.as_real())?;
-    let family = objects.iter().find_map(|object| {
-        let value = object.as_string()?;
-        (value != "$null" && value != "NSFont" && value != "NSObject").then(|| value.to_owned())
-    })?;
+    let archive = archive.as_dictionary()?;
+    let objects = archive.get("$objects")?.as_array()?;
+    let root_index = archive
+        .get("$top")?
+        .as_dictionary()?
+        .get("root")
+        .and_then(archive_index)?;
+    let font = objects.get(root_index)?.as_dictionary()?;
+    let font_size = font.get("NSSize").and_then(plist_number)?;
+    let name_index = font.get("NSName").and_then(archive_index)?;
+    let family = objects.get(name_index)?.as_string()?.to_owned();
     Some((family, font_size))
 }
 
@@ -330,38 +355,80 @@ fn parse_named_font(value: &str) -> Option<(String, f64)> {
     (!family.trim().is_empty()).then(|| (family.trim().to_owned(), size))
 }
 
-fn normalize_line_height(value: f64) -> f64 {
-    value.clamp(1.0, 3.0)
+fn normalize_line_height(value: f64) -> Option<f64> {
+    (value.is_finite() && (1.0..=3.0).contains(&value)).then_some(value)
 }
 
-fn terminal_app_color(path: &Path, key: &str) -> Option<String> {
-    let archived = BASE64.decode(plutil_raw_file(path, key)?).ok()?;
-    for object_index in 1..8 {
-        let base = format!("$objects.{object_index}");
-        if let Some(data) = plutil_raw_stdin(&archived, &format!("{base}.NSRGB"))
-            .and_then(|value| BASE64.decode(value).ok())
-        {
-            let values = String::from_utf8_lossy(&data)
-                .split_whitespace()
-                .filter_map(|value| value.trim_end_matches('\0').parse::<f64>().ok())
-                .collect::<Vec<_>>();
-            if values.len() >= 3 {
-                return Some(rgb_hex(values[0], values[1], values[2]));
-            }
-        }
-        if let Some(data) = plutil_raw_stdin(&archived, &format!("{base}.NSWhite"))
-            .and_then(|value| BASE64.decode(value).ok())
-        {
-            let white = String::from_utf8_lossy(&data)
-                .split_whitespace()
-                .next()
-                .and_then(|value| value.trim_end_matches('\0').parse::<f64>().ok());
-            if let Some(white) = white {
-                return Some(rgb_hex(white, white, white));
-            }
+fn normalize_width_multiplier(value: f64) -> Option<f64> {
+    (value.is_finite() && (0.5..=3.0).contains(&value)).then_some(value)
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_app_color(value: &plist::Value) -> Option<String> {
+    let archive = plist::Value::from_reader(std::io::Cursor::new(value.as_data()?)).ok()?;
+    let archive = archive.as_dictionary()?;
+    let objects = archive.get("$objects")?.as_array()?;
+    let root_index = archive
+        .get("$top")?
+        .as_dictionary()?
+        .get("root")
+        .and_then(archive_index)?;
+    let color = objects.get(root_index)?.as_dictionary()?;
+    if let Some(values) = color.get("NSRGB").and_then(plist::Value::as_data) {
+        let values = archived_components(values);
+        if values.len() >= 3 {
+            return Some(rgb_hex(values[0], values[1], values[2]));
         }
     }
-    None
+    let white = color
+        .get("NSWhite")
+        .and_then(plist::Value::as_data)
+        .and_then(|value| archived_components(value).into_iter().next())?;
+    Some(rgb_hex(white, white, white))
+}
+
+#[cfg(target_os = "macos")]
+fn archived_components(value: &[u8]) -> Vec<f64> {
+    String::from_utf8_lossy(value)
+        .split_whitespace()
+        .filter_map(|value| value.trim_end_matches('\0').parse::<f64>().ok())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn archive_index(value: &plist::Value) -> Option<usize> {
+    value.as_uid().map(|uid| uid.get() as usize).or_else(|| {
+        value
+            .as_dictionary()?
+            .get("CF$UID")?
+            .as_unsigned_integer()
+            .map(|index| index as usize)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn plist_number(value: &plist::Value) -> Option<f64> {
+    value
+        .as_real()
+        .or_else(|| value.as_signed_integer().map(|number| number as f64))
+        .or_else(|| value.as_unsigned_integer().map(|number| number as f64))
+}
+
+#[cfg(target_os = "macos")]
+fn plist_string(value: &plist::Value) -> Option<String> {
+    value.as_string().map(str::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+fn plist_scalar(value: &plist::Value) -> Option<String> {
+    plist_string(value)
+        .or_else(|| value.as_signed_integer().map(|number| number.to_string()))
+        .or_else(|| value.as_unsigned_integer().map(|number| number.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn plist_bool(value: &plist::Value) -> Option<bool> {
+    value.as_boolean()
 }
 
 fn import_ghostty(home: &Path) -> Option<Candidate> {
@@ -686,49 +753,11 @@ fn rgb_hex(red: f64, green: f64, blue: f64) -> String {
     )
 }
 
-fn plutil_raw_file(path: &Path, key: &str) -> Option<String> {
-    let output = Command::new("/usr/bin/plutil")
-        .args(["-extract", key, "raw", "-o", "-"])
-        .arg(path)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn plutil_number_file(path: &Path, key: &str) -> Option<f64> {
-    plutil_raw_file(path, key)?.parse().ok()
-}
-
-fn plutil_bool_file(path: &Path, key: &str) -> Option<bool> {
-    match plutil_raw_file(path, key)?.as_str() {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
-    }
-}
-
-fn plutil_raw_stdin(input: &[u8], key: &str) -> Option<String> {
-    let mut child = Command::new("/usr/bin/plutil")
-        .args(["-extract", key, "raw", "-o", "-", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    child.stdin.take()?.write_all(input).ok()?;
-    let output = child.wait_with_output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     #[cfg(target_os = "macos")]
     use std::fs;
     #[cfg(target_os = "macos")]
@@ -745,6 +774,17 @@ mod tests {
             iterm_fixture(),
         )
         .expect("fixture");
+        let terminal_color = terminal_color_archive("0.1 0.2 0.3 1\0");
+        fs::write(
+            preferences.join("com.apple.Terminal.plist"),
+            terminal_fixture(
+                &terminal_color,
+                &terminal_color,
+                &terminal_color,
+                &terminal_color,
+            ),
+        )
+        .expect("terminal fixture");
 
         let report = import_terminal_theme_from(home.path());
 
@@ -756,6 +796,12 @@ mod tests {
         assert_eq!(palette.foreground, "#E6CCB3");
         assert_eq!(palette.cursor, "#33CC99");
         assert_eq!(palette.bright_white, "#F5F5F5");
+        let style = report.terminal_style.expect("terminal style");
+        assert_eq!(style.font_family.as_deref(), Some("FixtureMono-Regular"));
+        assert_eq!(style.font_size, Some(14.0));
+        assert_eq!(style.line_height, Some(1.1));
+        assert_eq!(style.character_width_multiplier, Some(1.25));
+        assert_eq!(style.cursor_style.as_deref(), Some("block"));
     }
 
     #[test]
@@ -795,7 +841,10 @@ mod tests {
         let style = report.terminal_style.expect("terminal style");
         assert_eq!(style.font_family.as_deref(), Some("FixtureMono-Regular"));
         assert_eq!(style.font_size, Some(12.0));
-        assert_eq!(style.draw_bold_text_in_bright_colors, Some(false));
+        assert_eq!(style.line_height, None);
+        assert_eq!(style.character_width_multiplier, Some(1.5));
+        assert_eq!(style.cursor_style.as_deref(), Some("bar"));
+        assert_eq!(style.draw_bold_text_in_bright_colors, None);
     }
 
     #[test]
@@ -834,6 +883,9 @@ mod tests {
 <key>Default Bookmark Guid</key><string>fixture-guid</string>
 <key>New Bookmarks</key><array><dict>
 <key>Guid</key><string>fixture-guid</string><key>Name</key><string>Fixture Solar</string>
+<key>Normal Font</key><string>FixtureMono-Regular 14</string>
+<key>Horizontal Spacing</key><real>1.25</real><key>Vertical Spacing</key><real>1.1</real>
+<key>Cursor Type</key><integer>2</integer>
 <key>Background Color</key>{}<key>Foreground Color</key>{}<key>Cursor Color</key>{}<key>Selection Color</key>{}
 {}
 </dict></array></dict></plist>"#,
@@ -859,14 +911,17 @@ mod tests {
         let archive = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>$objects</key><array><string>$null</string><dict><key>NSRGB</key><data>{data}</data></dict></array></dict></plist>"#
+<plist version="1.0"><dict>
+<key>$objects</key><array><string>$null</string><dict><key>NSRGB</key><data>{data}</data></dict></array>
+<key>$top</key><dict><key>root</key><dict><key>CF$UID</key><integer>1</integer></dict></dict>
+</dict></plist>"#
         );
         BASE64.encode(archive.as_bytes())
     }
 
     #[cfg(target_os = "macos")]
     fn terminal_fixture(background: &str, foreground: &str, cursor: &str, red: &str) -> String {
-        let font = terminal_font_archive("FixtureMono-Regular", 12.0);
+        let font = terminal_font_archive("FixtureMono-Regular", 12);
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -878,18 +933,24 @@ mod tests {
 <key>CursorColor</key><data>{cursor}</data>
 <key>ANSIRedColor</key><data>{red}</data>
 <key>Font</key><data>{font}</data>
+<key>FontHeightSpacing</key><real>0.9</real>
+<key>FontWidthSpacing</key><real>1.5</real>
+<key>CursorType</key><integer>2</integer>
 </dict></dict></dict></plist>"#
         )
     }
 
     #[cfg(target_os = "macos")]
-    fn terminal_font_archive(name: &str, size: f64) -> String {
+    fn terminal_font_archive(name: &str, size: i64) -> String {
         let archive = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>$objects</key><array>
-<string>$null</string><dict><key>NSSize</key><real>{size}</real></dict><string>{name}</string>
-</array></dict></plist>"#
+<string>$null</string>
+<dict><key>$class</key><dict><key>CF$UID</key><integer>2</integer></dict><key>NSName</key><dict><key>CF$UID</key><integer>3</integer></dict><key>NSSize</key><integer>{size}</integer></dict>
+<dict><key>$classes</key><array><string>NSFont</string><string>NSObject</string></array><key>$classname</key><string>NSFont</string></dict>
+<string>{name}</string>
+</array><key>$top</key><dict><key>root</key><dict><key>CF$UID</key><integer>1</integer></dict></dict></dict></plist>"#
         );
         BASE64.encode(archive.as_bytes())
     }

@@ -15,6 +15,8 @@ export interface TerminalProfileStyle {
   fontFamily: string | null;
   fontSize: number | null;
   lineHeight: number | null;
+  characterWidthMultiplier: number | null;
+  /** Pixel spacing retained for settings written by the first profile-import preview build. */
   letterSpacing: number | null;
   cursorStyle: 'block' | 'underline' | 'bar' | null;
   cursorBlink: boolean | null;
@@ -249,7 +251,11 @@ export function terminalFontCss(
 }
 
 /** Resolve the few xterm options represented by a native profile; all other metrics stay native. */
-export function terminalProfileXtermOptions(profileStyle: TerminalProfileStyle | null): {
+export function terminalProfileXtermOptions(
+  profileStyle: TerminalProfileStyle | null,
+  fontFamily = TERMINAL_FONT_CHOICES[0].css,
+  fontSize = profileStyle?.fontSize ?? DEFAULT_APPEARANCE.terminalFontSize
+): {
   cursorBlink: boolean;
   cursorStyle: 'block' | 'underline' | 'bar';
   drawBoldTextInBrightColors: boolean;
@@ -260,9 +266,29 @@ export function terminalProfileXtermOptions(profileStyle: TerminalProfileStyle |
     cursorBlink: profileStyle?.cursorBlink ?? false,
     cursorStyle: profileStyle?.cursorStyle ?? 'block',
     drawBoldTextInBrightColors: profileStyle?.drawBoldTextInBrightColors ?? true,
-    letterSpacing: profileStyle?.letterSpacing ?? 0,
+    letterSpacing: terminalProfileLetterSpacing(profileStyle, fontFamily, fontSize),
     lineHeight: profileStyle?.lineHeight ?? 1
   };
+}
+
+/** Convert native advance-width multipliers to xterm's extra pixels per cell. */
+export function terminalProfileLetterSpacing(
+  profileStyle: TerminalProfileStyle | null,
+  fontFamily = TERMINAL_FONT_CHOICES[0].css,
+  fontSize = profileStyle?.fontSize ?? DEFAULT_APPEARANCE.terminalFontSize
+): number {
+  const multiplier = profileStyle?.characterWidthMultiplier;
+  if (multiplier === null || multiplier === undefined) return profileStyle?.letterSpacing ?? 0;
+  const fallbackAdvance = fontSize * 0.6;
+  let advance = fallbackAdvance;
+  if (typeof document !== 'undefined') {
+    const context = document.createElement('canvas').getContext('2d');
+    if (context) {
+      context.font = `${fontSize}px ${fontFamily}`;
+      advance = context.measureText('M').width || fallbackAdvance;
+    }
+  }
+  return Math.round((multiplier - 1) * advance * 100) / 100;
 }
 
 export function terminalAppearancePatchFromImport(
@@ -271,6 +297,7 @@ export function terminalAppearancePatchFromImport(
 ): Partial<AppearanceSettings> | null {
   if (!report.imported || !report.palette) return null;
   const style = report.terminalStyle ?? null;
+  const profileFontAvailable = isTerminalProfileFontAvailable(style);
   return {
     terminalTheme: {
       id: 'imported',
@@ -279,10 +306,11 @@ export function terminalAppearancePatchFromImport(
       palette: report.palette
     },
     terminalProfileStyle: style,
-    terminalFont: style?.fontFamily ? 'profile' : current.terminalFont,
-    terminalFontSize: style?.fontSize === null || style?.fontSize === undefined
+    terminalFont: profileFontAvailable ? 'profile' : current.terminalFont,
+    terminalFontSize: !profileFontAvailable
+      || style?.fontSize === null || style?.fontSize === undefined
       ? current.terminalFontSize
-      : Math.round(style.fontSize)
+      : style.fontSize
   };
 }
 
@@ -290,7 +318,11 @@ export function shouldAutoImportTerminalProfile(
   settings: AppearanceSettings,
   alreadyAttempted: boolean
 ): boolean {
-  return !alreadyAttempted && settings.terminalTheme.id === 'graphite';
+  return !alreadyAttempted
+    && settings.terminalTheme.id === DEFAULT_APPEARANCE.terminalTheme.id
+    && settings.terminalFont === DEFAULT_APPEARANCE.terminalFont
+    && settings.terminalFontSize === DEFAULT_APPEARANCE.terminalFontSize
+    && settings.terminalProfileStyle === null;
 }
 
 export function terminalThemeFromPreset(id: TerminalThemePreset['id']): TerminalThemeSetting {
@@ -341,7 +373,7 @@ export function installedTerminalFonts(
   profileStyle: TerminalProfileStyle | null = null
 ): FontChoice<TerminalFontId>[] {
   const choices = TERMINAL_FONT_CHOICES.filter((choice) => isFontAvailable(choice));
-  if (profileStyle?.fontFamily) {
+  if (profileStyle?.fontFamily && isTerminalProfileFontAvailable(profileStyle)) {
     choices.push({
       id: 'profile',
       label: `${profileStyle.fontFamily} · terminal profile`,
@@ -352,9 +384,26 @@ export function installedTerminalFonts(
   return choices;
 }
 
+export function isTerminalProfileFontAvailable(
+  profileStyle: TerminalProfileStyle | null
+): boolean {
+  if (!profileStyle?.fontFamily) return false;
+  return isFontAvailable({
+    id: 'profile',
+    label: profileStyle.fontFamily,
+    css: terminalFontCss('profile', profileStyle),
+    localName: profileStyle.fontFamily
+  });
+}
+
 function isFontAvailable<T extends string>(choice: FontChoice<T>): boolean {
   if (choice.id === 'system' || choice.bundled || !choice.localName) return true;
-  return typeof document === 'undefined' || document.fonts.check(`12px "${choice.localName}"`);
+  if (typeof document === 'undefined') return true;
+  try {
+    return document.fonts.check(`12px ${choice.css}`);
+  } catch {
+    return false;
+  }
 }
 
 function readAppearance(): AppearanceSettings {
@@ -380,6 +429,7 @@ function persistAppearance(settings: AppearanceSettings): void {
 }
 
 function sanitizeAppearance(value: Partial<AppearanceSettings>): AppearanceSettings {
+  const terminalProfileStyle = sanitizeTerminalProfileStyle(value.terminalProfileStyle);
   return {
     theme: includes(['light', 'dark', 'system'], value.theme)
       ? value.theme
@@ -391,16 +441,22 @@ function sanitizeAppearance(value: Partial<AppearanceSettings>): AppearanceSetti
     uiScale: nearest(UI_SCALE_STEPS, value.uiScale, DEFAULT_APPEARANCE.uiScale),
     terminalFont: (
       TERMINAL_FONT_CHOICES.some((choice) => choice.id === value.terminalFont)
-      || (value.terminalFont === 'profile' && sanitizeTerminalProfileStyle(value.terminalProfileStyle))
+      || (value.terminalFont === 'profile' && isTerminalProfileFontAvailable(terminalProfileStyle))
     ) ? value.terminalFont as TerminalFontId : DEFAULT_APPEARANCE.terminalFont,
-    terminalFontSize: clampInteger(value.terminalFontSize, 10, 20, DEFAULT_APPEARANCE.terminalFontSize),
+    terminalFontSize: clampNumber(value.terminalFontSize, 6, 72, DEFAULT_APPEARANCE.terminalFontSize),
     terminalTheme: sanitizeTerminalTheme(value.terminalTheme),
-    terminalProfileStyle: sanitizeTerminalProfileStyle(value.terminalProfileStyle)
+    terminalProfileStyle
   };
 }
 
 function applyAppearance(settings: AppearanceSettings): void {
   const root = document.documentElement;
+  const terminalFamily = terminalFontCss(settings.terminalFont, settings.terminalProfileStyle);
+  const terminalOptions = terminalProfileXtermOptions(
+    settings.terminalProfileStyle,
+    terminalFamily,
+    settings.terminalFontSize
+  );
   const resolvedTheme = settings.theme === 'system'
     ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
     : settings.theme;
@@ -414,16 +470,16 @@ function applyAppearance(settings: AppearanceSettings): void {
   root.style.setProperty('--ui-scale-inverse', String(1 / settings.uiScale));
   root.style.setProperty(
     '--terminal-font-family',
-    terminalFontCss(settings.terminalFont, settings.terminalProfileStyle)
+    terminalFamily
   );
   root.style.setProperty('--terminal-font-size', `${settings.terminalFontSize}px`);
   root.style.setProperty(
     '--terminal-line-height',
-    String(terminalProfileXtermOptions(settings.terminalProfileStyle).lineHeight)
+    String(terminalOptions.lineHeight)
   );
   root.style.setProperty(
     '--terminal-letter-spacing',
-    `${terminalProfileXtermOptions(settings.terminalProfileStyle).letterSpacing}px`
+    `${terminalOptions.letterSpacing}px`
   );
   root.style.setProperty('--terminal-background', settings.terminalTheme.palette.background);
   root.style.setProperty('--terminal-foreground', settings.terminalTheme.palette.foreground);
@@ -451,9 +507,9 @@ function nearest(
   );
 }
 
-function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(value)));
+  return Math.min(max, Math.max(min, value));
 }
 
 function settingFromPreset(preset: TerminalThemePreset): TerminalThemeSetting {
@@ -502,6 +558,7 @@ function sanitizeTerminalProfileStyle(value: unknown): TerminalProfileStyle | nu
     : null;
   const fontSize = finiteNumber(candidate.fontSize, 6, 72);
   const lineHeight = finiteNumber(candidate.lineHeight, 1, 3);
+  const characterWidthMultiplier = finiteNumber(candidate.characterWidthMultiplier, 0.5, 3);
   const letterSpacing = finiteNumber(candidate.letterSpacing, -5, 20);
   const cursorStyle = includes(['block', 'underline', 'bar'] as const, candidate.cursorStyle)
     ? candidate.cursorStyle
@@ -510,7 +567,8 @@ function sanitizeTerminalProfileStyle(value: unknown): TerminalProfileStyle | nu
     fontFamily,
     fontSize,
     lineHeight,
-    letterSpacing: letterSpacing === null ? null : Math.round(letterSpacing),
+    characterWidthMultiplier,
+    letterSpacing,
     cursorStyle,
     cursorBlink: typeof candidate.cursorBlink === 'boolean' ? candidate.cursorBlink : null,
     drawBoldTextInBrightColors: typeof candidate.drawBoldTextInBrightColors === 'boolean'
