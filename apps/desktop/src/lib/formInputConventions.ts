@@ -32,9 +32,9 @@ export function submitOnEnter(node: HTMLTextAreaElement): { destroy: () => void 
   const handleKeydown = (event: KeyboardEvent) => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
     event.preventDefault();
-    const submitter = form?.querySelector<HTMLButtonElement | HTMLInputElement>(
+    const submitter = Array.from(form?.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
       'button[type="submit"]:not(:disabled), input[type="submit"]:not(:disabled)'
-    );
+    ) ?? []).find((candidate) => candidate.form === form);
     if (form && submitter) form.requestSubmit(submitter);
     scheduleResize();
   };

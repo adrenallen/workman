@@ -52,7 +52,7 @@ export function focusPanel(panel: AppPanel, root: ParentNode = document): boolea
   const preferredSelectors = panel === 'projects'
     ? ['.project-select[aria-current="page"]', '.project-select:not(:disabled)', 'button:not(:disabled)']
     : panel === 'tree'
-      ? ['.tree-row.selected', '[data-tree-row]:not(:disabled)', 'input:not(:disabled)', 'button:not(:disabled)']
+      ? ['.draft-row.selected, .tree-row.selected', '[data-tree-row]:not(:disabled)', 'input:not(:disabled)', 'button:not(:disabled)']
       : ['button:not(:disabled)', 'input:not(:disabled)', 'textarea:not(:disabled)', '[tabindex="0"]'];
 
   for (const selector of preferredSelectors) {

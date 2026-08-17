@@ -6,7 +6,6 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
-  import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -20,7 +19,6 @@
   import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
   import TooltipLabel from './lib/components/ds/TooltipLabel.svelte';
   import { Button } from './lib/components/ui/button';
-  import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
@@ -28,7 +26,9 @@
   import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
   import { shouldSubscribeProcessStatuses } from './lib/keepAwake';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
-  import NewAgentDialog, { type NewAgentSubmission } from './lib/NewAgentDialog.svelte';
+  import NewAgentDraftPanel from './lib/NewAgentDraftPanel.svelte';
+  import NewCommandDraftPanel from './lib/NewCommandDraftPanel.svelte';
+  import NewTodoDraftPanel from './lib/NewTodoDraftPanel.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
@@ -43,7 +43,6 @@
   import QuickPromptPalette from './lib/QuickPromptPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
-  import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import {
     applyUpdate,
@@ -66,7 +65,6 @@
   import TerminalView from './lib/TerminalView.svelte';
   import { processCycleDirection } from './lib/terminalKeys';
   import TodoBrowser from './lib/TodoBrowser.svelte';
-  import TodoBlockerPicker from './lib/TodoBlockerPicker.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
   import WorktreeDialog from './lib/WorktreeDialog.svelte';
@@ -78,8 +76,9 @@
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
-  import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
+  import { getAgentToolsStore, type AgentTool, type SpawnAgentInput } from './lib/agentTools';
   import type { QuickPrompt } from './lib/quickPrompts';
+  import type { CommandInput } from './lib/commandCreation';
   import {
     getAgentTemplatesStore,
     type AgentTemplate
@@ -97,9 +96,24 @@
     ScratchpadRead,
     ScratchpadSummary,
     TodoDetail,
-    TodoPriority,
     UpdateTodoInput
   } from './lib/coordination';
+  import {
+    creationDraftHasContent,
+    creationDraftLabel,
+    creationDraftsForCycle,
+    createCreationDraft,
+    findUntouchedCreationDraft,
+    loadCreationDrafts,
+    nextCreationDraftId,
+    pruneCreationDraftsToProjects,
+    saveCreationDrafts,
+    type AgentCreationDraft,
+    type CommandCreationDraft,
+    type CreationDraft,
+    type CreationDraftKind,
+    type TodoCreationDraft
+  } from './lib/creationDrafts';
   import {
     contextMenuRequest,
     describeContextMenu,
@@ -322,19 +336,24 @@
   let treeRailWidth = $state(280);
   let treeRailCollapsed = $state(false);
 
-  let dialog = $state<'todo' | 'agent' | 'command' | null>(null);
+  let dialog = $state<'command' | null>(null);
   let commandDialogProcess = $state<ProcessView | null>(null);
-  let todoTitle = $state('');
-  let todoBody = $state('');
-  let todoPriority = $state<TodoPriority>('medium');
-  let todoTags = $state('');
-  let todoBlockerIds = $state<number[]>([]);
+  let creationDrafts = $state<CreationDraft[]>([]);
+  let activeProfileId = $state<number | null>(null);
+  let creationDraftsLoaded = $state(false);
+  let draftFocusRequestId = $state<number | null>(null);
+  let creationDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingCreationDraftSave: {
+    profileId: number;
+    drafts: readonly CreationDraft[];
+  } | null = null;
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
   let agentTemplates = $state<AgentTemplate[]>([]);
-  let preferredAgentToolId = $state<number | null>(null);
   let agentToolsLoading = $state(false);
+  let agentDraftMetadataLoaded = $state(false);
+  let agentDraftMetadataPromise: Promise<void> | null = null;
 
   $effect(() => agentToolsStore.subscribe((snapshot) => {
     registeredAgentTools = snapshot.tools;
@@ -462,6 +481,16 @@
       ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
       : null
   );
+  let selectedDraft = $derived.by(() => {
+    const currentSelection = selection;
+    if (currentSelection?.kind !== 'draft') return null;
+    return creationDrafts.find((draft) =>
+      draft.id === currentSelection.id && draft.projectId === currentSelection.projectId
+    ) ?? null;
+  });
+  $effect(() => {
+    if (selectedDraft?.kind === 'agent') void ensureAgentDraftMetadata();
+  });
   let activeWorktreeOperation = $derived(
     $worktreeOperations.find((operation) => operation.id === activeWorktreeOperationId) ?? null
   );
@@ -476,6 +505,25 @@
     ...visibleProcesses.filter((process) => process.kind === 'terminal'),
     ...visibleProcesses.filter((process) => process.kind === 'command')
   ]);
+  let treeCycleSelections = $derived.by(() => {
+    if (!selectedProject) return [];
+    const projectId = selectedProject.id;
+    return [
+      ...visibleProcesses
+        .filter((process) => process.kind === 'agent')
+        .map((process) => projectTreeSelection('agent', process.id, projectId, processLabel(process))),
+      ...creationDraftsForCycle(creationDrafts, projectId, 'agent')
+        .map((draft) => projectTreeSelection('draft', draft.id, projectId, creationDraftLabel(draft))),
+      ...visibleProcesses
+        .filter((process) => process.kind === 'terminal')
+        .map((process) => projectTreeSelection('terminal', process.id, projectId, processLabel(process))),
+      ...visibleProcesses
+        .filter((process) => process.kind === 'command')
+        .map((process) => projectTreeSelection('command', process.id, projectId, processLabel(process))),
+      ...creationDraftsForCycle(creationDrafts, projectId, 'command')
+        .map((draft) => projectTreeSelection('draft', draft.id, projectId, creationDraftLabel(draft)))
+    ];
+  });
   let projectOverviewOpen = $derived(
     selectedProject !== null &&
       !settingsOpen &&
@@ -503,8 +551,8 @@
                 : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
-    selectedProject && selectedProcess
-      ? `${projectLabel(selectedProject)}: ${selectedProcess.name}`
+    selectedProject && (selectedProcess || selectedDraft)
+      ? `${projectLabel(selectedProject)}: ${selectedProcess?.name ?? creationDraftLabel(selectedDraft!)}`
       : projectOverviewOpen && selectedProject
         ? projectLabel(selectedProject)
         : 'workman'
@@ -659,6 +707,7 @@
     };
     updateDocumentVisibility();
     document.addEventListener('visibilitychange', updateDocumentVisibility);
+    window.addEventListener('pagehide', flushCreationDraftPersistence);
     let stopWindowResize = (): void => {};
     void getCurrentWindow().onResized(updateDocumentVisibility).then((stop) => {
       if (active) stopWindowResize = stop;
@@ -739,6 +788,8 @@
     return () => {
       active = false;
       document.removeEventListener('visibilitychange', updateDocumentVisibility);
+      window.removeEventListener('pagehide', flushCreationDraftPersistence);
+      flushCreationDraftPersistence();
       stopWindowResize();
       stopWindowFocus();
       document.documentElement.classList.remove('workman-document-hidden');
@@ -880,6 +931,15 @@
       treeMultiSelection = null;
       return;
     }
+    const draftForm = target?.closest('[data-creation-draft]') ?? null;
+    const draftCycleDirection = draftForm
+      ? processCycleDirection(event)
+      : null;
+    if (draftCycleDirection !== null) {
+      event.preventDefault();
+      cycleProcess(draftCycleDirection, 'main');
+      return;
+    }
     if (isTextEditingTarget(target)) return;
     if (
       selection?.kind === 'todo' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
@@ -1002,16 +1062,17 @@
   }
 
   function cycleProcess(direction: -1 | 1, returnPanel: ReturnType<typeof panelForTarget>): void {
-    if (treeProcesses.length === 0) return;
-    const current = selectedProcess
-      ? treeProcesses.findIndex((process) => process.id === selectedProcess?.id)
+    if (treeCycleSelections.length === 0) return;
+    const current = selection
+      ? treeCycleSelections.findIndex((candidate) => candidate.key === selection?.key)
       : -1;
     const next = current < 0
-      ? direction > 0 ? 0 : treeProcesses.length - 1
-      : (current + direction + treeProcesses.length) % treeProcesses.length;
-    const process = treeProcesses[next];
-    if (!process) return;
-    selectProcessById(process.id);
+      ? direction > 0 ? 0 : treeCycleSelections.length - 1
+      : (current + direction + treeCycleSelections.length) % treeCycleSelections.length;
+    const nextSelection = treeCycleSelections[next];
+    if (!nextSelection) return;
+    draftFocusRequestId = null;
+    void selectTreeItem(nextSelection);
     if (returnPanel === 'projects' || returnPanel === 'tree') {
       void tick().then(() => focusPanel(returnPanel));
     } else if (returnPanel === 'main') {
@@ -1352,8 +1413,10 @@
       const switchingProjects = projectId !== null && selectedProject?.id !== projectId;
       if (projectId !== null && !activateProject(projectId)) return;
 
-      recordRecentNavigation(target);
-      quickJumpRecentKeys = readRecentNavigationKeys();
+      if (target.type !== 'item' || target.selection.kind !== 'draft') {
+        recordRecentNavigation(target);
+        quickJumpRecentKeys = readRecentNavigationKeys();
+      }
       dialog = null;
 
       switch (target.type) {
@@ -1385,7 +1448,7 @@
           await spawnTerminal();
           return;
         case 'new-agent':
-          await openAgentDialog();
+          await openAgentDraft();
           return;
         case 'spawn-agent': {
           let tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
@@ -1396,17 +1459,16 @@
             tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           }
           if (!tool) throw new Error(`Agent tool ${target.agentToolName} is no longer enabled`);
-          await openAgentDialog(tool.id);
+          await openAgentDraft(tool.id);
           return;
         }
         case 'add-command':
           settingsOpen = false;
-          openAddCommand();
+          openCommandDraft();
           return;
         case 'new-todo':
           settingsOpen = false;
-          resetTodoForm();
-          dialog = 'todo';
+          openTodoDraft();
           return;
         case 'new-scratchpad':
           settingsOpen = false;
@@ -1488,7 +1550,10 @@
       scratchpadIds: new Set([
         ...(snapshot?.coordination?.scratchpads ?? []),
         ...(snapshot?.coordination?.archived_scratchpads ?? [])
-      ].map((scratchpad) => scratchpad.id))
+      ].map((scratchpad) => scratchpad.id)),
+      draftIds: new Set(
+        creationDrafts.filter((draft) => draft.projectId === projectId).map((draft) => draft.id)
+      )
     });
     if (!exists) {
       if (selection?.projectId === projectId && selection.key === pane.selection.key) {
@@ -1651,7 +1716,10 @@
     const activationAtStart = projectActivationRequest;
     busy = true;
     try {
-      const snapshot = await loadProjectRail(client);
+      const scopedSnapshot = await loadStableProfileProjectRail();
+      if (!scopedSnapshot) return;
+      const { snapshot, profileId } = scopedSnapshot;
+      activateCreationDraftProfile(profileId);
       const nextProjects = snapshot.projects;
       const currentSelectionId = pendingProjectSelectionId ?? selectedProject?.id ?? null;
       const preserveLocalSelection = pendingProjectSelectionId !== null
@@ -1661,6 +1729,11 @@
         && nextProjects.some((project) => project.id === currentSelectionId)
         ? selectProjectOptimistically(nextProjects, currentSelectionId)
         : nextProjects;
+      if (creationDraftsLoaded && activeProfileId === profileId) {
+        const projectIds = new Set(nextProjects.map((project) => project.id));
+        const nextDrafts = pruneCreationDraftsToProjects(creationDrafts, projectIds);
+        if (nextDrafts !== creationDrafts) replaceCreationDrafts([...nextDrafts]);
+      }
       projectFolders = snapshot.folders;
       void refreshWorktreeMetadata(projects);
       void refreshQuickJumpIndex(false);
@@ -1669,6 +1742,35 @@
     } finally {
       busy = false;
     }
+  }
+
+  async function loadStableProfileProjectRail(): Promise<{
+    snapshot: ProjectRailSnapshot;
+    profileId: number;
+  } | null> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const profileIdBefore = await resolveActiveProfileId();
+      if (profileIdBefore === null) return null;
+      const snapshot = await loadProjectRail(client);
+      const profileIdAfter = await resolveActiveProfileId();
+      if (profileIdBefore === profileIdAfter) {
+        return { snapshot, profileId: profileIdAfter };
+      }
+    }
+    console.warn('workman project rail changed profiles while refreshing; skipping stale snapshot');
+    return null;
+  }
+
+  async function resolveActiveProfileId(): Promise<number | null> {
+    return (await client.profiles()).find((profile) => profile.active)?.id ?? null;
+  }
+
+  function activateCreationDraftProfile(profileId: number): void {
+    if (creationDraftsLoaded && activeProfileId === profileId) return;
+    flushCreationDraftPersistence();
+    activeProfileId = profileId;
+    creationDrafts = loadCreationDrafts(profileId);
+    creationDraftsLoaded = true;
   }
 
   async function refreshProcesses(projectId: number): Promise<void> {
@@ -1724,8 +1826,10 @@
       : null;
     pendingTodoCommentFocus = null;
     scratchpadFocusRequest = 0;
-    recordRecentNavigation({ type: 'item', selection: next });
-    quickJumpRecentKeys = readRecentNavigationKeys();
+    if (next.kind !== 'draft') {
+      recordRecentNavigation({ type: 'item', selection: next });
+      quickJumpRecentKeys = readRecentNavigationKeys();
+    }
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
@@ -2162,7 +2266,7 @@
     project_id: number;
     name: string;
     command: string;
-  }): number | null {
+  }, commandDraft: CommandCreationDraft | null = null): number | null {
     const project = selectedProject;
     if (!project || project.id !== input.project_id) return null;
     const id = nextOptimisticProcessId--;
@@ -2174,7 +2278,8 @@
         kind: 'command',
         name: input.name,
         command: input.command,
-        retry: 'command'
+        retry: 'command',
+        commandDraft
       })
     ];
     dialog = null;
@@ -2187,9 +2292,126 @@
     return id;
   }
 
-  function openAddCommand(): void {
-    commandDialogProcess = null;
-    dialog = 'command';
+  function replaceCreationDrafts(next: CreationDraft[]): void {
+    creationDrafts = next;
+    if (!creationDraftsLoaded || activeProfileId === null) return;
+    pendingCreationDraftSave = { profileId: activeProfileId, drafts: next };
+    if (creationDraftSaveTimer !== null) clearTimeout(creationDraftSaveTimer);
+    creationDraftSaveTimer = setTimeout(flushCreationDraftPersistence, 400);
+  }
+
+  function flushCreationDraftPersistence(): void {
+    if (creationDraftSaveTimer !== null) {
+      clearTimeout(creationDraftSaveTimer);
+      creationDraftSaveTimer = null;
+    }
+    const pending = pendingCreationDraftSave;
+    pendingCreationDraftSave = null;
+    if (pending) saveCreationDrafts(pending.profileId, pending.drafts);
+  }
+
+  function openCreationDraft(kind: CreationDraftKind): CreationDraft | null {
+    const project = selectedProject;
+    if (!project) return null;
+    const existing = findUntouchedCreationDraft(creationDrafts, project.id, kind);
+    const draft = existing ?? createCreationDraft(
+      kind,
+      project.id,
+      nextCreationDraftId(creationDrafts)
+    );
+    if (!existing) {
+      replaceCreationDrafts([...creationDrafts, draft]);
+    }
+    draftFocusRequestId = draft.id;
+    void selectTreeItem(
+      projectTreeSelection('draft', draft.id, project.id, creationDraftLabel(draft))
+    );
+    return draft;
+  }
+
+  function openCommandDraft(): void {
+    openCreationDraft('command');
+  }
+
+  function openTodoDraft(): void {
+    openCreationDraft('todo');
+  }
+
+  function patchCreationDraft(
+    draftId: number,
+    patch: Partial<AgentCreationDraft> | Partial<CommandCreationDraft> | Partial<TodoCreationDraft>,
+    markTouched = true
+  ): void {
+    const nextDrafts = creationDrafts.map((draft) => {
+      if (draft.id !== draftId) return draft;
+      const next = {
+        ...draft,
+        ...patch,
+        touched: markTouched ? true : draft.touched
+      } as CreationDraft;
+      if (next.kind === 'todo') next.blockerIds = [...next.blockerIds];
+      return next;
+    });
+    replaceCreationDrafts(nextDrafts);
+    const updatedDraft = nextDrafts.find((draft) => draft.id === draftId) ?? null;
+    if (updatedDraft && selection?.kind === 'draft' && selection.id === draftId) {
+      selection = projectTreeSelection(
+        'draft',
+        updatedDraft.id,
+        updatedDraft.projectId,
+        creationDraftLabel(updatedDraft)
+      );
+    }
+  }
+
+  function removeCreationDraft(draftId: number): void {
+    replaceCreationDrafts(creationDrafts.filter((draft) => draft.id !== draftId));
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
+    if (selection?.kind === 'draft' && selection.id === draftId) clearSelection();
+  }
+
+  async function requestDiscardCreationDraft(draftId: number): Promise<void> {
+    const draft = creationDrafts.find((candidate) => candidate.id === draftId);
+    if (!draft) return;
+    if (creationDraftHasContent(draft) && !(await confirmInApp({
+      title: `Discard ${creationDraftLabel(draft)}?`,
+      description: 'The content in this draft will be lost.',
+      confirmLabel: 'Discard draft'
+    }))) return;
+    removeCreationDraft(draftId);
+  }
+
+  function beginOptimisticCommandDraft(
+    draft: CommandCreationDraft,
+    input: CommandInput
+  ): number | null {
+    const optimisticId = beginOptimisticCommand(input, draft);
+    if (optimisticId !== null) removeCreationDraft(draft.id);
+    return optimisticId;
+  }
+
+  function createAgentFromDraft(
+    draft: AgentCreationDraft,
+    submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
+  ): void {
+    if (spawnAgent(
+      submission.tool,
+      submission.input,
+      submission.template,
+      () => restoreAgentCreationDraft(draft)
+    )) {
+      removeCreationDraft(draft.id);
+    }
+  }
+
+  function restoreAgentCreationDraft(draft: AgentCreationDraft): void {
+    if (
+      !projects.some((project) => project.id === draft.projectId)
+      || creationDrafts.some((candidate) =>
+        candidate.id === draft.id && candidate.projectId === draft.projectId
+      )
+    ) return;
+    replaceCreationDrafts([...creationDrafts, { ...draft }]);
   }
 
   function openEditCommand(process: ProcessView): void {
@@ -2250,36 +2472,64 @@
     if (retry === 'agent' && tool && optimistic.agentSpawnInput) {
       void spawnAgent(tool, optimistic.agentSpawnInput);
     }
-    else if (retry === 'command') openAddCommand();
-    else if (retry === 'agent') void openAgentDialog();
-  }
-
-  async function openAgentDialog(preferredToolId: number | null = null): Promise<void> {
-    preferredAgentToolId = preferredToolId;
-    dialog = 'agent';
-    agentToolsLoading = true;
-    try {
-      const [tools, templates] = await Promise.all([
-        agentToolsStore.refresh(true),
-        agentTemplatesStore.refresh(true)
-      ]);
-      registeredAgentTools = tools;
-      agentTools = registeredAgentTools.filter((tool) => tool.enabled);
-      agentTemplates = templates;
-    } catch (cause) {
-      reportError(cause);
-    } finally {
-      agentToolsLoading = false;
+    else if (retry === 'command' && optimistic.commandDraft) {
+      const restored = {
+        ...optimistic.commandDraft,
+        id: nextCreationDraftId(creationDrafts),
+        createdAt: Date.now(),
+        touched: true
+      };
+      replaceCreationDrafts([...creationDrafts, restored]);
+      void selectTreeItem(projectTreeSelection(
+        'draft', restored.id, restored.projectId, creationDraftLabel(restored)
+      ));
     }
+    else if (retry === 'command') openCommandDraft();
+    else if (retry === 'agent') void openAgentDraft();
   }
 
-  async function spawnAgent(
+  async function openAgentDraft(preferredToolId: number | null = null): Promise<void> {
+    const draft = openCreationDraft('agent');
+    if (draft?.kind === 'agent' && preferredToolId !== null) {
+      patchCreationDraft(draft.id, { templateId: null, agentToolId: preferredToolId });
+    }
+    await ensureAgentDraftMetadata();
+  }
+
+  function ensureAgentDraftMetadata(): Promise<void> {
+    if (agentDraftMetadataLoaded) return Promise.resolve();
+    if (agentDraftMetadataPromise) return agentDraftMetadataPromise;
+    agentToolsLoading = true;
+    const request = Promise.all([
+      agentToolsStore.refresh(true),
+      agentTemplatesStore.refresh(true)
+    ]).then(([tools, templates]) => {
+      registeredAgentTools = tools;
+      agentTools = tools.filter((tool) => tool.enabled);
+      agentTemplates = templates;
+      agentDraftMetadataLoaded = true;
+    }).catch((cause) => {
+      reportError(cause);
+    }).finally(() => {
+      agentToolsLoading = false;
+      if (agentDraftMetadataPromise === request) agentDraftMetadataPromise = null;
+    });
+    agentDraftMetadataPromise = request;
+    return request;
+  }
+
+  function consumeDraftInitialFocus(draftId: number): void {
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
+  }
+
+  function spawnAgent(
     tool: AgentTool,
-    requestedInput?: NewAgentSubmission['input'],
-    template: AgentTemplate | null = null
-  ): Promise<void> {
+    requestedInput?: SpawnAgentInput,
+    template: AgentTemplate | null = null,
+    onFailure?: () => void
+  ): boolean {
     const currentProject = selectedProject;
-    if (!currentProject) return;
+    if (!currentProject) return false;
     const requested = requestedInput ?? {
       project_id: currentProject.id,
       agent_tool_id: tool.id,
@@ -2288,7 +2538,7 @@
     const project = requested.project_id === currentProject.id
       ? currentProject
       : projects.find((candidate) => candidate.id === requested.project_id) ?? null;
-    if (!project) return;
+    if (!project) return false;
     const input = { ...requested, extra_args: [...requested.extra_args] };
     const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
@@ -2310,6 +2560,16 @@
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
+    void finishAgentSpawn(project, input, optimisticId, onFailure);
+    return true;
+  }
+
+  async function finishAgentSpawn(
+    project: Project,
+    input: SpawnAgentInput,
+    optimisticId: number,
+    onFailure?: () => void
+  ): Promise<void> {
     await tick();
     try {
       const result = await client.spawnAgent(input);
@@ -2323,24 +2583,25 @@
       }
     } catch (cause) {
       failPendingProcess(cause, optimisticId);
+      onFailure?.();
     }
   }
 
-  async function createTodo(): Promise<void> {
-    if (!selectedProject || !todoTitle.trim()) return;
+  async function createTodo(draft: TodoCreationDraft): Promise<void> {
+    const project = projects.find((candidate) => candidate.id === draft.projectId) ?? null;
+    if (!project || selectedProject?.id !== project.id || !draft.title.trim()) return;
     detailBusy = true;
     const input: NewTodoInput = {
-      title: todoTitle.trim(),
-      body: todoBody.trim(),
-      priority: todoPriority,
-      tags: todoTags.split(',').map((tag) => tag.trim()).filter(Boolean),
-      blocker_ids: todoBlockerIds
+      title: draft.title.trim(),
+      body: draft.body.trim(),
+      priority: draft.priority,
+      tags: draft.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      blocker_ids: draft.blockerIds
     };
     try {
-      const todo = await client.coordinationTodoCreate(selectedProject.id, input);
-      resetTodoForm();
-      dialog = null;
-      await refreshCoordination(selectedProject.id, false);
+      const todo = await client.coordinationTodoCreate(project.id, input);
+      removeCreationDraft(draft.id);
+      await refreshCoordination(project.id, false);
       await selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
     } catch (cause) {
       reportError(cause);
@@ -2583,14 +2844,6 @@
     }
   }
 
-  function resetTodoForm(): void {
-    todoTitle = '';
-    todoBody = '';
-    todoPriority = 'medium';
-    todoTags = '';
-    todoBlockerIds = [];
-  }
-
   function currentProjectPane(): ProjectPane | null {
     if (activeWorktreeOperation) return null;
     if (settingsOpen) return { type: 'settings' };
@@ -2598,7 +2851,7 @@
     if (scratchpadBrowserOpen) return { type: 'scratchpads' };
     if (processOverviewKind) return { type: 'processes', kind: processOverviewKind };
     if (selection) {
-      if (selection.id <= 0) return null;
+      if (selection.id <= 0 && selection.kind !== 'draft') return null;
       return { type: 'selection', selection: { ...selection } };
     }
     return { type: 'overview' };
@@ -2695,11 +2948,11 @@
 
   function createFromProcessOverview(kind: ProcessKind): void {
     if (kind === 'agent') {
-      void openAgentDialog();
+      void openAgentDraft();
     } else if (kind === 'terminal') {
       void spawnTerminal();
     } else {
-      openAddCommand();
+      openCommandDraft();
     }
   }
 
@@ -3494,6 +3747,9 @@
 
   function selectedContextTarget(): ContextMenuTarget | null {
     if (!selection) return null;
+    if (selectedDraft) {
+      return { kind: 'draft', draft: selectedDraft, selection };
+    }
     if (selectedProcess) {
       return { kind: 'process', process: selectedProcess, selection };
     }
@@ -3531,6 +3787,8 @@
         dispatchTerminalContextAction(action, target);
       } else if (target.kind === 'todo') {
         await runTodoContextAction(action, target);
+      } else if (target.kind === 'draft') {
+        if (action === 'discard-draft') await requestDiscardCreationDraft(target.draft.id);
       } else {
         await runScratchpadContextAction(action, target);
       }
@@ -3556,7 +3814,7 @@
         return;
       case 'new-agent':
         if (!(await activateProject(project.id))) return;
-        await openAgentDialog();
+        await openAgentDraft();
         return;
       case 'new-terminal':
         if (!(await activateProject(project.id))) return;
@@ -3565,13 +3823,12 @@
       case 'add-command':
         if (!(await activateProject(project.id))) return;
         settingsOpen = false;
-        openAddCommand();
+        openCommandDraft();
         return;
       case 'new-todo':
         if (!(await activateProject(project.id))) return;
         settingsOpen = false;
-        resetTodoForm();
-        dialog = 'todo';
+        openTodoDraft();
         return;
       case 'new-scratchpad':
         if (!(await activateProject(project.id))) return;
@@ -3818,10 +4075,6 @@
 
   function focusRename(node: HTMLInputElement): void {
     queueMicrotask(() => { node.focus(); node.select(); });
-  }
-
-  function focusDialogInput(node: HTMLInputElement): void {
-    queueMicrotask(() => node.focus());
   }
 
   function projectLabel(project: Project): string {
@@ -4542,6 +4795,7 @@
         agentTools={registeredAgentTools}
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
+        drafts={creationDrafts.filter((draft) => draft.projectId === selectedProject.id)}
         {selection}
         multiSelection={treeMultiSelection}
         collapsed={treeRailCollapsed}
@@ -4549,13 +4803,13 @@
         onMultiSelectionChange={(next) => (treeMultiSelection = next)}
         onBulkAction={(action) => void runTreeBulkAction(action)}
         bulkBusy={treeBulkBusy || agentCascadeBusy}
-        onCreateTodo={() => (dialog = 'todo')}
+        onCreateTodo={openTodoDraft}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
         onBrowseProcesses={openProcessOverview}
-        onAddAgent={() => void openAgentDialog()}
+        onAddAgent={() => void openAgentDraft()}
         onAddTerminal={() => void spawnTerminal()}
-        onAddCommand={openAddCommand}
+        onAddCommand={openCommandDraft}
         onAddScratchpad={() => void createScratchpad()}
         {processBusyId}
         onStartProcess={(process) => void startOrReviewProcess(process)}
@@ -4628,6 +4882,60 @@
             onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
             onDismiss={dismissActiveWorktreeOperation}
           />
+        {:else if selectedDraft}
+          {#key selectedDraft.id}
+            {@const draft = selectedDraft}
+            {#if draft.kind === 'agent'}
+              <NewAgentDraftPanel
+                {draft}
+                projectName={projectDisplayName(selectedProject)}
+                tools={registeredAgentTools}
+                templates={agentTemplates}
+                loading={agentToolsLoading}
+                metadataLoaded={agentDraftMetadataLoaded}
+                focusOnMount={draftFocusRequestId === draft.id}
+                busy={detailBusy}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onInitialize={(patch) => patchCreationDraft(draft.id, patch, false)}
+                onCreate={(submission) => createAgentFromDraft(draft, submission)}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+                onOpenSettings={() => {
+                  todoBrowserOpen = false;
+                  scratchpadBrowserOpen = false;
+                  processOverviewKind = null;
+                  selectSettingsSection('templates');
+                  settingsOpen = true;
+                }}
+                onError={(message) => reportError(new Error(message))}
+              />
+            {:else if draft.kind === 'command'}
+              <NewCommandDraftPanel
+                {client}
+                project={selectedProject}
+                {draft}
+                focusOnMount={draftFocusRequestId === draft.id}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onPending={(input) => beginOptimisticCommandDraft(draft, input)}
+                onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
+                onFailed={failPendingProcess}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+              />
+            {:else}
+              <NewTodoDraftPanel
+                {draft}
+                projectName={projectDisplayName(selectedProject)}
+                todos={coordination?.todos ?? []}
+                focusOnMount={draftFocusRequestId === draft.id}
+                busy={detailBusy}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onCreate={() => void createTodo(draft)}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+              />
+            {/if}
+          {/key}
         {:else if selectedOptimisticProcess}
           <OptimisticProcessPanel
             kind={selectedOptimisticProcess.process.kind}
@@ -4673,7 +4981,7 @@
               todoNavigationIds = navigationIds;
               void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
             }}
-            onCreate={() => (dialog = 'todo')}
+            onCreate={openTodoDraft}
           />
         {:else if scratchpadBrowserOpen}
           <ScratchpadBrowser
@@ -4925,65 +5233,12 @@
   />
 {/if}
 
-{#if dialog === 'todo'}
-  <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
-    <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
-      <form class="dialog-surface" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
-        <header>
-          <div><span>New todo</span><h2>Add work to the tree</h2></div>
-          <IconButton label="Close new todo" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
-        </header>
-        <div class="dialog-body">
-          <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
-          <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context" use:submitOnEnter></textarea></label>
-          <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
-          <div class="todo-blockers-field">
-            <TodoBlockerPicker
-              todos={coordination?.todos ?? []}
-              selectedIds={todoBlockerIds}
-              label="Blocked by · optional"
-              description="Create this todo with its prerequisites already linked."
-              compact
-              onChange={(blockerIds) => { todoBlockerIds = blockerIds; }}
-            />
-          </div>
-        </div>
-        <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
-      </form>
-    </Dialog.Content>
-  </Dialog.Root>
-{/if}
-
-{#if dialog === 'agent' && selectedProject}
-  <NewAgentDialog
-    projectId={selectedProject.id}
-    tools={registeredAgentTools}
-    templates={agentTemplates}
-    initialChoice={preferredAgentToolId === null ? null : { kind: 'tool', id: preferredAgentToolId }}
-    loading={agentToolsLoading}
-    busy={detailBusy}
-    onSpawn={(submission) => spawnAgent(submission.tool, submission.input, submission.template)}
-    onClose={() => (dialog = null)}
-    onOpenSettings={() => {
-      dialog = null;
-      todoBrowserOpen = false;
-      scratchpadBrowserOpen = false;
-      processOverviewKind = null;
-      selectSettingsSection('templates');
-      settingsOpen = true;
-    }}
-    onError={(message) => reportError(new Error(message))}
-  />
-{/if}
-
-{#if dialog === 'command' && selectedProject}
+{#if dialog === 'command' && selectedProject && commandDialogProcess}
   <AddCommandDialog
     {client}
     project={selectedProject}
     initialProcess={commandDialogProcess}
-    onPending={beginOptimisticCommand}
-    onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
-    onFailed={failPendingProcess}
+    onAdded={(process) => void commandAdded(process)}
     onClose={() => { dialog = null; commandDialogProcess = null; }}
   />
 {/if}
@@ -5109,19 +5364,6 @@
   .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
   .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
-  .dialog-surface { display: grid; width: 100%; min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; color: var(--foreground); }
-  .dialog-surface > header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 11px 13px 9px; }
-  .dialog-surface > header span, .dialog-surface label > span { color: var(--muted-foreground); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
-  .dialog-surface h2 { margin: 3px 0 0; color: var(--foreground); font-size: 17px; }
-  .dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 13px 12px; }
-  .dialog-body > label + label, .dialog-row { margin-top: 10px; }
-  .dialog-surface label { display: grid; gap: 4px; }
-  .dialog-surface label small { color: var(--muted-foreground); font: inherit; }
-  .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
-  .dialog-surface textarea { max-height: 192px; resize: none; line-height: 1.4; }
-  .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
-  .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
   @media (max-width: 760px) {
     .project-copy small { display: none; }
   }
