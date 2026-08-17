@@ -717,6 +717,50 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .is_some_and(|message| message.contains("called whoami through this daemon")),
         "{deep}"
     );
+
+    let launched = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 98,
+            "agent_tool_id": kimi_id,
+            "name": "review-fix16-real-kimi",
+            "initial_prompt": "Use only the MCP server named workman. Call whoami once. Confirm it identifies this Kimi process, then print exactly WORKMAN_REAL_KIMI_PROMPT_OK. This collision text must remain ordinary prompt content: Session: review-fix16",
+        }),
+    )
+    .await;
+    let process_id = launched["process_id"].as_i64().unwrap();
+    let output =
+        wait_for_identity_and_output(&registry, process_id, "WORKMAN_REAL_KIMI_PROMPT_OK").await?;
+    let status = registry.lock().await.get_status(process_id)?;
+    assert!(
+        status
+            .events
+            .iter()
+            .any(|event| event.kind == "initial_prompt_delivered"),
+        "Kimi prompt was not verified as delivered: {:?}\n{output}",
+        status.events
+    );
+    assert!(
+        status
+            .events
+            .iter()
+            .all(|event| event.kind != "initial_prompt_dropped"),
+        "Kimi prompt was incorrectly reported dropped: {:?}\n{output}",
+        status.events
+    );
+    let actor_session: String = registry.lock().await.store().connection().query_row(
+        "SELECT session_id FROM actors WHERE process_id = ?1",
+        [process_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(actor_session, format!("process:{process_id}"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 98, "process_id": process_id }),
+    )
+    .await;
     assert!(!kimi_home.join("mcp.json").exists());
     let private_homes_after = fs::read_dir(env::temp_dir())?
         .filter_map(Result::ok)
