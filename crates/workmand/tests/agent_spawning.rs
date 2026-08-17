@@ -1,12 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    time::Duration,
+    collections::BTreeMap, error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration,
 };
 
-use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo},
@@ -19,7 +14,7 @@ use workman_core::{
     AgentTemplate, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus,
     Project,
 };
-use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
+use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
     value
@@ -219,6 +214,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "parent-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -228,10 +226,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let parent_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-            .auth_header(discovery.token.clone()),
+            .auth_header("parent-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(parent_transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     let advertised_tools = parent.list_all_tools().await?;
     let spawn_tool = advertised_tools
@@ -610,12 +607,8 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         wait_for_fake_agent_context(&context_file).await?;
     assert_eq!(injected_process_id, process_id);
     assert_eq!(injected_url, endpoint);
-    let agent_headers = HashMap::from([(
-        HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
-        HeaderValue::from_str(&injected_token)?,
-    )]);
     let agent_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).custom_headers(agent_headers),
+        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(injected_token),
     );
     let agent = ClientInfo::default().serve(agent_transport).await?;
     let identity = call(&agent, "whoami", json!({})).await;

@@ -5,6 +5,13 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use image::{Rgba, RgbaImage};
+use rmcp::{
+    ServiceExt,
+    model::{CallToolRequestParams, ClientInfo},
+    transport::{
+        StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
+    },
+};
 use serde_json::{Value, json};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_tungstenite::{
@@ -487,6 +494,29 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             ))
     );
     let process_id = spawned["result"]["process_id"].as_i64().unwrap();
+    let process_token = registry.lock().await.store().connection().query_row(
+        "SELECT token FROM process_mcp_tokens WHERE process_id = ?1",
+        [process_id],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mcp_transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!(
+            "http://127.0.0.1:{}/mcp",
+            discovery.port
+        ))
+        .auth_header(process_token),
+    );
+    let mcp_client = ClientInfo::default().serve(mcp_transport).await?;
+    let identity = mcp_client
+        .call_tool(CallToolRequestParams::new("whoami").with_arguments(Default::default()))
+        .await?;
+    assert_ne!(identity.is_error, Some(true), "whoami failed: {identity:?}");
+    assert_eq!(
+        identity.structured_content.unwrap()["process_id"],
+        process_id,
+        "an agent spawned through the control API must bind to its own process credential"
+    );
+    let _ = mcp_client.cancel().await;
 
     let template_spawn = rpc(
         &mut socket,

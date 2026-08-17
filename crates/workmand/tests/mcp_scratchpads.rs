@@ -121,6 +121,9 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             selected: false,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "scratchpad-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -128,10 +131,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         let _ = shutdown_rx.await;
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
-    let first = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let second = connect(endpoint, discovery.token.clone()).await?;
-    call(&first, "identify_session", json!({ "process_id": 1 })).await;
-    call(&second, "identify_session", json!({ "process_id": 1 })).await;
+    let first = connect(endpoint.clone(), "scratchpad-process-token".into()).await?;
+    let second = connect(endpoint, "scratchpad-process-token".into()).await?;
 
     let tools = first.list_all_tools().await?;
     let append_section_tool = tools
