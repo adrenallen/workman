@@ -4,7 +4,7 @@
       title: 'Move through the workspace',
       shortcuts: [
         { keys: ['⌘', '← / →'], label: 'Move between the project rail, tree, and main frame' },
-        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process' },
+        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process, including from terminal input' },
         { keys: ['↑ / ↓'], label: 'Move through a focused rail or tree list' },
         { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
         { keys: ['↵'], label: 'Open or activate the focused row' }
@@ -59,7 +59,7 @@
   </div>
 
   <footer>
-    <span>Text fields keep editing keys. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
+    <span>Text fields keep editing keys. Terminal input reserves <strong>⌘U Unfocus</strong>, <strong>⌘↑/⌘↓ process selection</strong>, and <strong>⌘⇧P quick prompts</strong>; other keys reach the terminal.</span>
   </footer>
 </section>
 
