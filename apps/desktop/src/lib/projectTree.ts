@@ -3,7 +3,8 @@ export type ProjectTreeItemKind =
   | 'agent'
   | 'terminal'
   | 'command'
-  | 'scratchpad';
+  | 'scratchpad'
+  | 'draft';
 
 export type ProjectTreeGroup =
   | 'todos'
