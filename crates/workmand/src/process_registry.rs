@@ -2067,6 +2067,12 @@ impl ProcessRegistry {
     fn reconcile_stale_processes(&mut self) -> RegistryResult<()> {
         for mut process in self.store.list_processes(None)? {
             let _ = self.store.clear_process_mcp_token(process.id);
+            if let Err(error) = cleanup_ephemeral_agent_home(&process) {
+                eprintln!(
+                    "process {}: could not clean stale private agent config home: {error}",
+                    process.id
+                );
+            }
             if matches!(
                 process.status,
                 ProcessStatus::Starting | ProcessStatus::Running
@@ -2277,6 +2283,11 @@ impl Drop for ProcessRegistry {
                     .set_agent_session_id(process_id, &session_id, now_millis());
             }
             if let Ok(Some(mut process)) = self.store.get_process(process_id) {
+                if let Err(error) = cleanup_ephemeral_agent_home(&process) {
+                    eprintln!(
+                        "process {process_id}: could not clean private agent config home during shutdown: {error}"
+                    );
+                }
                 if let Some(status) = status {
                     apply_exit_info(&mut process, &status);
                 } else {
@@ -2705,6 +2716,48 @@ mod tests {
 
         assert!(!home.exists());
         assert_eq!(fs::read_to_string(auth).unwrap(), "fixture-auth");
+    }
+
+    #[test]
+    fn daemon_startup_removes_private_homes_left_by_persisted_processes() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/repo".into(),
+                name: "repo".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 0,
+            })
+            .unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "workman-kimi-mcp.test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("credential-copy"), "secret fixture").unwrap();
+        let mut process = output_test_process("/tmp/repo");
+        process.status = ProcessStatus::Running;
+        process.env.insert(
+            WORKMAN_EPHEMERAL_AGENT_HOME_ENV.into(),
+            home.to_string_lossy().into_owned(),
+        );
+        store.put_process(&process).unwrap();
+
+        let registry = ProcessRegistry::new(store).unwrap();
+
+        assert!(!home.exists());
+        assert_eq!(
+            registry
+                .store()
+                .get_process(process.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProcessStatus::Crashed
+        );
     }
 
     fn wait_for_persisted_output(registry: &mut ProcessRegistry) {

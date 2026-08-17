@@ -2008,13 +2008,19 @@ fn prepare_private_agent_home(
 fn copy_private_home_entry(source: &Path, target: &Path) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::other(format!(
-            "refusing to follow symlink {}",
+        eprintln!(
+            "skipping symlinked private-home seed entry {}",
             source.display()
-        )));
+        );
+        return Ok(());
     }
     if metadata.is_file() {
         fs::copy(source, target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+        }
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -2024,7 +2030,11 @@ fn copy_private_home_entry(source: &Path, target: &Path) -> std::io::Result<()> 
         )));
     }
     fs::create_dir(target)?;
-    fs::set_permissions(target, metadata.permissions())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
+    }
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         copy_private_home_entry(&entry.path(), &target.join(entry.file_name()))?;
@@ -2726,6 +2736,22 @@ mod tests {
             "fixture-credential\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::set_permissions(
+                source.path().join("credentials/login.json"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            let linked_secret = source.path().join("linked-secret.json");
+            fs::write(&linked_secret, "do-not-copy-through-link\n").unwrap();
+            symlink(
+                &linked_secret,
+                source.path().join("credentials/linked.json"),
+            )
+            .unwrap();
+        }
         fs::create_dir(source.path().join("workspace-trust")).unwrap();
         fs::write(
             source.path().join("workspace-trust/known-workspace"),
@@ -2766,6 +2792,7 @@ mod tests {
             fs::read_to_string(home.join("credentials/login.json")).unwrap(),
             "fixture-credential\n"
         );
+        assert!(!home.join("credentials/linked.json").exists());
         assert_eq!(
             fs::read_to_string(home.join("workspace-trust/known-workspace")).unwrap(),
             "fixture-trust\n"
@@ -2812,6 +2839,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(home.join("credentials/login.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
             assert_eq!(
                 fs::metadata(home.join("mcp.json"))
                     .unwrap()

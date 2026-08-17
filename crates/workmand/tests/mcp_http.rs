@@ -12,10 +12,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
-async fn raw_mcp_post(port: u16, token: &str, session_id: &str) -> std::io::Result<String> {
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+async fn raw_mcp_post(
+    port: u16,
+    path: &str,
+    token: Option<&str>,
+    session_id: Option<&str>,
+    body: &str,
+) -> std::io::Result<String> {
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let session = session_id
+        .map(|session_id| format!("Mcp-Session-Id: {session_id}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMcp-Session-Id: {session_id}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{authorization}Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
@@ -50,7 +61,14 @@ async fn unknown_mcp_session_returns_404() -> Result<(), Box<dyn Error>> {
         let _ = shutdown_rx.await;
     }));
 
-    let response = raw_mcp_post(discovery.port, &discovery.token, "bogus-session-id").await?;
+    let response = raw_mcp_post(
+        discovery.port,
+        "/mcp",
+        Some(&discovery.token),
+        Some("bogus-session-id"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    )
+    .await?;
     assert!(
         response.starts_with("HTTP/1.1 404 Not Found\r\n"),
         "unknown MCP session response was {response:?}"
@@ -176,6 +194,61 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     assert!(
         idle_get.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
         "stateless MCP must decline the idle SSE stream without creating a reconnectable body: {idle_get:?}"
+    );
+
+    for token in [None, Some("not-a-live-token")] {
+        let response = raw_mcp_post(
+            discovery.port,
+            "/mcp-stateless",
+            token,
+            None,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .await?;
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "stateless MCP accepted missing or invalid authentication: {response:?}"
+        );
+    }
+    let forged_session = raw_mcp_post(
+        discovery.port,
+        "/mcp-stateless",
+        Some(&process_token),
+        Some("process:999"),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"whoami","arguments":{}}}"#,
+    )
+    .await?;
+    assert!(forged_session.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(forged_session.contains(r#"\"session_id\":\"process:42\""#));
+    assert!(forged_session.contains(r#"\"process_id\":42"#));
+
+    let actors_before_processless_call: i64 = registry
+        .lock()
+        .await
+        .store()
+        .connection()
+        .query_row("SELECT COUNT(*) FROM actors", [], |row| row.get(0))?;
+    let processless_call = raw_mcp_post(
+        discovery.port,
+        "/mcp-stateless",
+        Some(&discovery.token),
+        None,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"whoami","arguments":{}}}"#,
+    )
+    .await?;
+    assert!(processless_call.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(
+        processless_call
+            .contains("sessionless MCP tool calls require an active process credential")
+    );
+    let actors_after_processless_call: i64 = registry.lock().await.store().connection().query_row(
+        "SELECT COUNT(*) FROM actors",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        actors_after_processless_call,
+        actors_before_processless_call
     );
 
     let process_client = {

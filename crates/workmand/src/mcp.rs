@@ -656,17 +656,26 @@ fn ensure_actor(
     if explicit_process_token.is_some() && token_process.is_none() {
         return Err("process token is no longer active".to_owned());
     }
-    let session_id = parts
+    let client_session_id = parts
         .headers
         .get("mcp-session-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| {
-            token_process
-                .as_ref()
-                .map(|process| format!("process:{}", process.id))
-        })
-        .unwrap_or_else(|| format!("anonymous:{}", Uuid::new_v4().simple()));
+        .and_then(|value| value.to_str().ok());
+    if token_process.is_none() && client_session_id.is_none() {
+        return Err(
+            "sessionless MCP tool calls require an active process credential; reconnect using this launch's WORKMAN_MCP_TOKEN credential"
+                .to_owned(),
+        );
+    }
+    // A process credential is the identity authority. Never let a caller-selected session
+    // header address or rewrite another process's durable actor row.
+    let session_id = token_process.as_ref().map_or_else(
+        || {
+            client_session_id
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("anonymous:{}", Uuid::new_v4().simple()))
+        },
+        |process| format!("process:{}", process.id),
+    );
     let now = now_millis();
     let mut actor = registry
         .store()
