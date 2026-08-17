@@ -48,6 +48,7 @@ mod process_registry;
 pub mod process_stats;
 mod process_tree;
 mod profiles;
+mod project_titles;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;
@@ -2233,7 +2234,10 @@ mod tests {
                 json!({
                     "id": "register-first",
                     "method": "projects.register",
-                    "params": { "path": first_path }
+                    "params": {
+                        "path": first_path,
+                        "display_name": "  First workspace  "
+                    }
                 })
                 .to_string()
                 .into(),
@@ -2244,6 +2248,7 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["selected"], true);
         assert_eq!(response["result"][0]["status"], "idle");
+        assert_eq!(response["result"][0]["display_name"], "First workspace");
         let first_id = response["result"][0]["id"].as_i64().unwrap();
 
         socket
@@ -2259,6 +2264,25 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["display_name"], "Frontend lab");
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "register-first-again",
+                    "method": "projects.register",
+                    "params": {
+                        "path": first_path,
+                        "display_name": "Folder default must not replace a rename"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["display_name"], "Frontend lab");
 
         socket
@@ -2296,6 +2320,13 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        let second = response["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == "second-project")
+            .unwrap();
+        assert!(second["display_name"].is_null());
         let second_id = response["result"]
             .as_array()
             .unwrap()

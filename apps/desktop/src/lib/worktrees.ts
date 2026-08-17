@@ -144,6 +144,7 @@ export interface WorktreeRemoval {
 export interface CreateWorktreeInput {
   project_id: number;
   branch: string;
+  display_name?: string;
   from_ref?: string;
   env_policy: EnvironmentPolicy;
   remember_env_policy: boolean;
@@ -152,6 +153,7 @@ export interface CreateWorktreeInput {
 export interface ForkWorktreeInput {
   project_id: number;
   branch: string;
+  display_name?: string;
   env_policy: EnvironmentPolicy;
   remember_env_policy: boolean;
 }
@@ -168,6 +170,7 @@ export type WorktreeDialogSubmission =
   | {
       mode: 'create';
       branch: string;
+      title: string;
       fromRef?: string;
       envPolicy: EnvironmentPolicy;
       rememberEnvPolicy: boolean;
@@ -175,10 +178,11 @@ export type WorktreeDialogSubmission =
   | {
       mode: 'fork';
       branch: string;
+      title: string;
       envPolicy: EnvironmentPolicy;
       rememberEnvPolicy: boolean;
     }
-  | { mode: 'adopt'; path: string };
+  | { mode: 'adopt'; path: string; title: string };
 
 /**
  * Seed the flat rail from the former nested presentation without deriving its order again later.
