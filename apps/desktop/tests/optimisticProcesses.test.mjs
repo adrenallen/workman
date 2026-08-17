@@ -75,7 +75,7 @@ test('failed optimistic commands retain and restore their complete draft', async
 
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   assert.match(app, /retry === 'command' && optimistic\.commandDraft/);
-  assert.match(app, /creationDrafts = \[\.\.\.creationDrafts, restored\]/);
+  assert.match(app, /replaceCreationDrafts\(\[\.\.\.creationDrafts, restored\]\)/);
 });
 
 function createCommandDraft() {
