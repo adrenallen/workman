@@ -3112,7 +3112,7 @@ mod tests {
                 kind: ProcessKind::Agent,
                 name: "kimi-input-target".into(),
                 command: Some(
-                    r#"stty raw -echo; exec perl -e '$|=1; print "Session:                       \r\nNo session yet - one will be created on your first message.\r\n| > |\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n| > $draft |\r\n"; next; } print "\033[2J\033[HSession: session_fixture\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n| > $draft |\r\n"; }'"#
+                    r#"stty raw -echo; exec perl -e '$|=1; print "│  Session:                       │\r\n│  Model: K3                      │\r\nNo session yet - one will be created on your first message.\r\n│ >                              │\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n│ > $draft │\r\n"; next; } print "\033[2J\033[H│  Session: session_fixture      │\r\n│  Model: K3                      │\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n│ > $draft │\r\n"; }'"#
                         .into(),
                 ),
                 working_dir: "/tmp".into(),

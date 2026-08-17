@@ -725,7 +725,7 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             "project_id": 98,
             "agent_tool_id": kimi_id,
             "name": "review-fix16-real-kimi",
-            "initial_prompt": "Use only the MCP server named workman. Call whoami once. Confirm it identifies this Kimi process, then print exactly WORKMAN_REAL_KIMI_PROMPT_OK. This collision text must remain ordinary prompt content: Session: review-fix16",
+            "initial_prompt": "Use only the MCP server named workman. Call whoami once. Confirm it identifies this Kimi process, then concatenate WORKMAN_REAL_KIMI_PROMPT and _OK with no separator and print only the result. This collision text must remain ordinary prompt content: Session: review-fix16",
         }),
     )
     .await;
