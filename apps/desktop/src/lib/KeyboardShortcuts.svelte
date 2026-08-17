@@ -16,7 +16,7 @@
       title: 'Move through the workspace',
       shortcuts: [
         { keys: ['⌘', '← / →'], label: 'Move between project rail, tree, and main frame' },
-        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process' },
+        { keys: ['⌘', '↑ / ↓'], label: 'Select the previous or next process, including from terminal input' },
         { keys: ['⌘', '⌥', '← / →'], label: 'Panel traversal alias' },
         { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
         { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
@@ -94,7 +94,7 @@
     </ScrollArea>
 
     <footer>
-      <span>Text fields keep Home/End; quick-prompt search uses them for first/last. Terminal input keeps every key except <strong>⌘U Unfocus</strong>.</span>
+      <span>Text fields keep Home/End; quick-prompt search uses them for first/last. Terminal input reserves <strong>⌘U Unfocus</strong>, <strong>⌘↑/⌘↓ process selection</strong>, and <strong>⌘⇧P quick prompts</strong>; other keys reach the terminal.</span>
       <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
   </Dialog.Content>

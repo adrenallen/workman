@@ -36,7 +36,7 @@
     clipboardImagePasteRoute,
     shouldForwardTerminalInput
   } from './terminalInput';
-  import { encodeTerminalKey } from './terminalKeys';
+  import { encodeTerminalKey, processCycleDirection } from './terminalKeys';
   import {
     installTerminalTransfers,
     type TerminalTransfers,
@@ -53,6 +53,7 @@
     onError,
     onContextMenu,
     onQuickPrompts,
+    onCycleProcess,
     onUnfocus
   }: {
     client: DaemonClient;
@@ -64,6 +65,7 @@
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
     onQuickPrompts?: () => void;
+    onCycleProcess?: (direction: -1 | 1) => void;
     onUnfocus?: () => void;
   } = $props();
 
@@ -231,6 +233,13 @@
         event.preventDefault();
         event.stopPropagation();
         if (event.type === 'keydown') onQuickPrompts();
+        return false;
+      }
+      const cycleDirection = onCycleProcess ? processCycleDirection(event) : null;
+      if (cycleDirection !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type === 'keydown') onCycleProcess?.(cycleDirection);
         return false;
       }
       let userKeyToken: number | null = null;
