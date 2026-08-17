@@ -155,11 +155,12 @@ export function projectActivityRollup(
 /**
  * Summarize project activity without losing which kind owns it.
  *
- * `running` means an agent is actively working or a terminal/command has a live
- * process. Agent input requests outrank active work, while errors remain a
- * fallback only when the kind is no longer live. Jump targets use the active
- * relevance order and then the newest
- * observable activity, with the process id as a deterministic final tie-break.
+ * `running` means an agent is actively working, a terminal has an active
+ * foreground process, or a command is live. Agent input requests outrank active
+ * work. Agent targets then prefer the newest output/content activity; runtime-
+ * only kinds use the most recently started process because live stats do not
+ * expose a last-activity timestamp. Process id is the final deterministic tie-
+ * break.
  * Inactive errors remain available to summaries, but a live indicator keeps its
  * running tone instead of being recolored by a process that has already exited.
  */
@@ -186,10 +187,10 @@ export function projectKindActivity(
   for (const process of processes) {
     const detail = rollup[process.kind];
     const stats = statsByProcess[process.id];
-    const state = processKindActivityState(process);
+    const state = processKindActivityState(process, stats);
     detail.total += 1;
 
-    if (state === 'running' || state === 'starting') detail.running += 1;
+    if (state === 'running') detail.running += 1;
     if (state === 'starting') detail.starting += 1;
     if (state === 'needs_input') detail.needsInput += 1;
     if (state === 'crashed') detail.crashed += 1;
@@ -208,7 +209,9 @@ export function projectKindActivity(
 
   for (const kind of ['agent', 'terminal', 'command'] as const) {
     const detail = rollup[kind];
-    detail.active = detail.running + (kind === 'agent' ? detail.needsInput : 0);
+    detail.active = detail.running
+      + (kind === 'terminal' ? 0 : detail.starting)
+      + (kind === 'agent' ? detail.needsInput : 0);
     detail.tone = kindActivityTone(detail);
     detail.label = kindActivityLabel(kind, detail);
     detail.activeProcessIds = candidates[kind]
@@ -240,7 +243,10 @@ function emptyKindActivity(kind: ProcessKind): ProjectKindActivityDetail {
   };
 }
 
-function processKindActivityState(process: ProcessView): KindActivityState {
+function processKindActivityState(
+  process: ProcessView,
+  stats: ProcessRuntimeStats | undefined
+): KindActivityState {
   if (processHasError(process)) return 'crashed';
   if (
     process.status === 'stopped'
@@ -255,7 +261,15 @@ function processKindActivityState(process: ProcessView): KindActivityState {
     if (process.agent_state.needs_input || attention === 'needs_input') return 'needs_input';
     if (attention === 'waiting') return 'waiting';
     if (process.agent_state.working || attention === 'working') return 'running';
+    if (process.status === 'starting') return 'starting';
     return 'idle';
+  }
+
+  if (process.kind === 'terminal') {
+    if (process.status === 'starting') return 'starting';
+    return process.status === 'running' && stats?.foreground_active === true
+      ? 'running'
+      : 'idle';
   }
 
   if (process.status === 'starting') return 'starting';
@@ -273,7 +287,7 @@ function processHasError(process: ProcessView): boolean {
 
 function kindActivityTone(detail: ProjectKindActivityDetail): ProcessActivityTone {
   if (detail.needsInput > 0) return 'needs-input';
-  if (detail.running > 0) return 'success';
+  if (detail.running > 0 || detail.starting > 0) return 'success';
   if (detail.crashed > 0) return 'danger';
   if (detail.waiting > 0) return 'waiting';
   return 'neutral';
@@ -299,6 +313,7 @@ function kindActiveLabel(
 
   const fragments: string[] = [];
   addLabelFragment(fragments, detail.running, kind, 'working', 'working');
+  addLabelFragment(fragments, detail.starting, kind, 'starting', 'starting');
   addLabelFragment(fragments, detail.needsInput, kind, 'needs input', 'need input');
   return fragments.join(' · ');
 }
@@ -307,13 +322,13 @@ function kindActivityLabel(kind: ProcessKind, detail: ProjectKindActivityDetail)
   if (detail.total === 0) return `no ${kindPlural(kind)}`;
 
   const fragments: string[] = [];
-  const running = detail.running - detail.starting;
   if (kind === 'agent') {
-    addLabelFragment(fragments, running, kind, 'working', 'working');
+    addLabelFragment(fragments, detail.running, kind, 'working', 'working');
+    addLabelFragment(fragments, detail.starting, kind, 'starting', 'starting');
     addLabelFragment(fragments, detail.needsInput, kind, 'needs input', 'need input');
     addLabelFragment(fragments, detail.waiting, kind, 'waiting', 'waiting');
   } else {
-    addLabelFragment(fragments, running, kind, 'running', 'running');
+    addLabelFragment(fragments, detail.running, kind, 'running', 'running');
     addLabelFragment(fragments, detail.starting, kind, 'starting', 'starting');
   }
   addLabelFragment(fragments, detail.crashed, kind, 'crashed', 'crashed');
@@ -345,14 +360,14 @@ function targetCandidate(
   stats: ProcessRuntimeStats | undefined
 ): KindTargetCandidate | null {
   if (process.kind === 'agent') {
-    if (state !== 'needs_input' && state !== 'running') return null;
+    if (state !== 'needs_input' && state !== 'running' && state !== 'starting') return null;
     return {
       id: process.id,
       priority: state === 'needs_input' ? 2 : 1,
-      recency: agentRecency(process)
+      recency: agentRecency(process, stats)
     };
   }
-  if (state !== 'running' && state !== 'starting') return null;
+  if (state !== 'running' && (process.kind === 'terminal' || state !== 'starting')) return null;
   return {
     id: process.id,
     priority: process.kind === 'terminal' && stats?.foreground_active === true ? 2 : 1,
@@ -360,10 +375,13 @@ function targetCandidate(
   };
 }
 
-function agentRecency(process: ProcessView): number {
+function agentRecency(
+  process: ProcessView,
+  stats: ProcessRuntimeStats | undefined
+): number {
   return process.agent_state.last_content_change_at
     ?? process.agent_state.last_output_at
-    ?? Number.NEGATIVE_INFINITY;
+    ?? runtimeRecency(stats);
 }
 
 function runtimeRecency(stats: ProcessRuntimeStats | undefined): number {
