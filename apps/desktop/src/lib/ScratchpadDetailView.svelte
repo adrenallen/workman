@@ -2,18 +2,35 @@
   import ArchiveIcon from '@lucide/svelte/icons/archive';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
+  import MessageSquareIcon from '@lucide/svelte/icons/message-square';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import TagIcon from '@lucide/svelte/icons/tag';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
+  import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Collapsible from '$lib/components/ui/collapsible';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Textarea } from '$lib/components/ui/textarea';
 
-  import type { ScratchpadRead } from './coordination';
+  import type {
+    NewScratchpadCommentInput,
+    ScratchpadComment,
+    ScratchpadRead
+  } from './coordination';
   import DocumentScaffold from './DocumentScaffold.svelte';
+  import CountBadge from './CountBadge.svelte';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
   import { scratchpadOutline, type ScratchpadOutlineItem } from './scratchpadOutline';
+  import {
+    mapScratchpadSelectionAnchor,
+    resolveScratchpadAnchor,
+    selectionAnchor,
+    type PositionMapper,
+    type ScratchpadSelectionAnchor
+  } from './scratchpadAnchors';
   import { autoGrowTextarea, singleLineTitle } from './wrappingTitle';
 
   interface Props {
@@ -30,6 +47,10 @@
     onSetTags?: (tags: string[], expectedRevision: number) => Promise<void> | void;
     onArchive?: (expectedRevision: number) => Promise<void> | void;
     onDelete?: (expectedRevision: number) => Promise<void> | void;
+    onCreateComment?: (input: NewScratchpadCommentInput) => Promise<void> | void;
+    onUpdateComment?: (commentId: number, body: string) => Promise<void> | void;
+    onResolveComment?: (commentId: number, resolved: boolean) => Promise<void> | void;
+    onDeleteComment?: (commentId: number) => Promise<void> | void;
   }
 
   interface Conflict {
@@ -57,7 +78,11 @@
     onSave,
     onSetTags,
     onArchive,
-    onDelete
+    onDelete,
+    onCreateComment,
+    onUpdateComment,
+    onResolveComment,
+    onDeleteComment
   }: Props = $props();
 
   let activeId = $state<number | null>(null);
@@ -75,12 +100,29 @@
   let metadataBusy = $state(false);
   let mobileOutlineOpen = $state(false);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let saveInFlight: Promise<void> | null = null;
   let seenFocusRequest = -1;
   let editorFocusRequest = $state(0);
   let outlineScrollKey = $state(0);
   let outlineScrollRequest = $state<{ key: number; line: number } | null>(null);
   let viewportLine = $state(1);
   let titleInput = $state<HTMLTextAreaElement | null>(null);
+  let commentsOpen = $state(true);
+  let mobileCommentsOpen = $state(false);
+  let showResolvedComments = $state(false);
+  let composerAnchor = $state<ScratchpadSelectionAnchor | null | undefined>(undefined);
+  let commentDraft = $state('');
+  let commentBusy = $state(false);
+  let focusedCommentId = $state<number | null>(null);
+  let editingCommentId = $state<number | null>(null);
+  let editingCommentDraft = $state('');
+  let commentScrollKey = $state(0);
+  let commentScrollRequest = $state<{
+    key: number;
+    commentId: number;
+    fallbackLine?: number | null;
+  } | null>(null);
+  let pendingDeleteComment = $state<ScratchpadComment | null>(null);
 
   let outline = $derived(scratchpadOutline(bodyDraft));
   let activeOutlineId = $derived.by(() => {
@@ -101,6 +143,161 @@
   let metadataDisabled = $derived(
     busy || metadataBusy || dirty || saveState === 'saving' || saveState === 'conflict'
   );
+  let locallyResolvedComments = $derived(
+    (read?.comments ?? []).map((comment) => ({
+      ...comment,
+      ...resolveScratchpadAnchor(bodyDraft, comment)
+    }))
+  );
+  let visibleComments = $derived(
+    locallyResolvedComments.filter((comment) => showResolvedComments || !comment.resolved)
+  );
+
+  function visibleElement<T extends HTMLElement>(selector: string): T | null {
+    return [...document.querySelectorAll<T>(selector)].find((element) => element.offsetParent !== null) ?? null;
+  }
+
+  function beginComment(anchor: ScratchpadSelectionAnchor | null): void {
+    commentsOpen = true;
+    mobileCommentsOpen = true;
+    composerAnchor = anchor;
+    commentDraft = '';
+    queueMicrotask(() => visibleElement<HTMLTextAreaElement>('[data-scratchpad-comment-composer]')?.focus());
+  }
+
+  function cancelComment(): void {
+    composerAnchor = undefined;
+    commentDraft = '';
+  }
+
+  async function saveComment(): Promise<void> {
+    if (!onCreateComment || composerAnchor === undefined || !commentDraft.trim() || commentBusy) return;
+    commentBusy = true;
+    try {
+      await saveDraft();
+      if (dirty || saveState !== 'saved' || conflict) return;
+      const localResolution = composerAnchor
+        ? resolveScratchpadAnchor(bodyDraft, composerAnchor)
+        : null;
+      const anchor = composerAnchor &&
+        localResolution?.anchor_state === 'anchored' &&
+        localResolution.current_start !== null &&
+        localResolution.current_end !== null
+        ? selectionAnchor(
+            bodyDraft,
+            localResolution.current_start,
+            localResolution.current_end
+          )
+        : composerAnchor
+          ? {
+              quote: composerAnchor.quote,
+              anchor_prefix: composerAnchor.anchor_prefix,
+              anchor_suffix: composerAnchor.anchor_suffix
+            }
+          : {};
+      await onCreateComment({
+        body: commentDraft.trim(),
+        ...anchor,
+        expected_revision: baseRevision,
+        allow_unanchored: composerAnchor !== null
+      });
+      cancelComment();
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors; preserve the draft for retry.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  function composerKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelComment();
+    } else if (event.key === 'Enter' && event.metaKey) {
+      event.preventDefault();
+      void saveComment();
+    }
+  }
+
+  function focusComment(commentId: number): void {
+    focusedCommentId = commentId;
+    commentsOpen = true;
+    mobileCommentsOpen = true;
+    queueMicrotask(() => {
+      const row = visibleElement<HTMLElement>(`[data-scratchpad-comment-row="${commentId}"]`);
+      row?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function jumpToComment(comment: ScratchpadComment): void {
+    if (comment.anchor_state !== 'anchored') return;
+    focusedCommentId = comment.id;
+    commentScrollKey += 1;
+    commentScrollRequest = {
+      key: commentScrollKey,
+      commentId: comment.id,
+      fallbackLine: comment.current_start_line
+    };
+  }
+
+  function beginEditComment(comment: ScratchpadComment): void {
+    editingCommentId = comment.id;
+    editingCommentDraft = comment.body;
+    queueMicrotask(() => visibleElement<HTMLTextAreaElement>(`[data-scratchpad-comment-edit="${comment.id}"]`)?.focus());
+  }
+
+  async function saveEditedComment(commentId: number): Promise<void> {
+    if (!onUpdateComment || !editingCommentDraft.trim() || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onUpdateComment(commentId, editingCommentDraft.trim());
+      editingCommentId = null;
+      await onRefresh();
+    } catch {
+      // Preserve the edit for retry.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  async function toggleCommentResolved(comment: ScratchpadComment): Promise<void> {
+    if (!onResolveComment || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onResolveComment(comment.id, !comment.resolved);
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  async function deleteComment(commentId: number): Promise<void> {
+    if (!onDeleteComment || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onDeleteComment(commentId);
+      pendingDeleteComment = null;
+      if (focusedCommentId === commentId) focusedCommentId = null;
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  function relativeTime(timestamp: number): string {
+    const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 60) return 'now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.floor(hours / 24)}d`;
+  }
 
   function fullMarkdown(next: ScratchpadRead): string {
     const body = next.scratchpad.content;
@@ -121,6 +318,20 @@
 
   function applyMarkdown(markdown: string): void {
     const parts = splitMarkdown(markdown);
+    if (composerAnchor) {
+      const resolved = resolveScratchpadAnchor(parts.body, composerAnchor);
+      if (
+        resolved.anchor_state === 'anchored' &&
+        resolved.current_start !== null &&
+        resolved.current_end !== null
+      ) {
+        composerAnchor = selectionAnchor(
+          parts.body,
+          resolved.current_start,
+          resolved.current_end
+        );
+      }
+    }
     draft = markdown;
     titleDraft = parts.title;
     bodyDraft = parts.body;
@@ -175,7 +386,10 @@
     updateDraft();
   }
 
-  function handleBodyChange(next: string): void {
+  function handleBodyChange(next: string, changes: PositionMapper): void {
+    if (composerAnchor) {
+      composerAnchor = mapScratchpadSelectionAnchor(composerAnchor, next, changes);
+    }
     bodyDraft = next;
     updateDraft();
   }
@@ -206,31 +420,39 @@
   }
 
   async function saveDraft(): Promise<void> {
+    if (saveInFlight) return saveInFlight;
     clearSaveTimer();
     if (activeId === null || !dirty || conflict || saveState === 'saving' || !titleDraft.trim()) return;
-    const savingMarkdown = draft;
-    const expectedRevision = baseRevision;
-    saveState = 'saving';
-    try {
-      const saved = await onSave(savingMarkdown, expectedRevision);
-      const canonical = fullMarkdown(saved);
-      const latestConflict = currentConflict();
-      if (
-        latestConflict &&
-        latestConflict.remoteRevision === saved.scratchpad.revision &&
-        latestConflict.remoteMarkdown === canonical
-      ) {
-        conflict = null;
+    saveInFlight = (async () => {
+      const savingMarkdown = draft;
+      const expectedRevision = baseRevision;
+      saveState = 'saving';
+      try {
+        const saved = await onSave(savingMarkdown, expectedRevision);
+        const canonical = fullMarkdown(saved);
+        const latestConflict = currentConflict();
+        if (
+          latestConflict &&
+          latestConflict.remoteRevision === saved.scratchpad.revision &&
+          latestConflict.remoteMarkdown === canonical
+        ) {
+          conflict = null;
+        }
+        baseRevision = saved.scratchpad.revision;
+        baseMarkdown = canonical;
+        if (draft === savingMarkdown) applyMarkdown(canonical);
+        dirty = draft !== baseMarkdown;
+        saveState = dirty ? 'unsaved' : 'saved';
+        if (dirty) scheduleSave();
+      } catch {
+        saveState = 'error';
+        await onRefresh();
       }
-      baseRevision = saved.scratchpad.revision;
-      baseMarkdown = canonical;
-      if (draft === savingMarkdown) applyMarkdown(canonical);
-      dirty = draft !== baseMarkdown;
-      saveState = dirty ? 'unsaved' : 'saved';
-      if (dirty) scheduleSave();
-    } catch {
-      saveState = 'error';
-      await onRefresh();
+    })();
+    try {
+      await saveInFlight;
+    } finally {
+      saveInFlight = null;
     }
   }
 
@@ -333,6 +555,9 @@
       tagsOpen = false;
       saveState = 'saved';
       viewportLine = 1;
+      composerAnchor = undefined;
+      focusedCommentId = null;
+      editingCommentId = null;
       return;
     }
     if (next.scratchpad.revision <= baseRevision) return;
@@ -390,6 +615,71 @@
   </nav>
 {/snippet}
 
+{#snippet commentsPanelContent()}
+  <div class="comments-controls">
+    <label title="Show resolved scratchpad comments">
+      <Checkbox bind:checked={showResolvedComments} aria-label="Show resolved scratchpad comments" /> Resolved
+    </label>
+    <Button size="xs" variant="outline" disabled={!onCreateComment || commentBusy} onclick={() => beginComment(null)}>Comment</Button>
+  </div>
+  {#if composerAnchor !== undefined}
+    <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
+      <small>{composerAnchor ? `On “${composerAnchor.quote.slice(0, 52)}${composerAnchor.quote.length > 52 ? '…' : ''}”` : 'Whole document'}</small>
+      <Textarea
+        data-scratchpad-comment-composer
+        bind:value={commentDraft}
+        rows={3}
+        aria-label="Scratchpad comment"
+        placeholder="Add review feedback…"
+        onkeydown={composerKeydown}
+      ></Textarea>
+      <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>⌘↵</kbd></Button></div>
+    </form>
+  {/if}
+  <div class="comment-list" aria-label="Scratchpad comments">
+    {#each visibleComments as comment (comment.id)}
+      <article
+        class:focused={focusedCommentId === comment.id}
+        class:resolved={comment.resolved}
+        class="comment-row"
+        data-scratchpad-comment-row={comment.id}
+      >
+        <header><strong>{comment.actor}</strong><time datetime={new Date(comment.created_at).toISOString()} title={new Date(comment.created_at).toLocaleString()}>{relativeTime(comment.created_at)}</time></header>
+        {#if comment.quote}
+          <Button class="comment-quote" size="xs" variant="ghost" disabled={comment.anchor_state !== 'anchored'} onclick={() => jumpToComment(comment)}>
+            “{comment.quote.slice(0, 88)}{comment.quote.length > 88 ? '…' : ''}”
+          </Button>
+        {/if}
+        {#if comment.anchor_state === 'orphaned'}<small class="anchor-note">Text no longer found</small>
+        {:else if comment.anchor_state === 'unanchored'}<small class="anchor-note">Whole document</small>{/if}
+        {#if editingCommentId === comment.id}
+          <Textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows={3} aria-label="Edit scratchpad comment" onkeydown={(event) => {
+            if (event.key === 'Escape') { event.preventDefault(); editingCommentId = null; }
+            else if (event.key === 'Enter' && event.metaKey) { event.preventDefault(); void saveEditedComment(comment.id); }
+          }}></Textarea>
+        {:else}
+          <p>{comment.body}</p>
+        {/if}
+        <footer>
+          {#if comment.anchor_state === 'anchored'}<Button size="xs" variant="outline" onclick={() => jumpToComment(comment)}>Jump</Button>{/if}
+          {#if comment.can_resolve}<Button size="xs" variant="outline" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</Button>{/if}
+          {#if comment.can_edit}
+            {#if editingCommentId === comment.id}
+              <Button size="xs" variant="outline" onclick={() => (editingCommentId = null)}>Cancel</Button>
+              <Button size="xs" disabled={!editingCommentDraft.trim() || commentBusy} onclick={() => void saveEditedComment(comment.id)}>Save</Button>
+            {:else}
+              <Button size="xs" variant="outline" onclick={() => beginEditComment(comment)}>Edit</Button>
+            {/if}
+          {/if}
+          {#if comment.can_delete}<Button size="xs" variant="destructive" disabled={commentBusy} onclick={() => (pendingDeleteComment = comment)}>Delete</Button>{/if}
+        </footer>
+      </article>
+    {:else}
+      <p class="comments-empty">{read?.comment_total_count ? 'No comments in this view.' : 'Select text to leave anchored feedback, or comment on the whole document.'}</p>
+    {/each}
+  </div>
+{/snippet}
+
 {#if loading && !read}
   <div class="state">Loading scratchpad…</div>
 {:else if read}
@@ -423,6 +713,9 @@
           <DropdownMenu.Item onclick={() => (editorFocusRequest += 1)}>
             <PencilIcon class="size-4" aria-hidden="true" /> Edit document
           </DropdownMenu.Item>
+          <DropdownMenu.Item disabled={!onCreateComment} onclick={() => beginComment(null)}>
+            <MessageSquareIcon class="size-4" aria-hidden="true" /> Comment on document
+          </DropdownMenu.Item>
           {#if !read.scratchpad.archived && onArchive}
             <DropdownMenu.Item disabled={metadataDisabled} onclick={() => void archiveScratchpad()}>
               <ArchiveIcon class="size-4" aria-hidden="true" /> Archive scratchpad
@@ -440,9 +733,19 @@
 
     {#snippet rail()}
       <section class="outline-rail">
-        <span>Document outline</span>
-        <h2>On this page</h2>
-        {@render outlineList(false)}
+        <div class="outline-section">
+          <span>Document outline</span>
+          <h2>On this page</h2>
+          {@render outlineList(false)}
+        </div>
+        <Collapsible.Root bind:open={commentsOpen}>
+          <Collapsible.Trigger class="comments-trigger">
+            <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
+            <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
+            <ChevronDownIcon class={commentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
+          </Collapsible.Trigger>
+          <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
+        </Collapsible.Root>
       </section>
     {/snippet}
 
@@ -454,6 +757,16 @@
             <ChevronDownIcon class={mobileOutlineOpen ? 'open' : ''} size={15} strokeWidth={1.8} aria-hidden="true" />
           </Collapsible.Trigger>
           <Collapsible.Content><div class="outline-mobile-content">{@render outlineList(true)}</div></Collapsible.Content>
+        </Collapsible.Root>
+      </div>
+      <div class="mobile-comments">
+        <Collapsible.Root bind:open={mobileCommentsOpen}>
+          <Collapsible.Trigger class="comments-trigger">
+            <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
+            <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
+            <ChevronDownIcon class={mobileCommentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
+          </Collapsible.Trigger>
+          <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
         </Collapsible.Root>
       </div>
 
@@ -527,9 +840,15 @@
           focusRequest={editorFocusRequest}
           flow
           scrollRequest={outlineScrollRequest}
+          {commentScrollRequest}
+          comments={locallyResolvedComments}
+          {showResolvedComments}
+          {focusedCommentId}
           onChange={handleBodyChange}
           onSave={() => void saveDraft()}
           onViewportLineChange={(line) => (viewportLine = line)}
+          onCommentSelection={(anchor) => beginComment(anchor)}
+          onCommentClick={focusComment}
         />
       </section>
     </article>
@@ -537,6 +856,21 @@
 {:else}
   <div class="state">Scratchpad not found.</div>
 {/if}
+
+<AlertDialog.Root open={pendingDeleteComment !== null} onOpenChange={(open) => { if (!open && !commentBusy) pendingDeleteComment = null; }}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete this comment?</AlertDialog.Title>
+      <AlertDialog.Description>This permanently removes the comment and its anchor.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel disabled={commentBusy}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" disabled={commentBusy} onclick={() => {
+        if (pendingDeleteComment) void deleteComment(pendingDeleteComment.id);
+      }}>Delete comment</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .scratchpad-document { min-width: 0; min-height: 100%; }
@@ -565,9 +899,9 @@
   .recovery-banner { border-color: var(--border); background: var(--card); color: var(--muted-foreground); }
   .recovery-banner span { min-width: 0; flex: 1; }
   .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
-  .outline-rail { position: sticky; top: 18px; }
-  .outline-rail > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
-  .outline-rail h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
+  .outline-rail { position: sticky; top: 18px; display: grid; gap: 16px; }
+  .outline-section > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
+  .outline-section h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
   .outline-list { display: grid; gap: 2px; }
   .outline-list button { width: 100%; min-height: 28px; overflow: hidden; border: 0; border-left: 2px solid var(--border); border-radius: 0 var(--radius) var(--radius) 0; padding: 4px 7px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .outline-list button.level-three { padding-left: 17px; }
@@ -575,7 +909,32 @@
   .outline-list button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .outline-list button.active { border-left-color: var(--foreground); background: var(--accent); color: var(--foreground); font-weight: 630; }
   .outline-list p { margin: 0; border-left: 2px solid var(--border); padding: 3px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
+  :global(.comments-trigger) { display: grid; width: 100%; min-height: 34px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 7px; background: var(--card); color: var(--foreground); cursor: pointer; }
+  :global(.comments-trigger > span) { display: inline-flex; align-items: center; gap: 6px; font-size: var(--font-size-sm); font-weight: 650; }
+  :global(.comments-trigger > svg) { color: var(--muted-foreground); transition: transform 150ms ease; }
+  :global(.comments-trigger > svg.open) { transform: rotate(180deg); }
+  .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); }
+  .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
+  .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
+  .comment-composer small, .anchor-note { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
+  .comment-composer kbd { margin-left: 3px; color: inherit; font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-list { display: grid; }
+  .comment-row { display: grid; gap: 5px; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 7px; }
+  .comment-row:last-child { border-bottom: 0; }
+  .comment-row.focused { box-shadow: inset 2px 0 0 var(--notification-unread); background: color-mix(in srgb, var(--notification-unread) 8%, var(--accent)); }
+  .comment-row.resolved { opacity: 0.72; }
+  .comment-row header { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
+  .comment-row header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-row p { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.42; white-space: pre-wrap; }
+  :global(.comment-quote) { overflow: hidden; justify-content: flex-start; border: 0; border-left: 2px solid var(--border-strong); border-radius: 0; padding: 2px 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: italic; line-height: 1.35; text-align: left; text-overflow: ellipsis; cursor: pointer; white-space: normal; }
+  :global(.comment-quote:disabled) { cursor: default; }
+  .comment-row footer { display: flex; flex-wrap: wrap; gap: 4px; }
+  .comments-empty { margin: 0; padding: 10px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
   .mobile-outline { display: none; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .mobile-comments { display: none; margin-bottom: 14px; }
   .mobile-outline :global(.outline-trigger) { display: flex; width: 100%; min-height: 38px; align-items: center; gap: 8px; border: 0; padding: 5px 8px 5px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .mobile-outline :global(.outline-trigger > span) { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 7px; }
   .mobile-outline :global(.outline-trigger strong) { font-size: var(--font-size-sm); font-weight: 630; }
@@ -587,6 +946,8 @@
 
   @container (max-width: 880px) {
     .mobile-outline { display: block; }
+    .mobile-comments { display: block; }
+    .mobile-comments .comments-panel { max-height: 340px; }
   }
 
   @container (max-width: 620px) {
@@ -601,5 +962,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .mobile-outline :global(.outline-trigger svg) { transition: none; }
+    :global(.comments-trigger > svg) { transition: none; }
   }
 </style>

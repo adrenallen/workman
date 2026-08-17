@@ -330,6 +330,9 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
         registry
             .store()
             .put_process(&root_process(77, &project_path))?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
         (claude_id, codex_id)
     };
 
@@ -340,10 +343,10 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
         let _ = shutdown_rx.await;
     }));
     let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+        StreamableHttpClientTransportConfig::with_uri(endpoint)
+            .auth_header("root-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     for (name, tool_id) in [("claude", claude_id), ("codex", codex_id)] {
         let launched = call(
@@ -436,6 +439,9 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
         registry
             .store()
             .put_process(&root_process(424, &project_path))?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
         let tools = registry.store().list_agent_tools()?;
         (
             tools.iter().find(|tool| tool.name == "Claude").unwrap().id,
@@ -450,10 +456,10 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
         let _ = shutdown_rx.await;
     }));
     let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+        StreamableHttpClientTransportConfig::with_uri(endpoint)
+            .auth_header("root-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
     let prompt = "Use only the MCP server named workman. Call whoami once. When it identifies you, print exactly WORKMAN_REAL_YOLO_OK and exit.";
 
     for (name, tool_id, extra_args) in [
@@ -564,6 +570,9 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .put_process(&root_process(96, &project_path))?;
         registry
             .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
+        registry
+            .store()
             .list_agent_tools()?
             .iter()
             .find(|tool| tool.name == "Grok")
@@ -578,10 +587,10 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
         let _ = shutdown_rx.await;
     }));
     let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+        StreamableHttpClientTransportConfig::with_uri(endpoint)
+            .auth_header("root-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     let deep = call(
         &parent,
@@ -610,7 +619,8 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
 
 /// Todo 98 acceptance against the installed authenticated Kimi CLI. The caller supplies a
 /// disposable KIMI_CODE_HOME containing copied login/config state but no mcp.json; Workman creates
-/// and removes a second private launch home containing only the process-scoped Workman connector.
+/// and removes a second private launch home containing copied immutable startup state plus the
+/// process-scoped Workman connector.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires authenticated Kimi and WORKMAN_TODO98_QA_ROOT; run alone"]
 async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<(), Box<dyn Error>> {
@@ -667,6 +677,9 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .put_process(&root_process(98, &project_path))?;
         registry
             .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
+        registry
+            .store()
             .list_agent_tools()?
             .iter()
             .find(|tool| tool.name == "Kimi")
@@ -681,10 +694,10 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
         let _ = shutdown_rx.await;
     }));
     let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(discovery.token),
+        StreamableHttpClientTransportConfig::with_uri(endpoint)
+            .auth_header("root-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
 
     let deep = call(
         &parent,
@@ -704,6 +717,50 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .is_some_and(|message| message.contains("called whoami through this daemon")),
         "{deep}"
     );
+
+    let launched = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 98,
+            "agent_tool_id": kimi_id,
+            "name": "review-fix16-real-kimi",
+            "initial_prompt": "Use only the MCP server named workman. Call whoami once. Confirm it identifies this Kimi process, then concatenate WORKMAN_REAL_KIMI_PROMPT and _OK with no separator and print only the result. This collision text must remain ordinary prompt content: Session: review-fix16",
+        }),
+    )
+    .await;
+    let process_id = launched["process_id"].as_i64().unwrap();
+    let output =
+        wait_for_identity_and_output(&registry, process_id, "WORKMAN_REAL_KIMI_PROMPT_OK").await?;
+    let status = registry.lock().await.get_status(process_id)?;
+    assert!(
+        status
+            .events
+            .iter()
+            .any(|event| event.kind == "initial_prompt_delivered"),
+        "Kimi prompt was not verified as delivered: {:?}\n{output}",
+        status.events
+    );
+    assert!(
+        status
+            .events
+            .iter()
+            .all(|event| event.kind != "initial_prompt_dropped"),
+        "Kimi prompt was incorrectly reported dropped: {:?}\n{output}",
+        status.events
+    );
+    let actor_session: String = registry.lock().await.store().connection().query_row(
+        "SELECT session_id FROM actors WHERE process_id = ?1",
+        [process_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(actor_session, format!("process:{process_id}"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 98, "process_id": process_id }),
+    )
+    .await;
     assert!(!kimi_home.join("mcp.json").exists());
     let private_homes_after = fs::read_dir(env::temp_dir())?
         .filter_map(Result::ok)

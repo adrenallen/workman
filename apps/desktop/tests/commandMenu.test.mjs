@@ -64,13 +64,14 @@ test('command context menu exposes edit and destructive remove', async () => {
   assert.match(menu, /id: 'remove-command',[\s\S]*label: 'Remove command…',[\s\S]*destructive: true/);
 });
 
-test('the shared command dialog is prefilled for edit and preserves the full definition', async () => {
+test('the edit command dialog is prefilled and shares environment parsing with creation', async () => {
   const dialog = await readFile(files.dialog, 'utf8');
-  assert.match(dialog, /initialProcess\?: ProcessView \| null/);
-  assert.match(dialog, /initialProcess\?\.name/);
-  assert.match(dialog, /initialProcess\?\.env/);
-  assert.match(dialog, /initialProcess\?\.restart_when_changed/);
+  assert.match(dialog, /initialProcess: ProcessView/);
+  assert.match(dialog, /initialProcess\.name/);
+  assert.match(dialog, /formatCommandEnvironment\(initialProcess\.env\)/);
+  assert.match(dialog, /parseCommandEnvironment\(environment\)/);
   assert.match(dialog, /'config\.command_update'/);
+  assert.doesNotMatch(dialog, /config\.command_save|process\.create|onPending|onFailed/);
   assert.match(dialog, /Saved changes apply the next time it starts; the current run is unchanged\./);
 });
 

@@ -20,6 +20,7 @@
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
   import { updateActionAvailable, updateActionCopy } from '../updateRecovery';
+  import { updateBannerState, type UpdateFlow } from '../updateFlow';
   import workmanLogo from '../../../../../assets/branding/workman-logo-wide.png';
 
   const repositoryUrl = 'https://github.com/adrenallen/workman';
@@ -31,8 +32,11 @@
     connection: ConnectionStatus;
     updateBusy: 'check' | 'apply' | 'preference' | null;
     updateMessage: string | null;
+    updateFlow: UpdateFlow;
     onCheckUpdate: () => void;
     onUpdateNow: () => void;
+    onRestartUpdate: () => void;
+    onDismissUpdate: () => void;
     onAutomaticChecks: (enabled: boolean) => void;
     onUpdateChannel: (channel: UpdateChannel) => void;
   }
@@ -42,8 +46,11 @@
     connection,
     updateBusy,
     updateMessage,
+    updateFlow,
     onCheckUpdate,
     onUpdateNow,
+    onRestartUpdate,
+    onDismissUpdate,
     onAutomaticChecks,
     onUpdateChannel
   }: Props = $props();
@@ -57,6 +64,8 @@
   let hasChecked = $derived(update.last_checked_at !== null && check.checked_at > 0);
   let connected = $derived(connection.status === 'connected');
   let currentReleaseUrl = $derived(`${releasesUrl}/tag/v${encodeURIComponent(check.current)}`);
+  let flowBanner = $derived(updateBannerState(update, updateFlow));
+  let flowActive = $derived(updateFlow.kind !== 'idle');
 
   function formatChecked(timestamp: number | null): string {
     if (!timestamp) return 'Not checked yet';
@@ -190,7 +199,10 @@
             {/if}
           </span>
           <div class="min-w-0">
-            {#if recoveryRequired}
+            {#if flowActive}
+              <strong class="text-sm">{flowBanner.title}</strong>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">{flowBanner.description}</p>
+            {:else if recoveryRequired}
               <div class="flex flex-wrap items-center gap-2">
                 <strong class="text-sm">
                   {check.available
@@ -223,29 +235,51 @@
             {/if}
           </div>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <Button
-            variant={check.available ? 'outline' : 'default'}
-            size="sm"
-            disabled={!connected || updateBusy !== null}
-            onclick={onCheckUpdate}
-          >
-            <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
-            {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
-          </Button>
-          {#if actionAvailable}
+        <div class="flex min-w-40 flex-wrap justify-end gap-2">
+          {#if flowBanner.mode === 'running' || flowBanner.mode === 'restarting'}
+            <div class="w-44 py-2" role="progressbar" aria-label={flowBanner.title} aria-valuemin="0" aria-valuemax="100" aria-valuenow={flowBanner.percent ?? undefined}>
+              <div class="h-1 overflow-hidden rounded-[1px] bg-warning/15">
+                <span
+                  class={cn('block h-full bg-warning transition-[width]', flowBanner.indeterminate && 'animate-pulse motion-reduce:animate-none')}
+                  style={`width: ${flowBanner.percent ?? 38}%`}
+                ></span>
+              </div>
+              <span class="mt-1.5 block text-right font-mono text-xs text-warning">{flowBanner.title}</span>
+            </div>
+          {:else if flowBanner.retry}
+            <Button size="sm" variant="outline" onclick={onUpdateNow}>Retry update</Button>
+            {#if flowBanner.dismiss}
+              <Button size="sm" variant="ghost" onclick={onDismissUpdate}>Later</Button>
+            {/if}
+          {:else if flowBanner.mode === 'needs-restart'}
+            {#if flowBanner.restart}
+              <Button size="sm" variant="outline" onclick={onRestartUpdate}>{flowBanner.restartLabel}</Button>
+            {/if}
+            <Button size="sm" variant="ghost" onclick={onDismissUpdate}>Later</Button>
+          {:else}
             <Button
+              variant={check.available ? 'outline' : 'default'}
               size="sm"
               disabled={!connected || updateBusy !== null}
-              onclick={() => (updateDialogOpen = true)}
+              onclick={onCheckUpdate}
             >
-              {#if recoveryRequired}
-                <WrenchIcon aria-hidden="true" />
-              {:else}
-                <DownloadIcon aria-hidden="true" />
-              {/if}
-              {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
+              <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
+              {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
             </Button>
+            {#if actionAvailable}
+              <Button
+                size="sm"
+                disabled={!connected || updateBusy !== null}
+                onclick={() => (updateDialogOpen = true)}
+              >
+                {#if recoveryRequired}
+                  <WrenchIcon aria-hidden="true" />
+                {:else}
+                  <DownloadIcon aria-hidden="true" />
+                {/if}
+                {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
+              </Button>
+            {/if}
           {/if}
         </div>
       </div>

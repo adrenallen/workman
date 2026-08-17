@@ -2,7 +2,6 @@
   import type { SettingsPanelProps } from './workspace';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import {
-    applyUpdate,
     checkForUpdates,
     loadDaemonSettings,
     restartDaemon,
@@ -10,7 +9,6 @@
     setUserShell,
     setUpdateChannel,
     type DaemonSettingsInfo,
-    type UpdateInstallReport,
     type UpdateChannel
   } from './settings';
   import {
@@ -37,7 +35,17 @@
   import ProfilesCard from './settings/ProfilesCard.svelte';
   import QuickPromptsCard from './settings/QuickPromptsCard.svelte';
 
-  let { client, project, connection, onError, onProfileSwitched }: SettingsPanelProps = $props();
+  let {
+    client,
+    project,
+    connection,
+    updateFlow,
+    onApplyUpdate,
+    onRestartUpdate,
+    onDismissUpdate,
+    onError,
+    onProfileSwitched
+  }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
@@ -48,6 +56,9 @@
   let loadedConnection = $state<string | null>(null);
   let viewport = $state<HTMLElement | null>(null);
   let request = 0;
+  let effectiveUpdateBusy = $derived(
+    updateFlow.kind === 'running' || updateFlow.kind === 'restarting' ? 'apply' : updateBusy
+  );
 
   let activeDefinition = $derived(
     settingsSections.find((section) => section.id === $settingsSection) ?? settingsSections[0]
@@ -182,24 +193,12 @@
   }
 
   async function updateNow(): Promise<void> {
-    if (!info || updateBusy) return;
-    updateBusy = 'apply';
-    const recovery = info.update.cli_recovery_required;
-    updateMessage = recovery
-      ? 'Downloading and verifying the release before repairing the command-line tools…'
-      : 'Downloading and verifying the update…';
+    if (!info || updateBusy || updateFlow.kind === 'running' || updateFlow.kind === 'restarting') return;
+    updateMessage = null;
     try {
-      const report: UpdateInstallReport = await applyUpdate(client);
-      updateMessage = report.desktop_instruction
-        ?? (recovery
-          ? `Repaired the command-line tools with Workman ${report.latest}. Reconnecting…`
-          : `Updated to Workman ${report.latest}. Reconnecting…`);
-      restarting = true;
-      sawRestartDisconnect = false;
+      await onApplyUpdate(info.update);
     } catch (cause) {
       updateMessage = message(cause);
-    } finally {
-      updateBusy = null;
     }
   }
 
@@ -306,10 +305,13 @@
           <AboutUpdatesCard
             {info}
             {connection}
-            {updateBusy}
+            updateBusy={effectiveUpdateBusy}
             {updateMessage}
+            {updateFlow}
             onCheckUpdate={() => void checkUpdate()}
             onUpdateNow={() => void updateNow()}
+            onRestartUpdate={() => void onRestartUpdate()}
+            {onDismissUpdate}
             onAutomaticChecks={(enabled: boolean) => void toggleAutomaticChecks(enabled)}
             onUpdateChannel={(channel: UpdateChannel) => void chooseUpdateChannel(channel)}
           />

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import type { ScratchpadSummary, TodoSummary } from './coordination';
 import type { ProcessView, Project } from './daemon';
+import type { CreationDraft } from './creationDrafts';
 import {
   customActionLabel,
   editorActionLabel,
@@ -53,6 +54,7 @@ export type ContextMenuTarget =
       pasteEnabled: boolean;
     }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
+  | { kind: 'draft'; draft: CreationDraft; selection: ProjectTreeSelection }
   | { kind: 'scratchpad'; scratchpad: ContextScratchpad; selection: ProjectTreeSelection };
 
 export interface ContextMenuRequest {
@@ -181,6 +183,18 @@ export function describeContextMenu(
             label: target.todo.completed ? 'Reopen todo' : 'Complete todo'
           },
           { id: 'copy-title', label: 'Copy title', separatorBefore: true }
+        ]
+      };
+    case 'draft':
+      return {
+        title: target.selection.label,
+        subtitle: `${target.draft.kind.toUpperCase()} DRAFT`,
+        items: [
+          {
+            id: 'discard-draft',
+            label: 'Discard draft…',
+            destructive: true
+          }
         ]
       };
     case 'scratchpad':

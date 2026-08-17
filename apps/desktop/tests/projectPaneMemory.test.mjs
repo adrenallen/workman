@@ -51,17 +51,38 @@ test('drops malformed and transient selections without losing valid panes', () =
   assert.deepEqual(loadProjectPaneMemory(target), { 3: { type: 'scratchpads' } });
 });
 
+test('persists negative draft selections while rejecting transient negative processes', () => {
+  const target = storage({
+    'workman.project-panes.v1': JSON.stringify({
+      1: { type: 'selection', selection: { kind: 'draft', id: -4, label: 'New agent' } },
+      2: { type: 'selection', selection: { kind: 'agent', id: -1, label: 'starting' } }
+    })
+  });
+  assert.deepEqual(loadProjectPaneMemory(target), {
+    1: {
+      type: 'selection',
+      selection: projectTreeSelection('draft', -4, 1, 'New agent')
+    }
+  });
+});
+
 test('stale remembered items fail closed to the overview inventory path', () => {
   const pane = {
     type: 'selection',
     selection: projectTreeSelection('terminal', 22, 5, 'shell')
   };
-  const missing = { processIds: new Set(), todoIds: new Set(), scratchpadIds: new Set() };
+  const missing = {
+    processIds: new Set(), todoIds: new Set(), scratchpadIds: new Set(), draftIds: new Set()
+  };
   const present = { ...missing, processIds: new Set([22]) };
 
   assert.equal(projectPaneSelectionExists(pane, missing), false);
   assert.equal(projectPaneSelectionExists(pane, present), true);
   assert.equal(projectPaneSelectionExists({ type: 'overview' }, missing), true);
+  assert.equal(projectPaneSelectionExists({
+    type: 'selection',
+    selection: projectTreeSelection('draft', -3, 5, 'New command')
+  }, { ...missing, draftIds: new Set([-3]) }), true);
 });
 
 test('pane equality notices selection labels but ignores object identity', () => {

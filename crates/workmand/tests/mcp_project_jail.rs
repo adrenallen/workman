@@ -304,7 +304,7 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
         unidentified["message"]
             .as_str()
             .unwrap()
-            .contains("identify_session")
+            .contains("authenticated process identity")
     );
 
     let mut request = format!("ws://127.0.0.1:{}/ws", discovery.port).into_client_request()?;
