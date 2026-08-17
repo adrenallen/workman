@@ -2,7 +2,7 @@ use std::error::Error;
 
 use workman_core::{
     NewScratchpadComment, Project, ScratchpadAnchorState, ScratchpadReadMode, ScratchpadService,
-    Store, resolve_scratchpad_anchor,
+    ScratchpadServiceError, Store, resolve_scratchpad_anchor,
 };
 
 fn seeded_store() -> Result<Store, Box<dyn Error>> {
@@ -42,6 +42,9 @@ fn scratchpad_comment_lifecycle_counts_and_cascades() -> Result<(), Box<dyn Erro
         10,
     )?;
     assert_eq!(created.anchor.anchor_state, ScratchpadAnchorState::Anchored);
+    assert!(created.can_edit);
+    assert!(created.can_resolve);
+    assert!(created.can_delete);
     assert_eq!(created.anchor.current_start_line, Some(2));
     assert_eq!(service.comment_count(1, scratchpad.id, false)?, 1);
 
@@ -135,6 +138,38 @@ fn reanchor_uses_utf16_offsets_context_and_orphans_missing_quotes() -> Result<()
     );
     assert_eq!(orphaned.anchor_state, ScratchpadAnchorState::Orphaned);
 
+    let non_overlapping = resolve_scratchpad_anchor("aaa", Some("aa"), None, None, None, None);
+    assert_eq!(
+        non_overlapping.anchor_state,
+        ScratchpadAnchorState::Anchored
+    );
+    assert_eq!(non_overlapping.current_start, Some(0));
+    let context_mismatch = resolve_scratchpad_anchor(
+        "only target remains",
+        Some("target"),
+        None,
+        None,
+        Some("old "),
+        Some(" context"),
+    );
+    assert_eq!(
+        context_mismatch.anchor_state,
+        ScratchpadAnchorState::Orphaned
+    );
+    let crlf = resolve_scratchpad_anchor(
+        "first\r\nsecond",
+        Some("first\r\nsecond"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(crlf.anchor_state, ScratchpadAnchorState::Anchored);
+    assert_eq!(
+        crlf.current_end,
+        Some("first\nsecond".encode_utf16().count())
+    );
+
     let store = seeded_store()?;
     let service = ScratchpadService::new(&store);
     let (scratchpad, _) = service.write(1, None, "Plan".into(), duplicate.into(), None, None)?;
@@ -147,5 +182,132 @@ fn reanchor_uses_utf16_offsets_context_and_orphans_missing_quotes() -> Result<()
             .content,
         duplicate
     );
+    Ok(())
+}
+
+#[test]
+fn comment_permissions_revision_guards_and_mutation_signal_are_enforced()
+-> Result<(), Box<dyn Error>> {
+    let store = seeded_store()?;
+    let user = ScratchpadService::attributed(&store, "user");
+    let agent = ScratchpadService::attributed(&store, "mcp-agent-one");
+    let other_agent = ScratchpadService::attributed(&store, "mcp-agent-two");
+    let (scratchpad, _) =
+        user.write(1, None, "Plan".into(), "first\r\nsecond".into(), None, None)?;
+    assert_eq!(scratchpad.content, "first\nsecond");
+
+    let user_comment = user.comment_create(
+        1,
+        scratchpad.id,
+        NewScratchpadComment {
+            body: "Human review".into(),
+            quote: Some("missing quote".into()),
+            anchor_prefix: Some("first ".into()),
+            anchor_suffix: Some(" second".into()),
+            allow_unanchored: true,
+            expected_revision: Some(scratchpad.revision),
+            ..NewScratchpadComment::default()
+        },
+        10,
+    )?;
+    assert_eq!(
+        user_comment.comment.anchor_prefix.as_deref(),
+        Some("first ")
+    );
+    assert_eq!(
+        user_comment.comment.anchor_suffix.as_deref(),
+        Some(" second")
+    );
+    assert_eq!(
+        user.list(1, Default::default())?.scratchpads[0].comments_revision,
+        1
+    );
+
+    for error in [
+        agent
+            .comment_update(1, user_comment.comment.id, "rewrite".into(), 11)
+            .unwrap_err(),
+        agent
+            .comment_set_resolved(1, user_comment.comment.id, true, 12)
+            .unwrap_err(),
+        agent
+            .comment_delete(1, user_comment.comment.id)
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            ScratchpadServiceError::CommentPermissionDenied { .. }
+        ));
+    }
+
+    let agent_comment = agent.comment_create(
+        1,
+        scratchpad.id,
+        NewScratchpadComment {
+            body: "Agent note".into(),
+            ..NewScratchpadComment::default()
+        },
+        13,
+    )?;
+    assert!(
+        !user
+            .comment_list(1, scratchpad.id, true)?
+            .comments
+            .iter()
+            .find(|comment| comment.comment.id == agent_comment.comment.id)
+            .unwrap()
+            .can_edit
+    );
+    assert!(
+        user.comment_list(1, scratchpad.id, true)?
+            .comments
+            .iter()
+            .find(|comment| comment.comment.id == agent_comment.comment.id)
+            .unwrap()
+            .can_resolve
+    );
+    user.comment_set_resolved(1, agent_comment.comment.id, true, 14)?;
+    assert!(matches!(
+        user.comment_delete(1, agent_comment.comment.id),
+        Err(ScratchpadServiceError::CommentPermissionDenied { .. })
+    ));
+    assert!(matches!(
+        other_agent.comment_update(1, agent_comment.comment.id, "nope".into(), 15),
+        Err(ScratchpadServiceError::CommentPermissionDenied { .. })
+    ));
+    agent.comment_delete(1, agent_comment.comment.id)?;
+    assert_eq!(
+        user.list(1, Default::default())?.scratchpads[0].comments_revision,
+        4,
+        "insert + insert + resolve + delete must all advance the signal"
+    );
+
+    assert!(matches!(
+        user.comment_create(
+            1,
+            scratchpad.id,
+            NewScratchpadComment {
+                body: "stale".into(),
+                expected_revision: Some(scratchpad.revision + 1),
+                ..NewScratchpadComment::default()
+            },
+            16,
+        ),
+        Err(ScratchpadServiceError::RevisionConflict { .. })
+    ));
+    assert!(matches!(
+        user.comment_create(
+            1,
+            scratchpad.id,
+            NewScratchpadComment {
+                body: "large quote".into(),
+                quote: Some("x".repeat(4_097)),
+                allow_unanchored: true,
+                ..NewScratchpadComment::default()
+            },
+            17,
+        ),
+        Err(ScratchpadServiceError::InvalidInput(_))
+    ));
     Ok(())
 }

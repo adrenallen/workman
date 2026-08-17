@@ -8,7 +8,10 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{
+    NewScratchpadComment, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    ScratchpadService,
+};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -90,6 +93,15 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             selected: false,
             sort_order: 0,
         })?;
+        registry.store().put_project(&Project {
+            id: 2,
+            path: second_path.to_string_lossy().into_owned(),
+            name: "two".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 0,
+        })?;
         registry.store().put_process(&Process {
             id: 1,
             project_id: 1,
@@ -112,14 +124,49 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
-        registry.store().put_project(&Project {
+        registry.store().put_process(&Process {
             id: 2,
-            path: second_path.to_string_lossy().into_owned(),
-            name: "two".into(),
-            display_name: None,
-            icon: None,
-            selected: false,
+            project_id: 2,
+            kind: ProcessKind::Agent,
+            name: "other-project-agent".into(),
+            command: Some("true".into()),
+            working_dir: second_path.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
             sort_order: 0,
+        })?;
+        registry.store().put_process(&Process {
+            id: 3,
+            project_id: 1,
+            kind: ProcessKind::Agent,
+            name: "second-scratchpad-agent".into(),
+            command: Some("true".into()),
+            working_dir: first_path.to_string_lossy().into_owned(),
+            env: BTreeMap::new(),
+            auto_start: false,
+            auto_restart: false,
+            restart_when_changed: Vec::new(),
+            source: ProcessSource::Local,
+            trust_hash: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            agent_tool_id: None,
+            spawned_by_process_id: None,
+            sort_order: 1,
         })?;
     }
 
@@ -129,9 +176,16 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let first = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let second = connect(endpoint, discovery.token.clone()).await?;
+    let second = connect(endpoint.clone(), discovery.token.clone()).await?;
+    let cross_project = connect(endpoint, discovery.token.clone()).await?;
     call(&first, "identify_session", json!({ "process_id": 1 })).await;
-    call(&second, "identify_session", json!({ "process_id": 1 })).await;
+    call(&second, "identify_session", json!({ "process_id": 3 })).await;
+    call(
+        &cross_project,
+        "identify_session",
+        json!({ "process_id": 2 }),
+    )
+    .await;
 
     let tools = first.list_all_tools().await?;
     let append_section_tool = tools
@@ -171,7 +225,10 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "quote",
         "anchor_start",
         "anchor_end",
+        "anchor_prefix",
+        "anchor_suffix",
         "allow_unanchored",
+        "expected_revision",
     ] {
         assert!(
             comment_create_tool.input_schema["properties"]
@@ -243,6 +300,39 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         );
     }
 
+    let user_comment_id = {
+        let registry = registry_handle.lock().await;
+        ScratchpadService::attributed(registry.store(), "user")
+            .comment_create(
+                1,
+                scratchpad_id,
+                NewScratchpadComment {
+                    body: "User review that agents must preserve.".into(),
+                    ..NewScratchpadComment::default()
+                },
+                1,
+            )?
+            .comment
+            .id
+    };
+    for (tool, args) in [
+        (
+            "scratchpad_comment_update",
+            json!({ "comment_id": user_comment_id, "body": "agent rewrite" }),
+        ),
+        (
+            "scratchpad_comment_resolve",
+            json!({ "comment_id": user_comment_id }),
+        ),
+        (
+            "scratchpad_comment_delete",
+            json!({ "comment_id": user_comment_id }),
+        ),
+    ] {
+        let denied = invoke(&first, tool, args).await;
+        assert_error_code(&denied, "scratchpad_comment_permission_denied");
+    }
+
     let comment = call(
         &first,
         "scratchpad_comment_create",
@@ -254,9 +344,52 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     )
     .await;
     assert_eq!(comment["actor"], "scratchpad-agent");
+    assert_eq!(comment["can_edit"], true);
     assert_eq!(comment["anchor_state"], "anchored");
     assert_eq!(comment["current_start_line"], 5);
     let comment_id = comment["id"].as_i64().unwrap();
+
+    for tool in [
+        (
+            "scratchpad_comment_update",
+            json!({ "comment_id": comment_id, "body": "not mine" }),
+        ),
+        (
+            "scratchpad_comment_resolve",
+            json!({ "comment_id": comment_id }),
+        ),
+        (
+            "scratchpad_comment_delete",
+            json!({ "comment_id": comment_id }),
+        ),
+    ] {
+        let denied = invoke(&second, tool.0, tool.1).await;
+        assert_error_code(&denied, "scratchpad_comment_permission_denied");
+    }
+    for (tool, args) in [
+        (
+            "scratchpad_comment_update",
+            json!({ "comment_id": comment_id, "body": "cross project" }),
+        ),
+        (
+            "scratchpad_comment_resolve",
+            json!({ "comment_id": comment_id }),
+        ),
+        (
+            "scratchpad_comment_delete",
+            json!({ "comment_id": comment_id }),
+        ),
+    ] {
+        let jailed = invoke(&cross_project, tool, args).await;
+        assert_error_code(&jailed, "scratchpad_not_found");
+    }
+    let jailed_create = invoke(
+        &cross_project,
+        "scratchpad_comment_create",
+        json!({ "scratchpad_id": scratchpad_id, "body": "cross project" }),
+    )
+    .await;
+    assert_error_code(&jailed_create, "scratchpad_not_found");
 
     let commented_read = call(
         &first,
@@ -264,9 +397,9 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         json!({ "scratchpad_id": scratchpad_id, "include_comments": true }),
     )
     .await;
-    assert_eq!(commented_read["unresolved_comment_count"], 1);
+    assert_eq!(commented_read["unresolved_comment_count"], 2);
     assert_eq!(
-        commented_read["comments"][0]["body"],
+        commented_read["comments"][1]["body"],
         "Make this step concrete."
     );
     let updated_comment = call(
@@ -283,20 +416,49 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     )
     .await;
     assert_eq!(resolved_comment["resolved"], true);
+    let default_commented_read = call(
+        &first,
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id, "include_comments": true }),
+    )
+    .await;
+    assert_eq!(
+        default_commented_read["comments"].as_array().unwrap().len(),
+        1
+    );
+    let resolved_commented_read = call(
+        &first,
+        "scratchpad_read",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "include_comments": true,
+            "include_resolved": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        resolved_commented_read["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let unresolved_comments = call(
         &first,
         "scratchpad_comment_list",
         json!({ "scratchpad_id": scratchpad_id }),
     )
     .await;
-    assert_eq!(unresolved_comments["comments"].as_array().unwrap().len(), 0);
+    assert_eq!(unresolved_comments["comments"].as_array().unwrap().len(), 1);
     let all_comments = call(
         &first,
         "scratchpad_comment_list",
         json!({ "scratchpad_id": scratchpad_id, "include_resolved": true }),
     )
     .await;
-    assert_eq!(all_comments["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(all_comments["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(all_comments["offset"], 0);
+    assert_eq!(all_comments["has_more"], false);
     let missing_quote = invoke(
         &first,
         "scratchpad_comment_create",
@@ -694,6 +856,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
 
     let _ = first.cancel().await;
     let _ = second.cancel().await;
+    let _ = cross_project.cancel().await;
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())

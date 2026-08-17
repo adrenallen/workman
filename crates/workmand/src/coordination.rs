@@ -96,6 +96,8 @@ struct CommentTodoParams {
 struct ScratchpadParams {
     project_id: ProjectId,
     scratchpad_id: ScratchpadId,
+    #[serde(default)]
+    include_comments: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +125,8 @@ struct CreateScratchpadCommentParams {
     anchor_suffix: Option<String>,
     #[serde(default)]
     allow_unanchored: bool,
+    #[serde(default)]
+    expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,21 +481,25 @@ fn scratchpad_read(params: Value, store: &Store) -> ControlResult {
             None,
         )
         .map_err(scratchpad_error)?;
-    let comments = ScratchpadService::new(store)
-        .comment_list(params.project_id, params.scratchpad_id, true)
-        .map_err(scratchpad_error)?;
-    Ok(json!({
+    let mut response = json!({
         "scratchpad": read.scratchpad,
         "total_lines": read.total_lines,
-        "comments": comments.comments,
-        "comment_total_count": comments.total_count,
-        "unresolved_comment_count": comments.unresolved_count,
-    }))
+    });
+    if params.include_comments {
+        let comments = ScratchpadService::attributed(store, "user")
+            .comment_list(params.project_id, params.scratchpad_id, true)
+            .map_err(scratchpad_error)?;
+        response["comments"] = json!(comments.comments);
+        response["comment_total_count"] = json!(comments.total_count);
+        response["unresolved_comment_count"] = json!(comments.unresolved_count);
+        response["comments_revision"] = json!(comments.comments_revision);
+    }
+    Ok(response)
 }
 
 fn scratchpad_comments(params: Value, store: &Store) -> ControlResult {
     let params: ScratchpadCommentsParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .comment_list(
             params.project_id,
             params.scratchpad_id,
@@ -515,6 +523,7 @@ fn scratchpad_comment_create(params: Value, store: &Store) -> ControlResult {
                 anchor_prefix: params.anchor_prefix,
                 anchor_suffix: params.anchor_suffix,
                 allow_unanchored: params.allow_unanchored,
+                expected_revision: params.expected_revision,
             },
             now_millis(),
         )
@@ -524,7 +533,7 @@ fn scratchpad_comment_create(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_comment_update(params: Value, store: &Store) -> ControlResult {
     let params: UpdateScratchpadCommentParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .comment_update(
             params.project_id,
             params.comment_id,
@@ -537,7 +546,7 @@ fn scratchpad_comment_update(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_comment_resolve(params: Value, store: &Store) -> ControlResult {
     let params: ResolveScratchpadCommentParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .comment_set_resolved(
             params.project_id,
             params.comment_id,
@@ -550,7 +559,7 @@ fn scratchpad_comment_resolve(params: Value, store: &Store) -> ControlResult {
 
 fn scratchpad_comment_delete(params: Value, store: &Store) -> ControlResult {
     let params: DeleteScratchpadCommentParams = params_as(params)?;
-    ScratchpadService::new(store)
+    ScratchpadService::attributed(store, "user")
         .comment_delete(params.project_id, params.comment_id)
         .map(|scratchpad_id| {
             json!({
@@ -628,6 +637,7 @@ fn scratchpad_update(params: Value, store: &Store) -> ControlResult {
         "comments": comments.comments,
         "comment_total_count": comments.total_count,
         "unresolved_comment_count": comments.unresolved_count,
+        "comments_revision": comments.comments_revision,
     }))
 }
 

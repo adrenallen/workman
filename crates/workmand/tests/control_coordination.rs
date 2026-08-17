@@ -577,10 +577,15 @@ async fn coordination_scratchpad_comment_rpcs_cover_anchors_and_lifecycle() {
             "anchor_end": 15,
             "anchor_prefix": "",
             "anchor_suffix": ""
+            ,"expected_revision": 1
         }),
     )
     .await;
     assert_eq!(created["actor"], "user");
+    assert_eq!(created["actor_kind"], "user");
+    assert_eq!(created["can_edit"], true);
+    assert_eq!(created["can_resolve"], true);
+    assert_eq!(created["can_delete"], true);
     assert_eq!(created["anchor_state"], "anchored");
     assert_eq!(created["current_start_line"], 1);
     let comment_id = created["id"].as_i64().unwrap();
@@ -593,11 +598,16 @@ async fn coordination_scratchpad_comment_rpcs_cover_anchors_and_lifecycle() {
     )
     .await;
     assert_eq!(snapshot["scratchpads"][0]["unresolved_comment_count"], 1);
+    assert_eq!(snapshot["scratchpads"][0]["comments_revision"], 1);
     let detail = rpc(
         &mut socket,
         "detail",
         "coordination.scratchpad",
-        json!({ "project_id": 1, "scratchpad_id": scratchpad_id }),
+        json!({
+            "project_id": 1,
+            "scratchpad_id": scratchpad_id,
+            "include_comments": true
+        }),
     )
     .await;
     assert_eq!(detail["unresolved_comment_count"], 1);
@@ -619,6 +629,14 @@ async fn coordination_scratchpad_comment_rpcs_cover_anchors_and_lifecycle() {
     )
     .await;
     assert_eq!(resolved["resolved"], true);
+    let mutation_snapshot = rpc(
+        &mut socket,
+        "snapshot-mutations",
+        "coordination.snapshot",
+        json!({ "project_id": 1 }),
+    )
+    .await;
+    assert_eq!(mutation_snapshot["scratchpads"][0]["comments_revision"], 3);
     let unresolved = rpc(
         &mut socket,
         "comments-unresolved",
@@ -637,6 +655,14 @@ async fn coordination_scratchpad_comment_rpcs_cover_anchors_and_lifecycle() {
     )
     .await;
     assert_eq!(deleted["deleted"], true);
+    let delete_snapshot = rpc(
+        &mut socket,
+        "snapshot-delete",
+        "coordination.snapshot",
+        json!({ "project_id": 1 }),
+    )
+    .await;
+    assert_eq!(delete_snapshot["scratchpads"][0]["comments_revision"], 4);
 
     socket.close(None).await.unwrap();
     server.stop().await;
