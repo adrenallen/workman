@@ -37,6 +37,10 @@
     active: boolean;
     assertion_pid: number | null;
     warning: string | null;
+    notice: string | null;
+    respawn_count: number;
+    last_loss_reason: string | null;
+    retry_in_ms: number | null;
   }
 
   type ReleaseReason = 'idle' | 'user' | null;
@@ -60,13 +64,20 @@
   let machineGeneration = $state(0);
   let autoReleasePending = false;
   let componentActive = false;
+  let nativeSyncPending = false;
+  let notifiedRespawnCount = 0;
+  let daemonUnreachableNotified = false;
   let clockTick = $state(monotonicNow());
   let nativeStatus = $state<NativeKeepAwakeStatus>({
     supported: false,
     armed: false,
     active: false,
     assertion_pid: null,
-    warning: null
+    warning: null,
+    notice: null,
+    respawn_count: 0,
+    last_loss_reason: null,
+    retry_in_ms: null
   });
   let lastReleaseReason = $state<ReleaseReason>(null);
   let availableAgents = $derived(runningAgents(processes));
@@ -78,7 +89,7 @@
   ));
   let connectionEvaluation = $derived(evaluateKeepAwakeConnection(
     connectionMachine,
-    connectionStatus,
+    machine.armed ? connectionStatus : 'connected',
     clockTick
   ));
   let selectedAgent = $derived(
@@ -127,6 +138,9 @@
     const count = evaluation.waitingAgentIds.length;
     return `Keeping Mac awake. ${assertion} Waiting on ${count} ${count === 1 ? 'agent' : 'agents'}: ${names.join(', ')}`;
   });
+  let assertionHistoryLine = $derived(
+    machine.armed && nativeStatus.notice ? nativeStatus.notice : null
+  );
 
   $effect(() => {
     armed = machine.armed;
@@ -152,6 +166,34 @@
   });
 
   $effect(() => {
+    const count = nativeStatus.respawn_count;
+    if (count === 0) {
+      notifiedRespawnCount = 0;
+      return;
+    }
+    if (count <= notifiedRespawnCount) return;
+    notifiedRespawnCount = count;
+    void deliverNativeSystemNotification(
+      'Keep awake assertion restored',
+      `The macOS idle-sleep assertion has been restored ${count} ${count === 1 ? 'time' : 'times'} since arming.`
+    );
+  });
+
+  $effect(() => {
+    const unreachable = machine.armed && connectionEvaluation.daemonUnreachable;
+    if (!unreachable) {
+      daemonUnreachableNotified = false;
+      return;
+    }
+    if (daemonUnreachableNotified) return;
+    daemonUnreachableNotified = true;
+    void deliverNativeSystemNotification(
+      'Daemon unreachable — still keeping Mac awake',
+      'Keep awake will not auto-release until the daemon reconnects.'
+    );
+  });
+
+  $effect(() => {
     const status = connectionStatus;
     const documentVisible = visible;
     clockTick = monotonicNow();
@@ -170,7 +212,8 @@
     const timer = window.setInterval(() => {
       clockTick = monotonicNow();
       pollCount += 1;
-      if (machine.armed && !busy && pollCount % 3 === 0) void syncNativeStatus();
+      const shouldPoll = machine.armed ? pollCount % 3 === 0 : pollCount % 15 === 0;
+      if (!busy && shouldPoll) void syncNativeStatus();
     }, 1_000);
 
     return () => {
@@ -181,15 +224,12 @@
   });
 
   async function syncNativeStatus(): Promise<void> {
+    if (nativeSyncPending) return;
+    nativeSyncPending = true;
     const statusGeneration = machineGeneration;
     try {
-      let status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
       if (!componentActive || machineGeneration !== statusGeneration) return;
-      applyNativeStatus(status);
-      if (machine.armed && !busy && (!status.armed || !status.active)) {
-        status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
-        if (!componentActive || machineGeneration !== statusGeneration) return;
-      }
       applyNativeStatus(status);
       if (!machine.armed && status.armed) {
         mode = 'all';
@@ -200,6 +240,8 @@
       }
     } catch (cause) {
       if (componentActive && machineGeneration === statusGeneration) warning = message(cause);
+    } finally {
+      nativeSyncPending = false;
     }
   }
 
@@ -224,7 +266,7 @@
     try {
       const status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
       applyNativeStatus(status);
-      if (!status.supported || !status.active) {
+      if (!status.supported || !status.armed) {
         warning = status.warning ?? 'macOS keep awake is unavailable.';
         return;
       }
@@ -235,6 +277,9 @@
       machineGeneration += 1;
       lastReleaseReason = null;
       clockTick = monotonicNow();
+      if (!status.active) {
+        warning = status.warning ?? 'Restoring the macOS idle-sleep assertion.';
+      }
     } catch (cause) {
       warning = message(cause);
     } finally {
@@ -338,7 +383,7 @@
     <Popover.Content class="keep-awake-popover" align="start" side="bottom" sideOffset={7}>
       <Popover.Header>
         <Popover.Title>Keep Mac awake</Popover.Title>
-        <Popover.Description>Prevent idle sleep until watched agents are fully idle. Closing the lid still sleeps this Mac.</Popover.Description>
+        <Popover.Description>Prevents idle sleep on AC or battery. The hold ends when watched agents are idle, you disarm, or Workman quits; closing the lid still sleeps this Mac.</Popover.Description>
       </Popover.Header>
 
       <fieldset disabled={busy || machine.armed}>
@@ -383,6 +428,10 @@
 
       <p class:warning={statusIsWarning} role={statusIsWarning ? 'alert' : 'status'} aria-live="polite">{statusLine}</p>
 
+      {#if assertionHistoryLine}
+        <p class="assertion-history" role="status">{assertionHistoryLine}</p>
+      {/if}
+
       <Button
         size="sm"
         variant={machine.armed ? 'outline' : 'default'}
@@ -412,5 +461,6 @@
   .agent-select :global([data-slot='select-trigger']) { width: 100%; }
   p { min-height: 31px; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); background: var(--card); color: var(--text-soft); font: var(--font-size-xs) var(--font-mono); line-height: 1.45; }
   p.warning { border-color: color-mix(in srgb, var(--destructive) 40%, var(--border)); color: var(--destructive); }
+  p.assertion-history { min-height: 0; border-style: dashed; color: var(--muted-foreground); }
   :global(.keep-awake-popover > button:last-child) { width: 100%; }
 </style>

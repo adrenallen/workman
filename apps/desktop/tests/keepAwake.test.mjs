@@ -17,7 +17,8 @@ const files = {
   control: new URL('../src/lib/KeepAwakeControl.svelte', import.meta.url),
   navigation: new URL('../src/lib/navigation.ts', import.meta.url),
   palette: new URL('../src/lib/QuickJumpPalette.svelte', import.meta.url),
-  shortcuts: new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url)
+  shortcuts: new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url),
+  native: new URL('../src-tauri/src/lib.rs', import.meta.url)
 };
 
 const connected = { connected: true };
@@ -296,7 +297,7 @@ test('disconnect pauses idle progress and reconnect resumes it', () => {
   assert.equal(reconnected.shouldRelease, true);
 });
 
-test('disconnect observations keep accumulating when the window is hidden', () => {
+test('disconnect observations do not depend on document visibility', () => {
   const disconnected = observeDisconnectFor(10_000, 10_000);
   assert.equal(disconnected.daemonUnreachable, true);
 });
@@ -308,7 +309,7 @@ test('armed keep awake retains process statuses while the document is hidden', (
 });
 
 test('control exposes resilient, truthful keep-awake status and copy', async () => {
-  const [app, control, navigation, palette, shortcuts] = await Promise.all(
+  const [app, control, navigation, palette, shortcuts, native] = await Promise.all(
     Object.values(files).map((file) => readFile(file, 'utf8'))
   );
 
@@ -322,13 +323,16 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(control, /keep_awake_start/);
   assert.match(control, /keep_awake_stop/);
   assert.match(control, /keep_awake_status/);
-  assert.match(control, /!status\.armed \|\| !status\.active/);
+  assert.doesNotMatch(control, /await invoke<NativeKeepAwakeStatus>\('keep_awake_start'\)[\s\S]*keep_awake_start/);
   assert.match(control, /Daemon reconnecting — still keeping Mac awake/);
   assert.match(control, /Daemon unreachable — still keeping Mac awake/);
+  assert.match(control, /Keep awake assertion restored/);
+  assert.match(control, /Keep awake will not auto-release until the daemon reconnects/);
   assert.match(control, /Assertion PID \$\{status\.assertion_pid\} held/);
   assert.match(control, /Released because all watched agents became idle/);
   assert.match(control, /Released by you/);
-  assert.match(control, /Closing the lid still sleeps this Mac/);
+  assert.match(control, /Prevents idle sleep on AC or battery/);
+  assert.match(control, /Workman quits; closing the lid still sleeps this Mac/);
   assert.doesNotMatch(control, /released — daemon disconnected/i);
   assert.match(control, /var\(--font-mono\)/);
   assert.match(navigation, /type: 'keep-awake'/);
@@ -336,4 +340,8 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(palette, /label: 'Keep awake…'/);
   assert.match(shortcuts, /keepAwakeSupported \? ', including Keep awake…' : ''/);
   assert.doesNotMatch(shortcuts, /keys: \['⌘', 'K'\], label: 'Open Keep awake/);
+  assert.match(native, /run_keep_awake_watchdog/);
+  assert.match(native, /if !inner\.armed \|\| inner\.child\.is_some\(\)/);
+  assert.match(native, /KEEP_AWAKE_MAX_RETRY_DELAY/);
+  assert.match(native, /respawn_count/);
 });
