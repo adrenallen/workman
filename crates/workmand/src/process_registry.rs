@@ -1024,11 +1024,12 @@ impl ProcessRegistry {
             .with_env("TERM", "xterm-256color")
             .with_env("COLORTERM", "truecolor")
             .with_env("SHELL", user_environment.active_shell());
-        // Current agent TUIs gate standards-based modified-key negotiation on a known terminal
-        // program identity. Workman's agent PTYs implement the CSI-u subset used by WezTerm and
-        // advertised at runtime. Avoid the literal `kitty` identity: Bun takes that as permission
-        // to run Kitty-specific probes beyond the keyboard protocol. Ordinary terminals and
-        // commands keep their exact existing environment and input behavior.
+        // Agent TUIs use the terminal product identity for both color-depth detection and
+        // standards-based modified-key negotiation. Workman's PTY implements the CSI-u subset
+        // advertised by WezTerm, and Node/Bun honor COLORTERM=truecolor under that identity.
+        // Avoid Apple_Terminal: Node hard-caps it at 256 colors before checking COLORTERM, and
+        // some TUIs skip kitty/modifyOtherKeys negotiation for that less-capable identity.
+        // Appearance parity comes from the imported native profile, not from reducing capability.
         if process.kind == ProcessKind::Agent {
             options = options.with_env("TERM_PROGRAM", "WezTerm");
         }

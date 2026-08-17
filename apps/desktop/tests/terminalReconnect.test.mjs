@@ -37,7 +37,8 @@ test('reconnect preserves xterm state, accepts input, and resumes replay at its 
 
   assert.match(disconnected, /inputEnabled = true/);
   assert.doesNotMatch(disconnected, /instance\.reset\(\)/);
-  assert.match(terminal, /client\.attachTerminal\(processId, terminalOffset\)/);
+  assert.match(terminal, /client\.attachTerminal\(processId, requestedOffset\)/);
+  assert.match(terminal, /if \(!resumingConnection\) \{\s*replayPreviewAllowed = true/);
   assert.match(terminal, /if \(!resumingConnection\) \{\s*await client\.resizeTerminal/);
   assert.match(terminal, /Keystrokes are queued/);
   assert.match(app, /if \(!connected\) return;/);

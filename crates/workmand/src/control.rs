@@ -846,7 +846,10 @@ async fn dispatch(
                 .map_err(|error| ("agent_tool_icon_error", error.to_string()));
         }
         "settings.terminal_theme_import" => {
-            return Ok(json_value(terminal_theme::import_terminal_theme()));
+            let report = tokio::task::spawn_blocking(terminal_theme::import_terminal_theme)
+                .await
+                .map_err(|error| ("terminal_theme_import_error", error.to_string()))?;
+            return Ok(json_value(report));
         }
         _ => {}
     }
