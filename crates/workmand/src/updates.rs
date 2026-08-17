@@ -8,10 +8,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use workman_core::{
     DEFAULT_RELEASES_API, LATEST_RELEASES_API, UPDATE_CHECK_INTERVAL_SECS, UpdateChannel,
     UpdateCheck, UpdateClient, UpdateError, UpdateInstallReport, UpdateInstallTarget,
+    UpdateProgress, UpdateStage,
 };
 
 use crate::{RuntimeIdentity, user_config::resolve_update_key};
@@ -61,6 +62,8 @@ pub(crate) struct UpdateService {
     cache_path: PathBuf,
     cache: Arc<Mutex<UpdateCache>>,
     operation: Arc<AsyncMutex<()>>,
+    progress: Arc<Mutex<Option<UpdateProgress>>>,
+    progress_events: broadcast::Sender<UpdateProgress>,
     updates_enabled: bool,
 }
 
@@ -89,6 +92,7 @@ impl UpdateService {
             cache.last_checked_at = None;
             cache.last_check = None;
         }
+        let (progress_events, _) = broadcast::channel(64);
         Ok(Self {
             stable_client,
             latest_client,
@@ -97,6 +101,8 @@ impl UpdateService {
             cache_path,
             cache: Arc::new(Mutex::new(cache)),
             operation: Arc::new(AsyncMutex::new(())),
+            progress: Arc::new(Mutex::new(None)),
+            progress_events,
             updates_enabled,
         })
     }
@@ -125,7 +131,11 @@ impl UpdateService {
         let _operation = self.operation.lock().await;
         {
             let cache = self.cache.lock().expect("update cache lock poisoned");
-            if !force && !automatic_check_due(&cache, now()) {
+            if !force
+                && (!cache.automatic_checks
+                    || (cached_check_is_current(&cache, self.current_version)
+                        && !automatic_check_due(&cache, now())))
+            {
                 return Ok(status_from_cache(
                     &cache,
                     self.current_version,
@@ -204,15 +214,67 @@ impl UpdateService {
                     .to_owned(),
             ));
         }
-        let status = self.check_with_key(true, key_override).await?;
-        let override_client = key_override
+        self.publish_progress(UpdateProgress::stage(
+            UpdateStage::Checking,
+            "Checking for the latest Workman release",
+        ));
+        let status = match self.check_with_key(true, key_override).await {
+            Ok(status) => status,
+            Err(error) => {
+                self.publish_failure(&error);
+                return Err(error);
+            }
+        };
+        let override_client = match key_override
             .map(|key| self.client(status.channel).clone().with_key(key))
-            .transpose()?;
-        override_client
+            .transpose()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                self.publish_failure(&error);
+                return Err(error);
+            }
+        };
+        let client = override_client
             .as_ref()
-            .unwrap_or_else(|| self.client(status.channel))
-            .install_target(&status.check, &self.install_target)
+            .unwrap_or_else(|| self.client(status.channel));
+        let publish = |progress| self.publish_progress(progress);
+        match client
+            .install_target_with_progress(&status.check, &self.install_target, &publish)
             .await
+        {
+            Ok(report) => {
+                self.publish_progress(UpdateProgress::stage(
+                    UpdateStage::Restarting,
+                    format!("Installed Workman {} — restarting…", report.latest),
+                ));
+                Ok(report)
+            }
+            Err(error) => {
+                self.publish_failure(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn subscribe_progress(&self) -> broadcast::Receiver<UpdateProgress> {
+        self.progress_events.subscribe()
+    }
+
+    fn publish_progress(&self, progress: UpdateProgress) {
+        *self.progress.lock().expect("update progress lock poisoned") = Some(progress.clone());
+        let _ = self.progress_events.send(progress);
+    }
+
+    fn publish_failure(&self, error: &UpdateError) {
+        let progress = self
+            .progress
+            .lock()
+            .expect("update progress lock poisoned")
+            .clone()
+            .unwrap_or_else(|| UpdateProgress::stage(UpdateStage::Checking, "Checking for updates"))
+            .failed(error.to_string());
+        self.publish_progress(progress);
     }
 
     fn client(&self, channel: UpdateChannel) -> &UpdateClient {
@@ -230,6 +292,13 @@ fn automatic_check_due(cache: &UpdateCache, current_time: i64) -> bool {
         })
 }
 
+fn cached_check_is_current(cache: &UpdateCache, current_version: &str) -> bool {
+    cache
+        .last_check
+        .as_ref()
+        .is_some_and(|check| check.current == current_version)
+}
+
 fn status_from_cache(
     cache: &UpdateCache,
     current_version: &str,
@@ -242,6 +311,7 @@ fn status_from_cache(
         check: cache
             .last_check
             .clone()
+            .filter(|check| check.current == current_version)
             .unwrap_or_else(|| UpdateCheck::current_for(current_version, cache.channel)),
         cli_recovery_required,
     }
@@ -335,6 +405,24 @@ mod tests {
     fn status_exposes_cli_recovery_independently_of_release_availability() {
         let status = status_from_cache(&UpdateCache::default(), "0.1.6", true);
         assert!(status.cli_recovery_required);
+        assert!(!status.check.available);
+    }
+
+    #[test]
+    fn stale_pre_update_cache_never_reannounces_an_installed_release() {
+        let mut old_check = UpdateCheck::current("0.1.9");
+        old_check.latest = "0.1.10".to_owned();
+        old_check.available = true;
+        let cache = UpdateCache {
+            last_checked_at: Some(123),
+            last_check: Some(old_check),
+            ..UpdateCache::default()
+        };
+
+        assert!(!cached_check_is_current(&cache, "0.1.10"));
+        let status = status_from_cache(&cache, "0.1.10", false);
+        assert_eq!(status.check.current, "0.1.10");
+        assert_eq!(status.check.latest, "0.1.10");
         assert!(!status.check.available);
     }
 }

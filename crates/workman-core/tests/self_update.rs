@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use workman_core::{
     ApplicationInstallTarget, ReleaseTarget, UpdateChannel, UpdateClient, UpdateError,
-    UpdateInstallTarget,
+    UpdateInstallTarget, UpdateStage,
 };
 
 const TEST_UPDATE_KEY: &str = "fixture-update-key";
@@ -356,6 +356,58 @@ async fn bearer_authenticated_manifest_and_artifact_are_verified_and_installed()
             .desktop_instruction
             .unwrap()
             .contains("workman-desktop-fixture.zip")
+    );
+    assert!(report.restart_plan.daemon);
+    assert!(!report.restart_plan.app);
+}
+
+#[tokio::test]
+async fn install_progress_reports_download_verify_install_in_order() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let install = seed_install();
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.0").await.unwrap();
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let captured = progress.clone();
+
+    client
+        .install_target_with_progress(
+            &check,
+            &UpdateInstallTarget::binary_directory(install.path()),
+            &move |event| captured.lock().unwrap().push(event),
+        )
+        .await
+        .unwrap();
+
+    let progress = progress.lock().unwrap();
+    let stages = progress.iter().map(|event| event.stage).fold(
+        Vec::<UpdateStage>::new(),
+        |mut stages, stage| {
+            if stages.last() != Some(&stage) {
+                stages.push(stage);
+            }
+            stages
+        },
+    );
+    assert_eq!(
+        stages,
+        [
+            UpdateStage::Downloading,
+            UpdateStage::Verifying,
+            UpdateStage::Installing
+        ]
+    );
+    assert_eq!(progress.first().unwrap().percent, Some(0));
+    assert_eq!(
+        progress
+            .iter()
+            .rev()
+            .find(|event| event.stage == UpdateStage::Downloading)
+            .unwrap()
+            .percent,
+        Some(100)
     );
 }
 
@@ -779,8 +831,14 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
         fs::read_to_string(app.join("Contents/Resources/build-marker")).unwrap(),
         "new app"
     );
+    assert!(report.restart_plan.daemon);
+    assert!(report.restart_plan.app);
+    assert_eq!(
+        serde_json::to_value(&report.restart_plan).unwrap(),
+        serde_json::json!({ "daemon": true, "app": true })
+    );
     let message = report.desktop_instruction.unwrap();
-    assert!(message.contains("Close and reopen Workman"));
+    assert!(message.contains("restart automatically"));
     assert!(message.contains("Updated 2 command-line launchers"));
     assert!(!install_target.cli_recovery_required());
 }
@@ -924,6 +982,34 @@ async fn checksum_mismatch_leaves_both_installed_binaries_untouched() {
     assert_eq!(
         fs::read_to_string(install.path().join("workmand")).unwrap(),
         "old workmand"
+    );
+}
+
+#[tokio::test]
+async fn checksum_failure_is_attributed_to_verifying_before_install_starts() {
+    let fixture = Fixture::start(archive(), "0".repeat(64));
+    let install = seed_install();
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.0").await.unwrap();
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let captured = progress.clone();
+
+    let error = client
+        .install_target_with_progress(
+            &check,
+            &UpdateInstallTarget::binary_directory(install.path()),
+            &move |event| captured.lock().unwrap().push(event),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, UpdateError::ChecksumMismatch { .. }));
+    let progress = progress.lock().unwrap();
+    assert_eq!(progress.last().unwrap().stage, UpdateStage::Verifying);
+    assert!(
+        progress
+            .iter()
+            .all(|event| event.stage != UpdateStage::Installing)
     );
 }
 

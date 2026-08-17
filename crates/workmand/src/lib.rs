@@ -538,6 +538,7 @@ async fn control_session(
     let concurrent_invalidations = status_invalidations.clone();
     let mut status_subscription =
         ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
+    let mut update_progress = settings.updates().subscribe_progress();
     let (control_request_tx, mut control_request_rx) = mpsc::unbounded_channel::<String>();
     let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel::<String>();
     let control_registry = registry.clone();
@@ -686,6 +687,21 @@ async fn control_session(
             Some(response) = control_response_rx.recv() => {
                 if socket.send(Message::Text(response.into())).await.is_err() {
                     break;
+                }
+            }
+            progress = update_progress.recv() => {
+                match progress {
+                    Ok(progress) => {
+                        let event = json!({
+                            "event": "daemon.update_progress",
+                            "progress": progress,
+                        });
+                        if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             _ = &mut output_ready => {
@@ -1027,11 +1043,10 @@ async fn handle_session_control(
         };
         return Some(match result {
             Ok(result) => {
-                let shutdown_request = shutdown_request.clone();
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(150)).await;
-                    let _ = shutdown_request.send(true);
-                });
+                // Installation no longer races a fixed reply-then-shutdown timer. The report's
+                // restart plan transfers ownership to the caller: desktop first presents the
+                // installed state, then its native bridge stops the daemon and relaunches the
+                // refreshed bundle; `wrk update` explicitly requests daemon.restart.
                 json!({ "id": id, "ok": true, "result": result }).to_string()
             }
             Err(error) => update_error_reply(id, error),

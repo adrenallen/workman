@@ -2418,6 +2418,7 @@ async fn self_update(
         return Ok(());
     }
 
+    let installed_via_daemon = daemon_client.is_some();
     let report = if let Some(client) = daemon_client.as_mut() {
         eprintln!(
             "workman: warning: updating restarts workmand and stops all running project processes"
@@ -2433,6 +2434,12 @@ async fn self_update(
         updater.install_target(&check, &install_target).await?
     };
     print_update_report(&report);
+    if installed_via_daemon
+        && report.restart_plan.daemon
+        && let Some(client) = daemon_client.as_mut()
+    {
+        let _: serde_json::Value = client.rpc("daemon.restart", json!({})).await?;
+    }
     Ok(())
 }
 
