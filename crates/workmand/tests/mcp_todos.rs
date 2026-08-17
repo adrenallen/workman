@@ -43,7 +43,7 @@ async fn connect(endpoint: String, bearer_token: String) -> Result<Client, Box<d
 }
 
 #[tokio::test]
-async fn todo_lock_ownership_survives_actor_rotation_and_rejects_other_processes()
+async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_processes()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let first_path = temp.path().join("one");
@@ -140,7 +140,10 @@ async fn todo_lock_ownership_survives_actor_rotation_and_rejects_other_processes
     let other = connect(endpoint, "other-process-token".into()).await?;
     let first_identity = call(&first, "whoami", json!({})).await;
     let second_identity = call(&second, "whoami", json!({})).await;
-    assert_ne!(first_identity["actor_id"], second_identity["actor_id"]);
+    assert_eq!(
+        first_identity["actor_id"], second_identity["actor_id"],
+        "one process credential must resolve to one durable actor"
+    );
 
     let tools = first.list_all_tools().await?;
     let tool_names: Vec<_> = tools

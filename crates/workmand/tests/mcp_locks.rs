@@ -38,7 +38,7 @@ async fn connect(endpoint: String, token: String) -> Result<Client, Box<dyn Erro
 }
 
 #[tokio::test]
-async fn lock_ownership_survives_actor_rotation_and_rejects_other_processes()
+async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_path = temp.path().join("project");
@@ -130,7 +130,10 @@ async fn lock_ownership_survives_actor_rotation_and_rejects_other_processes()
         .as_str()
         .unwrap()
         .to_owned();
-    assert_ne!(first_actor, second_actor);
+    assert_eq!(
+        first_actor, second_actor,
+        "one process credential must resolve to one durable actor"
+    );
 
     let tool_names: Vec<_> = first
         .list_all_tools()
@@ -153,14 +156,14 @@ async fn lock_ownership_survives_actor_rotation_and_rejects_other_processes()
     assert_eq!(acquired["lease"]["owner_process_id"], 1);
     assert!(acquired["lease"].get("owner_actor_id").is_none());
     assert!(!acquired.to_string().contains(&first_actor));
-    let renewed_after_rotation = call(
+    let renewed_after_reconnect = call(
         &second,
         "lock_acquire",
         json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
-    assert_eq!(renewed_after_rotation["acquired"], true);
-    assert_eq!(renewed_after_rotation["lease"]["owner_process_id"], 1);
+    assert_eq!(renewed_after_reconnect["acquired"], true);
+    assert_eq!(renewed_after_reconnect["lease"]["owner_process_id"], 1);
 
     let denied = invoke(
         &other,
