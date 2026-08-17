@@ -113,14 +113,20 @@ test('new-agent dialog keeps template and agent choices independent and persiste
   assert.match(daemon, /listAgentTemplates\(\)[\s\S]*requestOptional\('agent_templates\.list', \{\}, \[\]\)/);
 });
 
-test('all desktop spawn entry surfaces route through the shared new-agent dialog', async () => {
+test('desktop spawn entry surfaces route through the inline draft panel', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  const draftPanel = await readFile(
+    new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url),
+    'utf8'
+  );
   const agentsPanel = await readFile(
     new URL('../src/lib/AgentsPanel.svelte', import.meta.url),
     'utf8'
   );
-  assert.match(app, /<NewAgentDialog/);
-  assert.match(app, /await openAgentDialog\(tool\.id\)/);
-  assert.match(app, /onSpawn=\{\(submission\) => spawnAgent\(submission\.tool, submission\.input, submission\.template\)\}/);
+  assert.match(app, /<NewAgentDraftPanel/);
+  assert.match(app, /await openAgentDraft\(tool\.id\)/);
+  assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
+  assert.match(draftPanel, /Template prompt is prepended/);
+  assert.match(draftPanel, /requestAnimationFrame\(\(\) => promptTextarea\?\.focus\(\)\)/);
   assert.match(agentsPanel, /<NewAgentDialog/);
 });
