@@ -983,13 +983,14 @@ impl ProcessRegistry {
             .with_env("TERM", "xterm-256color")
             .with_env("COLORTERM", "truecolor")
             .with_env("SHELL", user_environment.active_shell());
-        // Match the macOS terminal users compare Workman against. TERM and COLORTERM above remain
-        // the capability contract for 256-color/truecolor output; TERM_PROGRAM is product identity,
-        // and claiming WezTerm made Codex and Claude choose non-native presentation/probe paths.
-        // Workman's key encoder still provides the native macOS editing keys independently of this
-        // value, while applications can negotiate terminal protocols from the advertised TERM.
+        // Agent TUIs use the terminal product identity for both color-depth detection and
+        // standards-based modified-key negotiation. Workman's PTY implements the CSI-u subset
+        // advertised by WezTerm, and Node/Bun honor COLORTERM=truecolor under that identity.
+        // Avoid Apple_Terminal: Node hard-caps it at 256 colors before checking COLORTERM, and
+        // some TUIs skip kitty/modifyOtherKeys negotiation for that less-capable identity.
+        // Appearance parity comes from the imported native profile, not from reducing capability.
         if process.kind == ProcessKind::Agent {
-            options = options.with_env("TERM_PROGRAM", "Apple_Terminal");
+            options = options.with_env("TERM_PROGRAM", "WezTerm");
         }
         options = if interactive_terminal {
             options.with_login_shell(user_environment.active_shell())
@@ -2830,15 +2831,15 @@ mod tests {
         let output = loop {
             let output = registry.raw_output(42, None, usize::MAX).unwrap().data;
             if output
-                .windows(b"AGENT_TERM_PROGRAM:Apple_Terminal".len())
-                .any(|window| window == b"AGENT_TERM_PROGRAM:Apple_Terminal")
+                .windows(b"AGENT_TERM_PROGRAM:WezTerm".len())
+                .any(|window| window == b"AGENT_TERM_PROGRAM:WezTerm")
             {
                 break String::from_utf8_lossy(&output).into_owned();
             }
             assert!(Instant::now() < deadline, "timed out: {output:?}");
             thread::sleep(Duration::from_millis(10));
         };
-        assert!(output.contains("AGENT_TERM_PROGRAM:Apple_Terminal"));
+        assert!(output.contains("AGENT_TERM_PROGRAM:WezTerm"));
     }
 
     #[test]
