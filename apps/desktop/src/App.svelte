@@ -140,7 +140,7 @@
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
   import type { ProjectSettingsInput } from './lib/projectAppearance';
-  import { defaultProjectTitleFromPath, resolvedProjectTitle } from './lib/projectTitles';
+  import { registrationTitleForPath, resolvedProjectTitle } from './lib/projectTitles';
   import {
     createProjectFolder,
     deleteProjectFolder,
@@ -2725,14 +2725,37 @@
     }
   }
 
-  async function registerProject(): Promise<void> {
+  async function chooseRegisterProjectFolder(): Promise<string | null> {
     const path = await open({ directory: true, multiple: false, title: 'Register a project folder' });
-    if (typeof path !== 'string') return;
+    return typeof path === 'string' ? path : null;
+  }
+
+  function showRegisterProjectTitle(path: string): void {
     registerProjectError = null;
     registerProjectDialog = {
       path,
-      defaultTitle: defaultProjectTitleFromPath(path)
+      defaultTitle: registrationTitleForPath(path, projects)
     };
+  }
+
+  async function registerProject(): Promise<void> {
+    const path = await chooseRegisterProjectFolder();
+    if (path) showRegisterProjectTitle(path);
+  }
+
+  async function changeRegisterProjectFolder(): Promise<void> {
+    const previous = registerProjectDialog;
+    const previousError = registerProjectError;
+    if (!previous || registerProjectBusy) return;
+    registerProjectDialog = null;
+    registerProjectError = null;
+    const path = await chooseRegisterProjectFolder();
+    if (path) {
+      showRegisterProjectTitle(path);
+    } else {
+      registerProjectDialog = previous;
+      registerProjectError = previousError;
+    }
   }
 
   async function submitRegisterProject(title: string): Promise<void> {
@@ -4428,6 +4451,7 @@
     busy={registerProjectBusy}
     error={registerProjectError}
     onSubmit={(title) => void submitRegisterProject(title)}
+    onBack={() => void changeRegisterProjectFolder()}
     onClose={() => {
       if (!registerProjectBusy) {
         registerProjectDialog = null;

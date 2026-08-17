@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import FolderPlusIcon from '@lucide/svelte/icons/folder-plus';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import XIcon from '@lucide/svelte/icons/x';
@@ -7,7 +8,6 @@
   import { Button } from '$lib/components/ui/button';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
-  import { resolvedProjectTitle } from './projectTitles';
 
   interface Props {
     path: string;
@@ -15,6 +15,7 @@
     busy?: boolean;
     error?: string | null;
     onSubmit: (title: string) => void;
+    onBack: () => void;
     onClose: () => void;
   }
 
@@ -24,6 +25,7 @@
     busy = false,
     error = null,
     onSubmit,
+    onBack,
     onClose
   }: Props = $props();
 
@@ -34,22 +36,20 @@
   let title = $state(initialTitle());
   let titleInput = $state<HTMLInputElement | null>(null);
 
-  $effect(() => {
-    if (!titleInput) return;
-    queueMicrotask(() => {
-      titleInput?.focus();
-      titleInput?.select();
-    });
-  });
-
   function submit(value = title): void {
     if (busy) return;
-    onSubmit(resolvedProjectTitle(value, defaultTitle));
+    onSubmit(value);
   }
 
   function keepDefault(event: KeyboardEvent): void {
     event.preventDefault();
     submit(defaultTitle);
+  }
+
+  function handleTitleKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+    event.preventDefault();
+    submit();
   }
 </script>
 
@@ -60,8 +60,10 @@
     aria-describedby="register-project-description"
     onOpenAutoFocus={(event) => {
       event.preventDefault();
-      titleInput?.focus();
-      titleInput?.select();
+      queueMicrotask(() => {
+        titleInput?.focus();
+        titleInput?.select();
+      });
     }}
     onEscapeKeydown={keepDefault}
   >
@@ -86,17 +88,27 @@
       <div class="grid gap-1.5 px-4 py-3">
         <label class="grid gap-1.5">
           <span class="text-sm font-medium">Title</span>
-          <Input bind:ref={titleInput} bind:value={title} autocomplete="off" aria-label="Project title" />
+          <Input
+            bind:ref={titleInput}
+            bind:value={title}
+            autocomplete="off"
+            aria-label="Project title"
+            aria-describedby={error ? 'register-project-title-help register-project-error' : 'register-project-title-help'}
+            onkeydown={handleTitleKeydown}
+          />
         </label>
-        <small class="text-xs text-muted-foreground">Enter registers this title. Esc keeps “{defaultTitle}”.</small>
-        {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
+        <small id="register-project-title-help" class="text-xs text-muted-foreground">Enter registers this title. Esc registers as “{defaultTitle}”. Cancel discards.</small>
+        {#if error}<p id="register-project-error" class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
       </div>
 
-      <Dialog.Footer class="flex-row justify-end border-t border-border bg-card px-4 py-2.5">
-        <Button type="button" variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
-        <Button type="submit" disabled={busy}>
-          {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{busy ? 'Registering…' : 'Register project'}
-        </Button>
+      <Dialog.Footer class="flex-row justify-between border-t border-border bg-card px-4 py-2.5">
+        <Button type="button" variant="ghost" disabled={busy} onclick={onBack}><ArrowLeftIcon size={14} />Back</Button>
+        <span class="flex items-center gap-2">
+          <Button type="button" variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
+          <Button type="submit" disabled={busy}>
+            {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{busy ? 'Registering…' : 'Register project'}
+          </Button>
+        </span>
       </Dialog.Footer>
     </form>
   </Dialog.Content>

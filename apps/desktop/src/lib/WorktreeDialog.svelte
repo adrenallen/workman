@@ -26,7 +26,8 @@
   import {
     defaultProjectTitleFromPath,
     defaultWorktreeTitle,
-    resolvedProjectTitle
+    resolvedProjectTitle,
+    syncProjectTitleDefault
   } from './projectTitles';
   import type { Project } from './daemon';
   import type {
@@ -96,6 +97,7 @@
   let advancedOpen = $state(false);
   let branchInput = $state<HTMLInputElement | null>(null);
   let branchSearchInput = $state<HTMLInputElement | null>(null);
+  let adoptPathInput = $state<HTMLInputElement | null>(null);
   let baseRefInput = $state<HTMLInputElement | null>(null);
   let projectTitleInput = $state<HTMLInputElement | null>(null);
   let baseRefPicker = $state<HTMLDivElement | null>(null);
@@ -111,7 +113,7 @@
   let activeRefOption = $derived(rankedRefOptions[baseRefOptionIndex] ?? null);
   let titleBranch = $derived(mode === 'create' && createKind === 'origin' ? existingBranch : branch);
   let defaultProjectTitle = $derived(mode === 'adopt'
-    ? defaultProjectTitleFromPath(adoptPath, 'Worktree')
+    ? defaultProjectTitleFromPath(adoptPath, '')
     : defaultWorktreeTitle(titleBranch));
   let previewBranch = $derived(branch.trim() || 'branch-name');
   let previewRef = $derived(resolvedRef ?? (baseRef.trim() || 'starting-ref'));
@@ -141,13 +143,13 @@
 
   $effect(() => {
     const input = mode === 'adopt'
-      ? projectTitleInput
+      ? adoptPathInput
       : mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
     if (input) queueMicrotask(() => input?.focus());
   });
 
   $effect(() => {
-    if (!projectTitleTouched) projectTitle = defaultProjectTitle;
+    projectTitle = syncProjectTitleDefault(projectTitle, defaultProjectTitle, projectTitleTouched);
   });
 
   $effect(() => {
@@ -317,10 +319,11 @@
   async function chooseDirectory(): Promise<void> {
     const path = await open({ directory: true, multiple: false, title: 'Choose an existing Git worktree' });
     if (typeof path === 'string') {
+      const selectDerivedTitle = !projectTitleTouched;
       adoptPath = path;
       queueMicrotask(() => {
         projectTitleInput?.focus();
-        projectTitleInput?.select();
+        if (selectDerivedTitle) projectTitleInput?.select();
       });
     }
   }
@@ -375,7 +378,7 @@
           <label class="grid gap-1.5">
             <span class="text-sm font-medium">Existing worktree folder</span>
             <span class="flex gap-2">
-              <Input bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
+              <Input bind:ref={adoptPathInput} bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
               <Button type="button" variant="outline" onclick={() => void chooseDirectory()}><FolderOpenIcon size={14} />Choose…</Button>
             </span>
             <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not Workman-managed.</small>
@@ -387,9 +390,11 @@
               bind:value={projectTitle}
               autocomplete="off"
               aria-label="Worktree title"
+              aria-describedby="worktree-title-help"
+              placeholder="Follows the selected folder"
               oninput={() => (projectTitleTouched = true)}
             />
-            <small class="text-xs text-muted-foreground">Defaults to the existing folder name; an empty title keeps that default.</small>
+            <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults to the existing folder name; an empty title keeps that default.</small>
           </label>
         {:else}
           {#if mode === 'create'}
@@ -476,9 +481,11 @@
               bind:value={projectTitle}
               autocomplete="off"
               aria-label="Worktree title"
+              aria-describedby="worktree-title-help"
+              placeholder="Follows the branch name"
               oninput={() => (projectTitleTouched = true)}
             />
-            <small class="text-xs text-muted-foreground">Defaults live to the final branch segment; an empty title keeps that default.</small>
+            <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults live to the full branch name; an empty title keeps that default.</small>
           </label>
 
           {#if mode === 'create' && createKind === 'new'}

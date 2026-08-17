@@ -403,6 +403,7 @@ export class DaemonClient
   }
 
   register(path: string, displayName?: string): Promise<Project[]> {
+    // Older daemons ignore this optional key during brief app/daemon version skew.
     return this.request('projects.register', { path, display_name: displayName });
   }
 

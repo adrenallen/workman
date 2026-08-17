@@ -10,7 +10,7 @@ test('folder selection opens a focused title step before the registration RPC', 
   const dialog = await readFile(dialogUrl, 'utf8');
   const app = await readFile(appUrl, 'utf8');
 
-  assert.match(app, /defaultTitle: defaultProjectTitleFromPath\(path\)/);
+  assert.match(app, /defaultTitle: registrationTitleForPath\(path, projects\)/);
   assert.match(app, /registerProjectDialog = \{/);
   assert.match(app, /client\.register\([\s\S]*?state\.path,[\s\S]*?resolvedProjectTitle/);
   assert.match(dialog, /bind:ref=\{titleInput\}/);
@@ -18,6 +18,10 @@ test('folder selection opens a focused title step before the registration RPC', 
   assert.match(dialog, /titleInput\?\.select\(\)/);
   assert.match(dialog, /onEscapeKeydown=\{keepDefault\}/);
   assert.match(dialog, /submit\(defaultTitle\)/);
+  assert.match(dialog, /Esc registers as/);
+  assert.match(dialog, /event\.metaKey && !event\.ctrlKey/);
+  assert.match(dialog, /onclick=\{onBack\}/);
+  assert.match(app, /onBack=\{\(\) => void changeRegisterProjectFolder\(\)\}/);
 });
 
 test('registration sends an optional display name in the original round trip', async () => {
