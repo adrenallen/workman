@@ -6,17 +6,25 @@ import type {
 } from './settings';
 
 export type UpdateCompletionAction = 'relaunch' | 'restart-daemon-only' | 'manual-restart';
+export type UpdateRestartAction = 'app' | 'daemon' | null;
 
 export type UpdateFlow =
   | { kind: 'idle' }
   | { kind: 'running'; progress: UpdateProgress }
-  | { kind: 'restarting'; version: string }
-  | { kind: 'needs-restart'; version: string; instruction: string | null }
+  | { kind: 'restarting'; version: string; target: 'app' | 'daemon' }
+  | {
+      kind: 'needs-restart';
+      version: string;
+      title: string;
+      instruction: string;
+      restartAction: UpdateRestartAction;
+    }
   | { kind: 'failed'; stage: UpdateStage; message: string };
 
 export interface UpdateEnvironment {
   nativeRelaunchAvailable: boolean;
   appVersion: string;
+  appBundle: string | null;
 }
 
 export interface UpdateBannerState {
@@ -28,24 +36,78 @@ export interface UpdateBannerState {
   indeterminate: boolean;
   retry: boolean;
   restart: boolean;
+  restartLabel: string | null;
   dismiss: boolean;
 }
 
 export const idleUpdateFlow: UpdateFlow = { kind: 'idle' };
 
+export function canPresentUpdateProgress(flow: UpdateFlow, installActive: boolean): boolean {
+  return installActive && flow.kind === 'running';
+}
+
 export function updateCompletionAction(
   report: UpdateInstallReport,
   environment: UpdateEnvironment
 ): UpdateCompletionAction {
-  if (report.restart_plan.app && environment.nativeRelaunchAvailable) return 'relaunch';
+  const restartPlan = report.restart_plan ?? { daemon: true, app: false };
   if (
-    report.restart_plan.daemon
-    && !report.restart_plan.app
+    restartPlan.app
+    && environment.nativeRelaunchAvailable
+    && report.installed_app_bundle
+    && environment.appBundle
+    && samePath(report.installed_app_bundle, environment.appBundle)
+  ) return 'relaunch';
+  if (
+    restartPlan.daemon
+    && !restartPlan.app
     && report.latest === environment.appVersion
   ) {
     return 'restart-daemon-only';
   }
   return 'manual-restart';
+}
+
+export function manualUpdateFlow(
+  report: UpdateInstallReport,
+  reason: string | null = null,
+  restartAction: UpdateRestartAction = null
+): Extract<UpdateFlow, { kind: 'needs-restart' }> {
+  const restartPlan = report.restart_plan;
+  const paths = report.updated_files.length > 0
+    ? report.updated_files.map((path) => shortPath(path)).join(', ')
+    : report.install_dir;
+  if (restartPlan?.app && report.installed_app_bundle) {
+    return {
+      kind: 'needs-restart',
+      version: report.latest,
+      title: `Installed Workman ${report.latest}. Restart Workman to finish`,
+      instruction: reason
+        ?? report.desktop_instruction
+        ?? `The app bundle at ${report.installed_app_bundle} was replaced, but it could not relaunch automatically.`,
+      restartAction
+    };
+  }
+  if (restartPlan && !restartPlan.app) {
+    return {
+      kind: 'needs-restart',
+      version: report.latest,
+      title: `Updated command-line tools and daemon to Workman ${report.latest}`,
+      instruction: reason
+        ?? report.desktop_instruction
+        ?? `Updated wrk and workmand (${paths}). The desktop app bundle was not replaced.`,
+      restartAction
+    };
+  }
+  return {
+    kind: 'needs-restart',
+    version: report.latest,
+    title: `Installed Workman ${report.latest}`,
+    instruction: reason
+      ?? report.desktop_instruction
+      ?? 'The update completed through an older daemon. Close and reopen the affected Workman surfaces manually.',
+    restartAction
+  };
 }
 
 export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow): UpdateBannerState {
@@ -66,6 +128,7 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
       indeterminate: progress.percent === null,
       retry: false,
       restart: false,
+      restartLabel: null,
       dismiss: false
     };
   }
@@ -74,11 +137,14 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
       visible: true,
       mode: 'restarting',
       title: `Installed Workman ${flow.version} — restarting…`,
-      description: 'Stopping the old daemon and reopening the updated desktop app.',
+      description: flow.target === 'app'
+        ? 'Stopping the old daemon and reopening the updated desktop app.'
+        : 'Stopping the old daemon and reconnecting to the updated daemon.',
       percent: 100,
       indeterminate: false,
       retry: false,
       restart: false,
+      restartLabel: null,
       dismiss: false
     };
   }
@@ -86,12 +152,13 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
     return {
       visible: true,
       mode: 'needs-restart',
-      title: `Installed Workman ${flow.version}. Restart Workman to finish`,
-      description: flow.instruction ?? 'The update is installed, but this environment cannot relaunch automatically.',
+      title: flow.title,
+      description: flow.instruction,
       percent: 100,
       indeterminate: false,
       retry: false,
-      restart: true,
+      restart: flow.restartAction !== null,
+      restartLabel: flow.restartAction === 'daemon' ? 'Restart daemon' : flow.restartAction === 'app' ? 'Restart now' : null,
       dismiss: true
     };
   }
@@ -115,6 +182,7 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
     indeterminate: false,
     retry: false,
     restart: false,
+    restartLabel: null,
     dismiss: false
   };
 }
@@ -139,8 +207,18 @@ function failedBanner(stage: UpdateStage, message: string): UpdateBannerState {
     indeterminate: false,
     retry: true,
     restart: false,
+    restartLabel: null,
     dismiss: true
   };
+}
+
+function samePath(left: string, right: string): boolean {
+  return left.replace(/\/+$/, '') === right.replace(/\/+$/, '');
+}
+
+function shortPath(path: string): string {
+  const pieces = path.split('/').filter(Boolean);
+  return pieces.at(-1) ?? path;
 }
 
 function downloadDetail(progress: UpdateProgress): string {

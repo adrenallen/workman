@@ -27,6 +27,8 @@ export interface SettingsPanelProps {
   connection: ConnectionStatus;
   updateFlow: UpdateFlow;
   onApplyUpdate: (update: UpdateStatus) => Promise<void>;
+  onRestartUpdate: () => Promise<void>;
+  onDismissUpdate: () => void;
   onError: (message: string) => void;
   onProfileSwitched: () => void;
 }

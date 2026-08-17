@@ -55,7 +55,9 @@
   } from './lib/settings';
   import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
   import {
+    canPresentUpdateProgress,
     idleUpdateFlow,
+    manualUpdateFlow,
     updateBannerState,
     updateCompletionAction,
     type UpdateFlow
@@ -350,15 +352,20 @@
   let startupUpdatePort = $state<number | null>(null);
   let updateFlow = $state<UpdateFlow>(idleUpdateFlow);
   let nativeRelaunchAvailable = $state(false);
+  let nativeRelaunchAppBundle = $state<string | null>(null);
+  let updateBannerDismissed = $state(false);
   let updatedVersionNotice = $state<string | null>(null);
   let justUpdatedVersion: string | null = null;
   let daemonOnlyRestartPending = false;
+  let updateInstallActive = false;
   let installedUpdateReport: UpdateInstallReport | null = null;
+  let updateRestartTimer: ReturnType<typeof setTimeout> | null = null;
   let updateProgressPresentedAt = 0;
   let updateProgressTimer: ReturnType<typeof setTimeout> | null = null;
   let updateProgressQueue: UpdateProgress[] = [];
   let updateProgressWaiters: Array<() => void> = [];
   const updateStageMinimumMs = 300;
+  const updateRestartTimeoutMs = 20_000;
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -502,9 +509,13 @@
   let cliRecoveryRequired = $derived(startupUpdate?.cli_recovery_required === true);
   let startupUpdateCopy = $derived(startupUpdate ? updateActionCopy(startupUpdate) : null);
   let updateBanner = $derived(updateBannerState(startupUpdate, updateFlow));
-  let updateFlowActive = $derived(updateFlow.kind !== 'idle');
-  let showVersionSkew = $derived(versionSkew && !updateFlowActive);
-  let showVersionBanner = $derived(showVersionSkew || updateBanner.visible);
+  let updateFlowBlocksSkew = $derived(
+    updateFlow.kind === 'running'
+      || updateFlow.kind === 'restarting'
+      || (updateFlow.kind === 'needs-restart' && !updateBannerDismissed)
+  );
+  let showVersionSkew = $derived(versionSkew && !updateFlowBlocksSkew);
+  let showVersionBanner = $derived(showVersionSkew || (updateBanner.visible && !updateBannerDismissed));
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
@@ -584,9 +595,15 @@
 
   onMount(() => {
     justUpdatedVersion = localStorage.getItem('workman.just-updated-to');
-    void invoke<{ supported: boolean }>('desktop_relaunch_capability')
-      .then((capability) => (nativeRelaunchAvailable = capability.supported))
-      .catch(() => (nativeRelaunchAvailable = false));
+    void invoke<{ supported: boolean; app_bundle: string | null }>('desktop_relaunch_capability')
+      .then((capability) => {
+        nativeRelaunchAvailable = capability.supported;
+        nativeRelaunchAppBundle = capability.app_bundle;
+      })
+      .catch(() => {
+        nativeRelaunchAvailable = false;
+        nativeRelaunchAppBundle = null;
+      });
     const projectPreference = loadPanelPreference(
       'project-rail',
       { collapsed: false, width: projectRailWidth },
@@ -650,10 +667,6 @@
         applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
       }
       reconcileAgentDoneNotices(next);
-    });
-    const stopUpdateProgress = client.onUpdateProgress((progress) => {
-      if (!active) return;
-      presentUpdateProgress(progress);
     });
     let lastNavigationRequest = 0;
     const stopNavigation = appNavigation.subscribe(({ request }) => {
@@ -723,8 +736,8 @@
       clearInterval(coordinationTimer);
       clearInterval(notificationTimer);
       if (updateProgressTimer) clearTimeout(updateProgressTimer);
+      if (updateRestartTimer) clearTimeout(updateRestartTimer);
       stopStatuses();
-      stopUpdateProgress();
       stopNavigation();
       stopNativeMenu();
       stopNativeNotifications();
@@ -763,6 +776,7 @@
       }
       if (status.version_compatible && daemonOnlyRestartPending && reconnected) {
         daemonOnlyRestartPending = false;
+        clearUpdateRestartWatchdog();
         updateFlow = idleUpdateFlow;
         startupUpdate = null;
         versionRestarting = false;
@@ -3865,9 +3879,12 @@
     if (
       !update
       || !updateActionAvailable(update)
+      || updateInstallActive
       || updateFlow.kind === 'running'
       || updateFlow.kind === 'restarting'
     ) return;
+    updateInstallActive = true;
+    updateBannerDismissed = false;
     versionRestarting = true;
     installedUpdateReport = null;
     resetUpdateProgressPresentation();
@@ -3877,7 +3894,11 @@
     };
     updateProgressPresentedAt = Date.now();
     try {
-      const report = await applyUpdate(client);
+      const report = await applyUpdate(client, (progress) => {
+        if (canPresentUpdateProgress(updateFlow, updateInstallActive)) {
+          presentUpdateProgress(progress);
+        }
+      });
       installedUpdateReport = report;
       presentUpdateProgress(
         updateProgress('restarting', `Installed Workman ${report.latest} — restarting…`)
@@ -3893,77 +3914,141 @@
         message: cause instanceof Error ? cause.message : String(cause)
       };
       versionRestarting = false;
+    } finally {
+      updateInstallActive = false;
     }
   }
 
   async function completeInstalledUpdate(report: UpdateInstallReport): Promise<void> {
     const action = updateCompletionAction(report, {
       nativeRelaunchAvailable,
-      appVersion: connection.app_version
+      appVersion: connection.app_version,
+      appBundle: nativeRelaunchAppBundle
     });
     if (action === 'manual-restart') {
-      updateFlow = {
-        kind: 'needs-restart',
-        version: report.latest,
-        instruction: 'The update is installed, but this environment cannot relaunch automatically.'
-      };
+      const canRetryNativeRestart = report.restart_plan?.app === true
+        && report.installed_app_bundle !== undefined
+        && report.installed_app_bundle !== null
+        && report.installed_app_bundle.replace(/\/+$/, '') === nativeRelaunchAppBundle?.replace(/\/+$/, '');
+      updateFlow = manualUpdateFlow(report, null, canRetryNativeRestart ? 'app' : null);
       startupUpdate = null;
       versionRestarting = false;
       return;
     }
 
-    updateFlow = { kind: 'restarting', version: report.latest };
+    const restartTarget = action === 'relaunch' ? 'app' : 'daemon';
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartTarget };
     await delay(1_000);
     if (action === 'restart-daemon-only') {
       daemonOnlyRestartPending = true;
-      await client.restartDaemon();
+      armUpdateRestartWatchdog(report, 'daemon');
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
       return;
     }
 
     localStorage.setItem('workman.just-updated-to', report.latest);
+    armUpdateRestartWatchdog(report, 'app');
     try {
       await invoke('desktop_restart_after_update', {
         confirmProcessesStopped: true,
-        restartDaemon: report.restart_plan.daemon
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
       });
     } catch (cause) {
-      localStorage.removeItem('workman.just-updated-to');
-      updateFlow = {
-        kind: 'needs-restart',
-        version: report.latest,
-        instruction: `The update is installed, but automatic restart was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`
-      };
-      versionRestarting = false;
+      showUpdateRestartFallback(report, cause, 'app');
     }
   }
 
   async function restartInstalledUpdate(): Promise<void> {
     const report = installedUpdateReport;
     if (!report || updateFlow.kind !== 'needs-restart') return;
-    updateFlow = { kind: 'restarting', version: report.latest };
+    const restartAction = updateFlow.restartAction;
+    if (!restartAction) return;
+    updateBannerDismissed = false;
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartAction };
     versionRestarting = true;
+    armUpdateRestartWatchdog(report, restartAction);
+    if (restartAction === 'daemon') {
+      daemonOnlyRestartPending = true;
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
+      return;
+    }
     localStorage.setItem('workman.just-updated-to', report.latest);
     try {
       await invoke('desktop_restart_after_update', {
         confirmProcessesStopped: true,
-        restartDaemon: report.restart_plan.daemon
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
       });
     } catch (cause) {
-      localStorage.removeItem('workman.just-updated-to');
-      updateFlow = {
-        kind: 'needs-restart',
-        version: report.latest,
-        instruction: `Restart Workman from the system launcher. ${cause instanceof Error ? cause.message : String(cause)}`
-      };
-      versionRestarting = false;
+      showUpdateRestartFallback(report, cause, 'app');
     }
   }
 
   function dismissInstalledUpdate(): void {
+    if (updateFlow.kind === 'needs-restart') {
+      updateBannerDismissed = true;
+      startupUpdate = null;
+      versionRestarting = false;
+      return;
+    }
+    resetUpdateProgressPresentation();
+    clearUpdateRestartWatchdog();
     updateFlow = idleUpdateFlow;
     installedUpdateReport = null;
     startupUpdate = null;
     versionRestarting = false;
+  }
+
+  function showUpdateRestartFallback(
+    report: UpdateInstallReport,
+    cause: unknown,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    localStorage.removeItem('workman.just-updated-to');
+    const message = cause instanceof Error ? cause.message : String(cause);
+    updateFlow = manualUpdateFlow(
+      report,
+      `The update is installed, but automatic restart was unavailable: ${message}`,
+      restartAction
+    );
+    updateBannerDismissed = false;
+    versionRestarting = false;
+  }
+
+  function armUpdateRestartWatchdog(
+    report: UpdateInstallReport,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    updateRestartTimer = setTimeout(() => {
+      updateRestartTimer = null;
+      if (updateFlow.kind !== 'restarting') return;
+      daemonOnlyRestartPending = false;
+      showUpdateRestartFallback(
+        report,
+        restartAction === 'app'
+          ? 'the desktop process did not relaunch within 20 seconds'
+          : 'the updated daemon did not reconnect within 20 seconds',
+        restartAction
+      );
+    }, updateRestartTimeoutMs);
+  }
+
+  function clearUpdateRestartWatchdog(): void {
+    if (updateRestartTimer) clearTimeout(updateRestartTimer);
+    updateRestartTimer = null;
   }
 
   function updateProgress(stage: UpdateStage, message: string): UpdateProgress {
@@ -3978,6 +4063,7 @@
   }
 
   function presentUpdateProgress(progress: UpdateProgress): void {
+    if (!canPresentUpdateProgress(updateFlow, updateInstallActive)) return;
     if (progress.failed) {
       resetUpdateProgressPresentation();
       updateFlow = { kind: 'failed', stage: progress.stage, message: progress.message };
@@ -4009,7 +4095,7 @@
   function drainUpdateProgress(): void {
     updateProgressTimer = null;
     const next = updateProgressQueue.shift();
-    if (next) {
+    if (next && canPresentUpdateProgress(updateFlow, updateInstallActive)) {
       updateFlow = { kind: 'running', progress: next };
       updateProgressPresentedAt = Date.now();
     }
@@ -4095,8 +4181,13 @@
         </Button>
       {:else if updateBanner.retry}
         <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void performAvailableUpdate()}>Retry</Button>
+        {#if updateBanner.dismiss}
+          <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+        {/if}
       {:else if updateBanner.restart}
-        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void restartInstalledUpdate()}>Restart now</Button>
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void restartInstalledUpdate()}>{updateBanner.restartLabel}</Button>
+        <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+      {:else if updateBanner.dismiss}
         <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
       {/if}
     </div>
@@ -4104,7 +4195,7 @@
 {/if}
 
 {#if updatedVersionNotice}
-  <button class="updated-version-notice" type="button" onclick={() => (updatedVersionNotice = null)}>
+  <button class:with-version-banner={showVersionBanner} class="updated-version-notice" type="button" onclick={() => (updatedVersionNotice = null)}>
     Updated to Workman {updatedVersionNotice}
   </button>
 {/if}
@@ -4443,6 +4534,8 @@
           {connection}
           {updateFlow}
           onApplyUpdate={performAvailableUpdate}
+          onRestartUpdate={restartInstalledUpdate}
+          onDismissUpdate={dismissInstalledUpdate}
           onError={reportError}
           onProfileSwitched={() => window.location.reload()}
         />
@@ -4838,6 +4931,7 @@
   .update-progress span { display: block; height: 100%; background: var(--warning); transition: width 120ms linear; }
   .update-progress.indeterminate span { width: 38% !important; animation: update-progress-scan 900ms ease-in-out infinite; }
   .updated-version-notice { position: fixed; z-index: 80; top: 12px; right: 12px; min-height: 32px; border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border)); border-radius: var(--radius); padding: 6px 10px; background: color-mix(in srgb, var(--success) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); }
+  .updated-version-notice.with-version-banner { top: 54px; }
 
   @keyframes update-progress-scan {
     from { transform: translateX(-110%); }

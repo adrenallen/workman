@@ -3,7 +3,7 @@ use std::{
     env,
     error::Error,
     ffi::OsString,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -112,6 +112,10 @@ impl Drop for KeepAwakeState {
 enum BridgeCommand {
     Send(String),
     Restart(oneshot::Sender<Result<(), String>>),
+    Park {
+        stop_daemon: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 struct TerminalInput {
@@ -189,6 +193,7 @@ struct DaemonRestartResult {
 #[derive(Clone, Serialize)]
 struct DesktopRelaunchCapability {
     supported: bool,
+    app_bundle: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -329,59 +334,68 @@ async fn daemon_restart(
 
 #[tauri::command]
 fn desktop_relaunch_capability() -> DesktopRelaunchCapability {
-    let supported = env::current_exe()
-        .ok()
-        .is_some_and(|executable| relaunch_supported_from_executable(&executable));
-    DesktopRelaunchCapability { supported }
+    let executable = env::current_exe().ok();
+    let supported = executable
+        .as_deref()
+        .is_some_and(relaunch_supported_from_executable);
+    let app_bundle = executable
+        .as_deref()
+        .and_then(application_bundle_from_executable)
+        .and_then(|bundle| bundle.canonicalize().ok())
+        .map(|bundle| bundle.to_string_lossy().into_owned());
+    let supported = supported && app_bundle.is_some();
+    DesktopRelaunchCapability {
+        supported,
+        app_bundle,
+    }
 }
 
 /// Stop the replaced daemon before asking Tauri to reopen the replaced application bundle.
 ///
-/// `refresh_application_bundle` swaps the bundle at the same path. `current_exe()` therefore
-/// still names `Workman.app/Contents/MacOS/<binary>`, but that path resolves to the new binary
-/// after the rename dance. Delaying the restart briefly lets the command response reach the
-/// webview and prevents the old supervisor from winning the daemon respawn race.
+/// `refresh_application_bundle` swaps the bundle at the same path. Re-validate that the path in
+/// the install report is this running app, then park the bridge before requesting restart. The
+/// park acknowledgement is the readiness handshake: once it arrives, the old supervisor has no
+/// code path that can reconnect or respawn a daemon while the process is exiting.
 #[tauri::command]
 async fn desktop_restart_after_update(
     confirm_processes_stopped: bool,
     restart_daemon: bool,
+    installed_app_bundle: String,
     state: State<'_, BridgeState>,
     app: tauri::AppHandle,
 ) -> Result<DaemonRestartResult, String> {
     if !confirm_processes_stopped {
         return Err("update restart requires confirmation that project processes will stop".into());
     }
-    if restart_daemon {
-        let (reply, receive) = oneshot::channel();
-        state
-            .sender
-            .send(BridgeCommand::Restart(reply))
-            .await
-            .map_err(|_| "daemon bridge is not running".to_owned())?;
-        timeout(RESTART_TIMEOUT, receive)
-            .await
-            .map_err(|_| "timed out waiting for the updated daemon to stop".to_owned())?
-            .map_err(|_| "daemon bridge dropped the update restart request".to_owned())??;
-    }
-    tauri::async_runtime::spawn(async move {
-        sleep(Duration::from_millis(100)).await;
-        app.request_restart();
-    });
+    verify_relaunch_bundle(Path::new(&installed_app_bundle))?;
+    let (reply, receive) = oneshot::channel();
+    state
+        .sender
+        .send(BridgeCommand::Park {
+            stop_daemon: restart_daemon,
+            reply,
+        })
+        .await
+        .map_err(|_| "daemon bridge is not running".to_owned())?;
+    timeout(RESTART_TIMEOUT, receive)
+        .await
+        .map_err(|_| "timed out waiting for the desktop bridge to park".to_owned())?
+        .map_err(|_| "daemon bridge dropped the update restart request".to_owned())??;
+    app.request_restart();
     Ok(DaemonRestartResult { restarting: true })
 }
 
 fn relaunch_supported_from_executable(executable: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let Some(contents) = executable.parent().and_then(Path::parent) else {
+        let Some(bundle) = application_bundle_from_executable(executable) else {
             return false;
         };
-        contents.file_name().and_then(|name| name.to_str()) == Some("Contents")
-            && contents.parent().is_some_and(|bundle| {
-                bundle
-                    .extension()
-                    .is_some_and(|extension| extension == "app")
-            })
+        let path = bundle.to_string_lossy();
+        !path.contains("/AppTranslocation/")
+            && !path.starts_with("/private/var/folders/")
+            && executable.is_file()
+            && bundle.join("Contents/Info.plist").is_file()
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -389,6 +403,43 @@ fn relaunch_supported_from_executable(executable: &Path) -> bool {
         let _ = executable;
         false
     }
+}
+
+fn application_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
+    let contents = executable.parent()?.parent()?;
+    if contents.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    bundle
+        .extension()
+        .is_some_and(|extension| extension == "app")
+        .then(|| bundle.to_path_buf())
+}
+
+fn verify_relaunch_bundle(expected_bundle: &Path) -> Result<(), String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("could not locate the running Workman executable: {error}"))?;
+    if !relaunch_supported_from_executable(&executable) {
+        return Err(
+            "the running executable is not a relaunchable Workman application bundle".into(),
+        );
+    }
+    let running_bundle = application_bundle_from_executable(&executable)
+        .ok_or_else(|| "could not locate the running Workman application bundle".to_owned())?
+        .canonicalize()
+        .map_err(|error| format!("could not resolve the running Workman bundle: {error}"))?;
+    let expected_bundle = expected_bundle
+        .canonicalize()
+        .map_err(|error| format!("could not resolve the replaced Workman bundle: {error}"))?;
+    if running_bundle != expected_bundle {
+        return Err(format!(
+            "the update replaced {}, but this process is running from {}",
+            expected_bundle.display(),
+            running_bundle.display()
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -951,6 +1002,18 @@ async fn run_bridge(
                                         break;
                                     }
                                 }
+                                BridgeCommand::Park { stop_daemon, reply } => {
+                                    let result = if stop_daemon {
+                                        stop_discovered_daemon(&discovery).await
+                                    } else {
+                                        Ok(())
+                                    };
+                                    let parked = result.is_ok();
+                                    let _ = reply.send(result);
+                                    if parked {
+                                        return;
+                                    }
+                                }
                             }
                         }
                         _ = heartbeat.tick() => {
@@ -1486,9 +1549,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn relaunch_requires_an_application_bundle_executable() {
-        assert!(relaunch_supported_from_executable(Path::new(
-            "/tmp/Workman.app/Contents/MacOS/workman"
-        )));
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Workman.app");
+        let executable = bundle.join("Contents/MacOS/workman");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"fixture").unwrap();
+        fs::write(bundle.join("Contents/Info.plist"), b"fixture").unwrap();
+        assert!(relaunch_supported_from_executable(&executable));
         assert!(!relaunch_supported_from_executable(Path::new(
             "/tmp/target/debug/workman"
         )));

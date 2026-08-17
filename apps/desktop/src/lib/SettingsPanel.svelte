@@ -41,6 +41,8 @@
     connection,
     updateFlow,
     onApplyUpdate,
+    onRestartUpdate,
+    onDismissUpdate,
     onError,
     onProfileSwitched
   }: SettingsPanelProps = $props();
@@ -308,6 +310,8 @@
             {updateFlow}
             onCheckUpdate={() => void checkUpdate()}
             onUpdateNow={() => void updateNow()}
+            onRestartUpdate={() => void onRestartUpdate()}
+            {onDismissUpdate}
             onAutomaticChecks={(enabled: boolean) => void toggleAutomaticChecks(enabled)}
             onUpdateChannel={(channel: UpdateChannel) => void chooseUpdateChannel(channel)}
           />

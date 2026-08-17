@@ -35,6 +35,8 @@
     updateFlow: UpdateFlow;
     onCheckUpdate: () => void;
     onUpdateNow: () => void;
+    onRestartUpdate: () => void;
+    onDismissUpdate: () => void;
     onAutomaticChecks: (enabled: boolean) => void;
     onUpdateChannel: (channel: UpdateChannel) => void;
   }
@@ -47,6 +49,8 @@
     updateFlow,
     onCheckUpdate,
     onUpdateNow,
+    onRestartUpdate,
+    onDismissUpdate,
     onAutomaticChecks,
     onUpdateChannel
   }: Props = $props();
@@ -236,7 +240,7 @@
             <div class="w-44 py-2" role="progressbar" aria-label={flowBanner.title} aria-valuemin="0" aria-valuemax="100" aria-valuenow={flowBanner.percent ?? undefined}>
               <div class="h-1 overflow-hidden rounded-[1px] bg-warning/15">
                 <span
-                  class={cn('block h-full bg-warning transition-[width]', flowBanner.indeterminate && 'animate-pulse')}
+                  class={cn('block h-full bg-warning transition-[width]', flowBanner.indeterminate && 'animate-pulse motion-reduce:animate-none')}
                   style={`width: ${flowBanner.percent ?? 38}%`}
                 ></span>
               </div>
@@ -244,30 +248,38 @@
             </div>
           {:else if flowBanner.retry}
             <Button size="sm" variant="outline" onclick={onUpdateNow}>Retry update</Button>
-          {:else if !flowBanner.restart}
-          <Button
-            variant={check.available ? 'outline' : 'default'}
-            size="sm"
-            disabled={!connected || updateBusy !== null}
-            onclick={onCheckUpdate}
-          >
-            <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
-            {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
-          </Button>
-          {#if actionAvailable}
+            {#if flowBanner.dismiss}
+              <Button size="sm" variant="ghost" onclick={onDismissUpdate}>Later</Button>
+            {/if}
+          {:else if flowBanner.mode === 'needs-restart'}
+            {#if flowBanner.restart}
+              <Button size="sm" variant="outline" onclick={onRestartUpdate}>{flowBanner.restartLabel}</Button>
+            {/if}
+            <Button size="sm" variant="ghost" onclick={onDismissUpdate}>Later</Button>
+          {:else}
             <Button
+              variant={check.available ? 'outline' : 'default'}
               size="sm"
               disabled={!connected || updateBusy !== null}
-              onclick={() => (updateDialogOpen = true)}
+              onclick={onCheckUpdate}
             >
-              {#if recoveryRequired}
-                <WrenchIcon aria-hidden="true" />
-              {:else}
-                <DownloadIcon aria-hidden="true" />
-              {/if}
-              {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
+              <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
+              {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
             </Button>
-          {/if}
+            {#if actionAvailable}
+              <Button
+                size="sm"
+                disabled={!connected || updateBusy !== null}
+                onclick={() => (updateDialogOpen = true)}
+              >
+                {#if recoveryRequired}
+                  <WrenchIcon aria-hidden="true" />
+                {:else}
+                  <DownloadIcon aria-hidden="true" />
+                {/if}
+                {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
+              </Button>
+            {/if}
           {/if}
         </div>
       </div>

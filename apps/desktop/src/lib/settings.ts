@@ -73,8 +73,9 @@ export interface UpdateInstallReport {
   install_dir: string;
   updated_files: string[];
   desktop_instruction: string | null;
+  installed_app_bundle?: string | null;
   quarantine_cleared: boolean;
-  restart_plan: UpdateRestartPlan;
+  restart_plan?: UpdateRestartPlan;
 }
 
 export interface UpdateRestartPlan {
@@ -144,6 +145,9 @@ export function setUpdateChannel(
   return client.control<UpdateStatus>('daemon.update_preferences', { channel });
 }
 
-export function applyUpdate(client: DaemonClient): Promise<UpdateInstallReport> {
-  return client.control<UpdateInstallReport>('daemon.update_apply');
+export function applyUpdate(
+  client: DaemonClient,
+  onProgress: (progress: UpdateProgress) => void
+): Promise<UpdateInstallReport> {
+  return client.applyUpdate(onProgress);
 }
