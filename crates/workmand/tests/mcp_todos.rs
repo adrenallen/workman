@@ -122,6 +122,12 @@ async fn todo_lock_ownership_survives_actor_rotation_and_rejects_other_processes
             selected: false,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "first-process-token", 1_700_000_000_000)?;
+        registry
+            .store()
+            .set_process_mcp_token(2, "other-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -129,12 +135,9 @@ async fn todo_lock_ownership_survives_actor_rotation_and_rejects_other_processes
         let _ = shutdown_rx.await;
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
-    let first = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let second = connect(endpoint.clone(), discovery.token.clone()).await?;
-    let other = connect(endpoint, discovery.token.clone()).await?;
-    call(&first, "identify_session", json!({ "process_id": 1 })).await;
-    call(&second, "identify_session", json!({ "process_id": 1 })).await;
-    call(&other, "identify_session", json!({ "process_id": 2 })).await;
+    let first = connect(endpoint.clone(), "first-process-token".into()).await?;
+    let second = connect(endpoint.clone(), "first-process-token".into()).await?;
+    let other = connect(endpoint, "other-process-token".into()).await?;
     let first_identity = call(&first, "whoami", json!({})).await;
     let second_identity = call(&second, "whoami", json!({})).await;
     assert_ne!(first_identity["actor_id"], second_identity["actor_id"]);

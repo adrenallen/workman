@@ -1,9 +1,5 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-};
+use std::{collections::BTreeMap, error::Error};
 
-use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo},
@@ -14,7 +10,7 @@ use rmcp::{
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
-use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
+use workmand::{DaemonConfig, DaemonServer};
 
 async fn raw_mcp_post(port: u16, token: &str, session_id: &str) -> std::io::Result<String> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
@@ -152,12 +148,9 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
 
     let process_client = {
-        let headers = HashMap::from([(
-            HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
-            HeaderValue::from_str(&process_token)?,
-        )]);
         let transport = StreamableHttpClientTransport::from_config(
-            StreamableHttpClientTransportConfig::with_uri(endpoint.clone()).custom_headers(headers),
+            StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
+                .auth_header(process_token.clone()),
         );
         ClientInfo::default().serve(transport).await?
     };
@@ -286,6 +279,36 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let smoke = call(&process_client, "mcp_smoke_test", json!({})).await;
     assert_eq!(smoke["ok"], true);
 
+    let created_todo = call(
+        &process_client,
+        "todo_create",
+        json!({ "title": "keep this MCP session connected" }),
+    )
+    .await;
+    assert!(created_todo["todo_id"].as_i64().unwrap() > 0);
+    let spawned = call(
+        &process_client,
+        "spawn_process",
+        json!({ "kind": "terminal", "name": "transport-regression" }),
+    )
+    .await;
+    let spawned_id = spawned["process_id"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &process_client,
+            "close_process",
+            json!({ "process_id": spawned_id }),
+        )
+        .await["closed"],
+        true
+    );
+    let identity_after_mutations = call(&process_client, "whoami", json!({})).await;
+    assert_eq!(identity_after_mutations["process_id"], 42);
+    assert_eq!(
+        identity_after_mutations["session_id"], identity["session_id"],
+        "todo and process mutations must not reset the Streamable HTTP session"
+    );
+
     let session_id = identity["session_id"].as_str().unwrap();
     assert!(
         registry
@@ -324,22 +347,29 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         unidentified_scope.structured_content.unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("identify_session")
+            .contains("authenticated process identity")
     );
-    let identified = call(
-        &fallback_client,
-        "identify_session",
-        json!({ "process_id": 42 }),
-    )
-    .await;
-    assert_eq!(identified["process_id"], 42);
-    assert_eq!(identified["effective_project_id"], 1);
+    let claim_denied = fallback_client
+        .call_tool(
+            CallToolRequestParams::new("identify_session")
+                .with_arguments(arguments(json!({ "process_id": 42 }))),
+        )
+        .await?;
+    assert_eq!(claim_denied.is_error, Some(true));
+    assert_eq!(
+        claim_denied.structured_content.unwrap()["code"],
+        "identity_authentication_required"
+    );
+    assert_eq!(
+        call(&fallback_client, "whoami", json!({})).await["process_id"],
+        Value::Null
+    );
     assert_eq!(
         call(&fallback_client, "list_projects", json!({})).await["projects"]
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     let _ = fallback_client.cancel().await;
 
