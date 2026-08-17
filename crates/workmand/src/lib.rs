@@ -474,9 +474,16 @@ fn router(state: AppState) -> Router {
         mcp_url,
         state.timer_events.clone(),
     );
+    let stateless_mcp_service = mcp::stateless_http_service(
+        state.registry.clone(),
+        state.input_router.clone(),
+        format!("http://127.0.0.1:{}/mcp-stateless", state.port),
+        state.timer_events.clone(),
+    );
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
+        .nest_service("/mcp-stateless", stateless_mcp_service)
         .nest_service("/mcp", mcp_service)
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(
@@ -1314,7 +1321,7 @@ async fn authorize_local_request(
     next: Next,
 ) -> Response {
     let bearer_is_valid = valid_bearer(request.headers(), &state.token);
-    let process_token_is_valid = request.uri().path().starts_with("/mcp")
+    let process_token_is_valid = is_mcp_request_path(request.uri().path())
         && valid_process_token(request.headers(), &state.registry).await;
     if !bearer_is_valid && !process_token_is_valid {
         return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
@@ -1332,8 +1339,8 @@ async fn invalidate_status_after_mcp_request(
     request: Request,
     next: Next,
 ) -> Response {
-    let invalidates = request.method() == axum::http::Method::POST
-        && (request.uri().path() == "/mcp" || request.uri().path().starts_with("/mcp/"));
+    let invalidates =
+        request.method() == axum::http::Method::POST && is_mcp_request_path(request.uri().path());
     let response = next.run(request).await;
     if invalidates {
         // MCP tools mutate several status-adjacent store tables directly. Conservatively
@@ -1341,6 +1348,13 @@ async fn invalidate_status_after_mcp_request(
         invalidations.invalidate();
     }
     response
+}
+
+fn is_mcp_request_path(path: &str) -> bool {
+    path == "/mcp"
+        || path.starts_with("/mcp/")
+        || path == "/mcp-stateless"
+        || path.starts_with("/mcp-stateless/")
 }
 
 async fn valid_process_token(headers: &HeaderMap, registry: &SharedProcessRegistry) -> bool {

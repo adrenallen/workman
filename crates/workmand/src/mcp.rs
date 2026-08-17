@@ -19,7 +19,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        session::{local::LocalSessionManager, never::NeverSessionManager},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -102,6 +102,35 @@ pub fn streamable_http_service(
         config,
     );
     (service, sessions)
+}
+
+/// Stateless JSON transport for clients that do not consume server-initiated messages.
+///
+/// Some MCP SDKs open an otherwise-idle SSE stream immediately after initialization and
+/// permanently disable a server after a very small reconnect budget. Workman tools are
+/// request/response only, so this endpoint avoids that unnecessary failure mode while keeping
+/// the stateful endpoint available to clients that need a durable stream.
+pub fn stateless_http_service(
+    registry: SharedProcessRegistry,
+    input_router: crate::ProcessInputRouter,
+    mcp_url: String,
+    timer_events: TimerLifecycleHub,
+) -> StreamableHttpService<WorkmanMcp, NeverSessionManager> {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true);
+    StreamableHttpService::new(
+        move || {
+            Ok(WorkmanMcp::new(
+                registry.clone(),
+                input_router.clone(),
+                mcp_url.clone(),
+                timer_events.clone(),
+            ))
+        },
+        Arc::new(NeverSessionManager::default()),
+        config,
+    )
 }
 
 /// Reject stale stateful MCP requests before rmcp can dispatch them.

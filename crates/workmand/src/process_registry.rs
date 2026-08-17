@@ -22,8 +22,8 @@ use workman_core::{
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
-        PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
-        WORKMAN_PTY_PROFILE_ENV,
+        PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification,
+        PtySubmissionVerificationMode, RawOutput, WORKMAN_PTY_PROFILE_ENV,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
 };
@@ -35,6 +35,21 @@ const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(5);
 const SUBMIT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Initial Enter plus two bounded bare-CR recovery attempts.
 const SUBMIT_MAX_ATTEMPTS: usize = 3;
+/// Kimi needs a longer redraw boundary before Enter and exactly one recovery keypress.
+const KIMI_INITIAL_PROMPT_KEY_DELAY: Duration = Duration::from_millis(150);
+const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
+const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
+
+fn is_kimi_tool_type(tool_type: &str) -> bool {
+    matches!(
+        tool_type
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str(),
+        "kimi" | "kimi_code"
+    )
+}
 
 use crate::agent_sessions::SessionCapture;
 use crate::config::{
@@ -258,6 +273,42 @@ impl ProcessInputRouter {
         content: &[u8],
         key_delay: Duration,
     ) -> RegistryResult<Process> {
+        self.submit_input_with_verification(process_id, content, key_delay, None)
+    }
+
+    fn submit_initial_prompt(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        let target = self.target(process_id)?;
+        let kimi = target
+            .attention
+            .snapshot()
+            .tool_type
+            .as_deref()
+            .is_some_and(is_kimi_tool_type);
+        drop(target);
+        let verification = kimi.then_some(PtySubmissionVerification {
+            timeout: KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT,
+            max_attempts: KIMI_INITIAL_PROMPT_MAX_ATTEMPTS,
+            mode: PtySubmissionVerificationMode::KimiSessionStart,
+        });
+        let key_delay = if kimi {
+            KIMI_INITIAL_PROMPT_KEY_DELAY
+        } else {
+            SUBMIT_KEY_DELAY
+        };
+        self.submit_input_with_verification(process_id, content, key_delay, verification)
+    }
+
+    fn submit_input_with_verification(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+    ) -> RegistryResult<Process> {
         let target = self.target(process_id)?;
         let active = target
             .active
@@ -270,10 +321,11 @@ impl ProcessInputRouter {
             target.input.submit_input_verified(
                 content,
                 key_delay,
-                PtySubmissionVerification {
+                verification.unwrap_or(PtySubmissionVerification {
                     timeout: SUBMIT_VERIFY_TIMEOUT,
                     max_attempts: SUBMIT_MAX_ATTEMPTS,
-                },
+                    mode: PtySubmissionVerificationMode::TurnStart,
+                }),
             )
         } else {
             target.input.submit_input(content, key_delay)
@@ -1785,6 +1837,16 @@ impl ProcessRegistry {
         self.submit_input_with_delay(process_id, content, SUBMIT_KEY_DELAY)
     }
 
+    /// Queue a launch-time prompt with tool-specific submission verification.
+    pub(crate) fn submit_initial_prompt(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        self.input_router.submit_initial_prompt(process_id, content)
+    }
+
     fn submit_input_with_delay(
         &mut self,
         process_id: ProcessId,
@@ -2971,6 +3033,100 @@ mod tests {
         // process-local worker waits to write Enter.
         assert_eq!(registry.get(20).unwrap().status, ProcessStatus::Running);
         registry.stop(20).unwrap();
+    }
+
+    #[test]
+    fn kimi_initial_prompt_retries_until_the_tui_creates_a_session() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/kimi-submit-registry-test".into(),
+                name: "kimi-submit".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 0,
+            })
+            .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 91,
+                name: "Scripted Kimi".into(),
+                command: "scripted-kimi".into(),
+                tool_type: "kimi".into(),
+                enabled: true,
+                source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
+            .expect("create process registry");
+        registry
+            .create(Process {
+                id: 21,
+                project_id: 1,
+                kind: ProcessKind::Agent,
+                name: "kimi-input-target".into(),
+                command: Some(
+                    r#"stty raw -echo; exec perl -e '$|=1; print "Session:                       \r\nNo session yet - one will be created on your first message.\r\n| > |\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n| > $draft |\r\n"; next; } print "\r\nSession: session_fixture\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n| > $draft |\r\n"; }'"#
+                        .into(),
+                ),
+                working_dir: "/tmp".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: Some(91),
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        registry.start(21).unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rendered = registry.rendered_output(21).unwrap().text;
+            if rendered.contains("No session yet") {
+                break;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "Kimi fixture did not render"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        registry
+            .submit_initial_prompt(21, b"Call whoami once.")
+            .unwrap();
+        let submitted_deadline = Instant::now() + Duration::from_secs(7);
+        loop {
+            let output = registry.raw_output(21, None, usize::MAX).unwrap();
+            if String::from_utf8_lossy(&output.data).contains("SUBMITTED:Call whoami once.") {
+                break;
+            }
+            assert!(
+                Instant::now() < submitted_deadline,
+                "Kimi prompt remained in the fixture composer"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let status = registry.get_status(21).unwrap();
+        assert!(status.events.iter().any(|event| {
+            event.kind == "submit_retry" && event.message.contains("retried Enter (2/2)")
+        }));
+        assert!(workman_core::pty::kimi_session_started(
+            &registry.rendered_output(21).unwrap().text
+        ));
+        registry.stop(21).unwrap();
     }
 
     #[test]

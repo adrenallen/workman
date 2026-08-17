@@ -25,6 +25,17 @@ async fn raw_mcp_post(port: u16, token: &str, session_id: &str) -> std::io::Resu
     Ok(response)
 }
 
+async fn raw_mcp_get(port: u16, token: &str, path: &str) -> std::io::Result<String> {
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n"
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
+}
+
 #[tokio::test]
 async fn unknown_mcp_session_returns_404() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -146,6 +157,26 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         let _ = shutdown_rx.await;
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let stateless_endpoint = format!("http://127.0.0.1:{}/mcp-stateless", discovery.port);
+
+    let stateless_client = {
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(stateless_endpoint)
+                .auth_header(process_token.clone()),
+        );
+        ClientInfo::default().serve(transport).await?
+    };
+    let stateless_identity = call(&stateless_client, "whoami", json!({})).await;
+    assert_eq!(stateless_identity["process_id"], 42);
+    assert_eq!(stateless_identity["session_id"], "process:42");
+    assert!(!stateless_client.list_all_tools().await?.is_empty());
+    let _ = stateless_client.cancel().await;
+
+    let idle_get = raw_mcp_get(discovery.port, &process_token, "/mcp-stateless").await?;
+    assert!(
+        idle_get.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "stateless MCP must decline the idle SSE stream without creating a reconnectable body: {idle_get:?}"
+    );
 
     let process_client = {
         let transport = StreamableHttpClientTransport::from_config(

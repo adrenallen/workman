@@ -22,6 +22,7 @@ use workman_core::{
     AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
     ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
     attention::{AttentionState, DEFAULT_IDLE_AFTER},
+    pty::kimi_session_started,
 };
 
 use super::{
@@ -52,6 +53,7 @@ const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_PROMPT_HARD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const KIMI_INITIAL_PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(6);
 const AGENT_TEMPLATE_NAME_MAX_CHARS: usize = 120;
 const AGENT_TEMPLATE_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS: usize = 64;
@@ -176,6 +178,7 @@ struct PreparedRegisteredAgent {
 #[derive(Debug)]
 struct ResolvedAgentSpawn {
     agent_tool_id: AgentToolId,
+    agent_tool_type: String,
     extra_args: Vec<String>,
     initial_prompt: Option<String>,
 }
@@ -914,7 +917,12 @@ pub(crate) async fn spawn_registered_agent(
     )
     .await?;
     if let Some(prompt) = resolved.initial_prompt {
-        schedule_initial_prompt(registry, result.process_id, prompt);
+        schedule_initial_prompt(
+            registry,
+            result.process_id,
+            prompt,
+            is_kimi_tool_type(&resolved.agent_tool_type),
+        );
     }
     Ok(result)
 }
@@ -930,9 +938,10 @@ fn resolve_agent_spawn(
         let agent_tool_id = requested_agent_tool_id.ok_or_else(|| {
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
-        load_enabled_agent_tool(registry, agent_tool_id)?;
+        let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
+            agent_tool_type: tool.tool_type,
             extra_args: caller_extra_args,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
         });
@@ -945,7 +954,7 @@ fn resolve_agent_spawn(
             format!("agent template {agent_template_id} was not found in the active profile")
         })?;
     let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
-    load_enabled_agent_tool(registry, agent_tool_id)?;
+    let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
     let mut extra_args = if agent_tool_id == template.agent_tool_id {
         template.extra_args
     } else {
@@ -954,6 +963,7 @@ fn resolve_agent_spawn(
     extra_args.extend(caller_extra_args);
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
+        agent_tool_type: tool.tool_type,
         extra_args,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
     })
@@ -981,6 +991,7 @@ fn schedule_initial_prompt(
     registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
     prompt: String,
+    verify_kimi_submission: bool,
 ) {
     tokio::spawn(async move {
         let started = Instant::now();
@@ -1052,10 +1063,20 @@ fn schedule_initial_prompt(
                             .is_some_and(|seconds| seconds >= DEFAULT_IDLE_AFTER.as_secs_f64());
                     (ready || quiet_fallback).then(|| {
                         let used_fallback = !ready;
-                        let result = registry
-                            .submit_input(process_id, prompt.as_bytes())
-                            .map_err(|error| error.to_string());
+                        let result = if verify_kimi_submission {
+                            registry.submit_initial_prompt(process_id, prompt.as_bytes())
+                        } else {
+                            registry.submit_input(process_id, prompt.as_bytes())
+                        }
+                        .map_err(|error| error.to_string());
                         match &result {
+                            Ok(_) if verify_kimi_submission => {
+                                let _ = registry.record_process_event(
+                                    process_id,
+                                    "initial_prompt_queued",
+                                    "initial prompt queued; waiting for Kimi session creation",
+                                );
+                            }
                             Ok(_) => {
                                 let suffix = if used_fallback {
                                     " using the observed-output quiet fallback"
@@ -1091,12 +1112,85 @@ fn schedule_initial_prompt(
                 }
                 if let Err(error) = delivery {
                     eprintln!("process {process_id}: initial prompt delivery failed: {error}");
+                } else if verify_kimi_submission {
+                    confirm_kimi_initial_prompt_submission(
+                        registry.clone(),
+                        process_id,
+                        used_fallback,
+                    )
+                    .await;
                 }
                 return;
             }
             tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
         }
     });
+}
+
+async fn confirm_kimi_initial_prompt_submission(
+    registry: crate::SharedProcessRegistry,
+    process_id: ProcessId,
+    used_fallback: bool,
+) {
+    let deadline = Instant::now() + KIMI_INITIAL_PROMPT_CONFIRM_TIMEOUT;
+    loop {
+        let finished = {
+            let mut registry = registry.lock().await;
+            let agent_state = match registry.agent_attention_snapshot(process_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        format!(
+                            "initial prompt dropped (reason: verification_failed): attention unavailable: {error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+            if agent_state.state == AttentionState::Exited {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    "initial prompt dropped (reason: exited) before Kimi created a session",
+                );
+                return;
+            }
+            let rendered = registry
+                .rendered_output(process_id)
+                .map(|output| output.text)
+                .unwrap_or_default();
+            if kimi_session_started(&rendered) {
+                let suffix = if used_fallback {
+                    " using the observed-output quiet fallback"
+                } else {
+                    ""
+                };
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_delivered",
+                    format!(
+                        "initial prompt submitted after Kimi session creation verification{suffix}"
+                    ),
+                );
+                true
+            } else if Instant::now() >= deadline {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    "initial prompt remained unsubmitted after one Kimi Enter retry",
+                );
+                true
+            } else {
+                false
+            }
+        };
+        if finished {
+            return;
+        }
+        tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1405,6 +1499,13 @@ fn supports_first_run_dialog_ack(tool_type: &str) -> bool {
     )
 }
 
+fn is_kimi_tool_type(tool_type: &str) -> bool {
+    matches!(
+        normalize_tool_type(tool_type).as_str(),
+        "kimi" | "kimi_code"
+    )
+}
+
 async fn auto_acknowledge_initial_dialog(
     registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
@@ -1641,6 +1742,8 @@ fn prepare_agent_launch(
             command
         }
         McpLaunchAdapter::Kimi => {
+            let mcp_url = stateless_mcp_url(mcp_url);
+            env.insert(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.clone());
             // Kimi 0.34 rejects --prompt with --yolo/--auto. Those policy flags remain intact for
             // normal launches; prompt-mode deep checks are already non-interactive and narrowly
             // constrained to whoami.
@@ -1654,7 +1757,7 @@ fn prepare_agent_launch(
                 source_home,
                 "mcp.json",
                 "mcp.json",
-                &kimi_mcp_config(mcp_url),
+                &kimi_mcp_config(&mcp_url),
                 Some(KIMI_PRIVATE_HOME_SEED_ENTRIES),
             )?;
             // Kimi gates even a private-home MCP config on workspace trust. Honor the existing
@@ -1729,6 +1832,13 @@ fn kimi_mcp_config(mcp_url: &str) -> String {
                 }
             }
         })
+    )
+}
+
+fn stateless_mcp_url(mcp_url: &str) -> String {
+    mcp_url.strip_suffix("/mcp").map_or_else(
+        || format!("{}/mcp-stateless", mcp_url.trim_end_matches('/')),
+        |base| format!("{base}/mcp-stateless"),
     )
 }
 
@@ -2672,7 +2782,11 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(home.join("mcp.json")).unwrap()).unwrap();
         assert_eq!(
             config["mcpServers"]["workman"]["url"],
-            "http://127.0.0.1:43127/mcp"
+            "http://127.0.0.1:43127/mcp-stateless"
+        );
+        assert_eq!(
+            launch.env.get(WORKMAN_MCP_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:43127/mcp-stateless")
         );
         assert_eq!(
             config["mcpServers"]["workman"]["bearerTokenEnvVar"],
