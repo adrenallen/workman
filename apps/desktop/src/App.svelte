@@ -47,6 +47,7 @@
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import {
     applyUpdate,
+    autoImportTerminalProfile,
     checkForUpdates,
     type UpdateInstallReport,
     type UpdateProgress,
@@ -261,6 +262,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
@@ -346,6 +348,13 @@
       ? client.subscribeProcessStatuses()
       : client.unsubscribeProcessStatuses();
     void request.catch(reportError);
+  });
+  $effect(() => {
+    if (connection.status !== 'connected' || terminalProfileAutoImportStarted) return;
+    terminalProfileAutoImportStarted = true;
+    void autoImportTerminalProfile(client).catch(() => {
+      // Native profile discovery is best-effort; Settings retains the explicit import action.
+    });
   });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
@@ -4369,6 +4378,7 @@
           processes={profileProcesses}
           {projects}
           connectionStatus={connection.status}
+          visible={documentVisible}
           bind:open={keepAwakeOpen}
           bind:armed={keepAwakeArmed}
           bind:supported={keepAwakeSupported}

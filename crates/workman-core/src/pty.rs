@@ -554,6 +554,17 @@ pub struct PtySubmissionVerification {
     pub timeout: Duration,
     /// Total Enter attempts, including the initial keypress.
     pub max_attempts: usize,
+    /// Terminal evidence required before the submission is considered accepted.
+    pub mode: PtySubmissionVerificationMode,
+}
+
+/// Tool-aware evidence used to verify a PTY submission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PtySubmissionVerificationMode {
+    /// Any non-composer output, or sustained output for TUIs that retain their composer.
+    TurnStart,
+    /// Kimi has created the session that begins with its first submitted message.
+    KimiSessionStart,
 }
 
 /// A retry/failure notice emitted by the process-local input worker.
@@ -705,6 +716,7 @@ impl PtyProcess {
         let (submission_event_tx, submission_event_rx) = mpsc::channel();
         let submission_output = raw_output.clone();
         let submission_attention = attention.clone();
+        let submission_terminal = terminal_output.clone();
         let submission_thread = match thread::Builder::new()
             .name(format!("workman-pty-{}-input", options.process_id))
             .spawn(move || {
@@ -713,6 +725,7 @@ impl PtyProcess {
                     submission_rx,
                     submission_output,
                     submission_attention,
+                    submission_terminal,
                     submission_event_tx,
                 )
             }) {
@@ -1021,6 +1034,7 @@ fn process_submissions(
     submissions: mpsc::Receiver<PtySubmission>,
     raw_output: RawOutput,
     attention: AttentionTracker,
+    terminal_output: TerminalOutput,
     events: mpsc::Sender<PtySubmissionEvent>,
 ) {
     for submission in submissions {
@@ -1029,11 +1043,11 @@ fn process_submissions(
             break;
         }
         thread::sleep(submission.key_delay);
-        if submission.verification.is_some() {
+        if let Some(verification) = submission.verification {
             // Interactive composers redraw asynchronously after receiving the
             // pasted body. Establish the Enter baseline only after that redraw
             // settles, otherwise late draft output can masquerade as a turn.
-            wait_for_output_quiet(&raw_output, output_before_content);
+            wait_for_output_quiet(&raw_output, output_before_content, verification.mode);
         }
 
         let attempts = submission
@@ -1051,8 +1065,10 @@ fn process_submissions(
             if wait_for_turn_start(
                 &raw_output,
                 &attention,
+                &terminal_output,
                 output_before_enter,
                 verification.timeout,
+                verification.mode,
             ) {
                 break;
             }
@@ -1086,8 +1102,10 @@ fn write_and_flush(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> 
 fn wait_for_turn_start(
     raw_output: &RawOutput,
     attention: &AttentionTracker,
+    terminal_output: &TerminalOutput,
     output_before_enter: u64,
     timeout: Duration,
+    mode: PtySubmissionVerificationMode,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut last_total = output_before_enter;
@@ -1099,6 +1117,16 @@ fn wait_for_turn_start(
             if total != last_total {
                 first_change_at.get_or_insert(now);
                 last_total = total;
+            }
+            if mode == PtySubmissionVerificationMode::KimiSessionStart {
+                if kimi_session_started(&terminal_output.read_viewport().text()) {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(10).min(timeout));
+                continue;
             }
             let status = attention.snapshot();
             // A draft redraw still classifies as the resting composer. Busy,
@@ -1123,9 +1151,19 @@ fn wait_for_turn_start(
     }
 }
 
-fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
-    const QUIET_FOR: Duration = Duration::from_millis(50);
-    const MAX_SETTLE: Duration = Duration::from_millis(500);
+fn wait_for_output_quiet(
+    raw_output: &RawOutput,
+    before_content: u64,
+    mode: PtySubmissionVerificationMode,
+) {
+    let (quiet_for, max_settle) = match mode {
+        PtySubmissionVerificationMode::TurnStart => {
+            (Duration::from_millis(50), Duration::from_millis(500))
+        }
+        PtySubmissionVerificationMode::KimiSessionStart => {
+            (Duration::from_millis(200), Duration::from_secs(2))
+        }
+    };
 
     let started = Instant::now();
     let mut last_total = raw_output.total_bytes_seen();
@@ -1137,14 +1175,52 @@ fn wait_for_output_quiet(raw_output: &RawOutput, before_content: u64) {
             last_change = Instant::now();
         }
         let saw_redraw = last_total > before_content;
-        if saw_redraw && last_change.elapsed() >= QUIET_FOR {
+        if saw_redraw && last_change.elapsed() >= quiet_for {
             return;
         }
-        if started.elapsed() >= MAX_SETTLE {
+        if started.elapsed() >= max_settle {
             return;
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Return whether a tool type uses Kimi's session-creation submission signal.
+pub fn is_kimi_tool_type(tool_type: &str) -> bool {
+    matches!(
+        tool_type
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str(),
+        "kimi" | "kimi_code"
+    )
+}
+
+/// Kimi creates a session only after its first composer draft was actually submitted.
+/// A non-empty banner header is therefore stronger evidence than spinner or MCP-status redraws.
+pub fn kimi_session_started(rendered: &str) -> bool {
+    let lines = rendered.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        let Some(value) = kimi_banner_field(line, "Session:") else {
+            return false;
+        };
+        !value.is_empty()
+            && lines
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|line| kimi_banner_field(line, "Model:").is_some())
+    })
+}
+
+fn kimi_banner_field<'a>(line: &'a str, label: &str) -> Option<&'a str> {
+    let line = line.trim_end().trim_start_matches(' ');
+    let line = line
+        .strip_prefix("│  ")
+        .or_else(|| line.strip_prefix("│ "))?;
+    line.strip_prefix(label)
+        .map(|value| value.trim().trim_matches('│').trim())
 }
 
 fn capture_output(
@@ -1310,6 +1386,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn kimi_session_signal_ignores_session_text_in_the_composer() {
+        assert!(!kimi_session_started(
+            "│ Session:                       │\n│ > Investigate Session: review-pr16 │"
+        ));
+        assert!(!kimi_session_started(
+            "│  Session:                       │\n│ > Session: review-pr16           │"
+        ));
+        assert!(!kimi_session_started(
+            "│  Session:                       │\n│ > Investigate identity           │\n│   Session: review-pr16           │"
+        ));
+        assert!(kimi_session_started(
+            "│  Session: session_fixture     │\n│  Model: K3                     │\n│ >                              │"
+        ));
+        assert!(kimi_session_started(
+            "  │  Session: session_indented    │\n  │  Model: K3                     │\n  │ >                              │"
+        ));
+    }
 
     fn wait_for_output(process: &PtyProcess, needle: &[u8]) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(5);

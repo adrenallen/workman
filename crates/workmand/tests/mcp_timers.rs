@@ -188,6 +188,11 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         worker.spawned_by_process_id = Some(DELIVERY_ID);
         registry.create(worker)?;
         registry.create(process(STALLED_ID, "stalled", "sleep 30", None))?;
+        registry.store().set_process_mcp_token(
+            STALLED_ID,
+            "stalled-process-token",
+            1_700_000_000_000,
+        )?;
         registry.start(DELIVERY_ID)?;
         registry.start(WORKER_ID)?;
         registry.store().connection().query_row(
@@ -368,15 +373,9 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
 
     let other_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint)
-            .auth_header(discovery.token.clone()),
+            .auth_header("stalled-process-token".to_owned()),
     );
     let other = ClientInfo::default().serve(other_transport).await?;
-    call(
-        &other,
-        "identify_session",
-        json!({ "process_id": STALLED_ID }),
-    )
-    .await;
     let other_timers = call(
         &other,
         "timer_list",

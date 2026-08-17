@@ -119,6 +119,9 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "worktree-process-token", 1_700_000_000_000)?;
         workmand::worktrees::reconcile_existing_projects(registry.store())?;
     }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -129,10 +132,9 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint)
-            .auth_header(discovery.token.clone()),
+            .auth_header("worktree-process-token".to_owned()),
     );
     let client = ClientInfo::default().serve(transport).await?;
-    call(&client, "identify_session", json!({ "process_id": 1 })).await;
     let tools = client.list_all_tools().await?;
     let remove_tool = tools
         .iter()
@@ -338,6 +340,16 @@ async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
                 sort_order: 0,
             })?;
         }
+        registry.store().set_process_mcp_token(
+            2,
+            "failed-delete-process-token",
+            1_700_000_000_000,
+        )?;
+        registry.store().set_process_mcp_token(
+            3,
+            "successful-delete-process-token",
+            1_700_000_000_000,
+        )?;
     }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server_task = tokio::spawn(server.serve_until(async move {
@@ -386,15 +398,9 @@ async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
     let failed_client = ClientInfo::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-                .auth_header(discovery.token.clone()),
+                .auth_header("failed-delete-process-token".to_owned()),
         ))
         .await?;
-    call(
-        &failed_client,
-        "identify_session",
-        json!({ "process_id": 2 }),
-    )
-    .await;
     std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o500))?;
     let failed = call_failure(
         &failed_client,
@@ -423,15 +429,9 @@ async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
     let successful_client = ClientInfo::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(endpoint)
-                .auth_header(discovery.token.clone()),
+                .auth_header("successful-delete-process-token".to_owned()),
         ))
         .await?;
-    call(
-        &successful_client,
-        "identify_session",
-        json!({ "process_id": 3 }),
-    )
-    .await;
     let removed = call(
         &successful_client,
         "delete_project",

@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, request::Parts},
+    http::{StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -19,7 +19,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        session::{local::LocalSessionManager, never::NeverSessionManager},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,7 @@ pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate Workman project.";
 pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while retaining the template prompt and skipping its launch args. Prefer model for a per-launch override: it replaces existing long and short model flags in the registered command, template args, and caller args for supported tool_type values; reserve extra_args for other raw flags.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -104,6 +105,36 @@ pub fn streamable_http_service(
     (service, sessions)
 }
 
+/// Stateless JSON transport for clients that do not consume server-initiated messages.
+///
+/// Some MCP SDKs open an otherwise-idle SSE stream immediately after initialization and
+/// permanently disable a server after a very small reconnect budget. Workman currently emits no
+/// MCP progress, list-changed, or other server-initiated notifications, so Kimi loses no active
+/// behavior on this request/response-only endpoint. The stateful endpoint remains the default for
+/// every other client and is ready for future server push.
+pub fn stateless_http_service(
+    registry: SharedProcessRegistry,
+    input_router: crate::ProcessInputRouter,
+    mcp_url: String,
+    timer_events: TimerLifecycleHub,
+) -> StreamableHttpService<WorkmanMcp, NeverSessionManager> {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true);
+    StreamableHttpService::new(
+        move || {
+            Ok(WorkmanMcp::new(
+                registry.clone(),
+                input_router.clone(),
+                mcp_url.clone(),
+                timer_events.clone(),
+            ))
+        },
+        Arc::new(NeverSessionManager::default()),
+        config,
+    )
+}
+
 /// Reject stale stateful MCP requests before rmcp can dispatch them.
 ///
 /// Streamable HTTP clients use 404 as the signal to discard an unknown or
@@ -139,13 +170,13 @@ pub async fn require_known_session(
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct IdentifySessionArgs {
-    /// Stable workman process ID to associate with this MCP session.
+    /// Expected Workman process ID. The authenticated process credential already establishes it.
     process_id: ProcessId,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct HelpArgs {
-    /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, or tools.
+    /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, tools, or spawning.
     #[serde(default)]
     topic: Option<String>,
 }
@@ -243,14 +274,16 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Manually associate this MCP session with a Workman process")]
+    #[tool(
+        description = "Confirm this authenticated MCP connection is bound to the expected process; this cannot claim or change identity"
+    )]
     async fn identify_session(
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<IdentifySessionArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (mut actor, existing_process) = match ensure_actor(&mut registry, &parts) {
+        let (actor, existing_process) = match ensure_actor(&mut registry, &parts) {
             Ok(identity) => identity,
             Err(error) => return failure("identity_error", error),
         };
@@ -282,47 +315,13 @@ impl WorkmanMcp {
                 selected_project_id: actor.selected_project_id,
             });
         }
-        let process = match registry.store().get_process(args.process_id) {
-            Ok(Some(process)) => process,
-            Ok(None) => {
-                return failure(
-                    "process_not_found",
-                    format!("process {} was not found", args.process_id),
-                );
-            }
-            Err(error) => return failure("store_error", error.to_string()),
-        };
-        match registry
-            .store()
-            .is_project_in_active_profile(process.project_id)
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return failure(
-                    "identity_scope_error",
-                    format!(
-                        "process {} belongs to project {}, which is not in the active profile",
-                        process.id, process.project_id
-                    ),
-                );
-            }
-            Err(error) => return failure("store_error", error.to_string()),
-        }
-        actor.process_id = Some(process.id);
-        actor.selected_project_id = Some(process.project_id);
-        actor.last_seen_at = now_millis();
-        if let Err(error) = registry.store().put_actor(&actor) {
-            return failure("store_error", error.to_string());
-        }
-        let effective_project_id = resolve_project_id(&registry, &actor, None).ok();
-        success(IdentityResult {
-            actor_id: actor.id,
-            session_id: actor.session_id,
-            process_id: actor.process_id,
-            process_name: Some(process.name),
-            effective_project_id,
-            selected_project_id: actor.selected_project_id,
-        })
+        failure(
+            "identity_authentication_required",
+            format!(
+                "this MCP connection has no authenticated process identity and cannot claim process {}; reconnect using that process's WORKMAN_MCP_TOKEN credential, then call whoami",
+                args.process_id
+            ),
+        )
     }
 
     #[tool(description = "Show concise Workman MCP help, optionally for one topic")]
@@ -330,13 +329,13 @@ impl WorkmanMcp {
         let topic = args.topic.as_deref().unwrap_or("setup");
         let text = match topic {
             "setup" => {
-                "Connect to /mcp with Streamable HTTP. Daemon-spawned agents send x-workman-mcp-token and are automatically jailed to their owning project. External MCP clients use the daemon bearer token, then must call identify_session before project-scoped work."
+                "Connect to /mcp with Streamable HTTP. Daemon-spawned agents authenticate with their process credential and are automatically jailed to their owning project. A daemon bearer authenticates user-level discovery only and cannot claim a process identity."
             }
             "identity" => {
-                "whoami auto-resolves a process token. identify_session is the explicit fallback for externally launched agents. Once identified with a process, an MCP identity cannot be retargeted and can act or read only inside that process's project."
+                "whoami resolves the process credential supplied by the launcher. identify_session only confirms that authenticated identity; it cannot claim or retarget a process. If whoami is unidentified or names the wrong process, stop and report a launch-wiring error."
             }
             "scoping" => {
-                "Agent identities are jailed by the daemon to their owning project: list_projects returns only that project, cross-project project_id overrides and indirect process/timer/transfer targets are rejected, select_project cannot escape the jail, and project-creating/global-config tools are unavailable. Unidentified bearer sessions may use discovery/help, but must call identify_session before project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
+                "Agent identities are jailed by the daemon to their owning project: list_projects returns only that project, cross-project project_id overrides and indirect process/timer/transfer targets are rejected, select_project cannot escape the jail, and project-creating/global-config tools are unavailable. Unidentified bearer sessions may use discovery/help but cannot claim a process or perform project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
             }
             "projects" => {
                 "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Agent identities see and target only their owning project and cannot register a new project. Delete always requires confirm_delete; active processes require confirm_stop_running; delete_from_disk performs guarded local-only deletion and never changes a remote."
@@ -345,6 +344,7 @@ impl WorkmanMcp {
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
             "worktrees" => WORKTREE_AGENT_GUIDANCE,
             "tools" => "Use mcp_tools_summary for the complete core tool list.",
+            "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
                     "unknown_help_topic",
@@ -367,6 +367,7 @@ impl WorkmanMcp {
             "enabled": true,
             "count": tools.len(),
             "tools": tools,
+            "spawn_agent_guidance": SPAWN_AGENT_GUIDANCE,
         }))
     }
 
@@ -529,7 +530,7 @@ impl WorkmanMcp {
             ),
             Ok(None) => failure(
                 "identity_required",
-                "MCP session has no process identity; call identify_session before project-scoped actions (project registration remains available through the authenticated UI/CLI control channel)",
+                "MCP session has no authenticated process identity; use the authenticated UI/CLI control channel for project registration",
             ),
             Err(error) => failure("project_scope_error", error),
         }
@@ -625,7 +626,7 @@ impl ServerHandler for WorkmanMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("workman", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "Workman workspace control. Call whoami first. Agent identities are daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions must call identify_session before project-scoped work. {HUMAN_HANDOFF_GUIDANCE}"
+                "Workman workspace control. Call whoami first. Agent identities are authenticated by their launch credential and daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions cannot claim a process identity or perform project-scoped work. {HUMAN_HANDOFF_GUIDANCE}"
             ))
     }
 }
@@ -634,31 +635,51 @@ fn ensure_actor(
     registry: &mut ProcessRegistry,
     parts: &Parts,
 ) -> Result<(Actor, Option<Process>), String> {
-    let token = parts
+    let explicit_process_token = parts
         .headers
         .get(WORKMAN_MCP_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
-    let token_process = match token {
+    let bearer_candidate = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let token_process = match explicit_process_token {
         Some(token) => registry
             .store()
             .get_process_by_mcp_token(token)
             .map_err(|error| error.to_string())?,
-        None => None,
+        None => match bearer_candidate {
+            Some(token) => registry
+                .store()
+                .get_process_by_mcp_token(token)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        },
     };
-    if token.is_some() && token_process.is_none() {
+    if explicit_process_token.is_some() && token_process.is_none() {
         return Err("process token is no longer active".to_owned());
     }
-    let session_id = parts
+    let client_session_id = parts
         .headers
         .get("mcp-session-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| {
-            token_process
-                .as_ref()
-                .map(|process| format!("process:{}", process.id))
-        })
-        .unwrap_or_else(|| format!("anonymous:{}", Uuid::new_v4().simple()));
+        .and_then(|value| value.to_str().ok());
+    if token_process.is_none() && client_session_id.is_none() {
+        return Err(
+            "sessionless MCP tool calls require an active process credential; reconnect using this launch's WORKMAN_MCP_TOKEN credential"
+                .to_owned(),
+        );
+    }
+    // A process credential is the identity authority. Never let a caller-selected session
+    // header address or rewrite another process's durable actor row.
+    let session_id = token_process.as_ref().map_or_else(
+        || {
+            client_session_id
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("anonymous:{}", Uuid::new_v4().simple()))
+        },
+        |process| format!("process:{}", process.id),
+    );
     let now = now_millis();
     let mut actor = registry
         .store()
@@ -675,6 +696,11 @@ fn ensure_actor(
     if let Some(process) = &token_process {
         actor.process_id = Some(process.id);
         actor.selected_project_id = Some(process.project_id);
+    } else {
+        // A durable actor record must never turn a daemon-bearer connection into a
+        // process identity. Only a current per-process credential can establish it.
+        actor.process_id = None;
+        actor.selected_project_id = None;
     }
     actor.last_seen_at = now;
     registry
@@ -721,7 +747,7 @@ fn resolve_project_id(
         return Ok(owning_project_id);
     }
     Err(
-        "MCP session has no process identity; call identify_session before project-scoped actions"
+        "MCP session has no authenticated process identity; reconnect with this process's WORKMAN_MCP_TOKEN credential before project-scoped actions"
             .to_owned(),
     )
 }
@@ -762,7 +788,7 @@ fn enforce_project_access(
         ),
         Some(_) => Ok(()),
         None => Err(
-            "MCP session has no process identity; call identify_session before project-scoped actions"
+            "MCP session has no authenticated process identity; reconnect with this process's WORKMAN_MCP_TOKEN credential before project-scoped actions"
                 .to_owned(),
         ),
     }
