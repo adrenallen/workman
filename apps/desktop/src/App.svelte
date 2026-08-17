@@ -44,7 +44,12 @@
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
-  import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
+  import {
+    applyUpdate,
+    autoImportTerminalProfile,
+    checkForUpdates,
+    type UpdateStatus
+  } from './lib/settings';
   import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
   import TerminalView from './lib/TerminalView.svelte';
   import { processCycleDirection } from './lib/terminalKeys';
@@ -245,6 +250,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
@@ -330,6 +336,13 @@
       ? client.subscribeProcessStatuses()
       : client.unsubscribeProcessStatuses();
     void request.catch(reportError);
+  });
+  $effect(() => {
+    if (connection.status !== 'connected' || terminalProfileAutoImportStarted) return;
+    terminalProfileAutoImportStarted = true;
+    void autoImportTerminalProfile(client).catch(() => {
+      // Native profile discovery is best-effort; Settings retains the explicit import action.
+    });
   });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);

@@ -15,12 +15,14 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use uuid::Uuid;
 use workman_core::{
     AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
     ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
     attention::{AttentionState, DEFAULT_IDLE_AFTER},
+    pty::{is_kimi_tool_type, kimi_session_started},
 };
 
 use super::{
@@ -32,8 +34,21 @@ use crate::ProcessRegistry;
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
-const KIMI_MCP_TEMPLATE_FILE: &str = ".workman-mcp-template.json";
-const KIMI_MCP_TOKEN_SENTINEL: &str = "__WORKMAN_KIMI_PROCESS_MCP_TOKEN__";
+// Kimi needs its provider credentials to launch, so these are restrictive per-launch snapshots:
+// copied files/directories are forced to 0600/0700, never followed through symlinks, removed on
+// close and graceful shutdown, and swept from persisted process records after daemon restart.
+// Refreshes remain isolated to the disposable snapshot and are intentionally not synced back.
+const KIMI_PRIVATE_HOME_SEED_ENTRIES: &[&str] = &[
+    "config.toml",
+    "credentials",
+    "device_id",
+    "migrations-effort.json",
+    "oauth",
+    "region",
+    "tui.toml",
+    "workspace-trust",
+    "workspaces.json",
+];
 const INITIAL_DIALOG_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_OUTPUT_SETTLE: Duration = Duration::from_millis(750);
 const INITIAL_OUTPUT_QUIET: Duration = Duration::from_millis(200);
@@ -42,11 +57,13 @@ const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_PROMPT_HARD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT: Duration = Duration::from_secs(12);
 const AGENT_TEMPLATE_NAME_MAX_CHARS: usize = 120;
 const AGENT_TEMPLATE_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS: usize = 64;
 const AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES: usize = 4 * 1024;
 const INITIAL_PROMPT_MAX_BYTES: usize = 64 * 1024;
+const MODEL_MAX_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -71,7 +88,8 @@ struct SpawnProcessArgs {
     /// Safely shell-quoted arguments appended to the registered agent command.
     #[serde(default)]
     extra_args: Vec<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs.
+    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
+    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
 }
@@ -81,25 +99,33 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Optional when agent_template_id is provided; when both are set,
-    /// this overrides the template's default agent.
+    /// Agent-tool registry ID. Required for the default plain-agent path. With a template, this
+    /// swaps its default agent: the template prompt stays, but template launch args are skipped.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
-    /// Optional agent template. Its default agent and launch arguments are used unless
-    /// agent_tool_id overrides the agent, in which case template launch arguments are skipped
-    /// and only the template prompt applies.
+    /// Numeric template ID from list_agent_templates. Use a template only when the user names one
+    /// or explicitly asks for one.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Safely shell-quoted arguments appended to the registered agent command.
+    /// Optional model override. Prefer this to putting --model in extra_args. Supported tool_type
+    /// values and aliases are codex, claude/claude_code, kimi/kimi_code, gemini/gemini_cli,
+    /// grok/grok_cli/grok_build, and opencode/open_code. Workman replaces long and short model
+    /// flags in the registered command, template args, and caller args; other tool types return an
+    /// error with recovery guidance.
+    #[serde(default)]
+    model: Option<String>,
+    /// Raw, safely shell-quoted flags appended to the registered agent command. Avoid using this
+    /// for model selection; use model instead.
     #[serde(default)]
     extra_args: Vec<String>,
     /// Optional first prompt delivered once the agent reaches a safe input state.
     #[serde(default)]
     initial_prompt: Option<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs.
+    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
+    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
 }
@@ -166,8 +192,28 @@ struct PreparedRegisteredAgent {
 #[derive(Debug)]
 struct ResolvedAgentSpawn {
     agent_tool_id: AgentToolId,
+    agent_tool_type: String,
     extra_args: Vec<String>,
+    model: Option<String>,
     initial_prompt: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTemplateDefaultAgent {
+    agent_tool_id: AgentToolId,
+    name: String,
+    tool_type: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTemplateSummary {
+    id: AgentTemplateId,
+    name: String,
+    default_agent: AgentTemplateDefaultAgent,
+    model: Option<String>,
+    prompt_preview: String,
+    extra_args: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +231,26 @@ enum McpLaunchAdapter {
     Grok,
     Kimi,
     Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModelFlag {
+    long: &'static str,
+    short: Option<&'static str>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DetectedModel {
+    Absent,
+    Present(Option<String>),
+}
+
+#[derive(Debug)]
+struct ShellWordSpan {
+    start: usize,
+    end: usize,
+    value: String,
+    shell_operator: bool,
 }
 
 impl McpLaunchAdapter {
@@ -218,13 +284,28 @@ impl McpLaunchAdapter {
             Self::Kimi => McpLaunchCapability {
                 supported: true,
                 mechanism: "private per-launch KIMI_CODE_HOME config",
-                note: "Workman injects a private Kimi Code home with the current URL and process token header; the user's mcp.json is never changed.",
+                note: "Workman requires Kimi Code 0.36 or newer and injects a private home with an environment-backed process bearer. The Kimi-only stateless endpoint carries request/response tools but no server push (Workman currently emits none). Mutable session state and the user's mcp.json remain isolated; disabling auto_acknowledge_dialogs also disables private workspace-trust seeding and may make Kimi filter MCP.",
             },
             Self::Unsupported => McpLaunchCapability {
                 supported: false,
                 mechanism: "unsupported",
                 note: "This tool type has no registered per-launch Workman MCP adapter.",
             },
+        }
+    }
+
+    const fn model_flag(self) -> Option<ModelFlag> {
+        match self {
+            Self::Claude
+            | Self::Codex
+            | Self::Gemini
+            | Self::OpenCode
+            | Self::Grok
+            | Self::Kimi => Some(ModelFlag {
+                long: "--model",
+                short: Some("-m"),
+            }),
+            Self::Unsupported => None,
         }
     }
 }
@@ -243,11 +324,11 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "List reusable agent templates for the active workspace profile. Returns { agent_templates: [...] }"
+        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent { agent_tool_id, name, tool_type, enabled }, model, prompt_preview, extra_args }] } without full prompts; a trailing … marks a truncated preview."
     )]
     async fn list_agent_templates(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
-        match load_agent_templates(&registry) {
+        match load_agent_template_summaries(&registry) {
             Ok(templates) => success(json!({ "agent_templates": templates })),
             Err(error) => failure("store_error", error),
         }
@@ -445,6 +526,7 @@ impl WorkmanMcp {
                     args.name,
                     args.extra_args,
                     None,
+                    None,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
                     spawned_by_process_id,
@@ -459,7 +541,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return the identity preamble for its first prompt"
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while keeping the prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,
@@ -467,6 +549,9 @@ impl WorkmanMcp {
         Parameters(args): Parameters<SpawnAgentArgs>,
     ) -> CallToolResult {
         if let Err(error) = validate_initial_prompt(args.initial_prompt.as_deref()) {
+            return failure("invalid_params", error);
+        }
+        if let Err(error) = validate_model(args.model.as_deref()) {
             return failure("invalid_params", error);
         }
         let (project, spawned_by_process_id) = {
@@ -483,6 +568,7 @@ impl WorkmanMcp {
             args.agent_template_id,
             args.name,
             args.extra_args,
+            args.model,
             args.initial_prompt,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
@@ -510,6 +596,56 @@ pub(crate) fn load_agent_templates(
         .store()
         .list_agent_templates()
         .map_err(|error| error.to_string())
+}
+
+fn load_agent_template_summaries(
+    registry: &ProcessRegistry,
+) -> Result<Vec<AgentTemplateSummary>, String> {
+    let tools = load_agent_tools(registry)?
+        .into_iter()
+        .map(|tool| (tool.id, tool))
+        .collect::<BTreeMap<_, _>>();
+    Ok(load_agent_templates(registry)?
+        .into_iter()
+        .filter_map(|template| {
+            let tool = tools.get(&template.agent_tool_id)?;
+            let model = mcp_launch_adapter(&tool.tool_type)
+                .model_flag()
+                .and_then(|flag| {
+                    let detected = match detected_model(&template.extra_args, flag) {
+                        DetectedModel::Absent => detected_model_from_command(&tool.command, flag),
+                        detected => detected,
+                    };
+                    match detected {
+                        DetectedModel::Absent => None,
+                        DetectedModel::Present(model) => model,
+                    }
+                });
+            Some(AgentTemplateSummary {
+                id: template.id,
+                name: template.name,
+                default_agent: AgentTemplateDefaultAgent {
+                    agent_tool_id: tool.id,
+                    name: tool.name.clone(),
+                    tool_type: tool.tool_type.clone(),
+                    enabled: tool.enabled,
+                },
+                model,
+                prompt_preview: prompt_preview(&template.prompt),
+                extra_args: template.extra_args,
+            })
+        })
+        .collect())
+}
+
+fn prompt_preview(prompt: &str) -> String {
+    let mut characters = prompt.trim().chars();
+    let mut preview = characters.by_ref().take(120).collect::<String>();
+    if characters.next().is_some() {
+        preview.pop();
+        preview.push('…');
+    }
+    preview
 }
 
 pub(crate) fn save_agent_template_from_settings(
@@ -875,6 +1011,7 @@ pub(crate) async fn spawn_registered_agent(
     agent_template_id: Option<AgentTemplateId>,
     name: Option<String>,
     extra_args: Vec<String>,
+    model: Option<String>,
     initial_prompt: Option<String>,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
@@ -888,6 +1025,7 @@ pub(crate) async fn spawn_registered_agent(
             agent_tool_id,
             agent_template_id,
             extra_args,
+            model,
             initial_prompt,
         )?
     };
@@ -897,6 +1035,7 @@ pub(crate) async fn spawn_registered_agent(
         resolved.agent_tool_id,
         name,
         resolved.extra_args,
+        resolved.model,
         mcp_url,
         auto_acknowledge_dialogs,
         spawned_by_process_id,
@@ -904,7 +1043,12 @@ pub(crate) async fn spawn_registered_agent(
     )
     .await?;
     if let Some(prompt) = resolved.initial_prompt {
-        schedule_initial_prompt(registry, result.process_id, prompt);
+        schedule_initial_prompt(
+            registry,
+            result.process_id,
+            prompt,
+            is_kimi_tool_type(&resolved.agent_tool_type),
+        );
     }
     Ok(result)
 }
@@ -914,16 +1058,20 @@ fn resolve_agent_spawn(
     requested_agent_tool_id: Option<AgentToolId>,
     agent_template_id: Option<AgentTemplateId>,
     caller_extra_args: Vec<String>,
+    requested_model: Option<String>,
     caller_prompt: Option<String>,
 ) -> Result<ResolvedAgentSpawn, String> {
+    let requested_model = normalize_model(requested_model)?;
     let Some(agent_template_id) = agent_template_id else {
         let agent_tool_id = requested_agent_tool_id.ok_or_else(|| {
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
-        load_enabled_agent_tool(registry, agent_tool_id)?;
+        let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
-            extra_args: caller_extra_args,
+            agent_tool_type: tool.tool_type.clone(),
+            extra_args: apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?,
+            model: requested_model,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
         });
     };
@@ -935,8 +1083,9 @@ fn resolve_agent_spawn(
             format!("agent template {agent_template_id} was not found in the active profile")
         })?;
     let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
-    load_enabled_agent_tool(registry, agent_tool_id)?;
-    let mut extra_args = if agent_tool_id == template.agent_tool_id {
+    let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
+    let uses_template_launch_settings = agent_tool_id == template.agent_tool_id;
+    let mut extra_args = if uses_template_launch_settings {
         template.extra_args
     } else {
         Vec::new()
@@ -944,9 +1093,133 @@ fn resolve_agent_spawn(
     extra_args.extend(caller_extra_args);
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
-        extra_args,
+        agent_tool_type: tool.tool_type.clone(),
+        extra_args: apply_model_override(&tool, extra_args, requested_model.as_deref())?,
+        model: requested_model,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
     })
+}
+
+fn validate_model(model: Option<&str>) -> Result<(), String> {
+    let Some(model) = model else {
+        return Ok(());
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model must not be empty when provided".to_owned());
+    }
+    if model.len() > MODEL_MAX_BYTES {
+        return Err(format!("model must be {MODEL_MAX_BYTES} bytes or fewer"));
+    }
+    if model.chars().any(char::is_control) {
+        return Err("model may not contain control characters".to_owned());
+    }
+    Ok(())
+}
+
+fn normalize_model(model: Option<String>) -> Result<Option<String>, String> {
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    validate_model(Some(&model))?;
+    let model = model.trim();
+    Ok(Some(model.to_owned()))
+}
+
+fn apply_model_override(
+    tool: &AgentTool,
+    extra_args: Vec<String>,
+    model: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let Some(model) = model else {
+        return Ok(extra_args);
+    };
+    let Some(flag) = mcp_launch_adapter(&tool.tool_type).model_flag() else {
+        return Err(format!(
+            "this agent tool has no known model flag: {} (tool_type {}). Choose a supported tool_type from list_agent_tools, or omit model and configure this tool's model in its registered command or extra_args",
+            tool.name, tool.tool_type,
+        ));
+    };
+    let mut filtered = strip_model_flags(extra_args, flag);
+    filtered.push(flag.long.to_owned());
+    filtered.push(model.to_owned());
+    Ok(filtered)
+}
+
+fn strip_model_flags(arguments: Vec<String>, flag: ModelFlag) -> Vec<String> {
+    let mut filtered = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--" {
+            filtered.extend(arguments[index..].iter().cloned());
+            break;
+        }
+        if is_separate_model_flag(argument, flag) {
+            // A separate option consumes the next token as its value. Removing both mirrors the
+            // CLI's interpretation even when the original value is missing or starts with '-'.
+            index += 2;
+            continue;
+        }
+        if is_attached_model_flag(argument, flag) {
+            index += 1;
+            continue;
+        }
+        filtered.push(argument.clone());
+        index += 1;
+    }
+    filtered
+}
+
+fn is_separate_model_flag(argument: &str, flag: ModelFlag) -> bool {
+    argument == flag.long || flag.short.is_some_and(|short| argument == short)
+}
+
+fn is_attached_model_flag(argument: &str, flag: ModelFlag) -> bool {
+    argument
+        .strip_prefix(flag.long)
+        .is_some_and(|suffix| suffix.starts_with('='))
+        || flag.short.is_some_and(|short| {
+            argument
+                .strip_prefix(short)
+                .is_some_and(|suffix| !suffix.is_empty())
+        })
+}
+
+fn detected_model(arguments: &[String], flag: ModelFlag) -> DetectedModel {
+    let mut detected = DetectedModel::Absent;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--" {
+            break;
+        }
+        if is_separate_model_flag(argument, flag) {
+            detected = DetectedModel::Present(
+                arguments
+                    .get(index + 1)
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            );
+            index += 2;
+            continue;
+        }
+        let attached = argument
+            .strip_prefix(flag.long)
+            .and_then(|suffix| suffix.strip_prefix('='))
+            .or_else(|| {
+                flag.short
+                    .and_then(|short| argument.strip_prefix(short))
+                    .filter(|suffix| !suffix.is_empty())
+                    .map(|suffix| suffix.strip_prefix('=').unwrap_or(suffix))
+            });
+        if let Some(value) = attached {
+            detected = DetectedModel::Present((!value.trim().is_empty()).then(|| value.to_owned()));
+        }
+        index += 1;
+    }
+    detected
 }
 
 pub(crate) fn compose_initial_prompt(
@@ -971,6 +1244,7 @@ fn schedule_initial_prompt(
     registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
     prompt: String,
+    verify_kimi_submission: bool,
 ) {
     tokio::spawn(async move {
         let started = Instant::now();
@@ -1042,10 +1316,20 @@ fn schedule_initial_prompt(
                             .is_some_and(|seconds| seconds >= DEFAULT_IDLE_AFTER.as_secs_f64());
                     (ready || quiet_fallback).then(|| {
                         let used_fallback = !ready;
-                        let result = registry
-                            .submit_input(process_id, prompt.as_bytes())
-                            .map_err(|error| error.to_string());
+                        let result = if verify_kimi_submission {
+                            registry.submit_initial_prompt(process_id, prompt.as_bytes())
+                        } else {
+                            registry.submit_input(process_id, prompt.as_bytes())
+                        }
+                        .map_err(|error| error.to_string());
                         match &result {
+                            Ok(_) if verify_kimi_submission => {
+                                let _ = registry.record_process_event(
+                                    process_id,
+                                    "initial_prompt_queued",
+                                    "initial prompt queued; waiting for Kimi session creation",
+                                );
+                            }
                             Ok(_) => {
                                 let suffix = if used_fallback {
                                     " using the observed-output quiet fallback"
@@ -1081,12 +1365,114 @@ fn schedule_initial_prompt(
                 }
                 if let Err(error) = delivery {
                     eprintln!("process {process_id}: initial prompt delivery failed: {error}");
+                } else if verify_kimi_submission {
+                    confirm_kimi_initial_prompt_submission(
+                        registry.clone(),
+                        process_id,
+                        used_fallback,
+                    )
+                    .await;
                 }
                 return;
             }
             tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
         }
     });
+}
+
+async fn confirm_kimi_initial_prompt_submission(
+    registry: crate::SharedProcessRegistry,
+    process_id: ProcessId,
+    used_fallback: bool,
+) {
+    let hard_deadline = Instant::now() + INITIAL_PROMPT_HARD_TIMEOUT;
+    let mut quiet_deadline = Instant::now() + KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT;
+    let mut last_output_offset = 0;
+    loop {
+        let finished = {
+            let mut registry = registry.lock().await;
+            let agent_state = match registry.agent_attention_snapshot(process_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        format!(
+                            "initial prompt dropped (reason: verification_failed): attention unavailable: {error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+            if agent_state.state == AttentionState::Exited {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    "initial prompt dropped (reason: exited) before Kimi created a session",
+                );
+                return;
+            }
+            let rendered = match registry.rendered_output(process_id) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        format!(
+                            "initial prompt dropped (reason: verification_failed): rendered output unavailable: {error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+            let now = Instant::now();
+            if rendered.raw_end_offset != last_output_offset {
+                last_output_offset = rendered.raw_end_offset;
+                quiet_deadline = now + KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT;
+            }
+            if kimi_session_started(&rendered.text) {
+                let suffix = if used_fallback {
+                    " using the observed-output quiet fallback"
+                } else {
+                    ""
+                };
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_delivered",
+                    format!(
+                        "initial prompt submitted after Kimi session creation verification{suffix}"
+                    ),
+                );
+                true
+            } else if now >= hard_deadline {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    format!(
+                        "initial prompt submission could not be verified before the {}s hard cap",
+                        INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                    ),
+                );
+                true
+            } else if now >= quiet_deadline {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    format!(
+                        "no Kimi session header appeared within {}s of the last PTY output",
+                        KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT.as_secs()
+                    ),
+                );
+                true
+            } else {
+                false
+            }
+        };
+        if finished {
+            return;
+        }
+        tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1096,6 +1482,7 @@ async fn spawn_registered_agent_for(
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
+    model: Option<String>,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
@@ -1115,16 +1502,26 @@ async fn spawn_registered_agent_for(
         ));
     }
     let mcp_url = mcp_url.to_owned();
+    let working_dir = project.path.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         let resolved_environment = user_environment.resolve();
         let source_home = agent_source_home(&resolved_environment, &tool.tool_type);
+        let command = if model.is_some() {
+            let flag = mcp_launch_adapter(&tool.tool_type)
+                .model_flag()
+                .expect("model support was checked while resolving the spawn");
+            strip_model_flags_from_command(&tool.command, flag)?
+        } else {
+            tool.command.clone()
+        };
         let launch = prepare_agent_launch(
-            &tool.command,
+            &command,
             &tool.tool_type,
             &mcp_url,
             &extra_args,
             purpose,
             source_home.as_deref(),
+            auto_acknowledge_dialogs.then_some(Path::new(&working_dir)),
         )?;
         Ok::<_, String>(PreparedRegisteredAgent {
             tool,
@@ -1179,6 +1576,23 @@ async fn spawn_registered_agent_for(
             return Err(error);
         }
     };
+    if is_kimi_tool_type(&tool_type) {
+        let (kind, message) = if auto_acknowledge_dialogs {
+            (
+                "kimi_workspace_trust_seeded",
+                "seeded workspace trust inside the disposable Kimi home; the user trust store was not changed",
+            )
+        } else {
+            (
+                "kimi_workspace_trust_skipped",
+                "private Kimi workspace trust was not seeded because auto_acknowledge_dialogs=false; Kimi may filter MCP until trust is established",
+            )
+        };
+        let _ = registry
+            .lock()
+            .await
+            .record_process_event(result.process_id, kind, message);
+    }
     if auto_acknowledge_dialogs
         && supports_first_run_dialog_ack(&tool_type)
         && let Err(error) =
@@ -1300,6 +1714,7 @@ pub(crate) async fn deep_check_registered_agent(
         agent_tool_id,
         None,
         extra_args,
+        None,
         mcp_url,
         true,
         spawned_by_process_id,
@@ -1565,6 +1980,174 @@ fn process_name(
     Ok(candidate)
 }
 
+// Tokenize enough POSIX shell syntax to locate argument byte spans without reconstructing or
+// re-quoting the user's registered command. Model overrides reject compound shell commands below
+// because appending one option cannot unambiguously target one command in a pipeline or script.
+fn shell_word_spans(command: &str) -> Result<Vec<ShellWordSpan>, String> {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < command.len() {
+        let first = command[index..]
+            .chars()
+            .next()
+            .expect("index remains on a character boundary");
+        if first.is_whitespace() && !matches!(first, '\n' | '\r') {
+            index += first.len_utf8();
+            continue;
+        }
+        if matches!(
+            first,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '#' | '\n' | '\r'
+        ) {
+            let start = index;
+            index += first.len_utf8();
+            if index < command.len()
+                && command[index..].starts_with(first)
+                && matches!(first, '&' | '|' | '<' | '>')
+            {
+                index += first.len_utf8();
+            }
+            words.push(ShellWordSpan {
+                start,
+                end: index,
+                value: command[start..index].to_owned(),
+                shell_operator: true,
+            });
+            continue;
+        }
+
+        let start = index;
+        let mut value = String::new();
+        let mut quote = Quote::None;
+        while index < command.len() {
+            let character = command[index..]
+                .chars()
+                .next()
+                .expect("index remains on a character boundary");
+            match (quote, character) {
+                (Quote::None, character)
+                    if character.is_whitespace() && !matches!(character, '\n' | '\r') =>
+                {
+                    break;
+                }
+                (Quote::None, ';' | '&' | '|' | '<' | '>' | '(' | ')' | '\n' | '\r') => break,
+                (Quote::None, '\'') => {
+                    quote = Quote::Single;
+                    index += character.len_utf8();
+                }
+                (Quote::None, '"') => {
+                    quote = Quote::Double;
+                    index += character.len_utf8();
+                }
+                (Quote::None | Quote::Double, '\\') => {
+                    index += character.len_utf8();
+                    if index == command.len() {
+                        return Err(
+                            "registered agent command ends with an incomplete escape".into()
+                        );
+                    }
+                    let escaped = command[index..]
+                        .chars()
+                        .next()
+                        .expect("index remains on a character boundary");
+                    value.push(escaped);
+                    index += escaped.len_utf8();
+                }
+                (Quote::Single, '\'') => {
+                    quote = Quote::None;
+                    index += character.len_utf8();
+                }
+                (Quote::Double, '"') => {
+                    quote = Quote::None;
+                    index += character.len_utf8();
+                }
+                (_, character) => {
+                    value.push(character);
+                    index += character.len_utf8();
+                }
+            }
+        }
+        if quote != Quote::None {
+            return Err("registered agent command contains an unterminated quote".into());
+        }
+        words.push(ShellWordSpan {
+            start,
+            end: index,
+            value,
+            shell_operator: false,
+        });
+    }
+    Ok(words)
+}
+
+fn strip_model_flags_from_command(command: &str, flag: ModelFlag) -> Result<String, String> {
+    let words = shell_word_spans(command)?;
+    if words.iter().any(|word| word.shell_operator) {
+        return Err(
+            "model overrides require a direct registered agent command without shell control operators"
+                .to_owned(),
+        );
+    }
+    let mut removed = vec![false; words.len()];
+    let mut index = 0;
+    while index < words.len() {
+        let argument = &words[index].value;
+        if argument == "--" {
+            break;
+        }
+        if is_separate_model_flag(argument, flag) {
+            removed[index] = true;
+            if words
+                .get(index + 1)
+                .is_some_and(|word| !word.shell_operator && word.value != "--")
+            {
+                removed[index + 1] = true;
+            }
+            index += 2;
+            continue;
+        }
+        if is_attached_model_flag(argument, flag) {
+            removed[index] = true;
+        }
+        index += 1;
+    }
+
+    let mut filtered = String::with_capacity(command.len());
+    let mut cursor = 0;
+    for (word, remove) in words.iter().zip(removed) {
+        if remove {
+            filtered.push_str(&command[cursor..word.start]);
+            cursor = word.end;
+        }
+    }
+    filtered.push_str(&command[cursor..]);
+    let filtered = filtered.trim().to_owned();
+    if filtered.is_empty() {
+        return Err("registered agent command is empty after replacing its model flag".to_owned());
+    }
+    Ok(filtered)
+}
+
+fn detected_model_from_command(command: &str, flag: ModelFlag) -> DetectedModel {
+    let Ok(words) = shell_word_spans(command) else {
+        return DetectedModel::Absent;
+    };
+    if words.iter().any(|word| word.shell_operator) {
+        return DetectedModel::Absent;
+    }
+    detected_model(
+        &words.into_iter().map(|word| word.value).collect::<Vec<_>>(),
+        flag,
+    )
+}
+
 fn command_with_args(command: &str, extra_args: &[String]) -> Result<String, String> {
     if command.contains('\0') || extra_args.iter().any(|arg| arg.contains('\0')) {
         return Err("commands and arguments may not contain NUL bytes".to_owned());
@@ -1587,6 +2170,7 @@ fn prepare_agent_launch(
     extra_args: &[String],
     purpose: AgentLaunchPurpose,
     source_home: Option<&Path>,
+    auto_trusted_working_dir: Option<&Path>,
 ) -> Result<AgentLaunchPlan, String> {
     let adapter = mcp_launch_adapter(tool_type);
     let mut env = BTreeMap::from([(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.to_owned())]);
@@ -1615,6 +2199,7 @@ fn prepare_agent_launch(
                 "config.toml",
                 "config.toml",
                 &grok_config(source_home, mcp_url)?,
+                None,
             )?;
             env.insert(
                 "GROK_HOME".to_owned(),
@@ -1627,6 +2212,8 @@ fn prepare_agent_launch(
             command
         }
         McpLaunchAdapter::Kimi => {
+            let mcp_url = stateless_mcp_url(mcp_url);
+            env.insert(WORKMAN_MCP_URL_ENV.to_owned(), mcp_url.clone());
             // Kimi 0.34 rejects --prompt with --yolo/--auto. Those policy flags remain intact for
             // normal launches; prompt-mode deep checks are already non-interactive and narrowly
             // constrained to whoami.
@@ -1639,10 +2226,19 @@ fn prepare_agent_launch(
                 "kimi",
                 source_home,
                 "mcp.json",
-                KIMI_MCP_TEMPLATE_FILE,
-                &kimi_mcp_template(mcp_url),
+                "mcp.json",
+                &kimi_mcp_config(&mcp_url),
+                Some(KIMI_PRIVATE_HOME_SEED_ENTRIES),
             )?;
-            let command = kimi_command_with_materialized_token(&command, &kimi_home);
+            // Kimi gates even a private-home MCP config on workspace trust. Honor the existing
+            // launch-level auto-ack choice inside this disposable home so prompt-mode checks and
+            // first missions cannot race the trust dialog; the user's trust store is untouched.
+            if let Some(working_dir) = auto_trusted_working_dir
+                && let Err(error) = seed_kimi_workspace_trust(&kimi_home, working_dir)
+            {
+                let _ = fs::remove_dir_all(&kimi_home);
+                return Err(error);
+            }
             env.insert(
                 "KIMI_CODE_HOME".to_owned(),
                 kimi_home.to_string_lossy().into_owned(),
@@ -1695,19 +2291,28 @@ fn agent_source_home(
         })
 }
 
-fn kimi_mcp_template(mcp_url: &str) -> String {
+fn kimi_mcp_config(mcp_url: &str) -> String {
     format!(
         "{}\n",
         json!({
             "mcpServers": {
                 "workman": {
                     "url": mcp_url,
-                    "headers": {
-                        "x-workman-mcp-token": KIMI_MCP_TOKEN_SENTINEL
-                    }
+                    "bearerTokenEnvVar": "WORKMAN_MCP_TOKEN"
                 }
             }
         })
+    )
+}
+
+fn stateless_mcp_url(mcp_url: &str) -> String {
+    let mcp_url = mcp_url.trim_end_matches('/');
+    if mcp_url.ends_with("/mcp-stateless") {
+        return mcp_url.to_owned();
+    }
+    mcp_url.strip_suffix("/mcp").map_or_else(
+        || format!("{mcp_url}/mcp-stateless"),
+        |base| format!("{base}/mcp-stateless"),
     )
 }
 
@@ -1738,20 +2343,6 @@ fn kimi_deep_check_command(command: &str, extra_args: &[String]) -> Result<Strin
         .collect::<Vec<_>>()
         .join(" ");
     command_with_args(&command, extra_args)
-}
-
-fn kimi_command_with_materialized_token(command: &str, home: &Path) -> String {
-    let template = shell_quote(&home.join(KIMI_MCP_TEMPLATE_FILE).to_string_lossy());
-    let config = shell_quote(&home.join("mcp.json").to_string_lossy());
-    format!(
-        "umask 077; [ -n \"$WORKMAN_MCP_TOKEN\" ] || exit 1; \
-         IFS= read -r workman_kimi_mcp_template < {template} || exit 1; \
-         case \"$workman_kimi_mcp_template\" in *{KIMI_MCP_TOKEN_SENTINEL}*) ;; *) exit 1 ;; esac; \
-         workman_kimi_mcp_prefix=${{workman_kimi_mcp_template%%{KIMI_MCP_TOKEN_SENTINEL}*}}; \
-         workman_kimi_mcp_suffix=${{workman_kimi_mcp_template#*{KIMI_MCP_TOKEN_SENTINEL}}}; \
-         printf '%s%s%s\\n' \"$workman_kimi_mcp_prefix\" \"$WORKMAN_MCP_TOKEN\" \"$workman_kimi_mcp_suffix\" > {config} || exit 1; \
-         {command}"
-    )
 }
 
 fn grok_config(source_home: Option<&Path>, mcp_url: &str) -> Result<String, String> {
@@ -1798,6 +2389,7 @@ fn prepare_private_agent_home(
     replaced_file: &str,
     replacement_file: &str,
     replacement: &str,
+    copied_source_entries: Option<&[&str]>,
 ) -> Result<PathBuf, String> {
     let home = env::temp_dir().join(format!("workman-{prefix}-mcp.{}", Uuid::new_v4().simple()));
     fs::create_dir(&home)
@@ -1834,6 +2426,22 @@ fn prepare_private_agent_home(
                     continue;
                 }
                 let target = home.join(entry.file_name());
+                if let Some(copied_source_entries) = copied_source_entries {
+                    let entry_name = entry.file_name();
+                    let Some(name) = entry_name.to_str() else {
+                        continue;
+                    };
+                    if !copied_source_entries.contains(&name) {
+                        continue;
+                    }
+                    copy_private_home_entry(&entry.path(), &target).map_err(|error| {
+                        format!(
+                            "copy private {prefix} config state from {}: {error}",
+                            entry.path().display()
+                        )
+                    })?;
+                    continue;
+                }
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(entry.path(), &target).map_err(|error| {
                     format!(
@@ -1869,6 +2477,100 @@ fn prepare_private_agent_home(
         return Err(error);
     }
     Ok(home)
+}
+
+fn copy_private_home_entry(source: &Path, target: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        eprintln!(
+            "skipping symlinked private-home seed entry {}",
+            source.display()
+        );
+        return Ok(());
+    }
+    if metadata.is_file() {
+        fs::copy(source, target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+        }
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "unsupported private-home entry {}",
+            source.display()
+        )));
+    }
+    fs::create_dir(target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_private_home_entry(&entry.path(), &target.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn seed_kimi_workspace_trust(home: &Path, working_dir: &Path) -> Result<(), String> {
+    // Validated against Kimi Code 0.36.1's workspace-trust filenames and JSON schema. The
+    // isolated deep check remains the runtime oracle if a future Kimi release changes it.
+    let root = working_dir.to_string_lossy().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return Err("Kimi launch working directory cannot be empty".to_owned());
+    }
+    let basename = root.rsplit('/').next().unwrap_or(root);
+    let mut slug = String::new();
+    let mut replacing = false;
+    for character in basename.to_lowercase().chars() {
+        if character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '.' | '_' | '-')
+        {
+            slug.push(character);
+            replacing = false;
+        } else if !replacing {
+            slug.push('-');
+            replacing = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = &slug[..slug.len().min(40)];
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() || matches!(slug, "." | "..") {
+        "workspace"
+    } else {
+        slug
+    };
+    let digest = format!("{:x}", Sha256::digest(root.as_bytes()));
+    let trust_dir = home.join("workspace-trust");
+    fs::create_dir_all(&trust_dir)
+        .map_err(|error| format!("create private Kimi workspace trust directory: {error}"))?;
+    let trust_file = trust_dir.join(format!("wd_{slug}_{}", &digest[..12]));
+    fs::write(
+        &trust_file,
+        json!({
+            "root": root,
+            "trustedAt": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        })
+        .to_string(),
+    )
+    .map_err(|error| format!("write private Kimi workspace trust marker: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&trust_file, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("secure private Kimi workspace trust marker: {error}"))?;
+    }
+    Ok(())
 }
 
 fn mcp_launch_args(
@@ -2008,8 +2710,8 @@ fn agent_instructions(
     };
     let identity_guidance = if capability.supported {
         format!(
-            "Call whoami() through workman first to confirm that you auto-identify as process {}. Use identify_session(process_id={}) only if whoami cannot identify you.",
-            process.id, process.id
+            "Call whoami() through workman first. It must identify you as process {}. Never call identify_session to claim or change identity; if whoami is unidentified or names any other process, stop and report a launch-wiring error.",
+            process.id
         )
     } else {
         "The Workman MCP identity check is unavailable for this launch.".to_owned()
@@ -2124,6 +2826,7 @@ mod tests {
             Some(91),
             Some(44),
             vec!["--caller".into()],
+            None,
             Some("Check this.".into()),
         )
         .unwrap();
@@ -2139,6 +2842,7 @@ mod tests {
             Some(92),
             Some(44),
             vec!["--caller".into()],
+            None,
             Some("Check this.".into()),
         )
         .unwrap();
@@ -2150,13 +2854,273 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None).unwrap_err(),
+            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 999 was not found"
         );
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None).unwrap_err(),
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 93 (Disabled agent) is disabled"
         );
+    }
+
+    #[test]
+    fn model_override_replaces_model_flags_for_every_known_agent_type() {
+        for (tool_type, model) in [
+            ("codex", "codex-model"),
+            ("claude", "claude-model"),
+            ("kimi", "kimi-model"),
+            ("gemini", "gemini-model"),
+            ("grok", "grok-model"),
+            ("opencode", "provider/model"),
+        ] {
+            let tool = AgentTool {
+                id: 1,
+                name: tool_type.into(),
+                command: tool_type.into(),
+                tool_type: tool_type.into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            };
+            let args = apply_model_override(
+                &tool,
+                vec![
+                    "--keep".into(),
+                    "value".into(),
+                    "--model".into(),
+                    "old".into(),
+                    "--model=older".into(),
+                ],
+                Some(model),
+            )
+            .unwrap();
+            assert_eq!(args, ["--keep", "value", "--model", model]);
+            assert_eq!(
+                detected_model(&args, mcp_launch_adapter(tool_type).model_flag().unwrap()),
+                DetectedModel::Present(Some(model.to_owned()))
+            );
+        }
+
+        let codex = AgentTool {
+            id: 2,
+            name: "Codex".into(),
+            command: "codex".into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
+        assert_eq!(
+            apply_model_override(&codex, vec!["--model".into(), "unchanged".into()], None).unwrap(),
+            ["--model", "unchanged"]
+        );
+
+        let custom = AgentTool {
+            id: 9,
+            name: "Custom runner".into(),
+            command: "runner".into(),
+            tool_type: "custom".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
+        assert_eq!(
+            apply_model_override(&custom, Vec::new(), Some("model-x")).unwrap_err(),
+            "this agent tool has no known model flag: Custom runner (tool_type custom). Choose a supported tool_type from list_agent_tools, or omit model and configure this tool's model in its registered command or extra_args"
+        );
+    }
+
+    #[test]
+    fn model_override_removes_long_short_and_command_model_flags() {
+        let flag = mcp_launch_adapter("opencode").model_flag().unwrap();
+        assert_eq!(
+            strip_model_flags(
+                vec![
+                    "--keep".into(),
+                    "-m".into(),
+                    "old one".into(),
+                    "-m=old-two".into(),
+                    "-mold-three".into(),
+                    "--model=old-four".into(),
+                    "--".into(),
+                    "-m".into(),
+                    "positional".into(),
+                ],
+                flag,
+            ),
+            ["--keep", "--", "-m", "positional"]
+        );
+        assert_eq!(
+            strip_model_flags_from_command(
+                "opencode --auto --model 'old model' --flag='two words'",
+                flag,
+            )
+            .unwrap(),
+            "opencode --auto   --flag='two words'"
+        );
+        assert_eq!(
+            strip_model_flags_from_command("opencode -mdeepseek/model --auto", flag).unwrap(),
+            "opencode  --auto"
+        );
+        assert_eq!(
+            detected_model_from_command(
+                "opencode --auto --model 'provider/model with space'",
+                flag,
+            ),
+            DetectedModel::Present(Some("provider/model with space".into()))
+        );
+        assert!(
+            strip_model_flags_from_command("opencode --model old && echo done", flag)
+                .unwrap_err()
+                .contains("direct registered agent command")
+        );
+
+        let tool = AgentTool {
+            id: 7,
+            name: "OpenCode".into(),
+            command: "opencode".into(),
+            tool_type: "open_code".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
+        let model = "provider/model with spaces and 'quotes'";
+        let args = apply_model_override(&tool, Vec::new(), Some(model)).unwrap();
+        let command = command_with_args(&tool.command, &args).unwrap();
+        assert_eq!(shell_words::split(&command).unwrap().last().unwrap(), model);
+    }
+
+    #[test]
+    fn model_validation_rejects_empty_oversized_and_control_values() {
+        assert_eq!(
+            normalize_model(Some("  ".into())).unwrap_err(),
+            "model must not be empty when provided"
+        );
+        assert_eq!(
+            normalize_model(Some("x".repeat(MODEL_MAX_BYTES + 1))).unwrap_err(),
+            "model must be 512 bytes or fewer"
+        );
+        assert_eq!(
+            normalize_model(Some("model\nname".into())).unwrap_err(),
+            "model may not contain control characters"
+        );
+        assert_eq!(
+            normalize_model(Some(" provider/model with spaces and 'quotes' ".into())).unwrap(),
+            Some("provider/model with spaces and 'quotes'".into())
+        );
+    }
+
+    #[test]
+    fn template_model_override_is_duplicate_free_and_omission_preserves_composed_args() {
+        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let mut tool = load_agent_tools(&registry)
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.tool_type == "codex")
+            .unwrap();
+        tool.command = "codex --model command-default".into();
+        registry.store().put_agent_tool(&tool).unwrap();
+        let template = AgentTemplate {
+            id: 44,
+            profile_id: 1,
+            name: "Reviewer".into(),
+            agent_tool_id: tool.id,
+            extra_args: vec!["--model".into(), "legacy-model".into(), "--review".into()],
+            prompt: "Review carefully.".into(),
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        registry.store().put_agent_template(&template).unwrap();
+
+        let unchanged = resolve_agent_spawn(
+            &registry,
+            None,
+            Some(44),
+            vec!["--caller".into()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            unchanged.extra_args,
+            ["--model", "legacy-model", "--review", "--caller"]
+        );
+
+        let overridden = resolve_agent_spawn(
+            &registry,
+            None,
+            Some(44),
+            vec!["--model=caller-legacy".into()],
+            Some("launch-override".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            overridden.extra_args,
+            ["--review", "--model", "launch-override"]
+        );
+        let summary = load_agent_template_summaries(&registry).unwrap().remove(0);
+        assert_eq!(summary.model.as_deref(), Some("legacy-model"));
+
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 45,
+                profile_id: 1,
+                name: "Unicode reviewer".into(),
+                agent_tool_id: tool.id,
+                extra_args: vec!["--review".into()],
+                prompt: "🧪".repeat(121),
+                sort_order: 1,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        let summaries = load_agent_template_summaries(&registry).unwrap();
+        assert_eq!(summaries[1].model.as_deref(), Some("command-default"));
+        assert!(summaries[1].default_agent.enabled);
+        assert_eq!(summaries[1].prompt_preview.chars().count(), 120);
+        assert!(summaries[1].prompt_preview.ends_with('…'));
+    }
+
+    #[test]
+    fn template_summaries_skip_a_dangling_tool_without_hiding_valid_templates() {
+        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let tool = load_agent_tools(&registry).unwrap().remove(0);
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 44,
+                profile_id: 1,
+                name: "Valid".into(),
+                agent_tool_id: tool.id,
+                extra_args: Vec::new(),
+                prompt: String::new(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        registry
+            .store()
+            .connection()
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO agent_templates (
+                    id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order
+                 ) VALUES (45, 1, 'Dangling', 999999, '[]', '', 1);
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+
+        let summaries = load_agent_template_summaries(&registry).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "Valid");
     }
 
     #[test]
@@ -2316,6 +3280,7 @@ mod tests {
             &["--model".into(), "opus".into()],
             AgentLaunchPurpose::Normal,
             None,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -2333,6 +3298,7 @@ mod tests {
             "http://127.0.0.1:43123/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
             None,
         )
         .unwrap();
@@ -2352,6 +3318,7 @@ mod tests {
             &["--model".into(), "gpt-test".into()],
             AgentLaunchPurpose::Normal,
             None,
+            None,
         )
         .unwrap();
         let command = launch.command;
@@ -2368,6 +3335,7 @@ mod tests {
             "http://127.0.0.1:43124/mcp",
             &[],
             AgentLaunchPurpose::DeepCheck,
+            None,
             None,
         )
         .unwrap();
@@ -2386,6 +3354,7 @@ mod tests {
             "http://127.0.0.1:43125/mcp",
             &["--model".into(), "gemini-test".into()],
             AgentLaunchPurpose::Normal,
+            None,
             None,
         )
         .unwrap();
@@ -2410,6 +3379,7 @@ mod tests {
             "http://127.0.0.1:43126/mcp",
             &["run".into(), "call workman".into()],
             AgentLaunchPurpose::Normal,
+            None,
             None,
         )
         .unwrap();
@@ -2449,6 +3419,7 @@ mod tests {
             &["--model".into(), "grok-test".into()],
             AgentLaunchPurpose::Normal,
             Some(source.path()),
+            None,
         )
         .unwrap();
         assert_eq!(launch.command, "grok --always-approve --model grok-test");
@@ -2478,7 +3449,15 @@ mod tests {
     }
 
     #[test]
-    fn kimi_launch_uses_a_private_home_and_materializes_the_process_token() {
+    fn kimi_launch_uses_private_state_and_an_environment_backed_process_bearer() {
+        assert_eq!(
+            stateless_mcp_url("http://127.0.0.1:43127/mcp"),
+            "http://127.0.0.1:43127/mcp-stateless"
+        );
+        assert_eq!(
+            stateless_mcp_url("http://127.0.0.1:43127/mcp-stateless"),
+            "http://127.0.0.1:43127/mcp-stateless"
+        );
         let deep_check = kimi_deep_check_command(
             "kimi --yolo --model 'kimi test'",
             &["--prompt".into(), "check".into()],
@@ -2497,6 +3476,39 @@ mod tests {
             "default_model = \"fixture\"\n",
         )
         .unwrap();
+        fs::create_dir(source.path().join("credentials")).unwrap();
+        fs::write(
+            source.path().join("credentials/login.json"),
+            "fixture-credential\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::set_permissions(
+                source.path().join("credentials/login.json"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            let linked_secret = source.path().join("linked-secret.json");
+            fs::write(&linked_secret, "do-not-copy-through-link\n").unwrap();
+            symlink(
+                &linked_secret,
+                source.path().join("credentials/linked.json"),
+            )
+            .unwrap();
+        }
+        fs::create_dir(source.path().join("workspace-trust")).unwrap();
+        fs::write(
+            source.path().join("workspace-trust/known-workspace"),
+            "fixture-trust\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("session_index.jsonl"),
+            "legacy-session\n",
+        )
+        .unwrap();
 
         let launch = prepare_agent_launch(
             "true",
@@ -2505,6 +3517,7 @@ mod tests {
             &["--model".into(), "kimi-test".into()],
             AgentLaunchPurpose::Normal,
             Some(source.path()),
+            Some(Path::new("/private/tmp/kimi-test-workspace")),
         )
         .unwrap();
         let home = PathBuf::from(launch.env.get("KIMI_CODE_HOME").unwrap());
@@ -2512,14 +3525,7 @@ mod tests {
             launch.env.get(WORKMAN_EPHEMERAL_AGENT_HOME_ENV),
             launch.env.get("KIMI_CODE_HOME")
         );
-        assert!(launch.command.contains("WORKMAN_MCP_TOKEN"));
-        assert!(!launch.command.contains("test-process-token"));
-        assert!(launch.command.ends_with("true --model kimi-test"));
-        assert!(!home.join("mcp.json").exists());
-        let template = fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE)).unwrap();
-        assert!(template.contains(KIMI_MCP_TOKEN_SENTINEL));
-        assert!(template.contains("x-workman-mcp-token"));
-        assert!(!template.contains("existing"));
+        assert_eq!(launch.command, "true --model kimi-test");
         assert_eq!(
             fs::read_to_string(source.path().join("mcp.json")).unwrap(),
             source_mcp
@@ -2528,33 +3534,75 @@ mod tests {
             fs::read_to_string(home.join("config.toml")).unwrap(),
             "default_model = \"fixture\"\n"
         );
-
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", &launch.command])
-            .env("WORKMAN_MCP_TOKEN", "test-process-token")
-            .status()
-            .unwrap();
-        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(home.join("credentials/login.json")).unwrap(),
+            "fixture-credential\n"
+        );
+        assert!(!home.join("credentials/linked.json").exists());
+        assert_eq!(
+            fs::read_to_string(home.join("workspace-trust/known-workspace")).unwrap(),
+            "fixture-trust\n"
+        );
+        let launch_trust_path = home
+            .join("workspace-trust")
+            .join("wd_kimi-test-workspace_fadd119bd9d8");
+        let launch_trust: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&launch_trust_path).unwrap()).unwrap();
+        assert_eq!(launch_trust["root"], "/private/tmp/kimi-test-workspace");
+        assert!(launch_trust["trustedAt"].as_u64().is_some());
+        assert!(!home.join("session_index.jsonl").exists());
         let config: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join("mcp.json")).unwrap()).unwrap();
         assert_eq!(
             config["mcpServers"]["workman"]["url"],
-            "http://127.0.0.1:43127/mcp"
+            "http://127.0.0.1:43127/mcp-stateless"
         );
         assert_eq!(
-            config["mcpServers"]["workman"]["headers"]["x-workman-mcp-token"],
-            "test-process-token"
+            launch.env.get(WORKMAN_MCP_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:43127/mcp-stateless")
+        );
+        assert_eq!(
+            config["mcpServers"]["workman"]["bearerTokenEnvVar"],
+            "WORKMAN_MCP_TOKEN"
+        );
+        assert!(config["mcpServers"]["workman"].get("headers").is_none());
+        fs::write(home.join("config.toml"), "private-change\n").unwrap();
+        fs::write(
+            home.join("workspace-trust/private-workspace"),
+            "private-trust\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(source.path().join("config.toml")).unwrap(),
+            "default_model = \"fixture\"\n"
         );
         assert!(
-            fs::read_to_string(home.join(KIMI_MCP_TEMPLATE_FILE))
-                .unwrap()
-                .contains(KIMI_MCP_TOKEN_SENTINEL)
+            !source
+                .path()
+                .join("workspace-trust/private-workspace")
+                .exists()
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
+                fs::metadata(home.join("credentials/login.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
                 fs::metadata(home.join("mcp.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(launch_trust_path)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -2619,6 +3667,7 @@ mod tests {
         assert!(preamble.contains("server named workman"));
         assert!(preamble.contains("never a globally configured Solo"));
         assert!(preamble.contains("Call whoami() through workman first"));
+        assert!(preamble.contains("Never call identify_session to claim or change identity"));
         assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
         assert!(preamble.contains(
             "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with \

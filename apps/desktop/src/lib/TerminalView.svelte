@@ -13,6 +13,7 @@
     appearance,
     currentAppearance,
     terminalFontCss,
+    terminalProfileXtermOptions,
     terminalXtermTheme
   } from './appearance';
   import {
@@ -26,7 +27,17 @@
   import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
-  import { hasRetainedTerminalOutput } from './terminalFirstPaint';
+  import {
+    hasRetainedTerminalOutput,
+    isUnstyledRetainedSnapshot,
+    rawReplayHasGap,
+    shouldShowRetainedPreview
+  } from './terminalFirstPaint';
+  import {
+    WEBGL_STABLE_RESET_MS,
+    shouldAttemptWebglRecovery,
+    webglRecoveryDelay
+  } from './terminalRenderer';
   import {
     isQuickPromptPaletteShortcut,
     sanitizeQuickPromptBody
@@ -73,12 +84,24 @@
   let frame: HTMLElement;
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
+  let webglAddon: WebglAddon | null = null;
+  let webglRecovering = false;
+  let webglRecoveryAttempt = 0;
+  let webglUnavailable = false;
+  let webglRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglStabilityTimer: ReturnType<typeof setTimeout> | null = null;
   let terminalTransfers: TerminalTransfers | null = null;
   let hasOutput = $state(false);
   let liveOutputPreviewElement = $state<HTMLPreElement | null>(null);
   let liveOutputPreview = $state('');
   let liveOutputLoaded = $state(false);
   let liveOutputRetained = $state(false);
+  let retainedSnapshotOnly = $state(false);
+  let replayPreviewAllowed = $state(false);
+  let replayComplete = $state(false);
+  let replayUnavailableMessage = $state<string | null>(null);
+  let replayWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  let replayWarningTimer: ReturnType<typeof setTimeout> | null = null;
   let linkHintVisible = $state(false);
   let hoveredLinkUri: string | null = null;
   let transferDropActive = $state(false);
@@ -130,6 +153,7 @@
     modifyOtherKeys: number;
     finishing: boolean;
     focusRequested: boolean;
+    gapDetected: boolean;
   }
 
   /** Insert through xterm so bracketed-paste mode and replay-safe input ordering are preserved. */
@@ -152,6 +176,15 @@
 
   onMount(() => {
     const initialPalette = initialAppearance.terminalTheme.palette;
+    const initialFontFamily = terminalFontCss(
+      initialAppearance.terminalFont,
+      initialAppearance.terminalProfileStyle
+    );
+    const initialProfileOptions = terminalProfileXtermOptions(
+      initialAppearance.terminalProfileStyle,
+      initialFontFamily,
+      initialAppearance.terminalFontSize
+    );
     appliedThemeSignature = Object.values(initialPalette).join('|');
     const activateLink = (event: MouseEvent, uri: string) => {
       if (!event.metaKey || event.button !== 0) return;
@@ -167,14 +200,9 @@
       linkHintVisible = false;
     };
     const instance = new Terminal({
-      allowTransparency: false,
-      convertEol: false,
-      cursorBlink: false,
-      cursorStyle: 'bar',
-      fontFamily: terminalFontCss(initialAppearance.terminalFont),
+      ...initialProfileOptions,
+      fontFamily: initialFontFamily,
       fontSize: initialAppearance.terminalFontSize,
-      fontWeight: 430,
-      lineHeight: 1.18,
       linkHandler: {
         activate: activateLink,
         hover: showLinkHint,
@@ -182,7 +210,6 @@
         allowNonHttpProtocols: false
       },
       scrollback: 10_000,
-      smoothScrollDuration: 80,
       theme: terminalXtermTheme(initialPalette)
     });
     fitAddon = new FitAddon();
@@ -218,15 +245,19 @@
       setPasteSaving: (saving) => { imagePasteSaving = saving; }
     });
 
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-      });
-      instance.loadAddon(webgl);
-    } catch {
-      // xterm automatically keeps its DOM renderer when WebGL is unavailable.
+    if (!installWebglRenderer(instance, false)) {
+      webglRecovering = true;
+      scheduleWebglRecovery(instance);
     }
+    const recoverVisibleRenderer = () => {
+      if (document.visibilityState !== 'visible' || !visible) return;
+      if (webglAddon !== null || webglUnavailable) return;
+      webglRecovering = webglAddon === null;
+      scheduleWebglRecovery(instance);
+    };
+    document.addEventListener('visibilitychange', recoverVisibleRenderer);
+    window.addEventListener('pageshow', recoverVisibleRenderer);
+    window.addEventListener('focus', recoverVisibleRenderer);
 
     instance.attachCustomKeyEventHandler((event) => {
       if (onQuickPrompts && isQuickPromptPaletteShortcut(event)) {
@@ -311,6 +342,15 @@
       window.removeEventListener(TERMINAL_CONTEXT_ACTION_EVENT, runContextAction);
       terminalTransfers?.dispose();
       terminalTransfers = null;
+      document.removeEventListener('visibilitychange', recoverVisibleRenderer);
+      window.removeEventListener('pageshow', recoverVisibleRenderer);
+      window.removeEventListener('focus', recoverVisibleRenderer);
+      if (webglRecoveryTimer) clearTimeout(webglRecoveryTimer);
+      webglRecoveryTimer = null;
+      clearWebglStabilityTimer();
+      clearReplayWatchdog();
+      clearReplayWarning();
+      webglAddon = null;
       void client.detachTerminal().catch(() => undefined);
       instance.dispose();
       terminal = null;
@@ -322,20 +362,39 @@
     const instance = terminal;
     if (!instance) return;
 
-    const family = terminalFontCss(settings.terminalFont);
+    const family = terminalFontCss(settings.terminalFont, settings.terminalProfileStyle);
+    const profileOptions = terminalProfileXtermOptions(
+      settings.terminalProfileStyle,
+      family,
+      settings.terminalFontSize
+    );
     const typographyChanged = instance.options.fontFamily !== family
-      || instance.options.fontSize !== settings.terminalFontSize;
+      || instance.options.fontSize !== settings.terminalFontSize
+      || instance.options.lineHeight !== profileOptions.lineHeight
+      || instance.options.letterSpacing !== profileOptions.letterSpacing;
+    const rendererStyleChanged = typographyChanged
+      || instance.options.cursorBlink !== profileOptions.cursorBlink
+      || instance.options.cursorStyle !== profileOptions.cursorStyle
+      || instance.options.drawBoldTextInBrightColors
+        !== profileOptions.drawBoldTextInBrightColors;
     const themeSignature = Object.values(settings.terminalTheme.palette).join('|');
     const themeChanged = themeSignature !== appliedThemeSignature;
     if (typographyChanged) {
       instance.options.fontFamily = family;
       instance.options.fontSize = settings.terminalFontSize;
+      instance.options.lineHeight = profileOptions.lineHeight;
+      instance.options.letterSpacing = profileOptions.letterSpacing;
+    }
+    if (rendererStyleChanged) {
+      instance.options.cursorBlink = profileOptions.cursorBlink;
+      instance.options.cursorStyle = profileOptions.cursorStyle;
+      instance.options.drawBoldTextInBrightColors = profileOptions.drawBoldTextInBrightColors;
     }
     if (themeChanged) {
       appliedThemeSignature = themeSignature;
       instance.options.theme = terminalXtermTheme(settings.terminalTheme.palette);
     }
-    if (typographyChanged || themeChanged) {
+    if (rendererStyleChanged || themeChanged) {
       // Refresh the currently rendered buffer. Offscreen scrollback picks up the same xterm
       // theme when it is next rendered, so old and new output never diverge.
       instance.refresh(0, Math.max(0, instance.rows - 1));
@@ -354,6 +413,10 @@
     const processStatus = process.status;
     const isVisible = visible;
     if (!instance) return;
+    if (isVisible && webglAddon === null && !webglUnavailable) {
+      webglRecovering = true;
+      scheduleWebglRecovery(instance);
+    }
     const sameProcessSession = attachedProcessId === processId
       && attachedProcessPid === processPid
       && attachedStatus === processStatus
@@ -374,13 +437,19 @@
       attachmentGeneration += 1;
       inputEnabled = false;
       replayState = null;
+      clearReplayWatchdog();
+      clearReplayWarning();
       terminalOffset = 0;
       setKeyboardProtocol(0, 0);
       instance.reset();
       hasOutput = false;
+      replayPreviewAllowed = false;
+      replayComplete = false;
+      replayUnavailableMessage = null;
       liveOutputPreview = '';
       liveOutputLoaded = false;
       liveOutputRetained = false;
+      retainedSnapshotOnly = false;
       linkHintVisible = false;
       hoveredLinkUri = null;
       if (isConnected) void client.detachTerminal().catch(() => undefined);
@@ -394,6 +463,9 @@
       // accepted and DaemonClient retains it until the native bridge reconnects.
       attachmentGeneration += 1;
       replayState = null;
+      clearReplayWatchdog();
+      clearReplayWarning();
+      replayUnavailableMessage = null;
       inputEnabled = true;
       return;
     }
@@ -402,19 +474,27 @@
     flushInput();
     inputEnabled = false;
     replayState = null;
+    clearReplayWatchdog();
+    clearReplayWarning();
+    replayUnavailableMessage = null;
     if (!resumingConnection) {
       terminalOffset = 0;
       setKeyboardProtocol(0, 0);
       instance.reset();
       hasOutput = false;
+      replayPreviewAllowed = false;
+      replayComplete = false;
+      replayUnavailableMessage = null;
       liveOutputPreview = '';
       liveOutputLoaded = false;
       liveOutputRetained = false;
+      retainedSnapshotOnly = false;
       linkHintVisible = false;
       hoveredLinkUri = null;
     }
 
     const generation = ++attachmentGeneration;
+    replayComplete = false;
     const state: TerminalReplayState = {
       generation,
       processId,
@@ -424,11 +504,15 @@
       kittyKeyboardFlags: 0,
       modifyOtherKeys: 0,
       finishing: false,
-      focusRequested: true
+      focusRequested: true,
+      gapDetected: false
     };
     replayState = state;
     instance.focus();
-    if (!resumingConnection) void loadLiveOutputPreview(state);
+    if (!resumingConnection) {
+      replayPreviewAllowed = true;
+      void loadLiveOutputPreview(state);
+    }
     void (async () => {
       // Replay at the PTY's actual viewport dimensions. Starting at xterm's 80x24 default and
       // resizing afterward reflows the active zsh prompt differently from a native terminal.
@@ -447,17 +531,27 @@
         if (replayState !== state) return;
       }
 
-      const attached = await client.attachTerminal(processId, terminalOffset);
+      const requestedOffset = terminalOffset;
+      armReplayWatchdog(state);
+      const attached = await client.attachTerminal(processId, requestedOffset);
       if (replayState !== state) return;
+      state.gapDetected = requestedOffset > 0
+        && rawReplayHasGap(requestedOffset, attached.replay_start_offset);
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
       state.focusReporting = attached.focus_reporting;
       state.kittyKeyboardFlags = attached.keyboard_protocol.kitty_flags;
       state.modifyOtherKeys = attached.keyboard_protocol.modify_other_keys;
       setKeyboardProtocol(state.kittyKeyboardFlags, state.modifyOtherKeys);
+      armReplayWatchdog(state);
       finishReplayIfReady(state);
     })().catch((cause) => {
-      if (replayState === state) onError(cause instanceof Error ? cause.message : String(cause));
+      if (replayState !== state) return;
+      clearReplayWatchdog();
+      replayPreviewAllowed = retainedSnapshotOnly;
+      replayComplete = true;
+      replayUnavailableMessage = 'Styled terminal replay is unavailable. Reopen this agent to retry.';
+      onError(cause instanceof Error ? cause.message : String(cause));
     });
   });
 
@@ -499,6 +593,11 @@
       state.kittyKeyboardFlags = frame.kitty_keyboard_flags;
       state.modifyOtherKeys = frame.modify_other_keys;
     }
+    if (frame.gap && replayComplete) {
+      showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
+    } else if (frame.gap && state && terminalOffset > 0) {
+      state.gapDetected = true;
+    }
     setKeyboardProtocol(frame.kitty_keyboard_flags, frame.modify_other_keys);
     terminal.write(Uint8Array.from(frame.data), () => {
       if (
@@ -508,12 +607,15 @@
       ) {
         hasOutput = true;
         terminalOffset = Math.max(terminalOffset, frame.start_offset + frame.data.length);
+        retainedSnapshotOnly = false;
+        replayPreviewAllowed = false;
       }
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
       state.parsedThrough = Math.max(
         state.parsedThrough,
         frame.start_offset + frame.data.length
       );
+      armReplayWatchdog(state);
       finishReplayIfReady(state);
     });
   }
@@ -524,6 +626,7 @@
       if (replayState !== state || state.generation !== attachmentGeneration) return;
       liveOutputPreview = output.text;
       liveOutputRetained = hasRetainedTerminalOutput(output);
+      retainedSnapshotOnly = isUnstyledRetainedSnapshot(output);
       liveOutputLoaded = true;
       if (!output.text) return;
 
@@ -617,6 +720,73 @@
       .catch((cause) => onError(cause instanceof Error ? cause.message : String(cause)));
   }
 
+  function installWebglRenderer(instance: Terminal, recovering: boolean): boolean {
+    if (webglAddon || webglUnavailable) return webglAddon !== null;
+    let addon: WebglAddon | null = null;
+    try {
+      addon = new WebglAddon();
+      addon.onContextLoss(() => {
+        if (webglAddon !== addon) return;
+        // WKWebView commonly discards hidden canvases. xterm's DOM fallback keeps the configured
+        // metrics while a bounded recovery campaign restores WebGL-quality glyph rendering.
+        clearWebglStabilityTimer();
+        webglAddon = null;
+        addon?.dispose();
+        if (webglUnavailable) return;
+        webglRecovering = true;
+        scheduleWebglRecovery(instance);
+      });
+      webglAddon = addon;
+      instance.loadAddon(addon);
+      if (webglAddon !== addon) return false;
+      webglRecovering = false;
+      armWebglStabilityReset(addon);
+      if (recovering) {
+        instance.clearTextureAtlas();
+        instance.refresh(0, Math.max(0, instance.rows - 1));
+      }
+      return true;
+    } catch {
+      if (webglAddon === addon) webglAddon = null;
+      addon?.dispose();
+      return false;
+    }
+  }
+
+  function scheduleWebglRecovery(instance: Terminal): void {
+    if (webglRecoveryTimer || webglUnavailable) return;
+    if (!shouldAttemptWebglRecovery({
+      terminalVisible: visible,
+      documentVisible: document.visibilityState === 'visible',
+      hasRenderer: webglAddon !== null,
+      recovering: webglRecovering
+    })) return;
+    const delay = webglRecoveryDelay(webglRecoveryAttempt++);
+    if (delay === null) {
+      webglRecovering = false;
+      webglUnavailable = true;
+      return;
+    }
+    webglRecoveryTimer = setTimeout(() => {
+      webglRecoveryTimer = null;
+      if (!installWebglRenderer(instance, true)) scheduleWebglRecovery(instance);
+    }, delay);
+  }
+
+  function armWebglStabilityReset(addon: WebglAddon): void {
+    clearWebglStabilityTimer();
+    webglStabilityTimer = setTimeout(() => {
+      webglStabilityTimer = null;
+      if (webglAddon !== addon) return;
+      webglRecoveryAttempt = 0;
+    }, WEBGL_STABLE_RESET_MS);
+  }
+
+  function clearWebglStabilityTimer(): void {
+    if (webglStabilityTimer) clearTimeout(webglStabilityTimer);
+    webglStabilityTimer = null;
+  }
+
   function scheduleFit(): void {
     if (resizeFrame) cancelAnimationFrame(resizeFrame);
     resizeFrame = requestAnimationFrame(() => {
@@ -640,6 +810,12 @@
     const instance = terminal;
     if (!instance || !fitAddon || host.clientWidth === 0 || host.clientHeight === 0) return null;
     fitAddon.fit();
+    const screenHeight = instance.element
+      ?.querySelector<HTMLElement>('.xterm-screen')
+      ?.getBoundingClientRect().height;
+    if (screenHeight && instance.rows > 0) {
+      frame.style.setProperty('--terminal-cell-height', `${screenHeight / instance.rows}px`);
+    }
     return instance;
   }
 
@@ -668,8 +844,16 @@
 
     const activate = () => {
       if (replayState !== state || state.generation !== attachmentGeneration) return;
+      clearReplayWatchdog();
+      clearReplayWarning();
+      replayUnavailableMessage = null;
+      replayPreviewAllowed = false;
+      replayComplete = true;
       const alreadyFocused = document.activeElement !== null && host.contains(document.activeElement);
       inputEnabled = true;
+      if (state.gapDetected) {
+        showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
+      }
       if (!state.focusRequested) return;
       if (alreadyFocused && state.focusReporting) {
         // Replay enabled mode 1004 after the DOM focus event, so xterm has no new event to report.
@@ -686,6 +870,44 @@
     } else {
       activate();
     }
+  }
+
+  function clearReplayWatchdog(): void {
+    if (replayWatchdogTimer) clearTimeout(replayWatchdogTimer);
+    replayWatchdogTimer = null;
+  }
+
+  function armReplayWatchdog(state: TerminalReplayState): void {
+    clearReplayWatchdog();
+    if (
+      replayState !== state
+      || replayComplete
+      || state.finishing
+      || (state.replayEndOffset !== null && state.parsedThrough >= state.replayEndOffset)
+    ) return;
+    replayWatchdogTimer = setTimeout(() => {
+      replayWatchdogTimer = null;
+      if (replayState !== state || state.generation !== attachmentGeneration || replayComplete) {
+        return;
+      }
+      replayPreviewAllowed = retainedSnapshotOnly;
+      replayComplete = true;
+      replayUnavailableMessage = 'Styled terminal replay stalled. Reopen this agent to retry.';
+    }, 10_000);
+  }
+
+  function showTransientReplayWarning(message: string): void {
+    clearReplayWarning();
+    replayUnavailableMessage = message;
+    replayWarningTimer = setTimeout(() => {
+      replayWarningTimer = null;
+      if (replayUnavailableMessage === message) replayUnavailableMessage = null;
+    }, 4_000);
+  }
+
+  function clearReplayWarning(): void {
+    if (replayWarningTimer) clearTimeout(replayWarningTimer);
+    replayWarningTimer = null;
   }
 
   function outputTail(output: string): string {
@@ -742,17 +964,27 @@
     aria-label={`${process.name} terminal`}
     oncontextmenu={showTerminalContextMenu}
   ></div>
-  {#if process.status === 'running' && !hasOutput && liveOutputRetained && liveOutputPreview}
-    <pre
-      class="terminal-retained-preview"
-      bind:this={liveOutputPreviewElement}
-      aria-label={`Retained output from ${process.name}`}
-    >{liveOutputPreview}</pre>
+  {#if process.status === 'running' && (replayPreviewAllowed || retainedSnapshotOnly) && liveOutputRetained && shouldShowRetainedPreview({ text: liveOutputPreview }, replayComplete, retainedSnapshotOnly)}
+    <div class="terminal-retained-surface" class:is-snapshot={retainedSnapshotOnly}>
+      {#if retainedSnapshotOnly}
+        <span class="terminal-snapshot-label">Unstyled retained snapshot · live output will replace it</span>
+      {/if}
+      <pre
+        class="terminal-retained-preview"
+        bind:this={liveOutputPreviewElement}
+        aria-label={retainedSnapshotOnly
+          ? `Unstyled retained snapshot from ${process.name}`
+          : `Retained output from ${process.name}`}
+      >{liveOutputPreview}</pre>
+    </div>
   {:else if process.status === 'running' && !hasOutput && liveOutputLoaded && !liveOutputRetained}
     <div class="terminal-starting" aria-live="polite">
       <span aria-hidden="true"></span>
       <strong>Waiting for first output…</strong>
     </div>
+  {/if}
+  {#if process.status === 'running' && replayComplete && replayUnavailableMessage}
+    <div class="terminal-replay-warning" role="status">{replayUnavailableMessage}</div>
   {/if}
   {#if process.status === 'running' && !connected}
     <div class="terminal-reconnecting" aria-live="polite" aria-label="Daemon reconnecting; terminal input is queued">
@@ -917,18 +1149,69 @@
 
   @keyframes terminal-waiting-spin { to { transform: rotate(360deg); } }
 
-  .terminal-retained-preview {
+  .terminal-retained-surface {
     position: absolute;
     inset: 0;
     z-index: 1;
+    overflow: hidden;
+    background: var(--terminal-background);
+    pointer-events: none;
+  }
+
+  .terminal-retained-preview {
     box-sizing: border-box;
+    width: 100%;
+    height: 100%;
     margin: 0;
     overflow: hidden;
     padding: 7px 6px 5px 8px;
     color: var(--terminal-foreground);
     background: var(--terminal-background);
-    font: 430 var(--terminal-font-size)/1.18 var(--terminal-font-family);
+    font-family: var(--terminal-font-family);
+    font-size: var(--terminal-font-size);
+    font-style: normal;
+    font-weight: normal;
+    line-height: var(
+      --terminal-cell-height,
+      calc(var(--terminal-font-size) * var(--terminal-line-height) * 1.2)
+    );
+    letter-spacing: var(--terminal-letter-spacing);
     white-space: pre;
+    pointer-events: none;
+  }
+
+  .terminal-retained-surface.is-snapshot .terminal-retained-preview {
+    padding-top: 36px;
+    opacity: .82;
+  }
+
+  .terminal-snapshot-label {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 1;
+    border: 1px solid color-mix(in srgb, var(--warning-token) 42%, var(--border));
+    border-radius: 3px;
+    padding: 4px 7px;
+    color: var(--terminal-foreground);
+    background: color-mix(in srgb, var(--terminal-background) 91%, var(--warning-token));
+    font: 500 var(--font-size-xs)/1.2 var(--terminal-font-family);
+  }
+
+  .terminal-replay-warning {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    z-index: 3;
+    max-width: calc(100% - 32px);
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in srgb, var(--warning-token) 42%, var(--border));
+    border-radius: 3px;
+    padding: 5px 8px;
+    color: var(--terminal-foreground);
+    background: color-mix(in srgb, var(--terminal-background) 91%, var(--warning-token));
+    font: var(--font-size-xs)/1.3 var(--terminal-font-family);
+    text-align: center;
     pointer-events: none;
   }
 
