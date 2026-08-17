@@ -16,7 +16,6 @@
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
-  import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
   import TooltipLabel from './lib/components/ds/TooltipLabel.svelte';
   import { Button } from './lib/components/ui/button';
   import * as Dialog from './lib/components/ui/dialog';
@@ -32,6 +31,7 @@
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectKindIndicators from './lib/ProjectKindIndicators.svelte';
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
   import ProjectFolderMenu from './lib/ProjectFolderMenu.svelte';
@@ -205,9 +205,8 @@
     type OptimisticProcess
   } from './lib/optimisticProcesses';
   import {
-    processActivityTone,
-    projectActivityRollup,
-    type ProjectActivityRollup
+    projectKindActivity,
+    type ProjectKindActivityRollup
   } from './lib/processActivity';
   import {
     initialFlatProjectOrder,
@@ -1195,24 +1194,36 @@
       .length;
   }
 
-  function projectRailActivity(project: Project): ProjectActivityRollup {
-    const projectProcesses = navigationIndex[project.id]?.processes
+  function projectRailProcesses(project: Project): ProcessView[] {
+    return navigationIndex[project.id]?.processes
       ?? (selectedProject?.id === project.id ? processes : []);
-    const rollup = projectActivityRollup(projectProcesses, $liveStats.processes);
-    if (projectProcesses.length === 0 && project.status === 'error') {
-      return { ...rollup, state: 'crashed', crashed: 1 };
-    }
-    return rollup;
   }
 
-  function projectRailActivityLabel(project: Project, rollup: ProjectActivityRollup): string {
-    const title = projectTitle(project);
-    const active = rollup.active > 0 ? ` · ${rollup.active} actively working` : '';
-    if (rollup.state === 'needs_input') return `${title} · needs input${active}`;
-    if (rollup.state === 'crashed') return `${title} · process error${active}`;
-    if (rollup.state === 'working') return `${title}${active}`;
-    if (rollup.state === 'waiting') return `${title} · waiting`;
-    return `${title} · no active work`;
+  function projectRailActivityLabel(activity: ProjectKindActivityRollup): string {
+    const running = (['agent', 'terminal', 'command'] as const)
+      .filter((kind) => activity[kind].active > 0)
+      .map((kind) => activity[kind].activeLabel);
+    return running.length > 0 ? running.join(' · ') : 'no processes running';
+  }
+
+  function openProjectRailProcess(project: Project, process: ProcessView): void {
+    appNavigation.navigate(
+      {
+        type: 'item',
+        selection: projectTreeSelection(
+          process.kind,
+          process.id,
+          project.id,
+          processLabel(process)
+        )
+      },
+      'project-rail'
+    );
+  }
+
+  function openProjectRailOverview(project: Project, kind: ProcessKind): void {
+    if (!activateProject(project.id)) return;
+    openProcessOverview(kind);
   }
 
   function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
@@ -3850,8 +3861,9 @@
   {@const parentLabel = worktreeParentLabel(project, projects, repository?.name)}
   {@const projectKind = parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
-  {@const activity = projectRailActivity(project)}
-  {@const activityLabel = projectRailActivityLabel(project, activity)}
+  {@const projectProcesses = projectRailProcesses(project)}
+  {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
+  {@const activityLabel = projectRailActivityLabel(activity)}
   <article
     class:active={project.selected}
     class:nested
@@ -3868,7 +3880,7 @@
           class="project-select"
           type="button"
           aria-current={project.selected ? 'page' : undefined}
-          aria-label={`${activityLabel} · ${projectKind}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+          aria-label={`${fullTitle} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
           use:reorderItem={{
             id: project.id,
             group: 'projects',
@@ -3883,11 +3895,6 @@
           data-context-kind="project"
           data-context-id={project.id}
         >
-          <StatusIndicator
-            class={projectRailCollapsed ? 'project-status-badge' : ''}
-            tone={processActivityTone(activity.state)}
-            label={activityLabel}
-          />
           <span class="project-icon-anchor">
             <span class="project-kind-icon" aria-hidden="true">
               <ProjectIcon
@@ -3923,14 +3930,34 @@
           {/if}
         </button>
       </TooltipLabel>
-      {#if repository && !projectRailCollapsed}
-        <WorktreeRowMeta
-          entry={worktree}
-          pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
-          repositoryName={repository.name}
-          refreshing={worktreeRefreshingRepositoryId === repository.id}
-          onRefresh={() => void refreshWorktreeRepository(project, true)}
+      {#if projectRailCollapsed}
+        <ProjectKindIndicators
+          {activity}
+          processes={projectProcesses}
+          projectTitle={fullTitle}
+          compact
+          onSelect={(process) => openProjectRailProcess(project, process)}
+          onShowAll={(kind) => openProjectRailOverview(project, kind)}
         />
+      {:else}
+        <span class="project-row-meta">
+          {#if repository}
+            <WorktreeRowMeta
+              entry={worktree}
+              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              repositoryName={repository.name}
+              refreshing={worktreeRefreshingRepositoryId === repository.id}
+              onRefresh={() => void refreshWorktreeRepository(project, true)}
+            />
+          {/if}
+          <ProjectKindIndicators
+            {activity}
+            processes={projectProcesses}
+            projectTitle={fullTitle}
+            onSelect={(process) => openProjectRailProcess(project, process)}
+            onShowAll={(kind) => openProjectRailOverview(project, kind)}
+          />
+        </span>
       {/if}
       <IconButton
         class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
@@ -4591,6 +4618,7 @@
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
   .project-icon-anchor { display: inline-flex; flex: none; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
+  .project-row-meta { display: inline-flex; flex: none; align-items: center; gap: 1px; }
   .project-copy { min-width: 0; }
   .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
@@ -4625,8 +4653,6 @@
   .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }
-  .project-rail.collapsed :global(.project-status-badge) { position: absolute; z-index: 2; right: 2px; bottom: 2px; width: 12px; height: 12px; border: 1px solid var(--card); border-radius: 999px; background: var(--card); }
-  .project-rail.collapsed :global(.project-status-badge > span) { width: 6px; height: 6px; }
   .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
