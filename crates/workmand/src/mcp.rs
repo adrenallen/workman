@@ -42,6 +42,7 @@ pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
 pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
 pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate Workman project.";
 pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while retaining the template prompt and skipping its launch args. Prefer model for a per-launch override: it replaces existing --model flags for known agent types; reserve extra_args for other raw flags. mcp_tools_summary lists the complete core tool surface.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -344,7 +345,7 @@ impl WorkmanMcp {
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
             "worktrees" => WORKTREE_AGENT_GUIDANCE,
-            "tools" => "Use mcp_tools_summary for the complete core tool list.",
+            "tools" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
                     "unknown_help_topic",
@@ -367,6 +368,7 @@ impl WorkmanMcp {
             "enabled": true,
             "count": tools.len(),
             "tools": tools,
+            "spawn_agent_guidance": SPAWN_AGENT_GUIDANCE,
         }))
     }
 

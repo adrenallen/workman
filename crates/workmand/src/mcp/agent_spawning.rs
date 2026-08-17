@@ -81,19 +81,24 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Optional when agent_template_id is provided; when both are set,
-    /// this overrides the template's default agent.
+    /// Agent-tool registry ID. Required for the default plain-agent path. With a template, this
+    /// swaps its default agent: the template prompt stays, but template launch args are skipped.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
-    /// Optional agent template. Its default agent and launch arguments are used unless
-    /// agent_tool_id overrides the agent, in which case template launch arguments are skipped
-    /// and only the template prompt applies.
+    /// Numeric template ID from list_agent_templates. Use a template only when the user names one
+    /// or explicitly asks for one.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Safely shell-quoted arguments appended to the registered agent command.
+    /// Optional model override. Prefer this to putting --model in extra_args. For Codex, Claude,
+    /// Kimi, Gemini, Grok, and OpenCode, Workman replaces existing model flags in template and
+    /// caller arguments and appends --model VALUE; unsupported custom tool types return an error.
+    #[serde(default)]
+    model: Option<String>,
+    /// Raw, safely shell-quoted flags appended to the registered agent command. Avoid using this
+    /// for model selection; use model instead.
     #[serde(default)]
     extra_args: Vec<String>,
     /// Optional first prompt delivered once the agent reaches a safe input state.
@@ -170,6 +175,23 @@ struct ResolvedAgentSpawn {
     initial_prompt: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct AgentTemplateDefaultAgent {
+    agent_tool_id: AgentToolId,
+    name: String,
+    tool_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTemplateSummary {
+    id: AgentTemplateId,
+    name: String,
+    default_agent: AgentTemplateDefaultAgent,
+    model: Option<String>,
+    prompt_preview: String,
+    extra_args: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentLaunchPurpose {
     Normal,
@@ -243,11 +265,11 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "List reusable agent templates for the active workspace profile. Returns { agent_templates: [...] }"
+        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent, model, prompt_preview, extra_args }] } without full prompts."
     )]
     async fn list_agent_templates(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
-        match load_agent_templates(&registry) {
+        match load_agent_template_summaries(&registry) {
             Ok(templates) => success(json!({ "agent_templates": templates })),
             Err(error) => failure("store_error", error),
         }
@@ -445,6 +467,7 @@ impl WorkmanMcp {
                     args.name,
                     args.extra_args,
                     None,
+                    None,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
                     spawned_by_process_id,
@@ -459,7 +482,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return the identity preamble for its first prompt"
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while keeping the prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,
@@ -483,6 +506,7 @@ impl WorkmanMcp {
             args.agent_template_id,
             args.name,
             args.extra_args,
+            args.model,
             args.initial_prompt,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
@@ -510,6 +534,31 @@ pub(crate) fn load_agent_templates(
         .store()
         .list_agent_templates()
         .map_err(|error| error.to_string())
+}
+
+fn load_agent_template_summaries(
+    registry: &ProcessRegistry,
+) -> Result<Vec<AgentTemplateSummary>, String> {
+    load_agent_templates(registry)?
+        .into_iter()
+        .map(|template| {
+            let tool = load_agent_tool(registry, template.agent_tool_id)?;
+            let model = model_from_extra_args(&template.extra_args);
+            let prompt = template.prompt.trim();
+            Ok(AgentTemplateSummary {
+                id: template.id,
+                name: template.name,
+                default_agent: AgentTemplateDefaultAgent {
+                    agent_tool_id: tool.id,
+                    name: tool.name,
+                    tool_type: tool.tool_type,
+                },
+                model,
+                prompt_preview: prompt.chars().take(120).collect(),
+                extra_args: template.extra_args,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn save_agent_template_from_settings(
@@ -875,6 +924,7 @@ pub(crate) async fn spawn_registered_agent(
     agent_template_id: Option<AgentTemplateId>,
     name: Option<String>,
     extra_args: Vec<String>,
+    model: Option<String>,
     initial_prompt: Option<String>,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
@@ -888,6 +938,7 @@ pub(crate) async fn spawn_registered_agent(
             agent_tool_id,
             agent_template_id,
             extra_args,
+            model,
             initial_prompt,
         )?
     };
@@ -914,16 +965,18 @@ fn resolve_agent_spawn(
     requested_agent_tool_id: Option<AgentToolId>,
     agent_template_id: Option<AgentTemplateId>,
     caller_extra_args: Vec<String>,
+    requested_model: Option<String>,
     caller_prompt: Option<String>,
 ) -> Result<ResolvedAgentSpawn, String> {
+    let requested_model = normalize_model(requested_model)?;
     let Some(agent_template_id) = agent_template_id else {
         let agent_tool_id = requested_agent_tool_id.ok_or_else(|| {
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
-        load_enabled_agent_tool(registry, agent_tool_id)?;
+        let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
-            extra_args: caller_extra_args,
+            extra_args: apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
         });
     };
@@ -935,8 +988,9 @@ fn resolve_agent_spawn(
             format!("agent template {agent_template_id} was not found in the active profile")
         })?;
     let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
-    load_enabled_agent_tool(registry, agent_tool_id)?;
-    let mut extra_args = if agent_tool_id == template.agent_tool_id {
+    let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
+    let uses_template_launch_settings = agent_tool_id == template.agent_tool_id;
+    let mut extra_args = if uses_template_launch_settings {
         template.extra_args
     } else {
         Vec::new()
@@ -944,9 +998,77 @@ fn resolve_agent_spawn(
     extra_args.extend(caller_extra_args);
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
-        extra_args,
+        extra_args: apply_model_override(&tool, extra_args, requested_model.as_deref())?,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
     })
+}
+
+fn normalize_model(model: Option<String>) -> Result<Option<String>, String> {
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model must not be empty when provided".to_owned());
+    }
+    if model.contains('\0') {
+        return Err("model may not contain NUL bytes".to_owned());
+    }
+    Ok(Some(model.to_owned()))
+}
+
+fn apply_model_override(
+    tool: &AgentTool,
+    extra_args: Vec<String>,
+    model: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let Some(model) = model else {
+        return Ok(extra_args);
+    };
+    if matches!(
+        mcp_launch_adapter(&tool.tool_type),
+        McpLaunchAdapter::Unsupported
+    ) {
+        return Err(format!(
+            "this agent tool has no known model flag: {} ({})",
+            tool.name, tool.tool_type
+        ));
+    }
+    let mut filtered = Vec::with_capacity(extra_args.len() + 2);
+    let mut arguments = extra_args.into_iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--model" {
+            let _ = arguments.next();
+        } else if !argument.starts_with("--model=") {
+            filtered.push(argument);
+        }
+    }
+    filtered.push("--model".to_owned());
+    filtered.push(model.to_owned());
+    Ok(filtered)
+}
+
+fn model_from_extra_args(extra_args: &[String]) -> Option<String> {
+    let mut model = None;
+    let mut index = 0;
+    while index < extra_args.len() {
+        let argument = &extra_args[index];
+        if argument == "--model" {
+            if let Some(value) = extra_args.get(index + 1).filter(|value| !value.is_empty()) {
+                model = Some(value.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument
+            .strip_prefix("--model=")
+            .filter(|value| !value.is_empty())
+        {
+            model = Some(value.to_owned());
+        }
+        index += 1;
+    }
+    model
 }
 
 pub(crate) fn compose_initial_prompt(
@@ -2124,6 +2246,7 @@ mod tests {
             Some(91),
             Some(44),
             vec!["--caller".into()],
+            None,
             Some("Check this.".into()),
         )
         .unwrap();
@@ -2139,6 +2262,7 @@ mod tests {
             Some(92),
             Some(44),
             vec!["--caller".into()],
+            None,
             Some("Check this.".into()),
         )
         .unwrap();
@@ -2150,13 +2274,132 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None).unwrap_err(),
+            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 999 was not found"
         );
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None).unwrap_err(),
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 93 (Disabled agent) is disabled"
         );
+    }
+
+    #[test]
+    fn model_override_replaces_model_flags_for_every_known_agent_type() {
+        for (tool_type, model) in [
+            ("codex", "codex-model"),
+            ("claude", "claude-model"),
+            ("kimi", "kimi-model"),
+            ("gemini", "gemini-model"),
+            ("grok", "grok-model"),
+            ("opencode", "provider/model"),
+        ] {
+            let tool = AgentTool {
+                id: 1,
+                name: tool_type.into(),
+                command: tool_type.into(),
+                tool_type: tool_type.into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            };
+            let args = apply_model_override(
+                &tool,
+                vec![
+                    "--keep".into(),
+                    "value".into(),
+                    "--model".into(),
+                    "old".into(),
+                    "--model=older".into(),
+                ],
+                Some(model),
+            )
+            .unwrap();
+            assert_eq!(args, ["--keep", "value", "--model", model]);
+            assert_eq!(model_from_extra_args(&args).as_deref(), Some(model));
+        }
+
+        let codex = AgentTool {
+            id: 2,
+            name: "Codex".into(),
+            command: "codex".into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
+        assert_eq!(
+            apply_model_override(&codex, vec!["--model".into(), "unchanged".into()], None).unwrap(),
+            ["--model", "unchanged"]
+        );
+
+        let custom = AgentTool {
+            id: 9,
+            name: "Custom runner".into(),
+            command: "runner".into(),
+            tool_type: "custom".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
+        assert_eq!(
+            apply_model_override(&custom, Vec::new(), Some("model-x")).unwrap_err(),
+            "this agent tool has no known model flag: Custom runner (custom)"
+        );
+    }
+
+    #[test]
+    fn template_model_override_is_duplicate_free_and_omission_preserves_composed_args() {
+        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let tool = load_agent_tools(&registry)
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.tool_type == "codex")
+            .unwrap();
+        let template = AgentTemplate {
+            id: 44,
+            profile_id: 1,
+            name: "Reviewer".into(),
+            agent_tool_id: tool.id,
+            extra_args: vec!["--model".into(), "legacy-model".into(), "--review".into()],
+            prompt: "Review carefully.".into(),
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        registry.store().put_agent_template(&template).unwrap();
+
+        let unchanged = resolve_agent_spawn(
+            &registry,
+            None,
+            Some(44),
+            vec!["--caller".into()],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            unchanged.extra_args,
+            ["--model", "legacy-model", "--review", "--caller"]
+        );
+
+        let overridden = resolve_agent_spawn(
+            &registry,
+            None,
+            Some(44),
+            vec!["--model=caller-legacy".into()],
+            Some("launch-override".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            overridden.extra_args,
+            ["--review", "--model", "launch-override"]
+        );
+        let summary = load_agent_template_summaries(&registry).unwrap().remove(0);
+        assert_eq!(summary.model.as_deref(), Some("legacy-model"));
     }
 
     #[test]
