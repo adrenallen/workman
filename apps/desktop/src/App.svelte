@@ -1628,7 +1628,7 @@
           if (
             summary &&
             (summary.revision !== scratchpadRead?.scratchpad.revision ||
-              summary.unresolved_comment_count !== scratchpadRead?.unresolved_comment_count)
+              summary.comments_revision !== scratchpadRead?.comments_revision)
           ) {
             void loadScratchpad(selection.id, false);
           }

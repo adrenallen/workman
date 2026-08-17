@@ -8,8 +8,12 @@
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
+  import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Collapsible from '$lib/components/ui/collapsible';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Textarea } from '$lib/components/ui/textarea';
 
   import type {
     NewScratchpadCommentInput,
@@ -17,9 +21,16 @@
     ScratchpadRead
   } from './coordination';
   import DocumentScaffold from './DocumentScaffold.svelte';
+  import CountBadge from './CountBadge.svelte';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
   import { scratchpadOutline, type ScratchpadOutlineItem } from './scratchpadOutline';
-  import type { ScratchpadSelectionAnchor } from './scratchpadAnchors';
+  import {
+    mapScratchpadSelectionAnchor,
+    resolveScratchpadAnchor,
+    selectionAnchor,
+    type PositionMapper,
+    type ScratchpadSelectionAnchor
+  } from './scratchpadAnchors';
   import { autoGrowTextarea, singleLineTitle } from './wrappingTitle';
 
   interface Props {
@@ -89,6 +100,7 @@
   let metadataBusy = $state(false);
   let mobileOutlineOpen = $state(false);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let saveInFlight: Promise<void> | null = null;
   let seenFocusRequest = -1;
   let editorFocusRequest = $state(0);
   let outlineScrollKey = $state(0);
@@ -105,7 +117,12 @@
   let editingCommentId = $state<number | null>(null);
   let editingCommentDraft = $state('');
   let commentScrollKey = $state(0);
-  let commentScrollRequest = $state<{ key: number; commentId: number } | null>(null);
+  let commentScrollRequest = $state<{
+    key: number;
+    commentId: number;
+    fallbackLine?: number | null;
+  } | null>(null);
+  let pendingDeleteComment = $state<ScratchpadComment | null>(null);
 
   let outline = $derived(scratchpadOutline(bodyDraft));
   let activeOutlineId = $derived.by(() => {
@@ -126,8 +143,14 @@
   let metadataDisabled = $derived(
     busy || metadataBusy || dirty || saveState === 'saving' || saveState === 'conflict'
   );
+  let locallyResolvedComments = $derived(
+    (read?.comments ?? []).map((comment) => ({
+      ...comment,
+      ...resolveScratchpadAnchor(bodyDraft, comment)
+    }))
+  );
   let visibleComments = $derived(
-    (read?.comments ?? []).filter((comment) => showResolvedComments || !comment.resolved)
+    locallyResolvedComments.filter((comment) => showResolvedComments || !comment.resolved)
   );
 
   function visibleElement<T extends HTMLElement>(selector: string): T | null {
@@ -151,9 +174,32 @@
     if (!onCreateComment || composerAnchor === undefined || !commentDraft.trim() || commentBusy) return;
     commentBusy = true;
     try {
+      await saveDraft();
+      if (dirty || saveState !== 'saved' || conflict) return;
+      const localResolution = composerAnchor
+        ? resolveScratchpadAnchor(bodyDraft, composerAnchor)
+        : null;
+      const anchor = composerAnchor &&
+        localResolution?.anchor_state === 'anchored' &&
+        localResolution.current_start !== null &&
+        localResolution.current_end !== null
+        ? selectionAnchor(
+            bodyDraft,
+            localResolution.current_start,
+            localResolution.current_end
+          )
+        : composerAnchor
+          ? {
+              quote: composerAnchor.quote,
+              anchor_prefix: composerAnchor.anchor_prefix,
+              anchor_suffix: composerAnchor.anchor_suffix
+            }
+          : {};
       await onCreateComment({
         body: commentDraft.trim(),
-        ...(composerAnchor ?? {})
+        ...anchor,
+        expected_revision: baseRevision,
+        allow_unanchored: composerAnchor !== null
       });
       cancelComment();
       await onRefresh();
@@ -181,7 +227,6 @@
     queueMicrotask(() => {
       const row = visibleElement<HTMLElement>(`[data-scratchpad-comment-row="${commentId}"]`);
       row?.scrollIntoView({ block: 'nearest' });
-      row?.focus({ preventScroll: true });
     });
   }
 
@@ -189,7 +234,11 @@
     if (comment.anchor_state !== 'anchored') return;
     focusedCommentId = comment.id;
     commentScrollKey += 1;
-    commentScrollRequest = { key: commentScrollKey, commentId: comment.id };
+    commentScrollRequest = {
+      key: commentScrollKey,
+      commentId: comment.id,
+      fallbackLine: comment.current_start_line
+    };
   }
 
   function beginEditComment(comment: ScratchpadComment): void {
@@ -230,6 +279,7 @@
     commentBusy = true;
     try {
       await onDeleteComment(commentId);
+      pendingDeleteComment = null;
       if (focusedCommentId === commentId) focusedCommentId = null;
       await onRefresh();
     } catch {
@@ -268,6 +318,20 @@
 
   function applyMarkdown(markdown: string): void {
     const parts = splitMarkdown(markdown);
+    if (composerAnchor) {
+      const resolved = resolveScratchpadAnchor(parts.body, composerAnchor);
+      if (
+        resolved.anchor_state === 'anchored' &&
+        resolved.current_start !== null &&
+        resolved.current_end !== null
+      ) {
+        composerAnchor = selectionAnchor(
+          parts.body,
+          resolved.current_start,
+          resolved.current_end
+        );
+      }
+    }
     draft = markdown;
     titleDraft = parts.title;
     bodyDraft = parts.body;
@@ -322,7 +386,10 @@
     updateDraft();
   }
 
-  function handleBodyChange(next: string): void {
+  function handleBodyChange(next: string, changes: PositionMapper): void {
+    if (composerAnchor) {
+      composerAnchor = mapScratchpadSelectionAnchor(composerAnchor, next, changes);
+    }
     bodyDraft = next;
     updateDraft();
   }
@@ -353,31 +420,39 @@
   }
 
   async function saveDraft(): Promise<void> {
+    if (saveInFlight) return saveInFlight;
     clearSaveTimer();
     if (activeId === null || !dirty || conflict || saveState === 'saving' || !titleDraft.trim()) return;
-    const savingMarkdown = draft;
-    const expectedRevision = baseRevision;
-    saveState = 'saving';
-    try {
-      const saved = await onSave(savingMarkdown, expectedRevision);
-      const canonical = fullMarkdown(saved);
-      const latestConflict = currentConflict();
-      if (
-        latestConflict &&
-        latestConflict.remoteRevision === saved.scratchpad.revision &&
-        latestConflict.remoteMarkdown === canonical
-      ) {
-        conflict = null;
+    saveInFlight = (async () => {
+      const savingMarkdown = draft;
+      const expectedRevision = baseRevision;
+      saveState = 'saving';
+      try {
+        const saved = await onSave(savingMarkdown, expectedRevision);
+        const canonical = fullMarkdown(saved);
+        const latestConflict = currentConflict();
+        if (
+          latestConflict &&
+          latestConflict.remoteRevision === saved.scratchpad.revision &&
+          latestConflict.remoteMarkdown === canonical
+        ) {
+          conflict = null;
+        }
+        baseRevision = saved.scratchpad.revision;
+        baseMarkdown = canonical;
+        if (draft === savingMarkdown) applyMarkdown(canonical);
+        dirty = draft !== baseMarkdown;
+        saveState = dirty ? 'unsaved' : 'saved';
+        if (dirty) scheduleSave();
+      } catch {
+        saveState = 'error';
+        await onRefresh();
       }
-      baseRevision = saved.scratchpad.revision;
-      baseMarkdown = canonical;
-      if (draft === savingMarkdown) applyMarkdown(canonical);
-      dirty = draft !== baseMarkdown;
-      saveState = dirty ? 'unsaved' : 'saved';
-      if (dirty) scheduleSave();
-    } catch {
-      saveState = 'error';
-      await onRefresh();
+    })();
+    try {
+      await saveInFlight;
+    } finally {
+      saveInFlight = null;
     }
   }
 
@@ -543,22 +618,22 @@
 {#snippet commentsPanelContent()}
   <div class="comments-controls">
     <label title="Show resolved scratchpad comments">
-      <input type="checkbox" bind:checked={showResolvedComments} /> Resolved
+      <Checkbox bind:checked={showResolvedComments} aria-label="Show resolved scratchpad comments" /> Resolved
     </label>
-    <button type="button" disabled={!onCreateComment || commentBusy} onclick={() => beginComment(null)}>Comment</button>
+    <Button size="xs" variant="outline" disabled={!onCreateComment || commentBusy} onclick={() => beginComment(null)}>Comment</Button>
   </div>
   {#if composerAnchor !== undefined}
     <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
       <small>{composerAnchor ? `On “${composerAnchor.quote.slice(0, 52)}${composerAnchor.quote.length > 52 ? '…' : ''}”` : 'Whole document'}</small>
-      <textarea
+      <Textarea
         data-scratchpad-comment-composer
         bind:value={commentDraft}
-        rows="3"
+        rows={3}
         aria-label="Scratchpad comment"
         placeholder="Add review feedback…"
         onkeydown={composerKeydown}
-      ></textarea>
-      <div><button type="button" onclick={cancelComment}>Cancel</button><button class="primary" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>⌘↵</kbd></button></div>
+      ></Textarea>
+      <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>⌘↵</kbd></Button></div>
     </form>
   {/if}
   <div class="comment-list" aria-label="Scratchpad comments">
@@ -568,36 +643,35 @@
         class:resolved={comment.resolved}
         class="comment-row"
         data-scratchpad-comment-row={comment.id}
-        tabindex="-1"
       >
         <header><strong>{comment.actor}</strong><time datetime={new Date(comment.created_at).toISOString()} title={new Date(comment.created_at).toLocaleString()}>{relativeTime(comment.created_at)}</time></header>
         {#if comment.quote}
-          <button class="comment-quote" type="button" disabled={comment.anchor_state !== 'anchored'} onclick={() => jumpToComment(comment)}>
+          <Button class="comment-quote" size="xs" variant="ghost" disabled={comment.anchor_state !== 'anchored'} onclick={() => jumpToComment(comment)}>
             “{comment.quote.slice(0, 88)}{comment.quote.length > 88 ? '…' : ''}”
-          </button>
+          </Button>
         {/if}
         {#if comment.anchor_state === 'orphaned'}<small class="anchor-note">Text no longer found</small>
         {:else if comment.anchor_state === 'unanchored'}<small class="anchor-note">Whole document</small>{/if}
         {#if editingCommentId === comment.id}
-          <textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows="3" aria-label="Edit scratchpad comment" onkeydown={(event) => {
+          <Textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows={3} aria-label="Edit scratchpad comment" onkeydown={(event) => {
             if (event.key === 'Escape') { event.preventDefault(); editingCommentId = null; }
             else if (event.key === 'Enter' && event.metaKey) { event.preventDefault(); void saveEditedComment(comment.id); }
-          }}></textarea>
+          }}></Textarea>
         {:else}
           <p>{comment.body}</p>
         {/if}
         <footer>
-          {#if comment.anchor_state === 'anchored'}<button type="button" onclick={() => jumpToComment(comment)}>Jump</button>{/if}
-          <button type="button" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</button>
-          {#if comment.actor === 'user'}
+          {#if comment.anchor_state === 'anchored'}<Button size="xs" variant="outline" onclick={() => jumpToComment(comment)}>Jump</Button>{/if}
+          {#if comment.can_resolve}<Button size="xs" variant="outline" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</Button>{/if}
+          {#if comment.can_edit}
             {#if editingCommentId === comment.id}
-              <button type="button" onclick={() => (editingCommentId = null)}>Cancel</button>
-              <button type="button" disabled={!editingCommentDraft.trim() || commentBusy} onclick={() => void saveEditedComment(comment.id)}>Save</button>
+              <Button size="xs" variant="outline" onclick={() => (editingCommentId = null)}>Cancel</Button>
+              <Button size="xs" disabled={!editingCommentDraft.trim() || commentBusy} onclick={() => void saveEditedComment(comment.id)}>Save</Button>
             {:else}
-              <button type="button" onclick={() => beginEditComment(comment)}>Edit</button>
+              <Button size="xs" variant="outline" onclick={() => beginEditComment(comment)}>Edit</Button>
             {/if}
-            <button class="destructive" type="button" disabled={commentBusy} onclick={() => void deleteComment(comment.id)}>Delete</button>
           {/if}
+          {#if comment.can_delete}<Button size="xs" variant="destructive" disabled={commentBusy} onclick={() => (pendingDeleteComment = comment)}>Delete</Button>{/if}
         </footer>
       </article>
     {:else}
@@ -667,7 +741,7 @@
         <Collapsible.Root bind:open={commentsOpen}>
           <Collapsible.Trigger class="comments-trigger">
             <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
-            <strong title={`${read.unresolved_comment_count} unresolved scratchpad comments`} aria-label={`${read.unresolved_comment_count} unresolved scratchpad comments`}>{read.unresolved_comment_count}</strong>
+            <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
             <ChevronDownIcon class={commentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
           </Collapsible.Trigger>
           <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
@@ -689,7 +763,7 @@
         <Collapsible.Root bind:open={mobileCommentsOpen}>
           <Collapsible.Trigger class="comments-trigger">
             <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
-            <strong title={`${read.unresolved_comment_count} unresolved scratchpad comments`} aria-label={`${read.unresolved_comment_count} unresolved scratchpad comments`}>{read.unresolved_comment_count}</strong>
+            <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
             <ChevronDownIcon class={mobileCommentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
           </Collapsible.Trigger>
           <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
@@ -767,7 +841,7 @@
           flow
           scrollRequest={outlineScrollRequest}
           {commentScrollRequest}
-          comments={read.comments}
+          comments={locallyResolvedComments}
           {showResolvedComments}
           {focusedCommentId}
           onChange={handleBodyChange}
@@ -782,6 +856,21 @@
 {:else}
   <div class="state">Scratchpad not found.</div>
 {/if}
+
+<AlertDialog.Root open={pendingDeleteComment !== null} onOpenChange={(open) => { if (!open && !commentBusy) pendingDeleteComment = null; }}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete this comment?</AlertDialog.Title>
+      <AlertDialog.Description>This permanently removes the comment and its anchor.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel disabled={commentBusy}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" disabled={commentBusy} onclick={() => {
+        if (pendingDeleteComment) void deleteComment(pendingDeleteComment.id);
+      }}>Delete comment</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .scratchpad-document { min-width: 0; min-height: 100%; }
@@ -822,33 +911,27 @@
   .outline-list p { margin: 0; border-left: 2px solid var(--border); padding: 3px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
   :global(.comments-trigger) { display: grid; width: 100%; min-height: 34px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 7px; background: var(--card); color: var(--foreground); cursor: pointer; }
   :global(.comments-trigger > span) { display: inline-flex; align-items: center; gap: 6px; font-size: var(--font-size-sm); font-weight: 650; }
-  :global(.comments-trigger > strong) { min-width: 20px; border-radius: 999px; padding: 1px 5px; background: var(--accent); color: var(--muted-foreground); font: 650 var(--font-size-xs) var(--terminal-font-family); text-align: center; }
   :global(.comments-trigger > svg) { color: var(--muted-foreground); transition: transform 150ms ease; }
   :global(.comments-trigger > svg.open) { transform: rotate(180deg); }
   .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); }
   .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
   .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .comments-controls button, .comment-composer button, .comment-row footer button { min-height: 27px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 7px; background: var(--background); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
-  .comments-controls button:disabled, .comment-composer button:disabled, .comment-row footer button:disabled { cursor: default; opacity: 0.55; }
   .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
   .comment-composer small, .anchor-note { color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .comment-composer textarea, .comment-row textarea { width: 100%; min-height: 68px; resize: vertical; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 6px 7px; background: var(--background); color: var(--foreground); font: var(--font-size-sm)/1.4 var(--ui-font-family); }
-  .comment-composer textarea:focus, .comment-row textarea:focus { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
   .comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
   .comment-composer kbd { margin-left: 3px; color: inherit; font: var(--font-size-xs) var(--terminal-font-family); }
   .comment-list { display: grid; }
   .comment-row { display: grid; gap: 5px; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 7px; }
   .comment-row:last-child { border-bottom: 0; }
-  .comment-row.focused { box-shadow: inset 2px 0 0 var(--ring); background: var(--accent); }
+  .comment-row.focused { box-shadow: inset 2px 0 0 var(--notification-unread); background: color-mix(in srgb, var(--notification-unread) 8%, var(--accent)); }
   .comment-row.resolved { opacity: 0.72; }
   .comment-row header { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
   .comment-row header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
   .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
   .comment-row p { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.42; white-space: pre-wrap; }
-  .comment-quote { overflow: hidden; border: 0; border-left: 2px solid var(--border-strong); padding: 2px 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: italic; line-height: 1.35; text-align: left; text-overflow: ellipsis; cursor: pointer; }
-  .comment-quote:disabled { cursor: default; }
+  :global(.comment-quote) { overflow: hidden; justify-content: flex-start; border: 0; border-left: 2px solid var(--border-strong); border-radius: 0; padding: 2px 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: italic; line-height: 1.35; text-align: left; text-overflow: ellipsis; cursor: pointer; white-space: normal; }
+  :global(.comment-quote:disabled) { cursor: default; }
   .comment-row footer { display: flex; flex-wrap: wrap; gap: 4px; }
-  .comment-row footer button.destructive { color: var(--destructive); }
   .comments-empty { margin: 0; padding: 10px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
   .mobile-outline { display: none; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
   .mobile-comments { display: none; margin-bottom: 14px; }

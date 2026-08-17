@@ -61,6 +61,7 @@ export interface ScratchpadSummary {
   created_by: string;
   updated_by: string;
   unresolved_comment_count: number;
+  comments_revision: number;
   matched_fields: string[];
   match_snippet?: string;
 }
@@ -69,6 +70,7 @@ export interface ScratchpadComment {
   id: number;
   scratchpad_id: number;
   actor: string;
+  actor_kind: 'user' | 'agent';
   body: string;
   quote: string | null;
   anchor_start: number | null;
@@ -84,6 +86,9 @@ export interface ScratchpadComment {
   current_end: number | null;
   current_start_line: number | null;
   current_end_line: number | null;
+  can_edit: boolean;
+  can_resolve: boolean;
+  can_delete: boolean;
 }
 
 export interface Scratchpad {
@@ -104,6 +109,7 @@ export interface ScratchpadRead {
   comments: ScratchpadComment[];
   comment_total_count: number;
   unresolved_comment_count: number;
+  comments_revision: number;
 }
 
 export interface NewScratchpadCommentInput {
@@ -114,6 +120,7 @@ export interface NewScratchpadCommentInput {
   anchor_prefix?: string;
   anchor_suffix?: string;
   allow_unanchored?: boolean;
+  expected_revision?: number;
 }
 
 export interface CoordinationSnapshot {

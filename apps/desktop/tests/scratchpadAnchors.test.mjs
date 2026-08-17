@@ -10,7 +10,12 @@ const output = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
 }).outputText;
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(output).toString('base64')}`;
-const { mapScratchpadSelectionAnchor, resolveScratchpadAnchor, selectionAnchor } = await import(moduleUrl);
+const {
+  mapScratchpadSelectionAnchor,
+  normalizeScratchpadLineEndings,
+  resolveScratchpadAnchor,
+  selectionAnchor
+} = await import(moduleUrl);
 
 test('reanchors duplicate quotes with context using UTF-16 offsets', () => {
   const original = 'Alpha target Omega\nBeta target Gamma';
@@ -54,6 +59,29 @@ test('orphaned and whole-document vectors agree with the Rust resolver', () => {
   assert.equal(resolveScratchpadAnchor('anything', {
     quote: null, anchor_start: null, anchor_end: null, anchor_prefix: null, anchor_suffix: null
   }).anchor_state, 'unanchored');
+});
+
+test('uses non-overlapping matches and requires supplied context like the Rust resolver', () => {
+  const overlap = resolveScratchpadAnchor('aaa', {
+    quote: 'aa', anchor_start: null, anchor_end: null, anchor_prefix: null, anchor_suffix: null
+  });
+  assert.equal(overlap.anchor_state, 'anchored');
+  assert.equal(overlap.current_start, 0);
+  assert.equal(resolveScratchpadAnchor('only target remains', {
+    quote: 'target', anchor_start: null, anchor_end: null,
+    anchor_prefix: 'old ', anchor_suffix: ' context'
+  }).anchor_state, 'orphaned');
+});
+
+test('normalizes CRLF into the shared LF anchor coordinate space', () => {
+  const normalized = normalizeScratchpadLineEndings('first\r\nsecond\rthird');
+  assert.equal(normalized, 'first\nsecond\nthird');
+  const resolved = resolveScratchpadAnchor('first\r\nsecond', {
+    quote: 'first\r\nsecond', anchor_start: null, anchor_end: null,
+    anchor_prefix: null, anchor_suffix: null
+  });
+  assert.equal(resolved.anchor_state, 'anchored');
+  assert.equal(resolved.current_end, 'first\nsecond'.length);
 });
 
 test('selection anchors preserve CodeMirror UTF-16 positions and cap Unicode context', () => {

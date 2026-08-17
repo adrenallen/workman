@@ -506,7 +506,8 @@ export class DaemonClient
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead> {
     return this.request('coordination.scratchpad', {
       project_id: projectId,
-      scratchpad_id: scratchpadId
+      scratchpad_id: scratchpadId,
+      include_comments: true
     });
   }
 

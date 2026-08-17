@@ -30,6 +30,11 @@ export interface PositionMapper {
 
 const CONTEXT_CHARACTERS = 64;
 
+/** Scratchpad storage, anchors, and CodeMirror all use LF line endings. */
+export function normalizeScratchpadLineEndings(content: string): string {
+  return content.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+}
+
 function anchored(content: string, quote: string, start: number, end: number): ScratchpadAnchorResolution {
   const startLine = content.slice(0, start).split('\n').length;
   return {
@@ -45,7 +50,8 @@ export function resolveScratchpadAnchor(
   content: string,
   anchor: ScratchpadAnchorInput
 ): ScratchpadAnchorResolution {
-  const quote = anchor.quote;
+  content = normalizeScratchpadLineEndings(content);
+  const quote = anchor.quote === null ? null : normalizeScratchpadLineEndings(anchor.quote);
   if (quote === null) {
     return {
       anchor_state: 'unanchored',
@@ -63,19 +69,32 @@ export function resolveScratchpadAnchor(
     return anchored(content, quote, anchor.anchor_start, anchor.anchor_end);
   }
 
+  if (quote.length === 0) return {
+    anchor_state: 'orphaned', current_start: null, current_end: null,
+    current_start_line: null, current_end_line: null
+  };
+  const prefix = anchor.anchor_prefix === null
+    ? null
+    : normalizeScratchpadLineEndings(anchor.anchor_prefix);
+  const suffix = anchor.anchor_suffix === null
+    ? null
+    : normalizeScratchpadLineEndings(anchor.anchor_suffix);
   const candidates: Array<[number, number]> = [];
-  for (let start = content.indexOf(quote); start >= 0; start = content.indexOf(quote, start + 1)) {
+  for (
+    let start = content.indexOf(quote);
+    start >= 0;
+    start = content.indexOf(quote, start + quote.length)
+  ) {
     candidates.push([start, start + quote.length]);
   }
   const contextual = candidates.filter(([start, end]) =>
-    (!anchor.anchor_prefix || content.slice(0, start).endsWith(anchor.anchor_prefix)) &&
-    (!anchor.anchor_suffix || content.slice(end).startsWith(anchor.anchor_suffix))
+    (!prefix || content.slice(0, start).endsWith(prefix)) &&
+    (!suffix || content.slice(end).startsWith(suffix))
   );
-  const match = contextual.length === 1
-    ? contextual[0]
-    : contextual.length === 0 && candidates.length === 1
-      ? candidates[0]
-      : null;
+  const hasContext = Boolean(prefix || suffix);
+  const match = hasContext
+    ? contextual.length === 1 ? contextual[0] : null
+    : candidates.length === 1 ? candidates[0] : null;
   if (match) return anchored(content, quote, match[0], match[1]);
   return {
     anchor_state: 'orphaned',
@@ -87,6 +106,7 @@ export function resolveScratchpadAnchor(
 }
 
 export function selectionAnchor(content: string, start: number, end: number): ScratchpadSelectionAnchor {
+  content = normalizeScratchpadLineEndings(content);
   return {
     quote: content.slice(start, end),
     anchor_start: start,

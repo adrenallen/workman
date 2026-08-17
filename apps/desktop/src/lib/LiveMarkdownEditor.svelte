@@ -42,6 +42,7 @@
   import {
     resolveScratchpadAnchor,
     selectionAnchor,
+    type PositionMapper,
     type ScratchpadSelectionAnchor
   } from './scratchpadAnchors';
 
@@ -51,11 +52,11 @@
     flow?: boolean;
     toolbar?: boolean;
     scrollRequest?: { key: number; line: number } | null;
-    commentScrollRequest?: { key: number; commentId: number } | null;
+    commentScrollRequest?: { key: number; commentId: number; fallbackLine?: number | null } | null;
     comments?: ScratchpadComment[];
     showResolvedComments?: boolean;
     focusedCommentId?: number | null;
-    onChange: (value: string) => void;
+    onChange: (value: string, changes: PositionMapper) => void;
     onSave: () => void;
     onViewportLineChange?: (line: number) => void;
     onCommentSelection?: (anchor: ScratchpadSelectionAnchor) => void;
@@ -187,7 +188,7 @@
     if (
       range.empty ||
       !editor.hasFocus ||
-      range.from < editor.viewport.from ||
+      range.to < editor.viewport.from ||
       range.to > editor.viewport.to
     ) {
       selectionAction = null;
@@ -440,18 +441,22 @@
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
     '.cm-comment-highlight': {
-      borderBottom: '1px solid var(--ring)',
-      backgroundColor: 'color-mix(in srgb, var(--ring) 14%, transparent)',
+      borderBottom: '1px solid var(--notification-unread)',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, transparent)',
       cursor: 'pointer'
     },
-    '.cm-comment-highlight:hover, .cm-comment-focused': {
-      backgroundColor: 'color-mix(in srgb, var(--ring) 24%, transparent)'
+    '.cm-comment-highlight:hover': {
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 19%, transparent)'
+    },
+    '.cm-comment-focused': {
+      borderBottomWidth: '2px',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 27%, transparent)'
     },
     '.cm-comment-resolved': {
       borderBottomColor: 'var(--border-strong)',
       backgroundColor: 'color-mix(in srgb, var(--muted-foreground) 8%, transparent)'
     },
-    '.cm-comment-flash': { outline: '2px solid var(--ring)', outlineOffset: '1px' },
+    '.cm-comment-flash': { outline: '2px solid var(--notification-unread)', outlineOffset: '1px' },
     '.cm-placeholder': { color: 'var(--muted-foreground)', fontStyle: 'italic' }
     });
   }
@@ -546,7 +551,7 @@
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))
             ) {
-              onChange(update.state.doc.toString());
+              onChange(update.state.doc.toString(), update.changes);
             }
           })
         ]
@@ -615,7 +620,14 @@
         to = rangeTo;
       }
     });
-    if (from === null || to === null) return;
+    if (from === null || to === null) {
+      if (request.fallbackLine !== null && request.fallbackLine !== undefined) {
+        const lineNumber = Math.max(1, Math.min(request.fallbackLine, view.state.doc.lines));
+        const line = view.state.doc.line(lineNumber);
+        view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: 'center', yMargin: 36 }) });
+      }
+      return;
+    }
     view.dispatch({
       selection: { anchor: from, head: to },
       effects: EditorView.scrollIntoView(from, { y: 'center', yMargin: 36 })
