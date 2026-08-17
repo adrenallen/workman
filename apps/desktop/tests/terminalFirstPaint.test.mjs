@@ -2,12 +2,23 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { hasRetainedTerminalOutput } from '../src/lib/terminalFirstPaint.ts';
+import {
+  hasRetainedTerminalOutput,
+  rawReplayHasGap,
+  shouldShowRetainedPreview
+} from '../src/lib/terminalFirstPaint.ts';
 
 test('only a genuinely empty PTY is eligible for the waiting placeholder', () => {
   assert.equal(hasRetainedTerminalOutput({ text: '', raw_end_offset: 0 }), false);
   assert.equal(hasRetainedTerminalOutput({ text: 'retained screen', raw_end_offset: 0 }), true);
   assert.equal(hasRetainedTerminalOutput({ text: '', raw_end_offset: 42 }), true);
+});
+
+test('the escape-free preview is transitional and gaps are reported', () => {
+  assert.equal(shouldShowRetainedPreview({ text: 'retained screen' }, false), true);
+  assert.equal(shouldShowRetainedPreview({ text: 'retained screen' }, true), false);
+  assert.equal(rawReplayHasGap(0, 128), true);
+  assert.equal(rawReplayHasGap(128, 128), false);
 });
 
 test('live attach fetches and paints the daemon snapshot before raw replay setup', async () => {
@@ -21,7 +32,7 @@ test('live attach fetches and paints the daemon snapshot before raw replay setup
   assert.ok(preview < fonts && preview < attach, 'the retained screen request starts immediately');
   assert.match(
     source,
-    /liveOutputRetained && liveOutputPreview[\s\S]*terminal-retained-preview/
+    /liveOutputRetained && shouldShowRetainedPreview[\s\S]*terminal-retained-preview/
   );
   assert.match(
     source,
@@ -29,7 +40,7 @@ test('live attach fetches and paints the daemon snapshot before raw replay setup
   );
 });
 
-test('the retained preview stays visible until xterm parses replay bytes', async () => {
+test('the retained preview stays visible until xterm completes raw replay', async () => {
   const source = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
   const handler = source.slice(
     source.indexOf('function handleTerminalFrame'),
@@ -40,6 +51,10 @@ test('the retained preview stays visible until xterm parses replay bytes', async
 
   assert.ok(write >= 0 && parsed > write);
   assert.doesNotMatch(handler.slice(0, write), /hasOutput = true/);
+  assert.match(source, /shouldShowRetainedPreview\(\{ text: liveOutputPreview \}, replayComplete\)/);
+  assert.match(source, /function finishReplayIfReady[\s\S]*replayComplete = true/);
+  assert.match(source, /replayWatchdogTimer = setTimeout[\s\S]*Styled terminal replay did not complete/);
+  assert.match(source, /Styled terminal replay is unavailable/);
 });
 
 test('retained replay focuses immediately and preserves physical input', async () => {
