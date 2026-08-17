@@ -2,7 +2,7 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
   import { markdown } from '@codemirror/lang-markdown';
-  import { Annotation, EditorState, type Range } from '@codemirror/state';
+  import { Annotation, EditorState, StateEffect, StateField, type Range } from '@codemirror/state';
   import {
     Decoration,
     EditorView,
@@ -33,11 +33,18 @@
   import { onMount } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import type { ScratchpadComment } from './coordination';
   import {
     EXTERNAL_LINK_TOOLTIP,
     markdownLinkAt,
     openExternalUrl
   } from './externalLinks';
+  import {
+    resolveScratchpadAnchor,
+    selectionAnchor,
+    type PositionMapper,
+    type ScratchpadSelectionAnchor
+  } from './scratchpadAnchors';
 
   interface Props {
     value: string;
@@ -45,9 +52,15 @@
     flow?: boolean;
     toolbar?: boolean;
     scrollRequest?: { key: number; line: number } | null;
-    onChange: (value: string) => void;
+    commentScrollRequest?: { key: number; commentId: number; fallbackLine?: number | null } | null;
+    comments?: ScratchpadComment[];
+    showResolvedComments?: boolean;
+    focusedCommentId?: number | null;
+    onChange: (value: string, changes: PositionMapper) => void;
     onSave: () => void;
     onViewportLineChange?: (line: number) => void;
+    onCommentSelection?: (anchor: ScratchpadSelectionAnchor) => void;
+    onCommentClick?: (commentId: number) => void;
   }
 
   let {
@@ -56,16 +69,36 @@
     flow = false,
     toolbar = true,
     scrollRequest = null,
+    commentScrollRequest = null,
+    comments = [],
+    showResolvedComments = false,
+    focusedCommentId = null,
     onChange,
     onSave,
-    onViewportLineChange
+    onViewportLineChange,
+    onCommentSelection,
+    onCommentClick
   }: Props = $props();
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   let appliedFocusRequest = -1;
   let appliedScrollRequest = -1;
+  let appliedCommentScrollRequest = -1;
+  let selectionAction = $state<({ x: number; y: number } & ScratchpadSelectionAnchor) | null>(null);
 
   const externalChange = Annotation.define<boolean>();
+  const setCommentDecorations = StateEffect.define<DecorationSet>();
+  const commentDecorationField = StateField.define<DecorationSet>({
+    create: () => Decoration.none,
+    update(decorations, transaction) {
+      let next = decorations.map(transaction.changes);
+      for (const effect of transaction.effects) {
+        if (effect.is(setCommentDecorations)) next = effect.value;
+      }
+      return next;
+    },
+    provide: (field) => EditorView.decorations.from(field)
+  });
 
   function replaceSelection(prefix: string, suffix = prefix, fallback = 'text'): void {
     if (!view) return;
@@ -115,6 +148,69 @@
 
   function reportViewportLine(editor: EditorView): void {
     onViewportLineChange?.(editor.state.doc.lineAt(editor.viewport.from).number);
+  }
+
+  function commentDecorations(editor: EditorView): DecorationSet {
+    const ranges: Range<Decoration>[] = [];
+    const content = editor.state.doc.toString();
+    for (const comment of comments) {
+      if (comment.resolved && !showResolvedComments) continue;
+      const resolved = resolveScratchpadAnchor(content, comment);
+      const from = resolved.current_start;
+      const to = resolved.current_end;
+      if (resolved.anchor_state !== 'anchored' || from === null || to === null) continue;
+      if (from < 0 || to <= from || to > editor.state.doc.length) continue;
+      const excerpt = comment.body.replaceAll(/\s+/g, ' ').slice(0, 120);
+      ranges.push(
+        Decoration.mark({
+          class: [
+            'cm-comment-highlight',
+            comment.resolved ? 'cm-comment-resolved' : '',
+            focusedCommentId === comment.id ? 'cm-comment-focused' : ''
+          ].filter(Boolean).join(' '),
+          attributes: {
+            'data-scratchpad-comment-id': String(comment.id),
+            title: `${comment.actor}: ${excerpt}`
+          },
+          inclusive: true
+        }).range(from, to)
+      );
+    }
+    return Decoration.set(ranges, true);
+  }
+
+  function refreshCommentDecorations(editor: EditorView): void {
+    editor.dispatch({ effects: setCommentDecorations.of(commentDecorations(editor)) });
+  }
+
+  function reportSelection(editor: EditorView): void {
+    const range = editor.state.selection.main;
+    if (
+      range.empty ||
+      !editor.hasFocus ||
+      range.to < editor.viewport.from ||
+      range.to > editor.viewport.to
+    ) {
+      selectionAction = null;
+      return;
+    }
+    const coordinates = editor.coordsAtPos(range.to);
+    if (!coordinates) {
+      selectionAction = null;
+      return;
+    }
+    selectionAction = {
+      ...selectionAnchor(editor.state.doc.toString(), range.from, range.to),
+      x: Math.min(window.innerWidth - 92, Math.max(8, coordinates.right + 6)),
+      y: Math.min(window.innerHeight - 42, Math.max(8, coordinates.bottom + 5))
+    };
+  }
+
+  function beginSelectionComment(): void {
+    if (!selectionAction) return;
+    const { x: _x, y: _y, ...anchor } = selectionAction;
+    onCommentSelection?.(anchor);
+    selectionAction = null;
   }
 
   class MarkerWidget extends WidgetType {
@@ -344,11 +440,30 @@
       color: 'var(--muted-foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace"
     },
+    '.cm-comment-highlight': {
+      borderBottom: '1px solid var(--notification-unread)',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, transparent)',
+      cursor: 'pointer'
+    },
+    '.cm-comment-highlight:hover': {
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 19%, transparent)'
+    },
+    '.cm-comment-focused': {
+      borderBottomWidth: '2px',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 27%, transparent)'
+    },
+    '.cm-comment-resolved': {
+      borderBottomColor: 'var(--border-strong)',
+      backgroundColor: 'color-mix(in srgb, var(--muted-foreground) 8%, transparent)'
+    },
+    '.cm-comment-flash': { outline: '2px solid var(--notification-unread)', outlineOffset: '1px' },
     '.cm-placeholder': { color: 'var(--muted-foreground)', fontStyle: 'italic' }
     });
   }
 
   onMount(() => {
+    const hideSelectionAction = (): void => { selectionAction = null; };
+    window.addEventListener('scroll', hideSelectionAction, true);
     view = new EditorView({
       parent: host,
       state: EditorState.create({
@@ -365,9 +480,18 @@
           EditorView.lineWrapping,
           editorPlaceholder('Start writing Markdown…'),
           liveMarkdown,
+          commentDecorationField,
           createEditorTheme(flow),
           EditorView.domEventHandlers({
             click: (event, editor) => {
+              const target = event.target instanceof Element
+                ? event.target.closest<HTMLElement>('[data-scratchpad-comment-id]')
+                : null;
+              const commentId = Number(target?.dataset.scratchpadCommentId);
+              if (target && Number.isInteger(commentId)) {
+                onCommentClick?.(commentId);
+                return true;
+              }
               if (!event.metaKey || event.button !== 0) return false;
               const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
               if (position === null) return false;
@@ -376,6 +500,12 @@
               event.preventDefault();
               openExternalUrl(href);
               return true;
+            },
+            blur: () => {
+              window.setTimeout(() => {
+                if (!view?.hasFocus) selectionAction = null;
+              }, 0);
+              return false;
             }
           }),
           keymap.of([
@@ -409,10 +539,19 @@
               reportViewportLine(update.view);
             }
             if (
+              update.docChanged ||
+              update.selectionSet ||
+              update.viewportChanged ||
+              update.geometryChanged ||
+              update.focusChanged
+            ) {
+              reportSelection(update.view);
+            }
+            if (
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))
             ) {
-              onChange(update.state.doc.toString());
+              onChange(update.state.doc.toString(), update.changes);
             }
           })
         ]
@@ -426,6 +565,7 @@
       if (view) reportViewportLine(view);
     });
     return () => {
+      window.removeEventListener('scroll', hideSelectionAction, true);
       view?.destroy();
       view = null;
     };
@@ -458,6 +598,46 @@
     });
     requestAnimationFrame(() => {
       if (view) reportViewportLine(view);
+    });
+  });
+
+  $effect(() => {
+    comments;
+    showResolvedComments;
+    focusedCommentId;
+    if (view) refreshCommentDecorations(view);
+  });
+
+  $effect(() => {
+    const request = commentScrollRequest;
+    if (!view || !request || request.key <= appliedCommentScrollRequest) return;
+    appliedCommentScrollRequest = request.key;
+    let from: number | null = null;
+    let to: number | null = null;
+    view.state.field(commentDecorationField).between(0, view.state.doc.length, (rangeFrom, rangeTo, decoration) => {
+      if (decoration.spec.attributes?.['data-scratchpad-comment-id'] === String(request.commentId)) {
+        from = rangeFrom;
+        to = rangeTo;
+      }
+    });
+    if (from === null || to === null) {
+      if (request.fallbackLine !== null && request.fallbackLine !== undefined) {
+        const lineNumber = Math.max(1, Math.min(request.fallbackLine, view.state.doc.lines));
+        const line = view.state.doc.line(lineNumber);
+        view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: 'center', yMargin: 36 }) });
+      }
+      return;
+    }
+    view.dispatch({
+      selection: { anchor: from, head: to },
+      effects: EditorView.scrollIntoView(from, { y: 'center', yMargin: 36 })
+    });
+    requestAnimationFrame(() => {
+      const highlight = view?.dom.querySelector<HTMLElement>(
+        `[data-scratchpad-comment-id="${request.commentId}"]`
+      );
+      highlight?.classList.add('cm-comment-flash');
+      window.setTimeout(() => highlight?.classList.remove('cm-comment-flash'), 900);
     });
   });
 </script>
@@ -509,6 +689,15 @@
   {/if}
   <div class="editor-host" bind:this={host}></div>
 </div>
+{#if selectionAction}
+  <button
+    type="button"
+    class="selection-comment"
+    style={`left: ${selectionAction.x}px; top: ${selectionAction.y}px`}
+    onmousedown={(event) => event.preventDefault()}
+    onclick={beginSelectionComment}
+  >Comment</button>
+{/if}
 
 <style>
   .editor-shell { display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--background); }
@@ -518,6 +707,9 @@
   .editor-shell.flow .format-toolbar { background: transparent; }
   .format-toolbar { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 1px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 2px 5px; background: var(--card); scrollbar-width: none; }
   .separator { width: 1px; height: 18px; flex: none; margin: 0 3px; background: var(--border); }
+  .selection-comment { position: fixed; z-index: 50; min-height: 30px; border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 0 9px; background: var(--popover); color: var(--foreground); font: 620 var(--font-size-xs) var(--ui-font-family); cursor: pointer; }
+  .selection-comment:hover { background: var(--accent); }
+  .selection-comment:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .editor-host { min-height: 0; height: 100%; overflow: hidden; background: var(--background); }
   .editor-shell.flow .editor-host { height: auto; min-height: inherit; overflow: visible; background: transparent; }
 </style>

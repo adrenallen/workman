@@ -160,10 +160,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "quick_prompts",
         include_str!("../migrations/0029_quick_prompts.sql"),
     ),
+    (
+        30,
+        "scratchpad_comments",
+        include_str!("../migrations/0030_scratchpad_comments.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 29;
+pub const LATEST_SCHEMA_VERSION: i64 = 30;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

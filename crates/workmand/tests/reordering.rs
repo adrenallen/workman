@@ -88,10 +88,10 @@ async fn connect_ws(discovery: &Discovery) -> Result<Socket, Box<dyn Error>> {
     Ok(connect_async(request).await?.0)
 }
 
-async fn connect_mcp(discovery: &Discovery) -> Result<McpClient, Box<dyn Error>> {
+async fn connect_mcp(discovery: &Discovery, token: &str) -> Result<McpClient, Box<dyn Error>> {
     let headers = std::collections::HashMap::from([(
         HeaderName::from_static("authorization"),
-        HeaderValue::from_str(&format!("Bearer {}", discovery.token))?,
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
     )]);
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(format!(
@@ -169,6 +169,9 @@ async fn websocket_reorder_is_scoped_and_mcp_order_survives_daemon_restart()
         registry.create(process(11, &first, ProcessKind::Agent, "beta"))?;
         registry.create(process(12, &first, ProcessKind::Terminal, "terminal"))?;
         registry.create(process(13, &first, ProcessKind::Command, "command"))?;
+        registry
+            .store()
+            .set_process_mcp_token(10, "alpha-process-token", 1_700_000_000_000)?;
     }
     let (discovery, shutdown, task) = serve(server).await;
     let mut socket = connect_ws(&discovery).await?;
@@ -248,15 +251,22 @@ async fn websocket_reorder_is_scoped_and_mcp_order_survives_daemon_restart()
     task.await??;
 
     let restarted = DaemonServer::bind(DaemonConfig { data_dir, port: 0 }).await?;
+    restarted
+        .registry()
+        .lock()
+        .await
+        .store()
+        .set_process_mcp_token(10, "alpha-process-token", 1_700_000_000_000)?;
     let (discovery, shutdown, task) = serve(restarted).await;
-    let client = connect_mcp(&discovery).await?;
+    let client = connect_mcp(&discovery, &discovery.token).await?;
     let projects = mcp_call(&client, "list_projects", json!({})).await;
     assert_eq!(ids(&projects["projects"]), [2, 1, 3]);
     assert_eq!(projects["projects"][0]["sort_order"], 0);
     assert_eq!(projects["projects"][1]["sort_order"], 1);
     assert_eq!(projects["projects"][2]["sort_order"], 2);
 
-    mcp_call(&client, "identify_session", json!({ "process_id": 10 })).await;
+    let _ = client.cancel().await;
+    let client = connect_mcp(&discovery, "alpha-process-token").await?;
     let projects = mcp_call(&client, "list_projects", json!({})).await;
     assert_eq!(ids(&projects["projects"]), [1]);
     assert_eq!(projects["projects"][0]["sort_order"], 1);

@@ -18,6 +18,7 @@ pub type QuickPromptId = i64;
 pub type TodoId = i64;
 pub type TodoCommentId = i64;
 pub type ScratchpadId = i64;
+pub type ScratchpadCommentId = i64;
 pub type TimerId = i64;
 
 /// Error returned when persisted text does not name a supported enum variant.
@@ -356,6 +357,27 @@ pub struct Scratchpad {
     pub archived: bool,
     pub created_by: String,
     pub updated_by: String,
+}
+
+/// A durable whole-document or text-anchored comment on a scratchpad.
+///
+/// Anchor offsets are UTF-16 code-unit offsets so they use the same coordinate
+/// system as CodeMirror and browser selection APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScratchpadComment {
+    pub id: ScratchpadCommentId,
+    pub scratchpad_id: ScratchpadId,
+    pub actor: String,
+    pub body: String,
+    pub quote: Option<String>,
+    pub anchor_start: Option<usize>,
+    pub anchor_end: Option<usize>,
+    pub anchor_prefix: Option<String>,
+    pub anchor_suffix: Option<String>,
+    pub anchor_revision: Option<i64>,
+    pub resolved: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// A project-scoped coordination lease.
