@@ -1,9 +1,5 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-};
+use std::{collections::BTreeMap, error::Error};
 
-use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo},
@@ -14,13 +10,35 @@ use rmcp::{
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
-use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
+use workmand::{DaemonConfig, DaemonServer};
 
-async fn raw_mcp_post(port: u16, token: &str, session_id: &str) -> std::io::Result<String> {
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+async fn raw_mcp_post(
+    port: u16,
+    path: &str,
+    token: Option<&str>,
+    session_id: Option<&str>,
+    body: &str,
+) -> std::io::Result<String> {
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let session = session_id
+        .map(|session_id| format!("Mcp-Session-Id: {session_id}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMcp-Session-Id: {session_id}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{authorization}Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
+}
+
+async fn raw_mcp_get(port: u16, token: &str, path: &str) -> std::io::Result<String> {
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n"
     );
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
     stream.write_all(request.as_bytes()).await?;
@@ -43,7 +61,14 @@ async fn unknown_mcp_session_returns_404() -> Result<(), Box<dyn Error>> {
         let _ = shutdown_rx.await;
     }));
 
-    let response = raw_mcp_post(discovery.port, &discovery.token, "bogus-session-id").await?;
+    let response = raw_mcp_post(
+        discovery.port,
+        "/mcp",
+        Some(&discovery.token),
+        Some("bogus-session-id"),
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    )
+    .await?;
     assert!(
         response.starts_with("HTTP/1.1 404 Not Found\r\n"),
         "unknown MCP session response was {response:?}"
@@ -150,14 +175,86 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         let _ = shutdown_rx.await;
     }));
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
+    let stateless_endpoint = format!("http://127.0.0.1:{}/mcp-stateless", discovery.port);
+
+    let stateless_client = {
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(stateless_endpoint)
+                .auth_header(process_token.clone()),
+        );
+        ClientInfo::default().serve(transport).await?
+    };
+    let stateless_identity = call(&stateless_client, "whoami", json!({})).await;
+    assert_eq!(stateless_identity["process_id"], 42);
+    assert_eq!(stateless_identity["session_id"], "process:42");
+    assert!(!stateless_client.list_all_tools().await?.is_empty());
+    let _ = stateless_client.cancel().await;
+
+    let idle_get = raw_mcp_get(discovery.port, &process_token, "/mcp-stateless").await?;
+    assert!(
+        idle_get.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "stateless MCP must decline the idle SSE stream without creating a reconnectable body: {idle_get:?}"
+    );
+
+    for token in [None, Some("not-a-live-token")] {
+        let response = raw_mcp_post(
+            discovery.port,
+            "/mcp-stateless",
+            token,
+            None,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .await?;
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "stateless MCP accepted missing or invalid authentication: {response:?}"
+        );
+    }
+    let forged_session = raw_mcp_post(
+        discovery.port,
+        "/mcp-stateless",
+        Some(&process_token),
+        Some("process:999"),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"whoami","arguments":{}}}"#,
+    )
+    .await?;
+    assert!(forged_session.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(forged_session.contains(r#"\"session_id\":\"process:42\""#));
+    assert!(forged_session.contains(r#"\"process_id\":42"#));
+
+    let actors_before_processless_call: i64 = registry
+        .lock()
+        .await
+        .store()
+        .connection()
+        .query_row("SELECT COUNT(*) FROM actors", [], |row| row.get(0))?;
+    let processless_call = raw_mcp_post(
+        discovery.port,
+        "/mcp-stateless",
+        Some(&discovery.token),
+        None,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"whoami","arguments":{}}}"#,
+    )
+    .await?;
+    assert!(processless_call.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(
+        processless_call
+            .contains("sessionless MCP tool calls require an active process credential")
+    );
+    let actors_after_processless_call: i64 = registry.lock().await.store().connection().query_row(
+        "SELECT COUNT(*) FROM actors",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        actors_after_processless_call,
+        actors_before_processless_call
+    );
 
     let process_client = {
-        let headers = HashMap::from([(
-            HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
-            HeaderValue::from_str(&process_token)?,
-        )]);
         let transport = StreamableHttpClientTransport::from_config(
-            StreamableHttpClientTransportConfig::with_uri(endpoint.clone()).custom_headers(headers),
+            StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
+                .auth_header(process_token.clone()),
         );
         ClientInfo::default().serve(transport).await?
     };
@@ -286,6 +383,36 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let smoke = call(&process_client, "mcp_smoke_test", json!({})).await;
     assert_eq!(smoke["ok"], true);
 
+    let created_todo = call(
+        &process_client,
+        "todo_create",
+        json!({ "title": "keep this MCP session connected" }),
+    )
+    .await;
+    assert!(created_todo["todo_id"].as_i64().unwrap() > 0);
+    let spawned = call(
+        &process_client,
+        "spawn_process",
+        json!({ "kind": "terminal", "name": "transport-regression" }),
+    )
+    .await;
+    let spawned_id = spawned["process_id"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &process_client,
+            "close_process",
+            json!({ "process_id": spawned_id }),
+        )
+        .await["closed"],
+        true
+    );
+    let identity_after_mutations = call(&process_client, "whoami", json!({})).await;
+    assert_eq!(identity_after_mutations["process_id"], 42);
+    assert_eq!(
+        identity_after_mutations["session_id"], identity["session_id"],
+        "todo and process mutations must not reset the Streamable HTTP session"
+    );
+
     let session_id = identity["session_id"].as_str().unwrap();
     assert!(
         registry
@@ -324,22 +451,29 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         unidentified_scope.structured_content.unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("identify_session")
+            .contains("authenticated process identity")
     );
-    let identified = call(
-        &fallback_client,
-        "identify_session",
-        json!({ "process_id": 42 }),
-    )
-    .await;
-    assert_eq!(identified["process_id"], 42);
-    assert_eq!(identified["effective_project_id"], 1);
+    let claim_denied = fallback_client
+        .call_tool(
+            CallToolRequestParams::new("identify_session")
+                .with_arguments(arguments(json!({ "process_id": 42 }))),
+        )
+        .await?;
+    assert_eq!(claim_denied.is_error, Some(true));
+    assert_eq!(
+        claim_denied.structured_content.unwrap()["code"],
+        "identity_authentication_required"
+    );
+    assert_eq!(
+        call(&fallback_client, "whoami", json!({})).await["process_id"],
+        Value::Null
+    );
     assert_eq!(
         call(&fallback_client, "list_projects", json!({})).await["projects"]
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     let _ = fallback_client.cancel().await;
 

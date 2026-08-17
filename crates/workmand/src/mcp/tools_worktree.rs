@@ -221,7 +221,7 @@ impl WorkmanMcp {
             ),
             Ok(None) => failure(
                 "identity_required",
-                "MCP session has no process identity; call identify_session before project-scoped actions",
+                "MCP session has no authenticated process identity; reconnect with this process's WORKMAN_MCP_TOKEN credential before project-scoped actions",
             ),
             Err(error) => failure("project_scope_error", error),
         }
