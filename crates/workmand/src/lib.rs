@@ -2069,7 +2069,10 @@ mod tests {
                 json!({
                     "id": "register-first",
                     "method": "projects.register",
-                    "params": { "path": first_path }
+                    "params": {
+                        "path": first_path,
+                        "display_name": "  First workspace  "
+                    }
                 })
                 .to_string()
                 .into(),
@@ -2080,6 +2083,7 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["selected"], true);
         assert_eq!(response["result"][0]["status"], "idle");
+        assert_eq!(response["result"][0]["display_name"], "First workspace");
         let first_id = response["result"][0]["id"].as_i64().unwrap();
 
         socket
@@ -2132,6 +2136,13 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        let second = response["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == "second-project")
+            .unwrap();
+        assert!(second["display_name"].is_null());
         let second_id = response["result"]
             .as_array()
             .unwrap()

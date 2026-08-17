@@ -57,3 +57,19 @@ test('create and fork previews state their different commit semantics', async ()
   assert.match(dialog, /at exact HEAD/);
   assert.match(dialog, /from this worktree's exact HEAD commit/);
 });
+
+test('worktree title follows the branch default until edited and is sent with every mode', async () => {
+  const dialog = await readFile(dialogUrl, 'utf8');
+  const app = await readFile(appUrl, 'utf8');
+  const daemon = await readFile(daemonUrl, 'utf8');
+
+  assert.match(dialog, /<span class="text-sm font-medium">Title<\/span>/);
+  assert.match(dialog, /defaultWorktreeTitle\(titleBranch\)/);
+  assert.match(dialog, /if \(!projectTitleTouched\) projectTitle = defaultProjectTitle/);
+  assert.match(dialog, /oninput=\{\(\) => \(projectTitleTouched = true\)\}/);
+  assert.match(dialog, /onSubmit\(\{ mode, path: adoptPath\.trim\(\), title \}\)/);
+  assert.match(dialog, /onSubmit\(\{ mode, branch: nextBranch, title, envPolicy, rememberEnvPolicy \}\)/);
+  assert.match(app, /display_name: submission\.title/g);
+  assert.match(app, /adoptWorktreeAsync\(operationId, submission\.path, submission\.title\)/);
+  assert.match(daemon, /display_name: displayName/);
+});

@@ -265,6 +265,7 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
         CreateWorktree {
             source_project_id: 1,
             branch: "qa/no-local-main".into(),
+            display_name: Some("   ".into()),
             from_ref: Some("origin/main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -277,6 +278,7 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
         git(Path::new(&created.worktree.path), &["rev-parse", "HEAD"])?.trim(),
         remote_main.trim()
     );
+    assert!(created.project.project.display_name.is_none());
     Ok(())
 }
 
@@ -319,6 +321,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/new-ui".into(),
+            display_name: Some("New UI checkout".into()),
             from_ref: Some("origin/main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -331,6 +334,10 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     )
     .await?;
     assert_eq!(created.project.project.name, "sample-repo: feature/new-ui");
+    assert_eq!(
+        created.project.project.display_name.as_deref(),
+        Some("New UI checkout")
+    );
     assert_eq!(created.project.parent_project_id, Some(1));
     assert_eq!(created.project.branch.as_deref(), Some("feature/new-ui"));
     assert!(created.project.worktree_managed);
@@ -361,6 +368,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         ForkWorktree {
             source_project_id: created.project.project.id,
             branch: "feature/fork-again".into(),
+            display_name: Some("Fork follow-up".into()),
             managed_root: None,
             preferences: BTreeMap::new(),
             env_policy: None,
@@ -371,6 +379,10 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     assert_eq!(
         git(Path::new(&forked.worktree.path), &["rev-parse", "HEAD"])?.trim(),
         selected_head.trim()
+    );
+    assert_eq!(
+        forked.project.project.display_name.as_deref(),
+        Some("Fork follow-up")
     );
 
     // Existing SWM projects were registered before workman knew about worktree
@@ -420,6 +432,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         CreateWorktree {
             source_project_id: 1,
             branch: "remote-only".into(),
+            display_name: None,
             from_ref: None,
             managed_root: None,
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -475,6 +488,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         &fixture.registry,
         AdoptWorktree {
             path: remote_path.clone(),
+            display_name: None,
             preferences: BTreeMap::new(),
         },
     )
@@ -510,11 +524,16 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         &fixture.registry,
         AdoptWorktree {
             path: fixture.external.join("nested"),
+            display_name: Some("Outside checkout".into()),
             preferences: BTreeMap::new(),
         },
     )
     .await?;
     assert_eq!(adopted.project.project.name, "sample-repo: outside-branch");
+    assert_eq!(
+        adopted.project.project.display_name.as_deref(),
+        Some("Outside checkout")
+    );
     assert_eq!(adopted.worktree.kind, "adopted");
     let unregistered_adopted = worktrees::remove(
         &fixture.registry,
@@ -661,6 +680,7 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/merged-cleanly".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1104,6 +1124,7 @@ async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<d
         CreateWorktree {
             source_project_id: 1,
             branch: "ignored-local".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1172,6 +1193,7 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/vendor-junk".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1256,6 +1278,7 @@ async fn path_recreated_during_git_cleanup_fails_loudly_and_keeps_registration_f
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/reappearing-path".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1359,6 +1382,7 @@ async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/retry-removal".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1428,6 +1452,7 @@ async fn retry_recovers_after_git_already_dropped_linked_worktree_metadata()
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/metadata-retry".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
@@ -1490,6 +1515,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
         CreateWorktree {
             source_project_id: 1,
             branch: "env/needs-choice".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -1512,6 +1538,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
         CreateWorktree {
             source_project_id: 1,
             branch: "env-target-does-not-ignore".into(),
+            display_name: None,
             from_ref: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -1530,6 +1557,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
         CreateWorktree {
             source_project_id: 1,
             branch: "env/copied".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -1562,6 +1590,7 @@ async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<()
         CreateWorktree {
             source_project_id: 1,
             branch: "env/nonignored".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -1581,6 +1610,7 @@ async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<()
         CreateWorktree {
             source_project_id: 1,
             branch: "env/tracked".into(),
+            display_name: None,
             from_ref: Some("main".into()),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
