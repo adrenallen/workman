@@ -38,7 +38,7 @@
     onClose: () => void;
   }
 
-  type PaletteKind = 'action' | 'project' | ProjectTreeItemKind;
+  type PaletteKind = 'action' | 'project' | Exclude<ProjectTreeItemKind, 'draft'>;
 
   interface PaletteEntry {
     key: string;
@@ -333,7 +333,6 @@
       case 'terminal': return 'Terminal';
       case 'command': return 'Command';
       case 'scratchpad': return 'Scratchpad';
-      case 'draft': return 'Draft';
     }
   }
 
@@ -354,7 +353,6 @@
       case 'todo': return CircleCheckIcon;
       case 'agent': return BotIcon;
       case 'terminal': return SquareTerminalIcon;
-      case 'draft': return CircleCheckIcon;
       case 'command': return PlayIcon;
       case 'scratchpad': return NotebookTextIcon;
     }

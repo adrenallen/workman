@@ -1,7 +1,6 @@
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
-  import { onMount } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
   import { resolveAgentDraftChoice } from './agentDraftChoices';
@@ -106,7 +105,7 @@
     }
   });
 
-  onMount(() => {
+  $effect(() => {
     if (!focusOnMount) return;
     requestAnimationFrame(() => {
       promptTextarea?.focus();

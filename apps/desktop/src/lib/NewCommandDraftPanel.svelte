@@ -56,6 +56,9 @@
 
   onMount(() => {
     void loadConfigStatus();
+  });
+
+  $effect(() => {
     if (!focusOnMount) return;
     requestAnimationFrame(() => {
       nameInput?.focus();

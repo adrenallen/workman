@@ -56,7 +56,8 @@ test('app reuses the cycle predicate and wires terminal cycling back to the main
   const draftCycle = app.indexOf("target?.closest('[data-creation-draft]')");
   const editingBail = app.indexOf('if (isTextEditingTarget(target)) return;');
   assert.ok(draftCycle >= 0 && editingBail > draftCycle);
-  assert.match(app.slice(draftCycle, editingBail), /ArrowLeft'[\s\S]*ArrowRight'[\s\S]*focusAdjacentPanel/);
+  assert.doesNotMatch(app.slice(draftCycle, editingBail), /ArrowLeft'[\s\S]*ArrowRight'/);
+  assert.match(app.slice(editingBail), /ArrowLeft'[\s\S]*ArrowRight'[\s\S]*focusAdjacentPanel/);
   assert.match(app, /draftFocusRequestId = null;[\s\S]*selectTreeItem\(nextSelection\)/);
   assert.match(keyboard, /'\.draft-row\.selected, \.tree-row\.selected'/);
 });

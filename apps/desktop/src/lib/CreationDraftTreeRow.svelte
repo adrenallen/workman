@@ -42,7 +42,7 @@
 >
   <span class="draft-rail" aria-hidden="true"></span>
   <span class="draft-copy"><strong>{label}</strong><small>{draft.kind} draft</small></span>
-  <span class="draft-pill">draft</span>
+  <span class="draft-pill" aria-hidden="true">draft</span>
 </button>
 
 <style>

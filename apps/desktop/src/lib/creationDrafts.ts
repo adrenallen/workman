@@ -56,6 +56,11 @@ interface StorageLike {
 }
 
 const storageKeyPrefix = 'workman.creation-drafts.v1';
+const maxRestoredDrafts = 100;
+const maxDraftTextLength = 256_000;
+const maxRestoredDraftText = 1_000_000;
+const maxRestoredBlockers = 1_000;
+let lastAllocatedDraftId = 0;
 
 export function creationDraftStorageKey(profileId: number): string {
   return `${storageKeyPrefix}.profile-${profileId}`;
@@ -109,24 +114,7 @@ export function isCreationDraftUntouched(draft: CreationDraft): boolean {
 }
 
 export function creationDraftHasContent(draft: CreationDraft): boolean {
-  if (draft.kind === 'agent') {
-    return Boolean(draft.name.trim() || draft.prompt.trim() || draft.extraArgs.trim());
-  }
-  if (draft.kind === 'command') {
-    return Boolean(
-      draft.name.trim()
-      || draft.command.trim()
-      || draft.workingDir.trim()
-      || draft.environment.trim()
-      || draft.restartWhenChanged.trim()
-    );
-  }
-  return Boolean(
-    draft.title.trim()
-    || draft.body.trim()
-    || draft.tags.trim()
-    || draft.blockerIds.length > 0
-  );
+  return !isCreationDraftUntouched(draft);
 }
 
 export function findUntouchedCreationDraft(
@@ -154,8 +142,25 @@ export function creationDraftsForCycle(
     .sort((left, right) => left.createdAt - right.createdAt || left.id - right.id);
 }
 
-export function nextCreationDraftId(drafts: readonly CreationDraft[]): number {
-  return Math.min(0, ...drafts.map((draft) => draft.id)) - 1;
+export function nextCreationDraftId(
+  drafts: readonly CreationDraft[],
+  now = Date.now()
+): number {
+  const timeBasedId = -Math.max(1, Math.floor(now));
+  lastAllocatedDraftId = Math.min(
+    timeBasedId,
+    lastAllocatedDraftId,
+    ...drafts.map((draft) => draft.id)
+  ) - 1;
+  return lastAllocatedDraftId;
+}
+
+export function pruneCreationDraftsToProjects(
+  drafts: readonly CreationDraft[],
+  projectIds: ReadonlySet<number>
+): readonly CreationDraft[] {
+  const next = drafts.filter((draft) => projectIds.has(draft.projectId));
+  return next.length === drafts.length ? drafts : next;
 }
 
 export function loadCreationDrafts(
@@ -171,10 +176,20 @@ export function loadCreationDrafts(
         ? parsed.drafts
         : null;
     if (!Array.isArray(candidates)) return [];
-    return candidates.flatMap((candidate) => {
+    const drafts: CreationDraft[] = [];
+    const seenIds = new Set<number>();
+    let restoredText = 0;
+    for (const candidate of candidates) {
       const draft = parseCreationDraft(candidate);
-      return draft ? [draft] : [];
-    });
+      if (!draft || seenIds.has(draft.id)) continue;
+      const textLength = creationDraftTextLength(draft);
+      if (restoredText + textLength > maxRestoredDraftText) continue;
+      seenIds.add(draft.id);
+      restoredText += textLength;
+      drafts.push(draft);
+      if (drafts.length >= maxRestoredDrafts) break;
+    }
+    return drafts;
   } catch {
     return [];
   }
@@ -219,9 +234,9 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
     if (
       !isNullablePositiveInteger(value.agentToolId)
       || !isNullablePositiveInteger(value.templateId)
-      || typeof value.name !== 'string'
-      || typeof value.prompt !== 'string'
-      || typeof value.extraArgs !== 'string'
+      || !isDraftText(value.name)
+      || !isDraftText(value.prompt)
+      || !isDraftText(value.extraArgs)
     ) return null;
     return {
       ...base,
@@ -235,11 +250,11 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
   }
   if (value.kind === 'command') {
     if (
-      typeof value.name !== 'string'
-      || typeof value.command !== 'string'
-      || typeof value.workingDir !== 'string'
-      || typeof value.environment !== 'string'
-      || typeof value.restartWhenChanged !== 'string'
+      !isDraftText(value.name)
+      || !isDraftText(value.command)
+      || !isDraftText(value.workingDir)
+      || !isDraftText(value.environment)
+      || !isDraftText(value.restartWhenChanged)
       || typeof value.autoStart !== 'boolean'
       || typeof value.autoRestart !== 'boolean'
       || (value.saveMode !== 'yml' && value.saveMode !== 'local')
@@ -259,11 +274,12 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
   }
   if (value.kind !== 'todo') return null;
   if (
-    typeof value.title !== 'string'
-    || typeof value.body !== 'string'
+    !isDraftText(value.title)
+    || !isDraftText(value.body)
     || !isTodoPriority(value.priority)
-    || typeof value.tags !== 'string'
+    || !isDraftText(value.tags)
     || !Array.isArray(value.blockerIds)
+    || value.blockerIds.length > maxRestoredBlockers
     || !value.blockerIds.every(isPositiveInteger)
   ) return null;
   return {
@@ -299,6 +315,22 @@ function isNegativeInteger(value: unknown): value is number {
 
 function isNullablePositiveInteger(value: unknown): value is number | null {
   return value === null || isPositiveInteger(value);
+}
+
+function isDraftText(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= maxDraftTextLength;
+}
+
+function creationDraftTextLength(draft: CreationDraft): number {
+  if (draft.kind === 'agent') return draft.name.length + draft.prompt.length + draft.extraArgs.length;
+  if (draft.kind === 'command') {
+    return draft.name.length
+      + draft.command.length
+      + draft.workingDir.length
+      + draft.environment.length
+      + draft.restartWhenChanged.length;
+  }
+  return draft.title.length + draft.body.length + draft.tags.length;
 }
 
 function browserStorage(): StorageLike | null {

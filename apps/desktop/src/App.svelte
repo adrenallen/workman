@@ -88,6 +88,7 @@
     findUntouchedCreationDraft,
     loadCreationDrafts,
     nextCreationDraftId,
+    pruneCreationDraftsToProjects,
     saveCreationDrafts,
     type AgentCreationDraft,
     type CommandCreationDraft,
@@ -322,6 +323,11 @@
   let activeProfileId = $state<number | null>(null);
   let creationDraftsLoaded = $state(false);
   let draftFocusRequestId = $state<number | null>(null);
+  let creationDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingCreationDraftSave: {
+    profileId: number;
+    drafts: readonly CreationDraft[];
+  } | null = null;
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
@@ -433,11 +439,13 @@
       ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
       : null
   );
-  let selectedDraft = $derived(
-    selection?.kind === 'draft'
-      ? creationDrafts.find((draft) => draft.id === selection?.id) ?? null
-      : null
-  );
+  let selectedDraft = $derived.by(() => {
+    const currentSelection = selection;
+    if (currentSelection?.kind !== 'draft') return null;
+    return creationDrafts.find((draft) =>
+      draft.id === currentSelection.id && draft.projectId === currentSelection.projectId
+    ) ?? null;
+  });
   $effect(() => {
     if (selectedDraft?.kind === 'agent') void ensureAgentDraftMetadata();
   });
@@ -520,11 +528,6 @@
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
-  });
-
-  $effect(() => {
-    if (!creationDraftsLoaded || activeProfileId === null) return;
-    saveCreationDrafts(activeProfileId, creationDrafts);
   });
 
   $effect(() => {
@@ -645,6 +648,7 @@
     };
     updateDocumentVisibility();
     document.addEventListener('visibilitychange', updateDocumentVisibility);
+    window.addEventListener('pagehide', flushCreationDraftPersistence);
     let stopWindowResize = (): void => {};
     void getCurrentWindow().onResized(updateDocumentVisibility).then((stop) => {
       if (active) stopWindowResize = stop;
@@ -725,6 +729,8 @@
     return () => {
       active = false;
       document.removeEventListener('visibilitychange', updateDocumentVisibility);
+      window.removeEventListener('pagehide', flushCreationDraftPersistence);
+      flushCreationDraftPersistence();
       stopWindowResize();
       stopWindowFocus();
       document.documentElement.classList.remove('workman-document-hidden');
@@ -856,14 +862,6 @@
     if (draftCycleDirection !== null) {
       event.preventDefault();
       cycleProcess(draftCycleDirection, 'main');
-      return;
-    }
-    if (
-      draftForm && event.metaKey && !event.ctrlKey && !event.shiftKey
-      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-    ) {
-      event.preventDefault();
-      focusAdjacentPanel(panelForTarget(target), event.key === 'ArrowLeft' ? -1 : 1);
       return;
     }
     if (isTextEditingTarget(target)) return;
@@ -1339,8 +1337,10 @@
       const switchingProjects = projectId !== null && selectedProject?.id !== projectId;
       if (projectId !== null && !activateProject(projectId)) return;
 
-      recordRecentNavigation(target);
-      quickJumpRecentKeys = readRecentNavigationKeys();
+      if (target.type !== 'item' || target.selection.kind !== 'draft') {
+        recordRecentNavigation(target);
+        quickJumpRecentKeys = readRecentNavigationKeys();
+      }
       dialog = null;
 
       switch (target.type) {
@@ -1640,10 +1640,10 @@
     const activationAtStart = projectActivationRequest;
     busy = true;
     try {
-      const [snapshot] = await Promise.all([
-        loadProjectRail(client),
-        ensureActiveProfileDrafts()
-      ]);
+      const scopedSnapshot = await loadStableProfileProjectRail();
+      if (!scopedSnapshot) return;
+      const { snapshot, profileId } = scopedSnapshot;
+      activateCreationDraftProfile(profileId);
       const nextProjects = snapshot.projects;
       const currentSelectionId = pendingProjectSelectionId ?? selectedProject?.id ?? null;
       const preserveLocalSelection = pendingProjectSelectionId !== null
@@ -1653,9 +1653,10 @@
         && nextProjects.some((project) => project.id === currentSelectionId)
         ? selectProjectOptimistically(nextProjects, currentSelectionId)
         : nextProjects;
-      if (creationDraftsLoaded) {
+      if (creationDraftsLoaded && activeProfileId === profileId) {
         const projectIds = new Set(nextProjects.map((project) => project.id));
-        creationDrafts = creationDrafts.filter((draft) => projectIds.has(draft.projectId));
+        const nextDrafts = pruneCreationDraftsToProjects(creationDrafts, projectIds);
+        if (nextDrafts !== creationDrafts) replaceCreationDrafts([...nextDrafts]);
       }
       projectFolders = snapshot.folders;
       void refreshWorktreeMetadata(projects);
@@ -1667,17 +1668,33 @@
     }
   }
 
-  async function ensureActiveProfileDrafts(): Promise<void> {
-    if (creationDraftsLoaded) return;
-    try {
-      const activeProfile = (await client.profiles()).find((profile) => profile.active) ?? null;
-      if (!activeProfile) return;
-      activeProfileId = activeProfile.id;
-      creationDrafts = loadCreationDrafts(activeProfile.id);
-      creationDraftsLoaded = true;
-    } catch (cause) {
-      console.warn('workman creation drafts could not resolve the active profile', cause);
+  async function loadStableProfileProjectRail(): Promise<{
+    snapshot: ProjectRailSnapshot;
+    profileId: number;
+  } | null> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const profileIdBefore = await resolveActiveProfileId();
+      if (profileIdBefore === null) return null;
+      const snapshot = await loadProjectRail(client);
+      const profileIdAfter = await resolveActiveProfileId();
+      if (profileIdBefore === profileIdAfter) {
+        return { snapshot, profileId: profileIdAfter };
+      }
     }
+    console.warn('workman project rail changed profiles while refreshing; skipping stale snapshot');
+    return null;
+  }
+
+  async function resolveActiveProfileId(): Promise<number | null> {
+    return (await client.profiles()).find((profile) => profile.active)?.id ?? null;
+  }
+
+  function activateCreationDraftProfile(profileId: number): void {
+    if (creationDraftsLoaded && activeProfileId === profileId) return;
+    flushCreationDraftPersistence();
+    activeProfileId = profileId;
+    creationDrafts = loadCreationDrafts(profileId);
+    creationDraftsLoaded = true;
   }
 
   async function refreshProcesses(projectId: number): Promise<void> {
@@ -1729,8 +1746,10 @@
       : null;
     pendingTodoCommentFocus = null;
     scratchpadFocusRequest = 0;
-    recordRecentNavigation({ type: 'item', selection: next });
-    quickJumpRecentKeys = readRecentNavigationKeys();
+    if (next.kind !== 'draft') {
+      recordRecentNavigation({ type: 'item', selection: next });
+      quickJumpRecentKeys = readRecentNavigationKeys();
+    }
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
@@ -2193,6 +2212,24 @@
     return id;
   }
 
+  function replaceCreationDrafts(next: CreationDraft[]): void {
+    creationDrafts = next;
+    if (!creationDraftsLoaded || activeProfileId === null) return;
+    pendingCreationDraftSave = { profileId: activeProfileId, drafts: next };
+    if (creationDraftSaveTimer !== null) clearTimeout(creationDraftSaveTimer);
+    creationDraftSaveTimer = setTimeout(flushCreationDraftPersistence, 400);
+  }
+
+  function flushCreationDraftPersistence(): void {
+    if (creationDraftSaveTimer !== null) {
+      clearTimeout(creationDraftSaveTimer);
+      creationDraftSaveTimer = null;
+    }
+    const pending = pendingCreationDraftSave;
+    pendingCreationDraftSave = null;
+    if (pending) saveCreationDrafts(pending.profileId, pending.drafts);
+  }
+
   function openCreationDraft(kind: CreationDraftKind): CreationDraft | null {
     const project = selectedProject;
     if (!project) return null;
@@ -2203,9 +2240,9 @@
       nextCreationDraftId(creationDrafts)
     );
     if (!existing) {
-      creationDrafts = [...creationDrafts, draft];
-      draftFocusRequestId = draft.id;
+      replaceCreationDrafts([...creationDrafts, draft]);
     }
+    draftFocusRequestId = draft.id;
     void selectTreeItem(
       projectTreeSelection('draft', draft.id, project.id, creationDraftLabel(draft))
     );
@@ -2225,7 +2262,7 @@
     patch: Partial<AgentCreationDraft> | Partial<CommandCreationDraft> | Partial<TodoCreationDraft>,
     markTouched = true
   ): void {
-    creationDrafts = creationDrafts.map((draft) => {
+    const nextDrafts = creationDrafts.map((draft) => {
       if (draft.id !== draftId) return draft;
       const next = {
         ...draft,
@@ -2235,7 +2272,8 @@
       if (next.kind === 'todo') next.blockerIds = [...next.blockerIds];
       return next;
     });
-    const updatedDraft = creationDrafts.find((draft) => draft.id === draftId) ?? null;
+    replaceCreationDrafts(nextDrafts);
+    const updatedDraft = nextDrafts.find((draft) => draft.id === draftId) ?? null;
     if (updatedDraft && selection?.kind === 'draft' && selection.id === draftId) {
       selection = projectTreeSelection(
         'draft',
@@ -2247,7 +2285,8 @@
   }
 
   function removeCreationDraft(draftId: number): void {
-    creationDrafts = creationDrafts.filter((draft) => draft.id !== draftId);
+    replaceCreationDrafts(creationDrafts.filter((draft) => draft.id !== draftId));
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
     if (selection?.kind === 'draft' && selection.id === draftId) clearSelection();
   }
 
@@ -2275,8 +2314,9 @@
     draft: AgentCreationDraft,
     submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
   ): void {
-    removeCreationDraft(draft.id);
-    void spawnAgent(submission.tool, submission.input, submission.template);
+    if (spawnAgent(submission.tool, submission.input, submission.template)) {
+      removeCreationDraft(draft.id);
+    }
   }
 
   function openEditCommand(process: ProcessView): void {
@@ -2344,7 +2384,7 @@
         createdAt: Date.now(),
         touched: true
       };
-      creationDrafts = [...creationDrafts, restored];
+      replaceCreationDrafts([...creationDrafts, restored]);
       void selectTreeItem(projectTreeSelection(
         'draft', restored.id, restored.projectId, creationDraftLabel(restored)
       ));
@@ -2356,7 +2396,7 @@
   async function openAgentDraft(preferredToolId: number | null = null): Promise<void> {
     const draft = openCreationDraft('agent');
     if (draft?.kind === 'agent' && preferredToolId !== null) {
-      patchCreationDraft(draft.id, { templateId: null, agentToolId: preferredToolId }, false);
+      patchCreationDraft(draft.id, { templateId: null, agentToolId: preferredToolId });
     }
     await ensureAgentDraftMetadata();
   }
@@ -2387,13 +2427,13 @@
     if (draftFocusRequestId === draftId) draftFocusRequestId = null;
   }
 
-  async function spawnAgent(
+  function spawnAgent(
     tool: AgentTool,
     requestedInput?: SpawnAgentInput,
     template: AgentTemplate | null = null
-  ): Promise<void> {
+  ): boolean {
     const currentProject = selectedProject;
-    if (!currentProject) return;
+    if (!currentProject) return false;
     const requested = requestedInput ?? {
       project_id: currentProject.id,
       agent_tool_id: tool.id,
@@ -2402,7 +2442,7 @@
     const project = requested.project_id === currentProject.id
       ? currentProject
       : projects.find((candidate) => candidate.id === requested.project_id) ?? null;
-    if (!project) return;
+    if (!project) return false;
     const input = { ...requested, extra_args: [...requested.extra_args] };
     const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
@@ -2424,6 +2464,15 @@
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
+    void finishAgentSpawn(project, input, optimisticId);
+    return true;
+  }
+
+  async function finishAgentSpawn(
+    project: Project,
+    input: SpawnAgentInput,
+    optimisticId: number
+  ): Promise<void> {
     await tick();
     try {
       const result = await client.spawnAgent(input);
@@ -4727,7 +4776,7 @@
     {client}
     project={selectedProject}
     initialProcess={commandDialogProcess}
-    onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
+    onAdded={(process) => void commandAdded(process)}
     onClose={() => { dialog = null; commandDialogProcess = null; }}
   />
 {/if}

@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import TodoBlockerPicker from './TodoBlockerPicker.svelte';
   import type { TodoSummary } from './coordination';
@@ -32,7 +30,7 @@
   }: Props = $props();
   let titleInput = $state<HTMLInputElement | null>(null);
 
-  onMount(() => {
+  $effect(() => {
     if (!focusOnMount) return;
     requestAnimationFrame(() => {
       titleInput?.focus();

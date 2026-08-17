@@ -10,6 +10,7 @@ import {
   findUntouchedCreationDraft,
   loadCreationDrafts,
   nextCreationDraftId,
+  pruneCreationDraftsToProjects,
   saveCreationDrafts
 } from '../src/lib/creationDrafts.ts';
 
@@ -30,19 +31,25 @@ test('finds only untouched drafts for the same project and kind', () => {
 
   assert.equal(findUntouchedCreationDraft([touchedAgent, otherProject, todo, agent], 7, 'agent')?.id, -1);
   assert.equal(findUntouchedCreationDraft([touchedAgent], 7, 'agent'), null);
-  assert.equal(nextCreationDraftId([agent, touchedAgent, otherProject, todo]), -5);
+  assert.ok(nextCreationDraftId([agent, touchedAgent, otherProject, todo], 1_000) < -1_000);
 });
 
-test('detects meaningful content without treating form defaults as content', () => {
+test('uses the touched flag consistently for reuse and discard confirmation', () => {
   const agent = createCreationDraft('agent', 7, -1);
   const command = createCreationDraft('command', 7, -2);
   const todo = createCreationDraft('todo', 7, -3);
   assert.equal(creationDraftHasContent(agent), false);
   assert.equal(creationDraftHasContent(command), false);
   assert.equal(creationDraftHasContent(todo), false);
-  assert.equal(creationDraftHasContent({ ...agent, prompt: 'Investigate this' }), true);
-  assert.equal(creationDraftHasContent({ ...command, environment: 'PORT=3000' }), true);
-  assert.equal(creationDraftHasContent({ ...todo, blockerIds: [12] }), true);
+  assert.equal(creationDraftHasContent({ ...agent, agentToolId: 4, touched: true }), true);
+  assert.equal(creationDraftHasContent({ ...command, autoStart: false, touched: true }), true);
+  assert.equal(creationDraftHasContent({ ...todo, priority: 'high', touched: true }), true);
+});
+
+test('allocates non-recycled time-based ids after all live drafts are removed', () => {
+  const first = nextCreationDraftId([], 10_000);
+  const second = nextCreationDraftId([], 10_001);
+  assert.ok(second < first);
 });
 
 test('persistence round-trips each kind per profile and clones array fields', () => {
@@ -78,6 +85,34 @@ test('bad persisted data is ignored while valid drafts survive', () => {
   });
   assert.deepEqual(loadCreationDrafts(3, storage), [valid]);
   assert.deepEqual(loadCreationDrafts(4, storage), []);
+});
+
+test('restoration drops duplicate ids and enforces count and text limits', () => {
+  const storage = memoryStorage();
+  const drafts = Array.from({ length: 105 }, (_, index) => ({
+    ...createCreationDraft('agent', 7, -(index + 1), index + 1),
+    prompt: `prompt ${index}`
+  }));
+  drafts.splice(1, 0, { ...drafts[0], prompt: 'duplicate' });
+  drafts.splice(2, 0, { ...drafts[2], id: -999, prompt: 'x'.repeat(256_001) });
+  storage.setItem(creationDraftStorageKey(3), JSON.stringify({ version: 1, drafts }));
+
+  const loaded = loadCreationDrafts(3, storage);
+  assert.equal(loaded.length, 100);
+  assert.equal(new Set(loaded.map((draft) => draft.id)).size, loaded.length);
+  assert.doesNotMatch(loaded.map((draft) => draft.prompt).join('\n'), /duplicate/);
+});
+
+test('project pruning preserves the array identity when no draft is removed', () => {
+  const drafts = [
+    createCreationDraft('agent', 7, -1),
+    createCreationDraft('todo', 8, -2)
+  ];
+  assert.equal(pruneCreationDraftsToProjects(drafts, new Set([7, 8])), drafts);
+  assert.deepEqual(
+    pruneCreationDraftsToProjects(drafts, new Set([8])).map((draft) => draft.id),
+    [-2]
+  );
 });
 
 test('labels update from names and titles with stable fallbacks', () => {
