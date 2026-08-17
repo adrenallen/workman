@@ -60,8 +60,30 @@ export interface ScratchpadSummary {
   tags: string[];
   created_by: string;
   updated_by: string;
+  unresolved_comment_count: number;
   matched_fields: string[];
   match_snippet?: string;
+}
+
+export interface ScratchpadComment {
+  id: number;
+  scratchpad_id: number;
+  actor: string;
+  body: string;
+  quote: string | null;
+  anchor_start: number | null;
+  anchor_end: number | null;
+  anchor_prefix: string | null;
+  anchor_suffix: string | null;
+  anchor_revision: number | null;
+  resolved: boolean;
+  created_at: number;
+  updated_at: number;
+  anchor_state: 'anchored' | 'orphaned' | 'unanchored';
+  current_start: number | null;
+  current_end: number | null;
+  current_start_line: number | null;
+  current_end_line: number | null;
 }
 
 export interface Scratchpad {
@@ -79,6 +101,19 @@ export interface Scratchpad {
 export interface ScratchpadRead {
   scratchpad: Scratchpad;
   total_lines: number;
+  comments: ScratchpadComment[];
+  comment_total_count: number;
+  unresolved_comment_count: number;
+}
+
+export interface NewScratchpadCommentInput {
+  body: string;
+  quote?: string;
+  anchor_start?: number;
+  anchor_end?: number;
+  anchor_prefix?: string;
+  anchor_suffix?: string;
+  allow_unanchored?: boolean;
 }
 
 export interface CoordinationSnapshot {
@@ -144,4 +179,20 @@ export interface CoordinationClient {
     expectedRevision: number,
     content: string
   ): Promise<ScratchpadRead>;
+  coordinationScratchpadCommentCreate(
+    projectId: number,
+    scratchpadId: number,
+    input: NewScratchpadCommentInput
+  ): Promise<ScratchpadComment>;
+  coordinationScratchpadCommentUpdate(
+    projectId: number,
+    commentId: number,
+    body: string
+  ): Promise<ScratchpadComment>;
+  coordinationScratchpadCommentResolve(
+    projectId: number,
+    commentId: number,
+    resolved: boolean
+  ): Promise<ScratchpadComment>;
+  coordinationScratchpadCommentDelete(projectId: number, commentId: number): Promise<void>;
 }

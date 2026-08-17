@@ -132,6 +132,7 @@
             <strong>{scratchpad.name}</strong>
             <small>
               <span>revision {scratchpad.revision} · {scratchpad.updated_by}</span>
+              {#if scratchpad.unresolved_comment_count > 0}<span class="comment-count" title={`${scratchpad.unresolved_comment_count} unresolved scratchpad comments`}>{scratchpad.unresolved_comment_count} unresolved comment{scratchpad.unresolved_comment_count === 1 ? '' : 's'}</span>{/if}
               {#if scratchpad.tags.length > 0}<span>{scratchpad.tags.join(' · ')}</span>{/if}
             </small>
           </span>

@@ -985,7 +985,10 @@
                   >
                     <span class="scratchpad-ref" title={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
                     <span class="row-copy"><strong>{scratchpad.name}</strong></span>
-                    <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
+                    <span class="row-badges">
+                      {#if scratchpad.unresolved_comment_count > 0}<CountBadge value={scratchpad.unresolved_comment_count} title={`${scratchpad.unresolved_comment_count} unresolved scratchpad comments`} />{/if}
+                      <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
+                    </span>
                   </button>
                 {/if}
               {:else}

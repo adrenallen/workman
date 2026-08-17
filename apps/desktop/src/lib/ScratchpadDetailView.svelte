@@ -2,6 +2,7 @@
   import ArchiveIcon from '@lucide/svelte/icons/archive';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
+  import MessageSquareIcon from '@lucide/svelte/icons/message-square';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import TagIcon from '@lucide/svelte/icons/tag';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
@@ -10,10 +11,15 @@
   import * as Collapsible from '$lib/components/ui/collapsible';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 
-  import type { ScratchpadRead } from './coordination';
+  import type {
+    NewScratchpadCommentInput,
+    ScratchpadComment,
+    ScratchpadRead
+  } from './coordination';
   import DocumentScaffold from './DocumentScaffold.svelte';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
   import { scratchpadOutline, type ScratchpadOutlineItem } from './scratchpadOutline';
+  import type { ScratchpadSelectionAnchor } from './scratchpadAnchors';
   import { autoGrowTextarea, singleLineTitle } from './wrappingTitle';
 
   interface Props {
@@ -30,6 +36,10 @@
     onSetTags?: (tags: string[], expectedRevision: number) => Promise<void> | void;
     onArchive?: (expectedRevision: number) => Promise<void> | void;
     onDelete?: (expectedRevision: number) => Promise<void> | void;
+    onCreateComment?: (input: NewScratchpadCommentInput) => Promise<void> | void;
+    onUpdateComment?: (commentId: number, body: string) => Promise<void> | void;
+    onResolveComment?: (commentId: number, resolved: boolean) => Promise<void> | void;
+    onDeleteComment?: (commentId: number) => Promise<void> | void;
   }
 
   interface Conflict {
@@ -57,7 +67,11 @@
     onSave,
     onSetTags,
     onArchive,
-    onDelete
+    onDelete,
+    onCreateComment,
+    onUpdateComment,
+    onResolveComment,
+    onDeleteComment
   }: Props = $props();
 
   let activeId = $state<number | null>(null);
@@ -81,6 +95,17 @@
   let outlineScrollRequest = $state<{ key: number; line: number } | null>(null);
   let viewportLine = $state(1);
   let titleInput = $state<HTMLTextAreaElement | null>(null);
+  let commentsOpen = $state(true);
+  let mobileCommentsOpen = $state(false);
+  let showResolvedComments = $state(false);
+  let composerAnchor = $state<ScratchpadSelectionAnchor | null | undefined>(undefined);
+  let commentDraft = $state('');
+  let commentBusy = $state(false);
+  let focusedCommentId = $state<number | null>(null);
+  let editingCommentId = $state<number | null>(null);
+  let editingCommentDraft = $state('');
+  let commentScrollKey = $state(0);
+  let commentScrollRequest = $state<{ key: number; commentId: number } | null>(null);
 
   let outline = $derived(scratchpadOutline(bodyDraft));
   let activeOutlineId = $derived.by(() => {
@@ -101,6 +126,128 @@
   let metadataDisabled = $derived(
     busy || metadataBusy || dirty || saveState === 'saving' || saveState === 'conflict'
   );
+  let visibleComments = $derived(
+    (read?.comments ?? []).filter((comment) => showResolvedComments || !comment.resolved)
+  );
+
+  function visibleElement<T extends HTMLElement>(selector: string): T | null {
+    return [...document.querySelectorAll<T>(selector)].find((element) => element.offsetParent !== null) ?? null;
+  }
+
+  function beginComment(anchor: ScratchpadSelectionAnchor | null): void {
+    commentsOpen = true;
+    mobileCommentsOpen = true;
+    composerAnchor = anchor;
+    commentDraft = '';
+    queueMicrotask(() => visibleElement<HTMLTextAreaElement>('[data-scratchpad-comment-composer]')?.focus());
+  }
+
+  function cancelComment(): void {
+    composerAnchor = undefined;
+    commentDraft = '';
+  }
+
+  async function saveComment(): Promise<void> {
+    if (!onCreateComment || composerAnchor === undefined || !commentDraft.trim() || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onCreateComment({
+        body: commentDraft.trim(),
+        ...(composerAnchor ?? {})
+      });
+      cancelComment();
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors; preserve the draft for retry.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  function composerKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelComment();
+    } else if (event.key === 'Enter' && event.metaKey) {
+      event.preventDefault();
+      void saveComment();
+    }
+  }
+
+  function focusComment(commentId: number): void {
+    focusedCommentId = commentId;
+    commentsOpen = true;
+    mobileCommentsOpen = true;
+    queueMicrotask(() => {
+      const row = visibleElement<HTMLElement>(`[data-scratchpad-comment-row="${commentId}"]`);
+      row?.scrollIntoView({ block: 'nearest' });
+      row?.focus({ preventScroll: true });
+    });
+  }
+
+  function jumpToComment(comment: ScratchpadComment): void {
+    if (comment.anchor_state !== 'anchored') return;
+    focusedCommentId = comment.id;
+    commentScrollKey += 1;
+    commentScrollRequest = { key: commentScrollKey, commentId: comment.id };
+  }
+
+  function beginEditComment(comment: ScratchpadComment): void {
+    editingCommentId = comment.id;
+    editingCommentDraft = comment.body;
+    queueMicrotask(() => visibleElement<HTMLTextAreaElement>(`[data-scratchpad-comment-edit="${comment.id}"]`)?.focus());
+  }
+
+  async function saveEditedComment(commentId: number): Promise<void> {
+    if (!onUpdateComment || !editingCommentDraft.trim() || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onUpdateComment(commentId, editingCommentDraft.trim());
+      editingCommentId = null;
+      await onRefresh();
+    } catch {
+      // Preserve the edit for retry.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  async function toggleCommentResolved(comment: ScratchpadComment): Promise<void> {
+    if (!onResolveComment || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onResolveComment(comment.id, !comment.resolved);
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  async function deleteComment(commentId: number): Promise<void> {
+    if (!onDeleteComment || commentBusy) return;
+    commentBusy = true;
+    try {
+      await onDeleteComment(commentId);
+      if (focusedCommentId === commentId) focusedCommentId = null;
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  function relativeTime(timestamp: number): string {
+    const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 60) return 'now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.floor(hours / 24)}d`;
+  }
 
   function fullMarkdown(next: ScratchpadRead): string {
     const body = next.scratchpad.content;
@@ -333,6 +480,9 @@
       tagsOpen = false;
       saveState = 'saved';
       viewportLine = 1;
+      composerAnchor = undefined;
+      focusedCommentId = null;
+      editingCommentId = null;
       return;
     }
     if (next.scratchpad.revision <= baseRevision) return;
@@ -390,6 +540,72 @@
   </nav>
 {/snippet}
 
+{#snippet commentsPanelContent()}
+  <div class="comments-controls">
+    <label title="Show resolved scratchpad comments">
+      <input type="checkbox" bind:checked={showResolvedComments} /> Resolved
+    </label>
+    <button type="button" disabled={!onCreateComment || commentBusy} onclick={() => beginComment(null)}>Comment</button>
+  </div>
+  {#if composerAnchor !== undefined}
+    <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
+      <small>{composerAnchor ? `On “${composerAnchor.quote.slice(0, 52)}${composerAnchor.quote.length > 52 ? '…' : ''}”` : 'Whole document'}</small>
+      <textarea
+        data-scratchpad-comment-composer
+        bind:value={commentDraft}
+        rows="3"
+        aria-label="Scratchpad comment"
+        placeholder="Add review feedback…"
+        onkeydown={composerKeydown}
+      ></textarea>
+      <div><button type="button" onclick={cancelComment}>Cancel</button><button class="primary" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>⌘↵</kbd></button></div>
+    </form>
+  {/if}
+  <div class="comment-list" aria-label="Scratchpad comments">
+    {#each visibleComments as comment (comment.id)}
+      <article
+        class:focused={focusedCommentId === comment.id}
+        class:resolved={comment.resolved}
+        class="comment-row"
+        data-scratchpad-comment-row={comment.id}
+        tabindex="-1"
+      >
+        <header><strong>{comment.actor}</strong><time datetime={new Date(comment.created_at).toISOString()} title={new Date(comment.created_at).toLocaleString()}>{relativeTime(comment.created_at)}</time></header>
+        {#if comment.quote}
+          <button class="comment-quote" type="button" disabled={comment.anchor_state !== 'anchored'} onclick={() => jumpToComment(comment)}>
+            “{comment.quote.slice(0, 88)}{comment.quote.length > 88 ? '…' : ''}”
+          </button>
+        {/if}
+        {#if comment.anchor_state === 'orphaned'}<small class="anchor-note">Text no longer found</small>
+        {:else if comment.anchor_state === 'unanchored'}<small class="anchor-note">Whole document</small>{/if}
+        {#if editingCommentId === comment.id}
+          <textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows="3" aria-label="Edit scratchpad comment" onkeydown={(event) => {
+            if (event.key === 'Escape') { event.preventDefault(); editingCommentId = null; }
+            else if (event.key === 'Enter' && event.metaKey) { event.preventDefault(); void saveEditedComment(comment.id); }
+          }}></textarea>
+        {:else}
+          <p>{comment.body}</p>
+        {/if}
+        <footer>
+          {#if comment.anchor_state === 'anchored'}<button type="button" onclick={() => jumpToComment(comment)}>Jump</button>{/if}
+          <button type="button" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</button>
+          {#if comment.actor === 'user'}
+            {#if editingCommentId === comment.id}
+              <button type="button" onclick={() => (editingCommentId = null)}>Cancel</button>
+              <button type="button" disabled={!editingCommentDraft.trim() || commentBusy} onclick={() => void saveEditedComment(comment.id)}>Save</button>
+            {:else}
+              <button type="button" onclick={() => beginEditComment(comment)}>Edit</button>
+            {/if}
+            <button class="destructive" type="button" disabled={commentBusy} onclick={() => void deleteComment(comment.id)}>Delete</button>
+          {/if}
+        </footer>
+      </article>
+    {:else}
+      <p class="comments-empty">{read?.comment_total_count ? 'No comments in this view.' : 'Select text to leave anchored feedback, or comment on the whole document.'}</p>
+    {/each}
+  </div>
+{/snippet}
+
 {#if loading && !read}
   <div class="state">Loading scratchpad…</div>
 {:else if read}
@@ -423,6 +639,9 @@
           <DropdownMenu.Item onclick={() => (editorFocusRequest += 1)}>
             <PencilIcon class="size-4" aria-hidden="true" /> Edit document
           </DropdownMenu.Item>
+          <DropdownMenu.Item disabled={!onCreateComment} onclick={() => beginComment(null)}>
+            <MessageSquareIcon class="size-4" aria-hidden="true" /> Comment on document
+          </DropdownMenu.Item>
           {#if !read.scratchpad.archived && onArchive}
             <DropdownMenu.Item disabled={metadataDisabled} onclick={() => void archiveScratchpad()}>
               <ArchiveIcon class="size-4" aria-hidden="true" /> Archive scratchpad
@@ -440,9 +659,19 @@
 
     {#snippet rail()}
       <section class="outline-rail">
-        <span>Document outline</span>
-        <h2>On this page</h2>
-        {@render outlineList(false)}
+        <div class="outline-section">
+          <span>Document outline</span>
+          <h2>On this page</h2>
+          {@render outlineList(false)}
+        </div>
+        <Collapsible.Root bind:open={commentsOpen}>
+          <Collapsible.Trigger class="comments-trigger">
+            <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
+            <strong title={`${read.unresolved_comment_count} unresolved scratchpad comments`} aria-label={`${read.unresolved_comment_count} unresolved scratchpad comments`}>{read.unresolved_comment_count}</strong>
+            <ChevronDownIcon class={commentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
+          </Collapsible.Trigger>
+          <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
+        </Collapsible.Root>
       </section>
     {/snippet}
 
@@ -454,6 +683,16 @@
             <ChevronDownIcon class={mobileOutlineOpen ? 'open' : ''} size={15} strokeWidth={1.8} aria-hidden="true" />
           </Collapsible.Trigger>
           <Collapsible.Content><div class="outline-mobile-content">{@render outlineList(true)}</div></Collapsible.Content>
+        </Collapsible.Root>
+      </div>
+      <div class="mobile-comments">
+        <Collapsible.Root bind:open={mobileCommentsOpen}>
+          <Collapsible.Trigger class="comments-trigger">
+            <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
+            <strong title={`${read.unresolved_comment_count} unresolved scratchpad comments`} aria-label={`${read.unresolved_comment_count} unresolved scratchpad comments`}>{read.unresolved_comment_count}</strong>
+            <ChevronDownIcon class={mobileCommentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
+          </Collapsible.Trigger>
+          <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
         </Collapsible.Root>
       </div>
 
@@ -527,9 +766,15 @@
           focusRequest={editorFocusRequest}
           flow
           scrollRequest={outlineScrollRequest}
+          {commentScrollRequest}
+          comments={read.comments}
+          {showResolvedComments}
+          {focusedCommentId}
           onChange={handleBodyChange}
           onSave={() => void saveDraft()}
           onViewportLineChange={(line) => (viewportLine = line)}
+          onCommentSelection={(anchor) => beginComment(anchor)}
+          onCommentClick={focusComment}
         />
       </section>
     </article>
@@ -565,9 +810,9 @@
   .recovery-banner { border-color: var(--border); background: var(--card); color: var(--muted-foreground); }
   .recovery-banner span { min-width: 0; flex: 1; }
   .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
-  .outline-rail { position: sticky; top: 18px; }
-  .outline-rail > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
-  .outline-rail h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
+  .outline-rail { position: sticky; top: 18px; display: grid; gap: 16px; }
+  .outline-section > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
+  .outline-section h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
   .outline-list { display: grid; gap: 2px; }
   .outline-list button { width: 100%; min-height: 28px; overflow: hidden; border: 0; border-left: 2px solid var(--border); border-radius: 0 var(--radius) var(--radius) 0; padding: 4px 7px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .outline-list button.level-three { padding-left: 17px; }
@@ -575,7 +820,38 @@
   .outline-list button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .outline-list button.active { border-left-color: var(--foreground); background: var(--accent); color: var(--foreground); font-weight: 630; }
   .outline-list p { margin: 0; border-left: 2px solid var(--border); padding: 3px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
+  :global(.comments-trigger) { display: grid; width: 100%; min-height: 34px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 7px; background: var(--card); color: var(--foreground); cursor: pointer; }
+  :global(.comments-trigger > span) { display: inline-flex; align-items: center; gap: 6px; font-size: var(--font-size-sm); font-weight: 650; }
+  :global(.comments-trigger > strong) { min-width: 20px; border-radius: 999px; padding: 1px 5px; background: var(--accent); color: var(--muted-foreground); font: 650 var(--font-size-xs) var(--terminal-font-family); text-align: center; }
+  :global(.comments-trigger > svg) { color: var(--muted-foreground); transition: transform 150ms ease; }
+  :global(.comments-trigger > svg.open) { transform: rotate(180deg); }
+  .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); }
+  .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
+  .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comments-controls button, .comment-composer button, .comment-row footer button { min-height: 27px; border: 1px solid var(--input); border-radius: var(--radius); padding: 0 7px; background: var(--background); color: var(--text-soft); font-size: var(--font-size-xs); cursor: pointer; }
+  .comments-controls button:disabled, .comment-composer button:disabled, .comment-row footer button:disabled { cursor: default; opacity: 0.55; }
+  .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
+  .comment-composer small, .anchor-note { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comment-composer textarea, .comment-row textarea { width: 100%; min-height: 68px; resize: vertical; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 6px 7px; background: var(--background); color: var(--foreground); font: var(--font-size-sm)/1.4 var(--ui-font-family); }
+  .comment-composer textarea:focus, .comment-row textarea:focus { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
+  .comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
+  .comment-composer kbd { margin-left: 3px; color: inherit; font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-list { display: grid; }
+  .comment-row { display: grid; gap: 5px; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 7px; }
+  .comment-row:last-child { border-bottom: 0; }
+  .comment-row.focused { box-shadow: inset 2px 0 0 var(--ring); background: var(--accent); }
+  .comment-row.resolved { opacity: 0.72; }
+  .comment-row header { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
+  .comment-row header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-row p { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.42; white-space: pre-wrap; }
+  .comment-quote { overflow: hidden; border: 0; border-left: 2px solid var(--border-strong); padding: 2px 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: italic; line-height: 1.35; text-align: left; text-overflow: ellipsis; cursor: pointer; }
+  .comment-quote:disabled { cursor: default; }
+  .comment-row footer { display: flex; flex-wrap: wrap; gap: 4px; }
+  .comment-row footer button.destructive { color: var(--destructive); }
+  .comments-empty { margin: 0; padding: 10px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
   .mobile-outline { display: none; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+  .mobile-comments { display: none; margin-bottom: 14px; }
   .mobile-outline :global(.outline-trigger) { display: flex; width: 100%; min-height: 38px; align-items: center; gap: 8px; border: 0; padding: 5px 8px 5px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .mobile-outline :global(.outline-trigger > span) { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 7px; }
   .mobile-outline :global(.outline-trigger strong) { font-size: var(--font-size-sm); font-weight: 630; }
@@ -587,6 +863,8 @@
 
   @container (max-width: 880px) {
     .mobile-outline { display: block; }
+    .mobile-comments { display: block; }
+    .mobile-comments .comments-panel { max-height: 340px; }
   }
 
   @container (max-width: 620px) {
@@ -601,5 +879,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .mobile-outline :global(.outline-trigger svg) { transition: none; }
+    :global(.comments-trigger > svg) { transition: none; }
   }
 </style>
