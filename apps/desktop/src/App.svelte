@@ -2314,9 +2314,24 @@
     draft: AgentCreationDraft,
     submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
   ): void {
-    if (spawnAgent(submission.tool, submission.input, submission.template)) {
+    if (spawnAgent(
+      submission.tool,
+      submission.input,
+      submission.template,
+      () => restoreAgentCreationDraft(draft)
+    )) {
       removeCreationDraft(draft.id);
     }
+  }
+
+  function restoreAgentCreationDraft(draft: AgentCreationDraft): void {
+    if (
+      !projects.some((project) => project.id === draft.projectId)
+      || creationDrafts.some((candidate) =>
+        candidate.id === draft.id && candidate.projectId === draft.projectId
+      )
+    ) return;
+    replaceCreationDrafts([...creationDrafts, { ...draft }]);
   }
 
   function openEditCommand(process: ProcessView): void {
@@ -2430,7 +2445,8 @@
   function spawnAgent(
     tool: AgentTool,
     requestedInput?: SpawnAgentInput,
-    template: AgentTemplate | null = null
+    template: AgentTemplate | null = null,
+    onFailure?: () => void
   ): boolean {
     const currentProject = selectedProject;
     if (!currentProject) return false;
@@ -2464,14 +2480,15 @@
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
-    void finishAgentSpawn(project, input, optimisticId);
+    void finishAgentSpawn(project, input, optimisticId, onFailure);
     return true;
   }
 
   async function finishAgentSpawn(
     project: Project,
     input: SpawnAgentInput,
-    optimisticId: number
+    optimisticId: number,
+    onFailure?: () => void
   ): Promise<void> {
     await tick();
     try {
@@ -2486,6 +2503,7 @@
       }
     } catch (cause) {
       failPendingProcess(cause, optimisticId);
+      onFailure?.();
     }
   }
 

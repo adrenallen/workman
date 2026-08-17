@@ -9,10 +9,11 @@ test('draft selection is project-scoped and agent removal waits for an optimisti
   assert.match(app, /draft\.id === currentSelection\.id && draft\.projectId === currentSelection\.projectId/);
   assert.match(
     app,
-    /if \(spawnAgent\(submission\.tool, submission\.input, submission\.template\)\) \{\s*removeCreationDraft\(draft\.id\);/
+    /if \(spawnAgent\([\s\S]*\(\) => restoreAgentCreationDraft\(draft\)[\s\S]*\)\) \{\s*removeCreationDraft\(draft\.id\);/
   );
   assert.match(app, /if \(!currentProject\) return false;/);
   assert.match(app, /if \(!project\) return false;/);
+  assert.match(app, /failPendingProcess\(cause, optimisticId\);\s*onFailure\?\.\(\);/);
 });
 
 test('draft persistence is trailing-debounced, flushed on pagehide, and profile snapshots are stable', async () => {
