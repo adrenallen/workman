@@ -80,7 +80,6 @@ test('removal, confirmation, and quick jump dialogs use wider responsive bounds'
 test('destructive desktop paths contain no native confirm, alert, or prompt calls', async () => {
   const sources = await Promise.all([
     '../src/App.svelte',
-    '../src/lib/AgentsPanel.svelte',
     '../src/lib/settings/AgentToolsCard.svelte',
     '../src/lib/settings/ProfilesCard.svelte'
   ].map((path) => readFile(new URL(path, import.meta.url), 'utf8')));

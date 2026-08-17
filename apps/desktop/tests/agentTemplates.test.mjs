@@ -69,20 +69,19 @@ test('last agent choice is validated and otherwise falls back to the first enabl
   assert.equal(lastAgentChoiceStorageKey, 'workman.new-agent.last-choice.v1');
 });
 
-test('new-agent dialog keeps template and agent choices independent and persistent', async () => {
+test('new-agent draft keeps template and agent choices independent and persistent', async () => {
   const [source, card, daemon] = await Promise.all([
-    readFile(new URL('../src/lib/NewAgentDialog.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
   ]);
-  assert.match(source, /for="new-agent-template">[\s\S]*Template/);
-  assert.match(source, /for="new-agent-tool">[\s\S]*Agent/);
+  assert.match(source, /draft-agent-template-[\s\S]*Template/);
+  assert.match(source, /draft-agent-tool-[\s\S]*Agent/);
   assert.match(source, /<Select\.Item value="none" label="None">None<\/Select\.Item>/);
   assert.match(source, /agent_template_id: selectedTemplate\.id, agent_tool_id: selectedTool\.id/);
-  assert.match(source, /prompt: prompt\.trim\(\) \|\| undefined/);
+  assert.match(source, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
   assert.match(source, /onValueChange=\{selectTemplate\}/);
   assert.match(source, /onValueChange=\{selectAgent\}/);
-  assert.match(source, /agentChoice = `tool:\$\{template\.agent_tool_id\}`/);
   assert.match(source, /Template default: \{templateDefaultTool\.name\}\. Template launch args are skipped for other agents\./);
   assert.match(source, /Template prompt is prepended/);
   assert.match(source, /event\.metaKey/);
@@ -91,15 +90,13 @@ test('new-agent dialog keeps template and agent choices independent and persiste
   assert.match(source, /agent disabled/);
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
-  assert.match(source, /w-\[min\(880px,calc\(100vw-24px\)\)\] !max-w-none/);
   assert.match(source, /class="min-h-\[17rem\] resize-y text-sm leading-6"/);
   assert.doesNotMatch(source, /rows=\{11\}/);
-  assert.match(source, /onOpenAutoFocus=\{focusPromptOnOpen\}/);
   assert.match(source, /bind:ref=\{promptTextarea\}/);
-  assert.match(source, /if \(enabledTools\.length === 0\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
-  assert.match(source, /<span>Template <span class="font-normal text-muted-foreground">\(optional\)<\/span><\/span>/);
-  assert.match(source, /<span>Prompt <span class="font-normal text-muted-foreground">\(optional\)<\/span><\/span>/);
-  assert.match(source, /class="whitespace-normal text-xs font-normal leading-4 text-muted-foreground"/);
+  assert.match(source, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
+  assert.match(source, /<span>Template <small>optional<\/small><\/span>/);
+  assert.match(source, /<span>Prompt <small>optional<\/small><\/span>/);
+  assert.match(source, /class="text-xs text-muted-foreground"/);
   assert.doesNotMatch(source, /class="truncate text-xs font-normal text-muted-foreground"/);
   assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
   assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
@@ -119,15 +116,11 @@ test('desktop spawn entry surfaces route through the inline draft panel', async 
     new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url),
     'utf8'
   );
-  const agentsPanel = await readFile(
-    new URL('../src/lib/AgentsPanel.svelte', import.meta.url),
-    'utf8'
-  );
   assert.match(app, /<NewAgentDraftPanel/);
   assert.match(app, /await openAgentDraft\(tool\.id\)/);
   assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
   assert.match(draftPanel, /Template prompt is prepended/);
   assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
   assert.match(draftPanel, /metadataLoaded \? `Unavailable template #\$\{draft\.templateId\}` : 'Loading template…'/);
-  assert.match(agentsPanel, /<NewAgentDialog/);
+  assert.doesNotMatch(app, /NewAgentDialog|AgentsPanel/);
 });

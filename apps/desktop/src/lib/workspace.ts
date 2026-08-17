@@ -1,4 +1,4 @@
-import type { ConnectionStatus, DaemonClient, ProcessView, Project } from './daemon';
+import type { ConnectionStatus, DaemonClient, Project } from './daemon';
 
 export type WorkspaceSection =
   | 'terminal'
@@ -7,17 +7,6 @@ export type WorkspaceSection =
   | 'scratchpads'
   | 'agents'
   | 'settings';
-
-export interface AgentsPanelProps {
-  client: DaemonClient;
-  project: Project;
-  processes: ProcessView[];
-  selectedProcessId: number | null;
-  spawnSignal: number;
-  connected: boolean;
-  onSelectProcess: (processId: number) => void;
-  onError: (message: string) => void;
-}
 
 export interface SettingsPanelProps {
   client: DaemonClient;
