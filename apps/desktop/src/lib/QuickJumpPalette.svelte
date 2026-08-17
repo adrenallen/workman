@@ -1,6 +1,7 @@
 <script lang="ts">
   import BotIcon from '@lucide/svelte/icons/bot';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import CoffeeIcon from '@lucide/svelte/icons/coffee';
   import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
@@ -30,6 +31,7 @@
     index: Record<number, NavigationProjectSnapshot>;
     currentProjectId: number | null;
     agentTools: AgentTool[];
+    keepAwakeSupported: boolean;
     recentKeys: string[];
     loading: boolean;
     onChoose: (target: AppNavigationTarget) => void;
@@ -61,6 +63,7 @@
     index,
     currentProjectId,
     agentTools,
+    keepAwakeSupported,
     recentKeys,
     loading,
     onChoose,
@@ -96,6 +99,18 @@
       target: { type: 'settings', projectId: currentProject?.id },
       creation: false
     });
+    if (keepAwakeSupported) {
+      next.push({
+        key: 'action:keep-awake',
+        kind: 'action',
+        label: 'Keep awake…',
+        detail: 'Keep this Mac awake until agents are fully idle',
+        projectName: currentProject ? projectLabel(currentProject) : null,
+        searchText: 'keep awake caffeinate sleep idle agents mac',
+        target: { type: 'keep-awake' },
+        creation: false
+      });
+    }
 
     for (const project of projects) {
       const name = projectLabel(project);
@@ -323,6 +338,7 @@
 
   function entryIcon(entry: PaletteEntry) {
     if (entry.kind === 'action') {
+      if (entry.target.type === 'keep-awake') return CoffeeIcon;
       if (entry.target.type === 'new-agent') return BotIcon;
       if (entry.target.type === 'new-terminal') return SquareTerminalIcon;
       if (entry.target.type === 'new-worktree') return GitBranchPlusIcon;

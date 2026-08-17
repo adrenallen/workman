@@ -24,6 +24,18 @@ import type {
   SpawnAgentInput,
   SpawnAgentResult
 } from './agentTools';
+import type {
+  AgentTemplate,
+  AgentTemplateInput,
+  AgentTemplatesClient,
+  DeleteAgentTemplateResult
+} from './agentTemplates';
+import type {
+  DeleteQuickPromptResult,
+  QuickPrompt,
+  QuickPromptInput,
+  QuickPromptsClient
+} from './quickPrompts';
 import {
   resetLiveStats,
   updateLiveStats,
@@ -306,7 +318,9 @@ interface QueuedTerminalInput {
   data: number[];
 }
 
-export class DaemonClient implements CoordinationClient, AgentToolsClient {
+export class DaemonClient
+  implements CoordinationClient, AgentToolsClient, AgentTemplatesClient, QuickPromptsClient
+{
   private sequence = 0;
   private pending = new Map<string, PendingRequest>();
   private connected = false;
@@ -693,6 +707,40 @@ export class DaemonClient implements CoordinationClient, AgentToolsClient {
 
   reorderAgentTools(agentToolIds: number[]): Promise<AgentTool[]> {
     return this.request('agent_tools.reorder', { agent_tool_ids: agentToolIds });
+  }
+
+  listQuickPrompts(): Promise<QuickPrompt[]> {
+    return this.requestOptional('quick_prompts.list', {}, []);
+  }
+
+  saveQuickPrompt(prompt: QuickPromptInput): Promise<QuickPrompt> {
+    return this.request('quick_prompts.save', { prompt });
+  }
+
+  deleteQuickPrompt(quickPromptId: number): Promise<DeleteQuickPromptResult> {
+    return this.request('quick_prompts.delete', { quick_prompt_id: quickPromptId });
+  }
+
+  reorderQuickPrompts(quickPromptIds: number[]): Promise<QuickPrompt[]> {
+    return this.request('quick_prompts.reorder', { quick_prompt_ids: quickPromptIds });
+  }
+
+  listAgentTemplates(): Promise<AgentTemplate[]> {
+    return this.requestOptional('agent_templates.list', {}, []);
+  }
+
+  saveAgentTemplate(template: AgentTemplateInput): Promise<AgentTemplate> {
+    return this.request('agent_templates.save', { template });
+  }
+
+  deleteAgentTemplate(agentTemplateId: number): Promise<DeleteAgentTemplateResult> {
+    return this.request('agent_templates.delete', { agent_template_id: agentTemplateId });
+  }
+
+  reorderAgentTemplates(agentTemplateIds: number[]): Promise<AgentTemplate[]> {
+    return this.request('agent_templates.reorder', {
+      agent_template_ids: agentTemplateIds
+    });
   }
 
   spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {

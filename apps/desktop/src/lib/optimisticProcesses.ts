@@ -1,9 +1,11 @@
 import type { ProcessKind, ProcessView, Project } from './daemon';
+import type { SpawnAgentInput } from './agentTools';
 
 export interface OptimisticProcess {
   process: ProcessView;
   error: string | null;
   retry: 'agent' | 'command' | null;
+  agentSpawnInput: SpawnAgentInput | null;
   createdAt: number;
 }
 
@@ -15,6 +17,7 @@ export interface OptimisticProcessInput {
   command?: string | null;
   agentToolId?: number | null;
   retry?: OptimisticProcess['retry'];
+  agentSpawnInput?: SpawnAgentInput | null;
 }
 
 export function createOptimisticProcess(input: OptimisticProcessInput): OptimisticProcess {
@@ -60,6 +63,9 @@ export function createOptimisticProcess(input: OptimisticProcessInput): Optimist
     },
     error: null,
     retry: input.retry ?? null,
+    agentSpawnInput: input.agentSpawnInput
+      ? { ...input.agentSpawnInput, extra_args: [...input.agentSpawnInput.extra_args] }
+      : null,
     createdAt: Date.now()
   };
 }

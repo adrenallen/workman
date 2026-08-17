@@ -147,6 +147,39 @@ export async function deliverNativeNotification(notification: Notification): Pro
   }
 }
 
+export async function deliverNativeSystemNotification(
+  title: string,
+  body: string
+): Promise<boolean> {
+  if (!get(nativeNotificationPreferences).enabled) return false;
+
+  let permission = get(nativeNotificationRuntime).permission;
+  if (permission.state === 'checking') {
+    permission = await refreshNativeNotificationPermission();
+  }
+  if (permission.state === 'not_determined') {
+    try {
+      permission = await requestNativeNotificationPermission();
+    } catch {
+      return false;
+    }
+  }
+  if (permission.state !== 'granted') return false;
+
+  try {
+    await invoke('native_notification_show', {
+      notificationId: 0,
+      title,
+      body
+    });
+    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+    return true;
+  } catch (cause) {
+    nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
+    return false;
+  }
+}
+
 export async function syncDockUnreadBadge(unreadCount: number): Promise<void> {
   try {
     await getCurrentWindow().setBadgeCount(unreadCount > 0 ? unreadCount : undefined);

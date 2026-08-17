@@ -330,12 +330,23 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             "project_id": 7,
             "agent_tool_id": 99,
             "name": "guarded-codex",
-            "auto_acknowledge_dialogs": false
+            "auto_acknowledge_dialogs": false,
+            "initial_prompt": "Initial line one.\nInitial line two."
         }),
     )
     .await;
     let guarded_id = guarded["process_id"].as_i64().unwrap();
     wait_for_dialog(&registry, guarded_id).await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !registry
+            .lock()
+            .await
+            .rendered_output(guarded_id)?
+            .text
+            .contains("RECEIVED:"),
+        "initial prompt bypassed the recognized dialog guard"
+    );
     let rejected = call_result(
         &client,
         "send_input",
@@ -361,6 +372,25 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
         json!({ "project_id": 7, "process_id": guarded_id, "bytes": [13] }),
     )
     .await;
+    let initial = "Initial line one.\nInitial line two.";
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(guarded_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains(&format!("RECEIVED:{initial}")) {
+            assert_eq!(output.matches("RECEIVED:").count(), 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "initial prompt was not delivered after the dialog cleared: {}",
+            output
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     call(
         &client,
         "close_process",

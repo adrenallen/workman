@@ -1,4 +1,5 @@
 import type { ProcessView } from './daemon';
+export { formatExtraArgs, parseExtraArgs } from './extraArgs';
 
 export interface AgentTool {
   id: number;
@@ -77,9 +78,11 @@ export interface AgentToolDeepCheck {
 
 export interface SpawnAgentInput {
   project_id: number;
-  agent_tool_id: number;
+  agent_tool_id?: number;
+  agent_template_id?: number;
   name?: string;
   extra_args: string[];
+  prompt?: string;
 }
 
 export interface SpawnAgentResult {
@@ -221,40 +224,4 @@ export function getAgentToolsStore(client: AgentToolsClient): AgentToolsStore {
     stores.set(key, store);
   }
   return store;
-}
-
-/** Parse a shell-like argument field into literal argv entries for safe server-side quoting. */
-export function parseExtraArgs(source: string): string[] {
-  const args: string[] = [];
-  let current = '';
-  let quote: 'single' | 'double' | null = null;
-  let escaped = false;
-  let started = false;
-  for (const character of source) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      started = true;
-    } else if (character === '\\' && quote !== 'single') {
-      escaped = true;
-      started = true;
-    } else if (character === "'" && quote !== 'double') {
-      quote = quote === 'single' ? null : 'single';
-      started = true;
-    } else if (character === '"' && quote !== 'single') {
-      quote = quote === 'double' ? null : 'double';
-      started = true;
-    } else if (/\s/.test(character) && quote === null) {
-      if (started) args.push(current);
-      current = '';
-      started = false;
-    } else {
-      current += character;
-      started = true;
-    }
-  }
-  if (escaped) current += '\\';
-  if (quote !== null) throw new Error('Close the quoted launch argument before spawning');
-  if (started) args.push(current);
-  return args;
 }

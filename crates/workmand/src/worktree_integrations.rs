@@ -267,7 +267,7 @@ fn parse_pull_requests(bytes: &[u8]) -> Result<PullRequestsByBranch, String> {
             .push(candidate);
     }
     for pull_requests in result.values_mut() {
-        pull_requests.sort_by(|left, right| right.number.cmp(&left.number));
+        pull_requests.sort_by_key(|pull_request| std::cmp::Reverse(pull_request.number));
     }
     Ok(result)
 }

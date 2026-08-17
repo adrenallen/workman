@@ -63,8 +63,38 @@ async fn rpc(
 fn write_fake_agent(path: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::write(
         path,
-        "#!/bin/sh\nprintf 'agent-ready\\n'\nIFS= read -r prompt\nprintf 'agent-answer:%s\\n' \"$prompt\"\nsleep 30\n",
+        r##"#!/usr/bin/perl
+use strict;
+use warnings;
+$| = 1;
+system('stty', 'raw', '-echo');
+print "agent-args:" . join('|', @ARGV) . "\r\n";
+select undef, undef, undef, 0.25;
+print "agent-ready\r\n\$";
+my $prompt = '';
+while (1) {
+    my $chunk = '';
+    my $count = sysread(STDIN, $chunk, 4096);
+    exit 3 unless defined($count) && $count > 0;
+    for my $character (split //, $chunk) {
+        if ($character eq "\r") {
+            print "\r\nagent-answer:$prompt\r\n";
+            sleep 30;
+            exit 0;
+        }
+        $prompt .= $character;
+    }
+}
+"##,
     )?;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+fn write_exiting_agent(path: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(path, permissions)?;
@@ -79,6 +109,8 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     std::fs::create_dir(&project_dir)?;
     let fake_agent = temp.path().join("fake-agent.sh");
     write_fake_agent(&fake_agent)?;
+    let exiting_agent = temp.path().join("exiting-agent.sh");
+    write_exiting_agent(&exiting_agent)?;
     let data_dir = temp.path().join("state");
 
     let server = DaemonServer::bind(DaemonConfig {
@@ -129,6 +161,141 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(created["ok"].as_bool().unwrap());
     let tool_id = created["result"]["id"].as_i64().unwrap();
+
+    let override_tool = rpc(
+        &mut socket,
+        39,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "Override agent",
+                "command": fake_agent,
+                "tool_type": "scripted",
+                "enabled": true
+            }
+        }),
+    )
+    .await;
+    let override_tool_id = override_tool["result"]["id"].as_i64().unwrap();
+
+    let exiting_tool = rpc(
+        &mut socket,
+        30,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "Exiting agent",
+                "command": exiting_agent,
+                "tool_type": "custom",
+                "enabled": true
+            }
+        }),
+    )
+    .await;
+    let exiting_tool_id = exiting_tool["result"]["id"].as_i64().unwrap();
+    let exiting_spawn = rpc(
+        &mut socket,
+        31,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_tool_id": exiting_tool_id,
+            "prompt": "This prompt must be dropped."
+        }),
+    )
+    .await;
+    let exiting_process_id = exiting_spawn["result"]["process_id"].as_i64().unwrap();
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = registry.lock().await.get_status(exiting_process_id)?;
+        if status.events.iter().any(|event| {
+            event.kind == "initial_prompt_dropped" && event.message.contains("reason: exited")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "exited agent did not publish an initial-prompt drop event: {:?}",
+            status.events
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let template = rpc(
+        &mut socket,
+        23,
+        "agent_templates.save",
+        json!({
+            "template": {
+                "name": "Review worker",
+                "agent_tool_id": tool_id,
+                "extra_args": ["--template", "alpha value"],
+                "prompt": "You are a careful reviewer."
+            }
+        }),
+    )
+    .await;
+    assert!(template["ok"].as_bool().unwrap());
+    let template_id = template["result"]["id"].as_i64().unwrap();
+
+    for (id, template, expected) in [
+        (
+            34,
+            json!({
+                "name": "x".repeat(121),
+                "agent_tool_id": tool_id
+            }),
+            "agent template name must be 120 characters or fewer",
+        ),
+        (
+            35,
+            json!({
+                "name": "Large prompt",
+                "agent_tool_id": tool_id,
+                "prompt": "x".repeat(64 * 1024 + 1)
+            }),
+            "agent template prompt must be 65536 bytes or fewer",
+        ),
+        (
+            36,
+            json!({
+                "name": "Many arguments",
+                "agent_tool_id": tool_id,
+                "extra_args": vec![""; 65]
+            }),
+            "agent template may have at most 64 arguments",
+        ),
+        (
+            37,
+            json!({
+                "name": "Large arguments",
+                "agent_tool_id": tool_id,
+                "extra_args": ["x".repeat(4 * 1024 + 1)]
+            }),
+            "agent template arguments must total 4096 bytes or fewer",
+        ),
+    ] {
+        let rejected = rpc(
+            &mut socket,
+            id,
+            "agent_templates.save",
+            json!({ "template": template }),
+        )
+        .await;
+        assert_eq!(rejected["error"]["code"], "agent_template_error");
+        assert_eq!(rejected["error"]["message"], expected);
+    }
+    let templates = rpc(&mut socket, 24, "agent_templates.list", json!({})).await;
+    assert_eq!(templates["result"].as_array().unwrap().len(), 1);
+    assert_eq!(templates["result"][0]["name"], "Review worker");
+    let reordered = rpc(
+        &mut socket,
+        25,
+        "agent_templates.reorder",
+        json!({ "agent_template_ids": [template_id] }),
+    )
+    .await;
+    assert_eq!(reordered["result"][0]["id"], template_id);
 
     let clipboard_dir = temp.path().join("Application Support/terminal-clipboard");
     std::fs::create_dir_all(&clipboard_dir)?;
@@ -216,6 +383,23 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert_eq!(enabled["result"]["enabled"], true);
 
+    let oversized_prompt = rpc(
+        &mut socket,
+        38,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_tool_id": tool_id,
+            "prompt": "x".repeat(64 * 1024 + 1)
+        }),
+    )
+    .await;
+    assert_eq!(oversized_prompt["error"]["code"], "invalid_params");
+    assert_eq!(
+        oversized_prompt["error"]["message"],
+        "initial prompt must be 65536 bytes or fewer"
+    );
+
     let spawned = rpc(
         &mut socket,
         6,
@@ -248,6 +432,154 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     );
     let process_id = spawned["result"]["process_id"].as_i64().unwrap();
 
+    let template_spawn = rpc(
+        &mut socket,
+        26,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": tool_id,
+            "name": "template-worker",
+            "extra_args": ["--caller", "beta"],
+            "prompt": "Review line one.\nReview line two."
+        }),
+    )
+    .await;
+    assert!(template_spawn["ok"].as_bool().unwrap());
+    let template_process_id = template_spawn["result"]["process_id"].as_i64().unwrap();
+    let template_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(template_process_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains(
+            "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.",
+        ) {
+            assert_eq!(output.matches("agent-answer:").count(), 1);
+            assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
+            assert!(
+                output.find("agent-ready").unwrap() < output.find("agent-answer:").unwrap(),
+                "initial prompt arrived before the delayed readiness marker: {output}"
+            );
+            let status = registry.lock().await.get_status(template_process_id)?;
+            assert!(
+                status.agent_state.last_output_at.is_some(),
+                "readiness delivery must be backed by observed tracker output"
+            );
+            assert!(status.events.iter().any(|event| {
+                event.kind == "initial_prompt_delivered"
+                    && event.message.contains("initial prompt delivered")
+            }));
+            break;
+        }
+        assert!(
+            Instant::now() < template_deadline,
+            "template prompt was not delivered after readiness: {}",
+            output
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let overridden = rpc(
+        &mut socket,
+        27,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": override_tool_id,
+            "name": "override-worker",
+            "extra_args": ["--caller", "override"],
+            "prompt": "Use the selected agent."
+        }),
+    )
+    .await;
+    assert!(overridden["ok"].as_bool().unwrap());
+    let override_process_id = overridden["result"]["process_id"].as_i64().unwrap();
+    let override_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(override_process_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains("agent-answer:You are a careful reviewer.\n\nUse the selected agent.") {
+            assert!(output.contains("agent-args:--caller|override"));
+            assert!(!output.contains("--template"));
+            assert_eq!(
+                registry
+                    .lock()
+                    .await
+                    .get_status(override_process_id)?
+                    .process
+                    .agent_tool_id,
+                Some(override_tool_id)
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < override_deadline,
+            "overridden template prompt was not delivered after readiness: {}",
+            output
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let unknown_override = rpc(
+        &mut socket,
+        40,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": 999_999
+        }),
+    )
+    .await;
+    assert_eq!(unknown_override["error"]["code"], "spawn_failed");
+    assert_eq!(
+        unknown_override["error"]["message"],
+        "agent tool 999999 was not found"
+    );
+
+    let disabled_override = rpc(
+        &mut socket,
+        41,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "id": override_tool_id,
+                "name": "Override agent",
+                "command": fake_agent,
+                "tool_type": "scripted",
+                "enabled": false
+            }
+        }),
+    )
+    .await;
+    assert_eq!(disabled_override["result"]["enabled"], false);
+    let disabled_override_spawn = rpc(
+        &mut socket,
+        42,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": override_tool_id
+        }),
+    )
+    .await;
+    assert_eq!(disabled_override_spawn["error"]["code"], "spawn_failed");
+    assert!(
+        disabled_override_spawn["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is disabled")
+    );
+
     let prompted = rpc(
         &mut socket,
         7,
@@ -278,8 +610,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     }
 
     let statuses = rpc(&mut socket, 8, "process.list", json!({ "project_id": 7 })).await;
-    assert_eq!(statuses["result"][0]["agent_tool_id"], tool_id);
-    assert!(statuses["result"][0]["agent_state"]["state"].is_string());
+    let spawned_status = statuses["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|status| status["id"] == process_id)
+        .unwrap();
+    assert_eq!(spawned_status["agent_tool_id"], tool_id);
+    assert!(spawned_status["agent_state"]["state"].is_string());
 
     let closed = rpc(
         &mut socket,
@@ -290,6 +628,38 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert_eq!(closed["result"]["id"], process_id);
     assert_eq!(closed["result"]["status"], "stopped");
+    let closed_template = rpc(
+        &mut socket,
+        28,
+        "process.close",
+        json!({ "process_id": template_process_id }),
+    )
+    .await;
+    assert_eq!(closed_template["result"]["status"], "stopped");
+    let closed_override = rpc(
+        &mut socket,
+        43,
+        "process.close",
+        json!({ "process_id": override_process_id }),
+    )
+    .await;
+    assert_eq!(closed_override["result"]["status"], "stopped");
+    let closed_exiting = rpc(
+        &mut socket,
+        33,
+        "process.close",
+        json!({ "process_id": exiting_process_id }),
+    )
+    .await;
+    assert_eq!(closed_exiting["result"]["status"], "exited");
+    let deleted_template = rpc(
+        &mut socket,
+        29,
+        "agent_templates.delete",
+        json!({ "agent_template_id": template_id }),
+    )
+    .await;
+    assert_eq!(deleted_template["result"]["deleted"], true);
     let deleted = rpc(
         &mut socket,
         10,
@@ -298,6 +668,22 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(deleted["result"]["deleted"], true);
+    let deleted_override_tool = rpc(
+        &mut socket,
+        44,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": override_tool_id }),
+    )
+    .await;
+    assert_eq!(deleted_override_tool["result"]["deleted"], true);
+    let deleted_exiting_tool = rpc(
+        &mut socket,
+        32,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": exiting_tool_id }),
+    )
+    .await;
+    assert_eq!(deleted_exiting_tool["result"]["deleted"], true);
 
     socket.close(None).await?;
     let _ = shutdown_tx.send(());

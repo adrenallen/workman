@@ -28,6 +28,10 @@
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import { hasRetainedTerminalOutput } from './terminalFirstPaint';
   import {
+    isQuickPromptPaletteShortcut,
+    sanitizeQuickPromptBody
+  } from './quickPromptPalette';
+  import {
     AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
     clipboardImagePasteRoute,
     shouldForwardTerminalInput
@@ -48,6 +52,7 @@
     onStart,
     onError,
     onContextMenu,
+    onQuickPrompts,
     onUnfocus
   }: {
     client: DaemonClient;
@@ -58,6 +63,7 @@
     onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
+    onQuickPrompts?: () => void;
     onUnfocus?: () => void;
   } = $props();
 
@@ -122,6 +128,24 @@
     modifyOtherKeys: number;
     finishing: boolean;
     focusRequested: boolean;
+  }
+
+  /** Insert through xterm so bracketed-paste mode and replay-safe input ordering are preserved. */
+  export function insertQuickPrompt(text: string, submit = false): boolean {
+    const instance = terminal;
+    if (!instance || process.status !== 'running') return false;
+    pendingUserKeyTokens.push(++nextUserKeyToken);
+    instance.paste(sanitizeQuickPromptBody(text));
+    if (submit) {
+      queueInput(encoder.encode('\r'), true);
+      flushInput();
+    }
+    instance.focus();
+    return true;
+  }
+
+  export function focusInput(): void {
+    terminal?.focus();
   }
 
   onMount(() => {
@@ -203,6 +227,12 @@
     }
 
     instance.attachCustomKeyEventHandler((event) => {
+      if (onQuickPrompts && isQuickPromptPaletteShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type === 'keydown') onQuickPrompts();
+        return false;
+      }
       let userKeyToken: number | null = null;
       if (event.type === 'keydown') {
         userKeyToken = ++nextUserKeyToken;

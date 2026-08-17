@@ -1,14 +1,21 @@
 //! SQLite connection setup, schema migration, and domain persistence.
 
-use std::{collections::HashSet, error::Error, fmt, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    path::Path,
+    time::Duration,
+};
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::Type};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentLaunchMode, AgentSession, AgentTool, Process, ProcessId, ProcessKind, Profile,
-    ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, Scratchpad, Timer, Todo,
-    TodoBlocker, TodoComment, TodoId, WorktreeRepository, WorktreeRepositoryId,
+    Actor, AgentLaunchMode, AgentSession, AgentTemplate, AgentTool, Process, ProcessId,
+    ProcessKind, Profile, ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, QuickPrompt,
+    Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
+    WorktreeRepositoryId,
 };
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -143,10 +150,20 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "process_ownership",
         include_str!("../migrations/0027_process_ownership.sql"),
     ),
+    (
+        28,
+        "agent_templates",
+        include_str!("../migrations/0028_agent_templates.sql"),
+    ),
+    (
+        29,
+        "quick_prompts",
+        include_str!("../migrations/0029_quick_prompts.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 27;
+pub const LATEST_SCHEMA_VERSION: i64 = 29;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -366,6 +383,20 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn list_profile_agent_templates(
+        &self,
+        profile_id: ProfileId,
+    ) -> StoreResult<Vec<AgentTemplate>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
+                    created_at, updated_at
+             FROM agent_templates WHERE profile_id = ?1 ORDER BY sort_order, id",
+        )?;
+        Ok(statement
+            .query_map([profile_id], agent_template_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn profile_terminal_shell(&self, profile_id: ProfileId) -> StoreResult<Option<String>> {
         Ok(self
             .connection
@@ -470,7 +501,8 @@ impl Store {
         Ok((profile, tool_ids))
     }
 
-    /// Create an inactive profile. `copy_active` snapshots membership, shell, and agent tools.
+    /// Create an inactive profile. `copy_active` snapshots membership, shell, agent tools,
+    /// templates, and quick prompts.
     /// The returned ID pairs map source agent-tool IDs to their independent copies so callers
     /// can clone custom icon files without putting filesystem paths in the database.
     pub fn create_profile(
@@ -631,6 +663,89 @@ impl Store {
                     ],
                 )?;
                 icon_pairs.push((old_id, next_id));
+            }
+
+            let tool_id_map = icon_pairs.iter().copied().collect::<HashMap<_, _>>();
+            let templates = {
+                let mut statement = transaction.prepare(
+                    "SELECT name, agent_tool_id, extra_args, prompt, sort_order
+                     FROM agent_templates WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_template_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_templates",
+                [],
+                |row| row.get(0),
+            )?;
+            for (position, (name, source_tool_id, extra_args, prompt, sort_order)) in
+                templates.into_iter().enumerate()
+            {
+                let copied_tool_id = tool_id_map.get(&source_tool_id).ok_or_else(|| {
+                    StoreError::InvalidProfile(format!(
+                        "agent template references uncopied tool {source_tool_id}"
+                    ))
+                })?;
+                transaction.execute(
+                    "INSERT INTO agent_templates (
+                        id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
+                        created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch(), unixepoch())",
+                    params![
+                        first_template_id + position as i64,
+                        profile_id,
+                        name,
+                        copied_tool_id,
+                        extra_args,
+                        prompt,
+                        sort_order,
+                    ],
+                )?;
+            }
+
+            let prompts = {
+                let mut statement = transaction.prepare(
+                    "SELECT name, body, sort_order
+                     FROM quick_prompts WHERE profile_id = ?1 ORDER BY sort_order, id",
+                )?;
+                statement
+                    .query_map([source_profile_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let first_prompt_id: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM quick_prompts",
+                [],
+                |row| row.get(0),
+            )?;
+            for (position, (name, body, sort_order)) in prompts.into_iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO quick_prompts (
+                        id, profile_id, name, body, sort_order, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch(), unixepoch())",
+                    params![
+                        first_prompt_id + position as i64,
+                        profile_id,
+                        name,
+                        body,
+                        sort_order,
+                    ],
+                )?;
             }
         }
         transaction.commit()?;
@@ -1261,6 +1376,204 @@ impl Store {
     pub fn delete_agent_tool(&self, id: i64) -> StoreResult<bool> {
         Ok(self.connection.execute(
             "DELETE FROM agent_tools
+             WHERE id = ?1
+               AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+            [id],
+        )? > 0)
+    }
+
+    pub fn list_profile_quick_prompts(
+        &self,
+        profile_id: ProfileId,
+    ) -> StoreResult<Vec<QuickPrompt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, body, sort_order, created_at, updated_at
+             FROM quick_prompts WHERE profile_id = ?1 ORDER BY sort_order, id",
+        )?;
+        Ok(statement
+            .query_map([profile_id], quick_prompt_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_quick_prompts(&self) -> StoreResult<Vec<QuickPrompt>> {
+        self.list_profile_quick_prompts(self.active_profile_id()?)
+    }
+
+    pub fn get_quick_prompt(&self, id: i64) -> StoreResult<Option<QuickPrompt>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT q.id, q.name, q.body, q.sort_order, q.created_at, q.updated_at
+                 FROM quick_prompts AS q
+                 JOIN profiles AS p ON p.id = q.profile_id AND p.active = 1
+                 WHERE q.id = ?1",
+                [id],
+                quick_prompt_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_agent_templates(&self) -> StoreResult<Vec<AgentTemplate>> {
+        self.list_profile_agent_templates(self.active_profile_id()?)
+    }
+
+    pub fn get_agent_template(&self, id: i64) -> StoreResult<Option<AgentTemplate>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT t.id, t.profile_id, t.name, t.agent_tool_id, t.extra_args, t.prompt,
+                        t.sort_order, t.created_at, t.updated_at
+                 FROM agent_templates AS t
+                 JOIN profiles AS p ON p.id = t.profile_id AND p.active = 1
+                WHERE t.id = ?1",
+                [id],
+                agent_template_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn put_quick_prompt(&self, prompt: &QuickPrompt) -> StoreResult<()> {
+        let profile_id = self.active_profile_id()?;
+        self.connection.execute(
+            "INSERT INTO quick_prompts (
+                id, profile_id, name, body, sort_order, created_at, updated_at
+             ) VALUES (
+                ?1, ?4, ?2, ?3,
+                COALESCE((SELECT MAX(sort_order) + 1 FROM quick_prompts WHERE profile_id = ?4), 0),
+                unixepoch(), unixepoch()
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                body = excluded.body,
+                updated_at = unixepoch()
+             WHERE quick_prompts.profile_id = excluded.profile_id",
+            params![prompt.id, prompt.name, prompt.body, profile_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_agent_template(&self, template: &AgentTemplate) -> StoreResult<()> {
+        let tool_profile_id = self
+            .connection
+            .query_row(
+                "SELECT profile_id FROM agent_tools WHERE id = ?1",
+                [template.agent_tool_id],
+                |row| row.get::<_, Option<ProfileId>>(0),
+            )
+            .optional()?
+            .flatten();
+        if tool_profile_id != Some(template.profile_id) {
+            return Err(StoreError::InvalidProfile(format!(
+                "agent tool {} does not belong to profile {}",
+                template.agent_tool_id, template.profile_id
+            )));
+        }
+        self.connection.execute(
+            "INSERT INTO agent_templates (
+                id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
+                created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                COALESCE((SELECT MAX(sort_order) + 1 FROM agent_templates WHERE profile_id = ?2), 0),
+                unixepoch(), unixepoch()
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                agent_tool_id = excluded.agent_tool_id,
+                extra_args = excluded.extra_args,
+                prompt = excluded.prompt,
+                updated_at = unixepoch()
+             WHERE agent_templates.profile_id = excluded.profile_id",
+            params![
+                template.id,
+                template.profile_id,
+                template.name,
+                template.agent_tool_id,
+                to_json(&template.extra_args)?,
+                template.prompt,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn reorder_quick_prompts(&self, ordered_ids: &[i64]) -> StoreResult<()> {
+        let existing = self
+            .list_quick_prompts()?
+            .into_iter()
+            .map(|prompt| prompt.id)
+            .collect::<HashSet<_>>();
+        let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+        if requested.len() != ordered_ids.len() || requested != existing {
+            return Err(StoreError::InvalidReorder(
+                "quick prompt order must contain every saved prompt exactly once".to_owned(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for (position, id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE quick_prompts SET sort_order = ?1, updated_at = unixepoch()
+                 WHERE id = ?2
+                   AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+                params![position as i64, id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn next_quick_prompt_id(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM quick_prompts",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn delete_quick_prompt(&self, id: i64) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM quick_prompts
+             WHERE id = ?1
+               AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
+            [id],
+        )? > 0)
+    }
+
+    pub fn next_agent_template_id(&self) -> StoreResult<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM agent_templates",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn reorder_agent_templates(&self, ordered_ids: &[i64]) -> StoreResult<()> {
+        let profile_id = self.active_profile_id()?;
+        let existing = self
+            .list_profile_agent_templates(profile_id)?
+            .into_iter()
+            .map(|template| template.id)
+            .collect::<HashSet<_>>();
+        let requested = ordered_ids.iter().copied().collect::<HashSet<_>>();
+        if requested.len() != ordered_ids.len() || requested != existing {
+            return Err(StoreError::InvalidReorder(
+                "agent template order must contain every template exactly once".to_owned(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        for (position, id) in ordered_ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE agent_templates SET sort_order = ?1, updated_at = unixepoch()
+                 WHERE id = ?2 AND profile_id = ?3",
+                params![position as i64, id, profile_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_agent_template(&self, id: i64) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM agent_templates
              WHERE id = ?1
                AND profile_id = (SELECT id FROM profiles WHERE active = 1)",
             [id],
@@ -2054,6 +2367,20 @@ fn process_from_row(row: &Row<'_>) -> rusqlite::Result<Process> {
     })
 }
 
+fn agent_template_from_row(row: &Row<'_>) -> rusqlite::Result<AgentTemplate> {
+    Ok(AgentTemplate {
+        id: row.get(0)?,
+        profile_id: row.get(1)?,
+        name: row.get(2)?,
+        agent_tool_id: row.get(3)?,
+        extra_args: json_from_row(row, 4)?,
+        prompt: row.get(5)?,
+        sort_order: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 fn profile_from_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
     let project_count: i64 = row.get(3)?;
     let agent_tool_count: i64 = row.get(4)?;
@@ -2064,6 +2391,17 @@ fn profile_from_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
         project_count: usize::try_from(project_count).unwrap_or(usize::MAX),
         agent_tool_count: usize::try_from(agent_tool_count).unwrap_or(usize::MAX),
         created_at: row.get(5)?,
+    })
+}
+
+fn quick_prompt_from_row(row: &Row<'_>) -> rusqlite::Result<QuickPrompt> {
+    Ok(QuickPrompt {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        body: row.get(2)?,
+        sort_order: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 

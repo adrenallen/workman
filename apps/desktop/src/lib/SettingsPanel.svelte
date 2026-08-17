@@ -19,6 +19,7 @@
   } from './nativeMenu';
   import { settingsSection, settingsSections } from './settingsSections';
   import AgentToolsCard from './settings/AgentToolsCard.svelte';
+  import AgentTemplatesCard from './settings/AgentTemplatesCard.svelte';
   import AboutUpdatesCard from './settings/AboutUpdatesCard.svelte';
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import DaemonCard from './settings/DaemonCard.svelte';
@@ -34,6 +35,7 @@
   import SidebarCard from './settings/SidebarCard.svelte';
   import TerminalAppearanceCard from './settings/TerminalAppearanceCard.svelte';
   import ProfilesCard from './settings/ProfilesCard.svelte';
+  import QuickPromptsCard from './settings/QuickPromptsCard.svelte';
 
   let { client, project, connection, onError, onProfileSwitched }: SettingsPanelProps = $props();
   let info = $state<DaemonSettingsInfo | null>(null);
@@ -248,6 +250,8 @@
         <HotkeysCard />
       {:else if $settingsSection === 'notifications'}
         <NotificationsCard />
+      {:else if $settingsSection === 'templates'}
+        <AgentTemplatesCard {client} connected={connection.status === 'connected'} {onError} />
       {:else if $settingsSection === 'agents'}
         {#if project}
           <div class="section-stack">
@@ -264,6 +268,8 @@
             onRetry={() => {}}
           />
         {/if}
+      {:else if $settingsSection === 'quick-prompts'}
+        <QuickPromptsCard {client} connected={connection.status === 'connected'} {onError} />
       {:else if $settingsSection === 'tools'}
         <OpenersCard />
       {:else if $settingsSection === 'mcp'}

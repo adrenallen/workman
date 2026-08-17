@@ -13,7 +13,6 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
-  import AgentBrandMark from './lib/AgentBrandMark.svelte';
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
@@ -25,7 +24,10 @@
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
   import KeyboardShortcuts from './lib/KeyboardShortcuts.svelte';
+  import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
+  import { shouldSubscribeProcessStatuses } from './lib/keepAwake';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
+  import NewAgentDialog, { type NewAgentSubmission } from './lib/NewAgentDialog.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
@@ -37,6 +39,7 @@
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
+  import QuickPromptPalette from './lib/QuickPromptPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import { submitOnEnter } from './lib/formInputConventions';
@@ -58,6 +61,11 @@
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
+  import type { QuickPrompt } from './lib/quickPrompts';
+  import {
+    getAgentTemplatesStore,
+    type AgentTemplate
+  } from './lib/agentTemplates';
   import {
     planAgentCascade,
     type AgentCascadeAction,
@@ -224,6 +232,7 @@
 
   const client = new DaemonClient();
   const agentToolsStore = getAgentToolsStore(client);
+  const agentTemplatesStore = getAgentTemplatesStore(client);
   const projectRailBounds = { min: 176, max: 340 };
   const treeRailBounds = { min: 220, max: 420 };
   const collapsedProjectRailWidth = 58;
@@ -233,7 +242,10 @@
   let projects = $state<Project[]>([]);
   let projectFolders = $state<ProjectFolder[]>([]);
   let processes = $state<ProcessView[]>([]);
+  let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let keepAwakeArmed = $state(false);
+  let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
   let coordination = $state<CoordinationSnapshot | null>(null);
@@ -300,17 +312,31 @@
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
+  let agentTemplates = $state<AgentTemplate[]>([]);
+  let preferredAgentToolId = $state<number | null>(null);
   let agentToolsLoading = $state(false);
 
   $effect(() => agentToolsStore.subscribe((snapshot) => {
     registeredAgentTools = snapshot.tools;
     agentTools = snapshot.tools.filter((tool) => tool.enabled);
   }));
+  $effect(() => agentTemplatesStore.subscribe((snapshot) => {
+    agentTemplates = snapshot.templates;
+  }));
+  $effect(() => {
+    if (connection.status !== 'connected') return;
+    const request = shouldSubscribeProcessStatuses(documentVisible, keepAwakeArmed)
+      ? client.subscribeProcessStatuses()
+      : client.unsubscribeProcessStatuses();
+    void request.catch(reportError);
+  });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
   let quickJumpOpen = $state(false);
+  let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let keepAwakeOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
@@ -362,6 +388,10 @@
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
   let removeWorktreeForceRequired = $state(false);
+  let terminalView = $state<{
+    insertQuickPrompt: (text: string, submit?: boolean) => boolean;
+    focusInput: () => void;
+  } | null>(null);
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
   let importError = $state<string | null>(null);
@@ -547,12 +577,7 @@
       if (documentVisible === visible) return;
       documentVisible = visible;
       document.documentElement.classList.toggle('workman-document-hidden', !documentVisible);
-      if (connection.status !== 'connected') return;
-      if (!documentVisible) {
-        void client.unsubscribeProcessStatuses().catch(reportError);
-        return;
-      }
-      void client.subscribeProcessStatuses().catch(reportError);
+      if (connection.status !== 'connected' || !documentVisible) return;
       if (!busy) void refreshProjects();
       if (selectedProject) {
         void refreshProcesses(selectedProject.id);
@@ -586,6 +611,7 @@
     }).catch(reportError);
     const stopStatuses = client.onProcessStatuses((next) => {
       if (!active) return;
+      profileProcesses = next;
       cacheProcessStatuses(next);
       if (selectedProject) {
         applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
@@ -703,7 +729,6 @@
     }
     if (reconnected) {
       if (documentVisible) {
-        void client.subscribeProcessStatuses().catch(reportError);
         void refreshProjects();
         if (status.version_compatible) void refreshNotifications();
       }
@@ -763,7 +788,16 @@
       else openQuickJump();
       return;
     }
-    if (quickJumpOpen || shortcutsOpen) return;
+    if (
+      event.metaKey && event.shiftKey && !event.altKey && !event.ctrlKey
+      && event.key.toLowerCase() === 'p'
+    ) {
+      event.preventDefault();
+      if (quickPromptOpen) closeQuickPrompts();
+      else openQuickPrompts();
+      return;
+    }
+    if (quickJumpOpen || quickPromptOpen || shortcutsOpen) return;
     if (event.key === 'Escape' && (treeMultiSelection?.ids.length ?? 0) > 0) {
       event.preventDefault();
       treeMultiSelection = null;
@@ -822,6 +856,7 @@
 
   function openQuickJump(): void {
     shortcutsOpen = false;
+    quickPromptOpen = false;
     quickJumpRecentKeys = readRecentNavigationKeys();
     quickJumpOpen = true;
     void refreshQuickJumpIndex(true);
@@ -831,8 +866,37 @@
     quickJumpOpen = false;
   }
 
+  function openQuickPrompts(): void {
+    quickJumpOpen = false;
+    shortcutsOpen = false;
+    quickPromptOpen = true;
+  }
+
+  function closeQuickPrompts(): void {
+    quickPromptOpen = false;
+  }
+
+  function insertQuickPrompt(prompt: QuickPrompt, submit: boolean): boolean {
+    if (
+      selectedProcess?.kind !== 'agent'
+      || selectedProcess.status !== 'running'
+      || terminalView === null
+    ) {
+      reportError(new Error('Open a running agent terminal before inserting a quick prompt.'));
+      return false;
+    }
+    if (!terminalView.insertQuickPrompt(prompt.body, submit)) {
+      reportError(new Error('The selected agent terminal is no longer available.'));
+      return false;
+    }
+    closeQuickPrompts();
+    void tick().then(() => terminalView?.focusInput());
+    return true;
+  }
+
   function openShortcuts(): void {
     quickJumpOpen = false;
+    quickPromptOpen = false;
     shortcutsOpen = true;
   }
 
@@ -1232,6 +1296,9 @@
             settingsOpen = true;
           }
           return;
+        case 'keep-awake':
+          keepAwakeOpen = true;
+          return;
         case 'new-worktree':
           if (selectedProject) await openWorktreeDialog('create', selectedProject);
           return;
@@ -1250,7 +1317,7 @@
             tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           }
           if (!tool) throw new Error(`Agent tool ${target.agentToolName} is no longer enabled`);
-          await spawnAgent(tool);
+          await openAgentDialog(tool.id);
           return;
         }
         case 'add-command':
@@ -2097,17 +2164,25 @@
       ? null
       : agentTools.find((candidate) => candidate.id === optimistic.process.agent_tool_id) ?? null;
     dismissOptimisticProcess(optimistic.process.id);
-    if (retry === 'agent' && tool) void spawnAgent(tool);
+    if (retry === 'agent' && tool && optimistic.agentSpawnInput) {
+      void spawnAgent(tool, optimistic.agentSpawnInput);
+    }
     else if (retry === 'command') openAddCommand();
     else if (retry === 'agent') void openAgentDialog();
   }
 
-  async function openAgentDialog(): Promise<void> {
+  async function openAgentDialog(preferredToolId: number | null = null): Promise<void> {
+    preferredAgentToolId = preferredToolId;
     dialog = 'agent';
     agentToolsLoading = true;
     try {
-      registeredAgentTools = await client.listAgentTools();
+      const [tools, templates] = await Promise.all([
+        agentToolsStore.refresh(true),
+        agentTemplatesStore.refresh(true)
+      ]);
+      registeredAgentTools = tools;
       agentTools = registeredAgentTools.filter((tool) => tool.enabled);
+      agentTemplates = templates;
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -2115,18 +2190,34 @@
     }
   }
 
-  async function spawnAgent(tool: AgentTool): Promise<void> {
-    const project = selectedProject;
+  async function spawnAgent(
+    tool: AgentTool,
+    requestedInput?: NewAgentSubmission['input'],
+    template: AgentTemplate | null = null
+  ): Promise<void> {
+    const currentProject = selectedProject;
+    if (!currentProject) return;
+    const requested = requestedInput ?? {
+      project_id: currentProject.id,
+      agent_tool_id: tool.id,
+      extra_args: []
+    };
+    const project = requested.project_id === currentProject.id
+      ? currentProject
+      : projects.find((candidate) => candidate.id === requested.project_id) ?? null;
     if (!project) return;
+    const input = { ...requested, extra_args: [...requested.extra_args] };
+    const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
     const optimistic = createOptimisticProcess({
       id: optimisticId,
       project,
       kind: 'agent',
-      name: tool.name,
+      name: optimisticName,
       command: tool.command,
       agentToolId: tool.id,
-      retry: 'agent'
+      retry: 'agent',
+      agentSpawnInput: input
     });
     optimisticProcesses = [...optimisticProcesses, optimistic];
     dialog = null;
@@ -2135,14 +2226,10 @@
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
-    selection = projectTreeSelection('agent', optimisticId, project.id, tool.name);
+    selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
     await tick();
     try {
-      const result = await client.spawnAgent({
-        project_id: project.id,
-        agent_tool_id: tool.id,
-        extra_args: []
-      });
+      const result = await client.spawnAgent(input);
       await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
       optimisticProcesses = optimisticProcesses.filter(
@@ -3910,6 +3997,16 @@
           {#if projectRailCollapsed}<ChevronRightIcon size={15} />{:else}<ChevronLeftIcon size={15} />{/if}
         {/snippet}
       </IconButton>
+      <div class="keep-awake-slot">
+        <KeepAwakeControl
+          processes={profileProcesses}
+          {projects}
+          connectionStatus={connection.status}
+          bind:open={keepAwakeOpen}
+          bind:armed={keepAwakeArmed}
+          bind:supported={keepAwakeSupported}
+        />
+      </div>
       <div class="notification-slot">
         <NotificationsCenter
           {notifications}
@@ -4100,6 +4197,7 @@
           {#key selectedProcess.id}
             <div class="terminal-view">
               <TerminalView
+                bind:this={terminalView}
                 {client}
                 process={selectedProcess}
                 connected={connection.status === 'connected'}
@@ -4108,6 +4206,7 @@
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}
                 onContextMenu={showContextMenu}
+                onQuickPrompts={openQuickPrompts}
                 onUnfocus={unfocusSelectedProcess}
               />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
@@ -4278,10 +4377,21 @@
     index={navigationIndex}
     currentProjectId={selectedProject?.id ?? null}
     {agentTools}
+    {keepAwakeSupported}
     recentKeys={quickJumpRecentKeys}
     loading={quickJumpLoading}
     onChoose={chooseQuickJumpTarget}
     onClose={closeQuickJump}
+  />
+{/if}
+
+{#if quickPromptOpen}
+  <QuickPromptPalette
+    {client}
+    canInsert={terminalView !== null && selectedProcess?.kind === 'agent' && selectedProcess.status === 'running'}
+    onInsert={insertQuickPrompt}
+    onClose={closeQuickPrompts}
+    onError={reportError}
   />
 {/if}
 
@@ -4297,7 +4407,7 @@
 {/if}
 
 {#if shortcutsOpen}
-  <KeyboardShortcuts onClose={closeShortcuts} />
+  <KeyboardShortcuts {keepAwakeSupported} onClose={closeShortcuts} />
 {/if}
 
 {#if agentCascadeRequest}
@@ -4367,10 +4477,9 @@
   />
 {/if}
 
-{#if dialog && dialog !== 'command'}
+{#if dialog === 'todo'}
   <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
-    {#if dialog === 'todo'}
-      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
+    <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
       <form class="dialog-surface" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
         <header>
           <div><span>New todo</span><h2>Add work to the tree</h2></div>
@@ -4393,34 +4502,30 @@
         </div>
         <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
       </form>
-      </Dialog.Content>
-    {:else if dialog === 'agent'}
-      <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Add agent">
-      <section class="dialog-surface">
-        <header>
-          <div><span>New agent</span><h2>Choose an agent tool</h2></div>
-          <IconButton label="Close agent picker" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
-        </header>
-        <div class="agent-choices">
-          {#if agentToolsLoading}
-            <p>Loading agent tools…</p>
-          {:else}
-            {#each agentTools as tool (tool.id)}
-              <button type="button" disabled={detailBusy} onclick={() => void spawnAgent(tool)}>
-                <span class="agent-choice-mark"><AgentBrandMark {tool} size={20} /></span>
-                <span class="agent-choice-copy"><strong>{tool.name}</strong><small>{tool.command}</small></span>
-                <span class="agent-choice-action">Spawn</span>
-              </button>
-            {:else}
-              <p>No enabled agent tools. Add one in Settings.</p>
-            {/each}
-          {/if}
-        </div>
-        <footer><Button variant="outline" onclick={() => { dialog = null; todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; }}>Open Settings</Button><Button variant="ghost" onclick={() => (dialog = null)}>Cancel</Button></footer>
-      </section>
-      </Dialog.Content>
-    {/if}
+    </Dialog.Content>
   </Dialog.Root>
+{/if}
+
+{#if dialog === 'agent' && selectedProject}
+  <NewAgentDialog
+    projectId={selectedProject.id}
+    tools={registeredAgentTools}
+    templates={agentTemplates}
+    initialChoice={preferredAgentToolId === null ? null : { kind: 'tool', id: preferredAgentToolId }}
+    loading={agentToolsLoading}
+    busy={detailBusy}
+    onSpawn={(submission) => spawnAgent(submission.tool, submission.input, submission.template)}
+    onClose={() => (dialog = null)}
+    onOpenSettings={() => {
+      dialog = null;
+      todoBrowserOpen = false;
+      scratchpadBrowserOpen = false;
+      processOverviewKind = null;
+      selectSettingsSection('templates');
+      settingsOpen = true;
+    }}
+    onError={(message) => reportError(new Error(message))}
+  />
 {/if}
 
 {#if dialog === 'command' && selectedProject}
@@ -4461,6 +4566,7 @@
   .brand-mark { display: grid; width: 24px; height: 24px; flex: none; place-items: center; pointer-events: none; }
   .brand-mark img { display: block; width: 24px; height: 24px; }
   .notification-slot { display: flex; flex: none; }
+  .keep-awake-slot { display: flex; flex: none; }
 
   .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
@@ -4501,11 +4607,12 @@
   .resize-handle::after { position: absolute; top: 0; right: 2px; bottom: 0; width: 1px; background: transparent; content: ''; }
   .resize-handle:hover::after, .resize-handle:focus-visible::after { background: var(--muted-foreground); }
 
-  .project-rail.collapsed .brand { display: grid; min-height: 84px; grid-template-rows: 28px 28px 24px; align-content: center; justify-content: center; gap: 0; padding: 2px; }
+  .project-rail.collapsed .brand { display: grid; min-height: 112px; grid-template-rows: 28px 28px 28px 24px; align-content: center; justify-content: center; gap: 0; padding: 2px; }
   .project-rail.collapsed .rail-label span, .project-rail.collapsed .project-copy, .project-rail.collapsed .button-copy, .project-rail.collapsed .project-empty { display: none; }
   .project-rail.collapsed .brand-mark { grid-row: 1; place-self: center; }
-  .project-rail.collapsed .notification-slot { grid-row: 2; place-self: center; }
-  .project-rail.collapsed :global(.brand-collapse) { grid-row: 3; width: 24px; height: 24px; place-self: center; }
+  .project-rail.collapsed .keep-awake-slot { grid-row: 2; place-self: center; }
+  .project-rail.collapsed .notification-slot { grid-row: 3; place-self: center; }
+  .project-rail.collapsed :global(.brand-collapse) { grid-row: 4; width: 24px; height: 24px; place-self: center; }
   .project-rail.collapsed .rail-label { justify-content: center; padding-inline: 0; }
   .project-rail.collapsed .project-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 7px; }
   .project-rail.collapsed .folder-children { display: contents; }
@@ -4552,16 +4659,6 @@
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
   .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  .agent-choices { display: grid; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 5px; }
-  .agent-choices > button { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 0; border-bottom: 1px solid var(--border); padding: 7px 8px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
-  .agent-choices > button:hover { background: var(--accent); }
-  .agent-choice-mark { display: grid; width: 24px; height: 24px; place-items: center; color: var(--text-soft); }
-  .agent-choice-copy { display: grid; min-width: 0; gap: 2px; }
-  .agent-choice-copy strong { font-size: var(--font-size-sm); }
-  .agent-choice-copy small { overflow: hidden; color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-choice-action { color: var(--text-soft); font-size: var(--font-size-sm); }
-  .agent-choices p { margin: 0; padding: 13px; color: var(--text-soft); font-size: var(--font-size-sm); }
-
   @media (max-width: 760px) {
     .project-copy small { display: none; }
   }
