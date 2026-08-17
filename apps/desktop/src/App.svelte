@@ -92,6 +92,7 @@
   import type { ClaimedTodo } from './lib/claimedTodos';
   import type {
     CoordinationSnapshot,
+    NewScratchpadCommentInput,
     NewTodoInput,
     ScratchpadRead,
     ScratchpadSummary,
@@ -1699,7 +1700,11 @@
         coordination = next;
         if (selection?.kind === 'scratchpad') {
           const summary = next.scratchpads.find((scratchpad) => scratchpad.id === selection?.id);
-          if (summary && summary.revision !== scratchpadRead?.scratchpad.revision) {
+          if (
+            summary &&
+            (summary.revision !== scratchpadRead?.scratchpad.revision ||
+              summary.comments_revision !== scratchpadRead?.comments_revision)
+          ) {
             void loadScratchpad(selection.id, false);
           }
         }
@@ -2516,6 +2521,63 @@
       await Promise.all([loadTodo(selection.id), refreshCoordination(selectedProject.id, false)]);
     } catch (cause) {
       reportError(cause);
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function createScratchpadComment(input: NewScratchpadCommentInput): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    const projectId = selectedProject.id;
+    const scratchpadId = selection.id;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentCreate(projectId, scratchpadId, input);
+      await refreshCoordination(projectId, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function updateScratchpadComment(commentId: number, body: string): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentUpdate(selectedProject.id, commentId, body);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function resolveScratchpadComment(commentId: number, resolved: boolean): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentResolve(selectedProject.id, commentId, resolved);
+      await refreshCoordination(selectedProject.id, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function deleteScratchpadComment(commentId: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentDelete(selectedProject.id, commentId);
+      await refreshCoordination(selectedProject.id, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
     } finally {
       detailBusy = false;
     }
@@ -4678,6 +4740,10 @@
             onSetTags={setSelectedScratchpadTags}
             onArchive={archiveSelectedScratchpad}
             onDelete={deleteSelectedScratchpad}
+            onCreateComment={createScratchpadComment}
+            onUpdateComment={updateScratchpadComment}
+            onResolveComment={resolveScratchpadComment}
+            onDeleteComment={deleteScratchpadComment}
           />
         {:else}
           <ProjectOverview

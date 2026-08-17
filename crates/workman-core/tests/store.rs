@@ -64,6 +64,7 @@ fn fresh_database_migrates_to_current_schema() {
             "projects",
             "quick_prompts",
             "schema_migrations",
+            "scratchpad_comments",
             "scratchpad_tags",
             "scratchpads",
             "timer_runtime",

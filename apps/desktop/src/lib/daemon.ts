@@ -4,9 +4,11 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   CoordinationClient,
   CoordinationSnapshot,
+  NewScratchpadCommentInput,
   NewScratchpadInput,
   NewTodoInput,
   Scratchpad,
+  ScratchpadComment,
   ScratchpadRead,
   TodoComment,
   TodoCompleteResult,
@@ -514,7 +516,8 @@ export class DaemonClient
   coordinationScratchpad(projectId: number, scratchpadId: number): Promise<ScratchpadRead> {
     return this.request('coordination.scratchpad', {
       project_id: projectId,
-      scratchpad_id: scratchpadId
+      scratchpad_id: scratchpadId,
+      include_comments: true
     });
   }
 
@@ -546,6 +549,49 @@ export class DaemonClient
       scratchpad_id: scratchpadId,
       expected_revision: expectedRevision,
       content
+    });
+  }
+
+  coordinationScratchpadCommentCreate(
+    projectId: number,
+    scratchpadId: number,
+    input: NewScratchpadCommentInput
+  ): Promise<ScratchpadComment> {
+    return this.request('coordination.scratchpad_comment_create', {
+      project_id: projectId,
+      scratchpad_id: scratchpadId,
+      ...input
+    });
+  }
+
+  coordinationScratchpadCommentUpdate(
+    projectId: number,
+    commentId: number,
+    body: string
+  ): Promise<ScratchpadComment> {
+    return this.request('coordination.scratchpad_comment_update', {
+      project_id: projectId,
+      comment_id: commentId,
+      body
+    });
+  }
+
+  coordinationScratchpadCommentResolve(
+    projectId: number,
+    commentId: number,
+    resolved: boolean
+  ): Promise<ScratchpadComment> {
+    return this.request('coordination.scratchpad_comment_resolve', {
+      project_id: projectId,
+      comment_id: commentId,
+      resolved
+    });
+  }
+
+  async coordinationScratchpadCommentDelete(projectId: number, commentId: number): Promise<void> {
+    await this.request('coordination.scratchpad_comment_delete', {
+      project_id: projectId,
+      comment_id: commentId
     });
   }
 
