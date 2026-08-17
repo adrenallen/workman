@@ -1,6 +1,8 @@
 import type { ConnectionStatus, ProcessStatus, ProcessView } from './daemon';
 
 export const KEEP_AWAKE_SETTLE_MS = 60_000;
+export const KEEP_AWAKE_UNREACHABLE_MS = 10 * 60_000;
+export const KEEP_AWAKE_MAX_OBSERVATION_GAP_MS = 5_000;
 
 export type KeepAwakeMode = 'all' | 'specific';
 
@@ -8,7 +10,8 @@ export interface KeepAwakeMachineState {
   armed: boolean;
   mode: KeepAwakeMode;
   watchedAgentIds: number[];
-  idleSince: number | null;
+  idleObservedMs: number;
+  lastIdleObservationAt: number | null;
 }
 
 export interface KeepAwakeEvaluation {
@@ -18,22 +21,41 @@ export interface KeepAwakeEvaluation {
   releaseInSeconds: number | null;
 }
 
+export interface KeepAwakeObservation {
+  connected: boolean;
+  visible: boolean;
+}
+
+export interface KeepAwakeConnectionState {
+  disconnectedObservedMs: number;
+  lastObservationAt: number | null;
+}
+
 export interface KeepAwakeConnectionEvaluation {
-  lastConnectedAt: number;
-  shouldDisarm: boolean;
+  state: KeepAwakeConnectionState;
+  daemonUnreachable: boolean;
   recheckInMs: number | null;
 }
 
 export type KeepAwakeAgent = Pick<ProcessView, 'id' | 'kind' | 'status' | 'agent_state'>;
 
 const liveStatuses = new Set<ProcessStatus>(['starting', 'running']);
+const activeObservation: KeepAwakeObservation = { connected: true, visible: true };
 
 export function initialKeepAwakeState(): KeepAwakeMachineState {
   return {
     armed: false,
     mode: 'all',
     watchedAgentIds: [],
-    idleSince: null
+    idleObservedMs: 0,
+    lastIdleObservationAt: null
+  };
+}
+
+export function initialKeepAwakeConnectionState(): KeepAwakeConnectionState {
+  return {
+    disconnectedObservedMs: 0,
+    lastObservationAt: null
   };
 }
 
@@ -62,17 +84,24 @@ export function armKeepAwake(
     armed: true,
     mode,
     watchedAgentIds,
-    idleSince: null
+    idleObservedMs: 0,
+    lastIdleObservationAt: null
   };
 }
 
 export function disarmKeepAwake(state: KeepAwakeMachineState): KeepAwakeMachineState {
-  if (!state.armed && state.idleSince === null && state.watchedAgentIds.length === 0) return state;
+  if (
+    !state.armed
+    && state.watchedAgentIds.length === 0
+    && state.idleObservedMs === 0
+    && state.lastIdleObservationAt === null
+  ) return state;
   return {
     ...state,
     armed: false,
     watchedAgentIds: [],
-    idleSince: null
+    idleObservedMs: 0,
+    lastIdleObservationAt: null
   };
 }
 
@@ -80,7 +109,9 @@ export function evaluateKeepAwake(
   state: KeepAwakeMachineState,
   processes: KeepAwakeAgent[],
   now: number,
-  settleMs = KEEP_AWAKE_SETTLE_MS
+  observation: KeepAwakeObservation = activeObservation,
+  settleMs = KEEP_AWAKE_SETTLE_MS,
+  maxObservationGapMs = KEEP_AWAKE_MAX_OBSERVATION_GAP_MS
 ): KeepAwakeEvaluation {
   if (!state.armed) {
     return {
@@ -103,18 +134,26 @@ export function evaluateKeepAwake(
   });
 
   if (waitingAgentIds.length > 0) {
-    const next = state.idleSince === null ? state : { ...state, idleSince: null };
     return {
-      state: next,
+      state: resetIdleObservation(state),
       shouldRelease: false,
       waitingAgentIds,
       releaseInSeconds: null
     };
   }
 
-  const idleSince = state.idleSince ?? now;
-  const elapsed = Math.max(0, now - idleSince);
-  if (elapsed >= settleMs) {
+  if (!observation.connected || !observation.visible) {
+    return {
+      state: resetIdleObservation(state),
+      shouldRelease: false,
+      waitingAgentIds: [],
+      releaseInSeconds: Math.max(1, Math.ceil(settleMs / 1_000))
+    };
+  }
+
+  const delta = observationDelta(state.lastIdleObservationAt, now, maxObservationGapMs);
+  const idleObservedMs = delta === null ? 0 : state.idleObservedMs + delta;
+  if (idleObservedMs >= settleMs) {
     return {
       state: disarmKeepAwake(state),
       shouldRelease: true,
@@ -123,39 +162,78 @@ export function evaluateKeepAwake(
     };
   }
 
+  const nextState = state.idleObservedMs === idleObservedMs && state.lastIdleObservationAt === now
+    ? state
+    : { ...state, idleObservedMs, lastIdleObservationAt: now };
   return {
-    state: state.idleSince === idleSince ? state : { ...state, idleSince },
+    state: nextState,
     shouldRelease: false,
     waitingAgentIds: [],
-    releaseInSeconds: Math.max(1, Math.ceil((settleMs - elapsed) / 1_000))
+    releaseInSeconds: Math.max(1, Math.ceil((settleMs - idleObservedMs) / 1_000))
   };
 }
 
-/** Evaluate using a fresh clock read whenever a status push or UI refresh re-runs the caller. */
+/** Evaluate with the monotonic timestamp captured by the caller's latest active UI tick. */
 export function evaluateKeepAwakeAtCurrentTime(
   state: KeepAwakeMachineState,
   processes: KeepAwakeAgent[],
-  refresh: number,
+  monotonicNow: number,
+  observation: KeepAwakeObservation,
   settleMs = KEEP_AWAKE_SETTLE_MS
 ): KeepAwakeEvaluation {
-  void refresh;
-  return evaluateKeepAwake(state, processes, Date.now(), settleMs);
+  return evaluateKeepAwake(state, processes, monotonicNow, observation, settleMs);
 }
 
-/** Preserve the last healthy timestamp across connecting/disconnected oscillation. */
+/**
+ * Count only short, actively observed disconnect intervals. A suspended or throttled
+ * webview creates a gap and restarts confirmation instead of converting sleep time
+ * into a daemon-outage verdict.
+ */
 export function evaluateKeepAwakeConnection(
-  lastConnectedAt: number,
+  state: KeepAwakeConnectionState,
   connectionStatus: ConnectionStatus['status'],
   now: number,
-  disconnectMs = 60_000
+  visible: boolean,
+  unreachableMs = KEEP_AWAKE_UNREACHABLE_MS,
+  maxObservationGapMs = KEEP_AWAKE_MAX_OBSERVATION_GAP_MS
 ): KeepAwakeConnectionEvaluation {
-  if (connectionStatus === 'connected') {
-    return { lastConnectedAt: now, shouldDisarm: false, recheckInMs: null };
+  if (connectionStatus === 'connected' || !visible) {
+    const reset = resetConnectionObservation(state);
+    return { state: reset, daemonUnreachable: false, recheckInMs: null };
   }
-  const elapsed = Math.max(0, now - lastConnectedAt);
+
+  const delta = observationDelta(state.lastObservationAt, now, maxObservationGapMs);
+  const disconnectedObservedMs = delta === null ? 0 : state.disconnectedObservedMs + delta;
+  const nextState = state.disconnectedObservedMs === disconnectedObservedMs
+    && state.lastObservationAt === now
+    ? state
+    : { disconnectedObservedMs, lastObservationAt: now };
+  const daemonUnreachable = disconnectedObservedMs >= unreachableMs;
   return {
-    lastConnectedAt,
-    shouldDisarm: elapsed >= disconnectMs,
-    recheckInMs: Math.max(0, disconnectMs - elapsed)
+    state: nextState,
+    daemonUnreachable,
+    recheckInMs: daemonUnreachable ? null : Math.max(0, unreachableMs - disconnectedObservedMs)
   };
+}
+
+function observationDelta(
+  previous: number | null,
+  now: number,
+  maxObservationGapMs: number
+): number | null {
+  if (previous === null) return null;
+  const delta = now - previous;
+  return delta >= 0 && delta <= maxObservationGapMs ? delta : null;
+}
+
+function resetIdleObservation(state: KeepAwakeMachineState): KeepAwakeMachineState {
+  if (state.idleObservedMs === 0 && state.lastIdleObservationAt === null) return state;
+  return { ...state, idleObservedMs: 0, lastIdleObservationAt: null };
+}
+
+function resetConnectionObservation(
+  state: KeepAwakeConnectionState
+): KeepAwakeConnectionState {
+  if (state.disconnectedObservedMs === 0 && state.lastObservationAt === null) return state;
+  return initialKeepAwakeConnectionState();
 }

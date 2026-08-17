@@ -1,7 +1,7 @@
 <script lang="ts">
   import CoffeeIcon from '@lucide/svelte/icons/coffee';
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -13,6 +13,7 @@
     disarmKeepAwake,
     evaluateKeepAwakeAtCurrentTime,
     evaluateKeepAwakeConnection,
+    initialKeepAwakeConnectionState,
     initialKeepAwakeState,
     runningAgents,
     type KeepAwakeMode
@@ -24,6 +25,7 @@
     processes: ProcessView[];
     projects: Project[];
     connectionStatus: ConnectionStatus['status'];
+    visible: boolean;
     open?: boolean;
     armed?: boolean;
     supported?: boolean;
@@ -31,14 +33,19 @@
 
   interface NativeKeepAwakeStatus {
     supported: boolean;
+    armed: boolean;
     active: boolean;
+    assertion_pid: number | null;
     warning: string | null;
   }
+
+  type ReleaseReason = 'idle' | 'user' | null;
 
   let {
     processes,
     projects,
     connectionStatus,
+    visible,
     open = $bindable(false),
     armed = $bindable(false),
     supported = $bindable(false)
@@ -49,36 +56,77 @@
   let mode = $state<KeepAwakeMode>('all');
   let specificAgentId = $state('');
   let machine = $state(initialKeepAwakeState());
+  let connectionMachine = $state(initialKeepAwakeConnectionState());
   let machineGeneration = $state(0);
   let autoReleasePending = false;
-  let clockTick = $state(0);
-  let lastConnectedAt = $state(Date.now());
+  let componentActive = false;
+  let clockTick = $state(monotonicNow());
+  let nativeStatus = $state<NativeKeepAwakeStatus>({
+    supported: false,
+    armed: false,
+    active: false,
+    assertion_pid: null,
+    warning: null
+  });
+  let lastReleaseReason = $state<ReleaseReason>(null);
   let availableAgents = $derived(runningAgents(processes));
-  let evaluation = $derived(evaluateKeepAwakeAtCurrentTime(machine, processes, clockTick));
+  let evaluation = $derived(evaluateKeepAwakeAtCurrentTime(
+    machine,
+    processes,
+    clockTick,
+    { connected: connectionStatus === 'connected', visible }
+  ));
+  let connectionEvaluation = $derived(evaluateKeepAwakeConnection(
+    connectionMachine,
+    connectionStatus,
+    clockTick,
+    visible
+  ));
   let selectedAgent = $derived(
     availableAgents.find((process) => String(process.id) === specificAgentId) ?? null
   );
   let triggerLabel = $derived.by(() => {
     if (warning) return warning;
     if (!machine.armed) return 'Keep Mac awake until agents idle';
+    if (!nativeStatus.active) return 'Restoring the macOS idle-sleep assertion';
+    if (connectionEvaluation.daemonUnreachable) {
+      return 'Daemon unreachable — Mac is still being kept awake';
+    }
     if (machine.mode === 'specific') {
       const name = processName(machine.watchedAgentIds[0]);
       return `Keeping Mac awake until ${name ?? 'the watched agent'} is idle`;
     }
     return 'Keeping Mac awake until all agents are idle';
   });
+  let statusIsWarning = $derived(
+    warning !== null
+      || (machine.armed && (!nativeStatus.active || connectionEvaluation.daemonUnreachable))
+  );
   let statusLine = $derived.by(() => {
-    if (warning) return warning;
-    if (!machine.armed) return 'Ready to prevent system idle sleep.';
+    const assertion = assertionStatus(nativeStatus);
+    if (machine.armed && warning) return `${warning} ${assertion}`;
+    if (!machine.armed && warning) return warning;
+    if (!machine.armed) {
+      if (lastReleaseReason === 'idle') return 'Released because all watched agents became idle.';
+      if (lastReleaseReason === 'user') return 'Released by you.';
+      return 'Ready to prevent system idle sleep.';
+    }
+    if (!nativeStatus.active) return 'Restoring the macOS idle-sleep assertion…';
+    if (connectionEvaluation.daemonUnreachable) {
+      return `Daemon unreachable — still keeping Mac awake. ${assertion}`;
+    }
+    if (connectionStatus !== 'connected') {
+      return `Daemon reconnecting — still keeping Mac awake. ${assertion}`;
+    }
     if (evaluation.releaseInSeconds !== null) {
       const subject = machine.mode === 'all' ? 'All agents' : 'Watched agent';
-      return `${subject} idle — releasing in ${evaluation.releaseInSeconds}s`;
+      return `${subject} idle — releasing in ${evaluation.releaseInSeconds}s. ${assertion}`;
     }
     const names = evaluation.waitingAgentIds
       .map(processName)
       .filter((name): name is string => name !== null);
     const count = evaluation.waitingAgentIds.length;
-    return `Waiting on ${count} ${count === 1 ? 'agent' : 'agents'}: ${names.join(', ')}`;
+    return `Keeping Mac awake. ${assertion} Waiting on ${count} ${count === 1 ? 'agent' : 'agents'}: ${names.join(', ')}`;
   });
 
   $effect(() => {
@@ -100,69 +148,61 @@
   });
 
   $effect(() => {
-    if (connectionStatus === 'connected') lastConnectedAt = Date.now();
+    const next = connectionEvaluation;
+    if (next.state !== connectionMachine) connectionMachine = next.state;
   });
 
   $effect(() => {
-    if (!machine.armed || connectionStatus === 'connected') return;
-    const connection = evaluateKeepAwakeConnection(
-      lastConnectedAt,
-      connectionStatus,
-      Date.now()
-    );
-    if (connection.shouldDisarm) {
-      void disarm('Keep awake stopped because the daemon disconnected.', true);
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      const current = evaluateKeepAwakeConnection(
-        lastConnectedAt,
-        connectionStatus,
-        Date.now()
-      );
-      if (machine.armed && current.shouldDisarm) {
-        void disarm('Keep awake stopped because the daemon disconnected.', true);
-      }
-    }, connection.recheckInMs ?? 60_000);
-    return () => window.clearTimeout(timeout);
+    const status = connectionStatus;
+    const documentVisible = visible;
+    clockTick = monotonicNow();
+    if (
+      componentActive
+      && documentVisible
+      && untrack(() => machine.armed && !busy)
+      && status === 'connected'
+    ) void syncNativeStatus();
   });
 
   onMount(() => {
-    let active = true;
+    componentActive = true;
     let pollCount = 0;
     void syncNativeStatus();
     const timer = window.setInterval(() => {
-      clockTick += 1;
+      clockTick = monotonicNow();
       pollCount += 1;
-      if (machine.armed && pollCount % 3 === 0) void syncNativeStatus();
+      if (machine.armed && !busy && pollCount % 3 === 0) void syncNativeStatus();
     }, 1_000);
 
     return () => {
-      active = false;
+      componentActive = false;
       window.clearInterval(timer);
       if (machine.armed) void invoke('keep_awake_stop').catch(() => undefined);
     };
-
-    async function syncNativeStatus(): Promise<void> {
-      const statusGeneration = machineGeneration;
-      try {
-        const status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
-        if (!active || machineGeneration !== statusGeneration) return;
-        supported = status.supported;
-        if (status.warning) warning = status.warning;
-        if (!machine.armed && status.active) {
-          mode = 'all';
-          machine = armKeepAwake('all', null);
-          machineGeneration += 1;
-        } else if (machine.armed && !status.active) {
-          machine = disarmKeepAwake(machine);
-          machineGeneration += 1;
-        }
-      } catch (cause) {
-        if (active && machineGeneration === statusGeneration) warning = message(cause);
-      }
-    }
   });
+
+  async function syncNativeStatus(): Promise<void> {
+    const statusGeneration = machineGeneration;
+    try {
+      let status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
+      if (!componentActive || machineGeneration !== statusGeneration) return;
+      applyNativeStatus(status);
+      if (machine.armed && !busy && (!status.armed || !status.active)) {
+        status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
+        if (!componentActive || machineGeneration !== statusGeneration) return;
+      }
+      applyNativeStatus(status);
+      if (!machine.armed && status.armed) {
+        mode = 'all';
+        machine = armKeepAwake('all', null);
+        machineGeneration += 1;
+        lastReleaseReason = null;
+        clockTick = monotonicNow();
+      }
+    } catch (cause) {
+      if (componentActive && machineGeneration === statusGeneration) warning = message(cause);
+    }
+  }
 
   function processName(processId: number | undefined): string | null {
     if (processId === undefined) return null;
@@ -184,7 +224,7 @@
     warning = null;
     try {
       const status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
-      supported = status.supported;
+      applyNativeStatus(status);
       if (!status.supported || !status.active) {
         warning = status.warning ?? 'macOS keep awake is unavailable.';
         return;
@@ -194,7 +234,8 @@
         mode === 'specific' ? Number(specificAgentId) : null
       );
       machineGeneration += 1;
-      clockTick += 1;
+      lastReleaseReason = null;
+      clockTick = monotonicNow();
     } catch (cause) {
       warning = message(cause);
     } finally {
@@ -202,27 +243,20 @@
     }
   }
 
-  async function disarm(
-    reason: string | null = null,
-    notifyDisconnect = false
-  ): Promise<void> {
+  async function disarm(): Promise<void> {
     if (busy) return;
     busy = true;
     const generation = machineGeneration;
     try {
-      await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
       const disarmed = machine.armed && machineGeneration === generation;
       if (disarmed) {
         machine = disarmKeepAwake(machine);
         machineGeneration += 1;
+        lastReleaseReason = 'user';
       }
-      warning = reason;
-      if (notifyDisconnect && disarmed) {
-        await deliverNativeSystemNotification(
-          'Keep awake released — daemon disconnected',
-          'Your Mac may sleep normally again.'
-        );
-      }
+      applyNativeStatus(status);
+      warning = null;
     } catch (cause) {
       warning = message(cause);
     } finally {
@@ -236,11 +270,12 @@
     autoReleasePending = true;
     const generation = machineGeneration;
     try {
-      await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+      applyNativeStatus(status);
     } catch (cause) {
       warning = message(cause);
       if (machine.armed && machineGeneration === generation) {
-        machine = { ...machine, idleSince: Date.now() };
+        machine = { ...machine, idleObservedMs: 0, lastIdleObservationAt: null };
       }
       autoReleasePending = false;
       busy = false;
@@ -250,6 +285,7 @@
     if (disarmed) {
       machine = disarmKeepAwake(machine);
       machineGeneration += 1;
+      lastReleaseReason = 'idle';
     }
     autoReleasePending = false;
     busy = false;
@@ -264,6 +300,23 @@
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
+
+  function applyNativeStatus(status: NativeKeepAwakeStatus): void {
+    supported = status.supported;
+    nativeStatus = status;
+    warning = status.warning;
+  }
+
+  function assertionStatus(status: NativeKeepAwakeStatus): string {
+    if (!status.active) return 'No live idle-sleep assertion.';
+    return status.assertion_pid === null
+      ? 'macOS idle-sleep assertion held.'
+      : `Assertion PID ${status.assertion_pid} held.`;
+  }
+
+  function monotonicNow(): number {
+    return globalThis.performance?.now() ?? Date.now();
+  }
 </script>
 
 {#if supported === true}
@@ -274,7 +327,7 @@
           {...props}
           class="keep-awake-trigger size-7 rounded border border-border bg-card"
           data-armed={machine.armed}
-          data-warning={warning !== null}
+          data-warning={statusIsWarning}
           label={triggerLabel}
         >
           {#snippet icon()}
@@ -286,7 +339,7 @@
     <Popover.Content class="keep-awake-popover" align="start" side="bottom" sideOffset={7}>
       <Popover.Header>
         <Popover.Title>Keep Mac awake</Popover.Title>
-        <Popover.Description>Prevent system idle sleep until watched agents are fully idle.</Popover.Description>
+        <Popover.Description>Prevent idle sleep until watched agents are fully idle. Closing the lid still sleeps this Mac.</Popover.Description>
       </Popover.Header>
 
       <fieldset disabled={busy || machine.armed}>
@@ -329,7 +382,7 @@
         </div>
       {/if}
 
-      <p class:warning role={warning ? 'alert' : 'status'} aria-live="polite">{statusLine}</p>
+      <p class:warning={statusIsWarning} role={statusIsWarning ? 'alert' : 'status'} aria-live="polite">{statusLine}</p>
 
       <Button
         size="sm"

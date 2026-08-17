@@ -4005,6 +4005,7 @@
           processes={profileProcesses}
           {projects}
           connectionStatus={connection.status}
+          visible={documentVisible}
           bind:open={keepAwakeOpen}
           bind:armed={keepAwakeArmed}
           bind:supported={keepAwakeSupported}

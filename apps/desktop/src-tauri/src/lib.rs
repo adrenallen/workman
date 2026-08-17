@@ -72,6 +72,7 @@ struct KeepAwakeState {
 
 #[derive(Default)]
 struct KeepAwakeInner {
+    armed: bool,
     child: Option<Child>,
     warning: Option<String>,
 }
@@ -79,7 +80,9 @@ struct KeepAwakeInner {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct KeepAwakeStatus {
     supported: bool,
+    armed: bool,
     active: bool,
+    assertion_pid: Option<u32>,
     warning: Option<String>,
 }
 
@@ -90,10 +93,13 @@ impl KeepAwakeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         stop_keep_awake_child(&mut inner)?;
+        inner.armed = false;
         inner.warning = None;
         Ok(KeepAwakeStatus {
             supported: cfg!(target_os = "macos"),
+            armed: false,
             active: false,
+            assertion_pid: None,
             warning: None,
         })
     }
@@ -335,18 +341,19 @@ fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus,
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        refresh_keep_awake_child(&mut inner);
-        if inner.child.is_none() {
-            let child = keep_awake_command(std::process::id())
+        inner.armed = true;
+        if let Err(error) = ensure_keep_awake_child_with(&mut inner, || {
+            keep_awake_command(std::process::id())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|error| format!("could not start macOS keep awake: {error}"))?;
-            inner.child = Some(child);
-            inner.warning = None;
+        }) {
+            inner.armed = false;
+            inner.warning = Some(error.clone());
+            return Err(error);
         }
-        Ok(keep_awake_status_from(&inner))
+        Ok(take_keep_awake_status(&mut inner))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -354,7 +361,9 @@ fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus,
         let _ = state;
         Ok(KeepAwakeStatus {
             supported: false,
+            armed: false,
             active: false,
+            assertion_pid: None,
             warning: None,
         })
     }
@@ -371,8 +380,20 @@ fn keep_awake_status(state: State<'_, KeepAwakeState>) -> KeepAwakeStatus {
         .inner
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    refresh_keep_awake_child(&mut inner);
-    keep_awake_status_from(&inner)
+    if inner.armed {
+        if let Err(error) = ensure_keep_awake_child_with(&mut inner, || {
+            keep_awake_command(std::process::id())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        }) {
+            inner.warning = Some(error);
+        }
+    } else {
+        refresh_keep_awake_child(&mut inner);
+    }
+    take_keep_awake_status(&mut inner)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -385,8 +406,43 @@ fn keep_awake_command(pid: u32) -> Command {
 fn keep_awake_status_from(inner: &KeepAwakeInner) -> KeepAwakeStatus {
     KeepAwakeStatus {
         supported: cfg!(target_os = "macos"),
+        armed: inner.armed,
         active: inner.child.is_some(),
+        assertion_pid: inner.child.as_ref().map(Child::id),
         warning: inner.warning.clone(),
+    }
+}
+
+fn take_keep_awake_status(inner: &mut KeepAwakeInner) -> KeepAwakeStatus {
+    let status = keep_awake_status_from(inner);
+    if status.active {
+        inner.warning = None;
+    }
+    status
+}
+
+fn ensure_keep_awake_child_with(
+    inner: &mut KeepAwakeInner,
+    spawn: impl FnOnce() -> std::io::Result<Child>,
+) -> Result<(), String> {
+    refresh_keep_awake_child(inner);
+    if inner.child.is_some() {
+        return Ok(());
+    }
+
+    let prior_warning = inner.warning.take();
+    match spawn() {
+        Ok(child) => {
+            inner.child = Some(child);
+            inner.warning = prior_warning
+                .map(|warning| format!("Keep awake assertion restored after: {warning}"));
+            Ok(())
+        }
+        Err(error) => {
+            let error = format!("Could not start macOS keep awake: {error}");
+            inner.warning = Some(error.clone());
+            Err(error)
+        }
     }
 }
 
@@ -1432,10 +1488,49 @@ mod tests {
             keep_awake_status_from(&inner),
             KeepAwakeStatus {
                 supported: cfg!(target_os = "macos"),
+                armed: false,
                 active: false,
+                assertion_pid: None,
                 warning: None,
             }
         );
+    }
+
+    #[test]
+    fn requested_keep_awake_assertion_is_checked_and_respawned() {
+        let mut inner = KeepAwakeInner {
+            armed: true,
+            ..KeepAwakeInner::default()
+        };
+        ensure_keep_awake_child_with(&mut inner, test_keep_awake_child).unwrap();
+        let first_pid = inner.child.as_ref().map(Child::id).unwrap();
+
+        let child = inner.child.as_mut().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        ensure_keep_awake_child_with(&mut inner, test_keep_awake_child).unwrap();
+        let status = keep_awake_status_from(&inner);
+        assert!(status.armed);
+        assert!(status.active);
+        assert_ne!(status.assertion_pid, Some(first_pid));
+        assert!(
+            status
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("assertion restored"))
+        );
+
+        stop_keep_awake_child(&mut inner).unwrap();
+    }
+
+    fn test_keep_awake_child() -> std::io::Result<Child> {
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
     }
 
     #[test]
