@@ -304,6 +304,62 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert_eq!(reordered["result"][0]["id"], template_id);
 
+    let model_tool = rpc(
+        &mut socket,
+        70,
+        "agent_tools.save",
+        json!({
+            "tool": {
+                "name": "Model test agent",
+                "command": "true --model command/provider-model",
+                "tool_type": "opencode",
+                "enabled": true
+            }
+        }),
+    )
+    .await;
+    let model_tool_id = model_tool["result"]["id"].as_i64().unwrap();
+    let model_template = rpc(
+        &mut socket,
+        71,
+        "agent_templates.save",
+        json!({
+            "template": {
+                "name": "Model reviewer",
+                "agent_tool_id": model_tool_id,
+                "extra_args": ["--model", "default/provider-model", "--review"],
+                "prompt": "Review with the selected model."
+            }
+        }),
+    )
+    .await;
+    let model_template_id = model_template["result"]["id"].as_i64().unwrap();
+    let model_spawn = rpc(
+        &mut socket,
+        72,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": model_template_id,
+            "model": "override/provider-model",
+            "name": "model-override-worker"
+        }),
+    )
+    .await;
+    assert!(model_spawn["ok"].as_bool().unwrap());
+    let model_process_id = model_spawn["result"]["process_id"].as_i64().unwrap();
+    let model_command = registry
+        .lock()
+        .await
+        .get_status(model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(model_command.matches("--model").count(), 1);
+    assert!(model_command.contains("--model override/provider-model"));
+    assert!(!model_command.contains("command/provider-model"));
+    assert!(!model_command.contains("default/provider-model"));
+
     let clipboard_dir = temp.path().join("Application Support/terminal-clipboard");
     std::fs::create_dir_all(&clipboard_dir)?;
     let source_icon = clipboard_dir.join("paste-123.png");
@@ -682,6 +738,22 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_exiting["result"]["status"], "exited");
+    let closed_model = rpc(
+        &mut socket,
+        73,
+        "process.close",
+        json!({ "process_id": model_process_id }),
+    )
+    .await;
+    assert_eq!(closed_model["result"]["status"], "exited");
+    let deleted_model_template = rpc(
+        &mut socket,
+        74,
+        "agent_templates.delete",
+        json!({ "agent_template_id": model_template_id }),
+    )
+    .await;
+    assert_eq!(deleted_model_template["result"]["deleted"], true);
     let deleted_template = rpc(
         &mut socket,
         29,
@@ -714,6 +786,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(deleted_exiting_tool["result"]["deleted"], true);
+    let deleted_model_tool = rpc(
+        &mut socket,
+        75,
+        "agent_tools.delete",
+        json!({ "agent_tool_id": model_tool_id }),
+    )
+    .await;
+    assert_eq!(deleted_model_tool["result"]["deleted"], true);
 
     socket.close(None).await?;
     let _ = shutdown_tx.send(());

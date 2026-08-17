@@ -501,6 +501,9 @@ struct SpawnAgentParams {
     agent_template_id: Option<AgentTemplateId>,
     #[serde(default)]
     name: Option<String>,
+    /// Optional tool-aware model override. Prefer this to --model in extra_args.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     extra_args: Vec<String>,
     #[serde(default)]
@@ -594,6 +597,7 @@ async fn dispatch(
                 params.agent_template_id,
                 params.name,
                 params.extra_args,
+                params.model,
                 params.prompt,
                 mcp_url,
                 params.auto_acknowledge_dialogs,

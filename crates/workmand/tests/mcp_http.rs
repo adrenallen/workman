@@ -316,11 +316,33 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("read it back with scratchpad_read or todo_get and reference its ID")
     );
+    let tools_help = call(&process_client, "help", json!({ "topic": "tools" })).await;
     assert!(
-        call(&process_client, "mcp_tools_summary", json!({})).await["count"]
-            .as_u64()
+        tools_help["text"]
+            .as_str()
             .unwrap()
-            >= 13
+            .contains("complete core tool list")
+    );
+    let spawning_help = call(&process_client, "help", json!({ "topic": "spawning" })).await;
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("only when the user names a template or explicitly asks for one")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("pick agent_tool_id from list_agent_tools")
+    );
+    let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
+    assert!(tools_summary["count"].as_u64().unwrap() >= 13);
+    assert!(
+        tools_summary["spawn_agent_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Prefer model for a per-launch override")
     );
     assert_eq!(
         call(&process_client, "list_projects", json!({})).await["projects"]
