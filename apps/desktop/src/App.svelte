@@ -47,6 +47,7 @@
   import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
   import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
   import TerminalView from './lib/TerminalView.svelte';
+  import { processCycleDirection } from './lib/terminalKeys';
   import TodoBrowser from './lib/TodoBrowser.svelte';
   import TodoBlockerPicker from './lib/TodoBlockerPicker.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
@@ -828,12 +829,10 @@
       focusAdjacentPanel(panelForTarget(target), event.key === 'ArrowLeft' ? -1 : 1);
       return;
     }
-    if (
-      event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
-      && (event.key === 'ArrowUp' || event.key === 'ArrowDown')
-    ) {
+    const cycleDirection = processCycleDirection(event);
+    if (cycleDirection !== null) {
       event.preventDefault();
-      cycleProcess(event.key === 'ArrowUp' ? -1 : 1, panelForTarget(target));
+      cycleProcess(cycleDirection, panelForTarget(target));
       return;
     }
     if (panelForTarget(target) === 'projects') handleProjectListKeys(event);
@@ -939,6 +938,10 @@
     selectProcessById(process.id);
     if (returnPanel === 'projects' || returnPanel === 'tree') {
       void tick().then(() => focusPanel(returnPanel));
+    } else if (returnPanel === 'main') {
+      void tick().then(() => {
+        if (!focusPanel('main')) terminalView?.focusInput();
+      });
     }
   }
 
@@ -4207,6 +4210,7 @@
                 onError={reportError}
                 onContextMenu={showContextMenu}
                 onQuickPrompts={openQuickPrompts}
+                onCycleProcess={(direction) => cycleProcess(direction, 'main')}
                 onUnfocus={unfocusSelectedProcess}
               />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
