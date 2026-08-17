@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import BotIcon from '@lucide/svelte/icons/bot';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
@@ -28,10 +29,27 @@
 
   const kinds = ['agent', 'terminal', 'command'] as const;
   let openKind = $state<ProcessKind | null>(null);
+  let indicatorRoot = $state<HTMLSpanElement | null>(null);
   let visibleKinds = $derived(kinds.filter((kind) => activity[kind].active > 0));
 
-  $effect(() => {
-    if (openKind && activity[openKind].active === 0) openKind = null;
+  $effect.pre(() => {
+    if (typeof document === 'undefined') return;
+    const focused = document.activeElement;
+    const focusedTrigger = focused instanceof HTMLElement
+      ? focused.closest<HTMLElement>('[data-project-kind]')
+      : null;
+    const focusedKind = focusedTrigger?.dataset.projectKind as ProcessKind | undefined;
+    const focusedKindDisappeared = indicatorRoot?.contains(focused)
+      && focusedKind !== undefined
+      && activity[focusedKind].active === 0;
+    const openKindDisappeared = openKind !== null && activity[openKind].active === 0;
+    if (!focusedKindDisappeared && !openKindDisappeared) return;
+
+    const projectButton = indicatorRoot
+      ?.closest('.project-row')
+      ?.querySelector<HTMLButtonElement>('.project-select');
+    if (openKindDisappeared) openKind = null;
+    if (projectButton) void tick().then(() => projectButton.focus());
   });
 
   function activeProcesses(kind: ProcessKind): ProcessView[] {
@@ -70,22 +88,15 @@
 
   function stateLabel(process: ProcessView): string {
     if (process.kind === 'agent') {
-      const state = agentNeedsInput(process) ? 'needs input' : 'working';
-      const activityAt = process.agent_state.last_content_change_at
-        ?? process.agent_state.last_output_at;
-      return activityAt == null ? state : `${state} · ${relativeTime(activityAt)}`;
+      if (agentNeedsInput(process)) return 'needs input';
+      return process.status === 'starting' ? 'starting' : 'working';
     }
     if (process.status === 'starting') return 'starting';
     return process.kind === 'terminal' ? 'live' : 'running';
   }
 
-  function relativeTime(timestamp: number): string {
-    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
-    if (seconds < 5) return 'active now';
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    return `${Math.floor(minutes / 60)}h ago`;
+  function compactCount(count: number): string {
+    return count > 99 ? '99+' : String(count);
   }
 </script>
 
@@ -95,14 +106,15 @@
     class="project-kind-indicators"
     data-project-kind-indicators
     data-compact={compact ? 'true' : 'false'}
-    aria-label={`Running processes in ${projectTitle}`}
+    aria-label={`Active processes in ${projectTitle}`}
     role="group"
+    bind:this={indicatorRoot}
   >
     {#each visibleKinds as kind (kind)}
       {@const detail = activity[kind]}
       <span
-        class:attention={kind === 'agent' && detail.needsInput > 0}
         class="project-kind-indicator"
+        data-tone={detail.tone}
       >
         <Popover.Root open={openKind === kind} onOpenChange={(open) => changeOpen(kind, open)}>
           <Popover.Trigger>
@@ -126,7 +138,7 @@
                       {:else}
                         <PlayIcon size={13} strokeWidth={1.9} />
                       {/if}
-                      {#if detail.active > 1}<small>{detail.active}</small>{/if}
+                      {#if detail.active > 1}<small>{compactCount(detail.active)}</small>{/if}
                     </span>
                   {/if}
                 {/snippet}
@@ -138,11 +150,11 @@
             align="start"
             sideOffset={6}
             class="w-64 gap-0 p-1.5"
-            aria-label={`${kindTitle(kind)} running in ${projectTitle}`}
+            aria-label={`${kindTitle(kind)} active in ${projectTitle}`}
             data-project-kind-popover={kind}
           >
             <header class="kind-popover-header">
-              <span class:attention={kind === 'agent' && detail.needsInput > 0} aria-hidden="true">
+              <span data-tone={detail.tone} aria-hidden="true">
                 {#if kind === 'agent'}
                   <BotIcon size={14} strokeWidth={1.9} />
                 {:else if kind === 'terminal'}
@@ -181,22 +193,22 @@
 {/if}
 
 <style>
-  .project-kind-indicators { display: inline-flex; min-height: 20px; flex: none; align-items: center; gap: 1px; }
-  .project-kind-indicator { display: inline-flex; color: var(--agent-state-working); }
-  .project-kind-indicator.attention { color: var(--warning-token); }
-  .project-kind-indicator :global(.project-kind-trigger) { width: auto; min-width: 20px; height: 20px; gap: 2px; border-radius: var(--radius); padding: 0 3px; color: inherit; }
-  .kind-glyph { display: inline-flex; align-items: center; gap: 2px; }
-  .kind-glyph small { min-width: 8px; color: currentColor; font: 700 9px/1 var(--terminal-font-family); text-align: center; }
+  .project-kind-indicators { display: inline-flex; min-width: 0; min-height: 20px; flex: none; align-items: center; gap: 0; }
+  .project-kind-indicator { --indicator-tone: var(--agent-state-working); display: inline-flex; color: var(--indicator-tone); }
+  .project-kind-indicator[data-tone='needs-input'] { --indicator-tone: var(--warning-token); }
+  .project-kind-indicator :global(.project-kind-trigger) { width: 18px; min-width: 18px; height: 20px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0; color: inherit; background: var(--card); }
+  .kind-glyph { position: relative; display: grid; width: 14px; height: 14px; place-items: center; }
+  .kind-glyph small { position: absolute; right: -5px; bottom: -5px; display: grid; min-width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 1px; color: var(--card); background: var(--indicator-tone); font: 750 8px/1 var(--terminal-font-family); text-align: center; }
 
-  .project-kind-indicators.compact { position: absolute; z-index: 4; right: 1px; bottom: 2px; align-items: end; gap: 1px; }
-  .compact .project-kind-indicator :global(.project-kind-pip) { width: 7px; min-width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; padding: 0; background: var(--agent-state-working); color: transparent; }
-  .compact .project-kind-indicator.attention :global(.project-kind-pip) { background: var(--warning-token); }
+  .project-kind-indicators.compact { position: absolute; z-index: 4; right: 0; bottom: 0; align-items: end; gap: 0; }
+  .compact .project-kind-indicator :global(.project-kind-pip) { display: grid; width: 12px; min-width: 12px; height: 12px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: transparent; }
   .compact .project-kind-indicator :global(.project-kind-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
-  .pip-mark { display: block; width: 100%; height: 100%; border-radius: inherit; }
+  .pip-mark { display: block; width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; background: var(--agent-state-working); }
+  .project-kind-indicator[data-tone='needs-input'] .pip-mark { background: var(--warning-token); }
 
   .kind-popover-header { display: flex; min-width: 0; align-items: center; gap: var(--space-2); border-bottom: 1px solid var(--border); padding: 4px 5px 7px; }
   .kind-popover-header > span:first-child { display: grid; width: 24px; height: 24px; flex: none; place-items: center; border: 1px solid var(--border); border-radius: var(--radius); color: var(--agent-state-working); background: var(--card); }
-  .kind-popover-header > span:first-child.attention { color: var(--warning-token); }
+  .kind-popover-header > span:first-child[data-tone='needs-input'] { color: var(--warning-token); }
   .kind-popover-header > span:last-child { min-width: 0; }
   .kind-popover-header strong, .kind-popover-header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kind-popover-header strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; }

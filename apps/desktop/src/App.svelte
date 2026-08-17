@@ -1199,11 +1199,15 @@
       ?? (selectedProject?.id === project.id ? processes : []);
   }
 
-  function projectRailActivityLabel(activity: ProjectKindActivityRollup): string {
+  function projectRailActivityLabel(
+    project: Project,
+    activity: ProjectKindActivityRollup
+  ): string {
     const running = (['agent', 'terminal', 'command'] as const)
       .filter((kind) => activity[kind].active > 0)
       .map((kind) => activity[kind].activeLabel);
-    return running.length > 0 ? running.join(' · ') : 'no processes running';
+    const activitySummary = running.length > 0 ? running.join(' · ') : 'no processes running';
+    return project.status === 'error' ? `project error · ${activitySummary}` : activitySummary;
   }
 
   function openProjectRailProcess(project: Project, process: ProcessView): void {
@@ -1222,8 +1226,10 @@
   }
 
   function openProjectRailOverview(project: Project, kind: ProcessKind): void {
-    if (!activateProject(project.id)) return;
-    openProcessOverview(kind);
+    appNavigation.navigate(
+      { type: 'processes', projectId: project.id, kind },
+      'project-rail'
+    );
   }
 
   function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
@@ -1298,6 +1304,9 @@
             clearSelection();
           }
           if (selectedProject) void refreshWorktreeRepository(selectedProject, false);
+          return;
+        case 'processes':
+          openProcessOverview(target.kind);
           return;
         case 'item':
           await selectTreeItem(target.selection);
@@ -3864,7 +3873,7 @@
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
   {@const projectProcesses = projectRailProcesses(project)}
   {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
-  {@const activityLabel = projectRailActivityLabel(activity)}
+  {@const activityLabel = projectRailActivityLabel(project, activity)}
   <article
     class:active={project.selected}
     class:has-unread={unreadAgentCount > 0}
@@ -3884,7 +3893,7 @@
               class="project-select"
               type="button"
               aria-current={project.selected ? 'page' : undefined}
-              aria-label={`${fullTitle} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
               use:reorderItem={{
                 id: project.id,
                 group: 'projects',
@@ -4608,13 +4617,13 @@
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
-  .project-row { position: relative; display: flex; min-height: 44px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row { position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row.nested { min-height: 42px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
-  .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
-  .project-content { position: relative; display: block; width: 100%; min-width: 0; height: 100%; min-height: 42px; align-self: stretch; }
-  .project-select { position: absolute; inset: 0; display: grid; width: 100%; height: 100%; min-width: 0; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(16px, 1fr) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-row > :global(.tooltip-anchor) { min-width: 0; grid-column: 1; grid-row: 1; align-self: stretch; }
+  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; align-self: stretch; }
+  .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
@@ -4627,18 +4636,18 @@
   .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
   .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .project-meta-strip { position: absolute; z-index: 3; right: 35px; bottom: 3px; left: 34px; display: inline-flex; min-width: 0; height: 20px; align-items: center; justify-content: flex-start; gap: 2px; }
-  .project-row.has-unread .project-meta-strip { right: 59px; }
+  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: hidden; margin: 0 3px 3px 34px; pointer-events: none; }
+  .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
   .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }
   .project-tooltip-copy > span { color: inherit; font-family: var(--terminal-font-family); font-size: var(--font-size-xs); opacity: .78; }
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
-  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1 / 3; }
+  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
-  .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
+  .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
   .project-empty strong { color: var(--foreground); font-size: var(--font-size-sm); } .project-empty p { margin: 3px 0 8px; color: var(--muted); font-size: var(--font-size-sm); }
