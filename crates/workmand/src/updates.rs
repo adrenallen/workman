@@ -3,7 +3,10 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,6 +29,12 @@ pub struct UpdateStatus {
     pub last_checked_at: Option<i64>,
     pub check: UpdateCheck,
     pub cli_recovery_required: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct UpdateProgressEvent {
+    pub request_id: String,
+    pub progress: UpdateProgress,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,8 +71,9 @@ pub(crate) struct UpdateService {
     cache_path: PathBuf,
     cache: Arc<Mutex<UpdateCache>>,
     operation: Arc<AsyncMutex<()>>,
+    installing: Arc<AtomicBool>,
     progress: Arc<Mutex<Option<UpdateProgress>>>,
-    progress_events: broadcast::Sender<UpdateProgress>,
+    progress_events: broadcast::Sender<UpdateProgressEvent>,
     updates_enabled: bool,
 }
 
@@ -101,6 +111,7 @@ impl UpdateService {
             cache_path,
             cache: Arc::new(Mutex::new(cache)),
             operation: Arc::new(AsyncMutex::new(())),
+            installing: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(None)),
             progress_events,
             updates_enabled,
@@ -201,12 +212,20 @@ impl UpdateService {
     }
 
     pub(crate) async fn install(&self) -> Result<UpdateInstallReport, UpdateError> {
-        self.install_with_key(None).await
+        self.install_with_key_for(None, None).await
     }
 
     pub(crate) async fn install_with_key(
         &self,
         key_override: Option<&str>,
+    ) -> Result<UpdateInstallReport, UpdateError> {
+        self.install_with_key_for(key_override, None).await
+    }
+
+    pub(crate) async fn install_with_key_for(
+        &self,
+        key_override: Option<&str>,
+        request_id: Option<String>,
     ) -> Result<UpdateInstallReport, UpdateError> {
         if !self.updates_enabled {
             return Err(UpdateError::InvalidRelease(
@@ -214,14 +233,18 @@ impl UpdateService {
                     .to_owned(),
             ));
         }
-        self.publish_progress(UpdateProgress::stage(
-            UpdateStage::Checking,
-            "Checking for the latest Workman release",
-        ));
+        let _install = self.begin_install()?;
+        self.publish_progress(
+            request_id.as_deref(),
+            UpdateProgress::stage(
+                UpdateStage::Checking,
+                "Checking for the latest Workman release",
+            ),
+        );
         let status = match self.check_with_key(true, key_override).await {
             Ok(status) => status,
             Err(error) => {
-                self.publish_failure(&error);
+                self.publish_failure(request_id.as_deref(), &error);
                 return Err(error);
             }
         };
@@ -231,42 +254,55 @@ impl UpdateService {
         {
             Ok(client) => client,
             Err(error) => {
-                self.publish_failure(&error);
+                self.publish_failure(request_id.as_deref(), &error);
                 return Err(error);
             }
         };
         let client = override_client
             .as_ref()
             .unwrap_or_else(|| self.client(status.channel));
-        let publish = |progress| self.publish_progress(progress);
+        let publish = |progress| self.publish_progress(request_id.as_deref(), progress);
         match client
             .install_target_with_progress(&status.check, &self.install_target, &publish)
             .await
         {
-            Ok(report) => {
-                self.publish_progress(UpdateProgress::stage(
-                    UpdateStage::Restarting,
-                    format!("Installed Workman {} — restarting…", report.latest),
-                ));
-                Ok(report)
-            }
+            // The daemon cannot know whether the caller will relaunch an app, restart only the
+            // daemon, or present a manual fallback. The successful RPC report is the terminal
+            // event; the caller narrates its own restart plan.
+            Ok(report) => Ok(report),
             Err(error) => {
-                self.publish_failure(&error);
+                self.publish_failure(request_id.as_deref(), &error);
                 Err(error)
             }
         }
     }
 
-    pub(crate) fn subscribe_progress(&self) -> broadcast::Receiver<UpdateProgress> {
+    pub(crate) fn subscribe_progress(&self) -> broadcast::Receiver<UpdateProgressEvent> {
         self.progress_events.subscribe()
     }
 
-    fn publish_progress(&self, progress: UpdateProgress) {
-        *self.progress.lock().expect("update progress lock poisoned") = Some(progress.clone());
-        let _ = self.progress_events.send(progress);
+    fn begin_install(&self) -> Result<UpdateInstallGuard, UpdateError> {
+        self.installing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                UpdateError::InvalidRelease(
+                    "another update installation is already in progress".to_owned(),
+                )
+            })?;
+        Ok(UpdateInstallGuard(self.installing.clone()))
     }
 
-    fn publish_failure(&self, error: &UpdateError) {
+    fn publish_progress(&self, request_id: Option<&str>, progress: UpdateProgress) {
+        *self.progress.lock().expect("update progress lock poisoned") = Some(progress.clone());
+        if let Some(request_id) = request_id {
+            let _ = self.progress_events.send(UpdateProgressEvent {
+                request_id: request_id.to_owned(),
+                progress,
+            });
+        }
+    }
+
+    fn publish_failure(&self, request_id: Option<&str>, error: &UpdateError) {
         let progress = self
             .progress
             .lock()
@@ -274,7 +310,7 @@ impl UpdateService {
             .clone()
             .unwrap_or_else(|| UpdateProgress::stage(UpdateStage::Checking, "Checking for updates"))
             .failed(error.to_string());
-        self.publish_progress(progress);
+        self.publish_progress(request_id, progress);
     }
 
     fn client(&self, channel: UpdateChannel) -> &UpdateClient {
@@ -282,6 +318,14 @@ impl UpdateService {
             UpdateChannel::Stable => &self.stable_client,
             UpdateChannel::Latest => &self.latest_client,
         }
+    }
+}
+
+struct UpdateInstallGuard(Arc<AtomicBool>);
+
+impl Drop for UpdateInstallGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

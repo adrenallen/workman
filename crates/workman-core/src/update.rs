@@ -539,16 +539,17 @@ impl UpdateClient {
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
                     if asset.name == binary_asset.name {
                         format!(
-                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     } else {
                         format!(
-                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     }
                 }),
+                installed_app_bundle: None,
                 quarantine_cleared,
                 restart_plan: UpdateRestartPlan {
                     daemon: true,
@@ -695,16 +696,17 @@ impl UpdateClient {
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
                     if asset.name == binary_asset.name {
                         format!(
-                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     } else {
                         format!(
-                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     }
                 }),
+                installed_app_bundle: None,
                 quarantine_cleared,
                 restart_plan: UpdateRestartPlan {
                     daemon: true,
@@ -888,10 +890,11 @@ impl UpdateClient {
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect(),
                 desktop_instruction: Some(format!(
-                    "Updated the Workman app at {}. Workman can restart automatically into {}. {launcher_note}{incomplete_note}",
+                    "Updated the Workman app bundle at {} to {}. The running app must restart to use the replaced bundle. {launcher_note}{incomplete_note}",
                     target.app_bundle.display(),
                     check.latest
                 )),
+                installed_app_bundle: Some(target.app_bundle.to_string_lossy().into_owned()),
                 quarantine_cleared,
                 restart_plan: UpdateRestartPlan {
                     daemon: true,
@@ -930,6 +933,7 @@ impl UpdateClient {
             )));
         }
         let mut body = Vec::new();
+        let mut last_percent = 0;
         while let Some(chunk) = response.chunk().await? {
             let next_len = body.len().saturating_add(chunk.len());
             if next_len as u64 > MAX_DOWNLOAD_BYTES {
@@ -939,11 +943,19 @@ impl UpdateClient {
                 )));
             }
             body.extend_from_slice(&chunk);
-            on_progress(UpdateProgress::download(
+            let progress = UpdateProgress::download(
                 format!("Downloading {}", asset.name),
                 body.len() as u64,
                 asset.size,
-            ));
+            );
+            let percent = progress.percent.unwrap_or_default();
+            // Body chunks are an implementation detail and can number in the thousands. One
+            // event per meaningful percentage change keeps the UI fluid without flooding every
+            // subscribed transport, while preserving the initial 0% and final 100% events.
+            if percent > last_percent {
+                last_percent = percent;
+                on_progress(progress);
+            }
         }
         Ok(body)
     }
@@ -963,7 +975,11 @@ pub struct UpdateInstallReport {
     pub install_dir: String,
     pub updated_files: Vec<String>,
     pub desktop_instruction: Option<String>,
+    /// The application bundle replaced by this install, if any.
+    #[serde(default)]
+    pub installed_app_bundle: Option<String>,
     pub quarantine_cleared: bool,
+    #[serde(default)]
     pub restart_plan: UpdateRestartPlan,
 }
 
@@ -972,6 +988,17 @@ pub struct UpdateInstallReport {
 pub struct UpdateRestartPlan {
     pub daemon: bool,
     pub app: bool,
+}
+
+impl Default for UpdateRestartPlan {
+    fn default() -> Self {
+        // Reports from legacy daemons did not carry a restart plan. Treat those installs as
+        // requiring a daemon restart, but never claim that the desktop bundle was replaced.
+        Self {
+            daemon: true,
+            app: false,
+        }
+    }
 }
 
 /// Destination selected for an update. Installed CLI binaries hop to a new durable versioned

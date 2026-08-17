@@ -359,6 +359,7 @@ async fn bearer_authenticated_manifest_and_artifact_are_verified_and_installed()
     );
     assert!(report.restart_plan.daemon);
     assert!(!report.restart_plan.app);
+    assert_eq!(report.installed_app_bundle, None);
 }
 
 #[tokio::test]
@@ -400,6 +401,16 @@ async fn install_progress_reports_download_verify_install_in_order() {
         ]
     );
     assert_eq!(progress.first().unwrap().percent, Some(0));
+    let download_events = progress
+        .iter()
+        .filter(|event| event.stage == UpdateStage::Downloading)
+        .collect::<Vec<_>>();
+    assert!(download_events.len() <= 101);
+    assert!(
+        download_events
+            .windows(2)
+            .all(|pair| pair[0].percent != pair[1].percent)
+    );
     assert_eq!(
         progress
             .iter()
@@ -834,13 +845,33 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
     assert!(report.restart_plan.daemon);
     assert!(report.restart_plan.app);
     assert_eq!(
+        report.installed_app_bundle.as_deref(),
+        Some(app.to_string_lossy().as_ref())
+    );
+    assert_eq!(
         serde_json::to_value(&report.restart_plan).unwrap(),
         serde_json::json!({ "daemon": true, "app": true })
     );
     let message = report.desktop_instruction.unwrap();
-    assert!(message.contains("restart automatically"));
+    assert!(message.contains("running app must restart"));
     assert!(message.contains("Updated 2 command-line launchers"));
     assert!(!install_target.cli_recovery_required());
+}
+
+#[test]
+fn legacy_install_reports_default_to_a_daemon_only_restart_plan() {
+    let report: workman_core::UpdateInstallReport = serde_json::from_value(serde_json::json!({
+        "current": "0.1.9",
+        "latest": "0.1.10",
+        "install_dir": "/tmp/workman",
+        "updated_files": ["/tmp/workman/wrk", "/tmp/workman/workmand"],
+        "desktop_instruction": null,
+        "quarantine_cleared": false
+    }))
+    .unwrap();
+    assert_eq!(report.installed_app_bundle, None);
+    assert!(report.restart_plan.daemon);
+    assert!(!report.restart_plan.app);
 }
 
 #[tokio::test]
