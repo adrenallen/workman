@@ -3860,12 +3860,14 @@
   {@const fullTitle = projectTitle(project)}
   {@const parentLabel = worktreeParentLabel(project, projects, repository?.name)}
   {@const projectKind = parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+  {@const tooltipLabel = `${fullTitle} · ${project.path}${parentLabel !== null ? ` · Worktree of ${parentLabel}` : ''}`}
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
   {@const projectProcesses = projectRailProcesses(project)}
   {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
   {@const activityLabel = projectRailActivityLabel(activity)}
   <article
     class:active={project.selected}
+    class:has-unread={unreadAgentCount > 0}
     class:nested
     class="project-row group/project group/repository"
   >
@@ -3875,78 +3877,72 @@
         <Button size="sm" type="submit">Save</Button>
       </form>
     {:else}
-      <TooltipLabel label={fullTitle} side={projectRailCollapsed ? 'right' : 'top'}>
-        <button
-          class="project-select"
-          type="button"
-          aria-current={project.selected ? 'page' : undefined}
-          aria-label={`${fullTitle} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
-          use:reorderItem={{
-            id: project.id,
-            group: 'projects',
-            disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
-            label: fullTitle,
-            onDrop: handleProjectDrop,
-            onKeyboardMove: moveProjectRailFromKeyboard
-          }}
-          onclick={() => selectProject(project)}
-          oncontextmenu={(event) => showProjectPointerMenu(event, project)}
-          onkeydown={(event) => showProjectKeyboardMenu(event, project)}
-          data-context-kind="project"
-          data-context-id={project.id}
-        >
-          <span class="project-icon-anchor">
-            <span class="project-kind-icon" aria-hidden="true">
-              <ProjectIcon
-                icon={project.icon}
-                color={project.icon_color}
-                image={project.icon_image?.data_url}
-                fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-                size={15}
-              />
-            </span>
+      <TooltipLabel label={tooltipLabel} side={projectRailCollapsed ? 'right' : 'top'}>
+        {#snippet children()}
+          <span class="project-content">
+            <button
+              class="project-select"
+              type="button"
+              aria-current={project.selected ? 'page' : undefined}
+              aria-label={`${fullTitle} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+              use:reorderItem={{
+                id: project.id,
+                group: 'projects',
+                disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
+                label: fullTitle,
+                onDrop: handleProjectDrop,
+                onKeyboardMove: moveProjectRailFromKeyboard
+              }}
+              onclick={() => selectProject(project)}
+              oncontextmenu={(event) => showProjectPointerMenu(event, project)}
+              onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+              data-context-kind="project"
+              data-context-id={project.id}
+            >
+              <span class="project-icon-anchor">
+                <span class="project-kind-icon" aria-hidden="true">
+                  <ProjectIcon
+                    icon={project.icon}
+                    color={project.icon_color}
+                    image={project.icon_image?.data_url}
+                    fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                    size={15}
+                  />
+                </span>
+              </span>
+              <span class="project-copy"><strong>{rowLabel}</strong></span>
+              {#if unreadAgentCount > 0}
+                <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
+                  <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                    <span aria-hidden="true"></span>{unreadAgentCount}
+                  </span>
+                </TooltipLabel>
+              {/if}
+            </button>
           </span>
-          <span class="project-copy">
-            <strong>{rowLabel}</strong>
+        {/snippet}
+        {#snippet content()}
+          <span class="project-tooltip-copy">
+            <strong>{fullTitle}</strong>
+            <span>{project.path}</span>
             {#if parentLabel !== null}
-              <small
-                class="worktree-parent"
-                title={`Worktree of ${parentLabel}`}
-                aria-label={`Worktree of ${parentLabel}`}
-              >
-                <GitBranchIcon size={11} strokeWidth={1.8} aria-hidden="true" />
-                <span>Worktree of {parentLabel}</span>
-              </small>
-            {:else}
-              <small>{project.path}</small>
+              <span class="project-tooltip-parent">
+                <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                Worktree of {parentLabel}
+              </span>
             {/if}
           </span>
-          {#if unreadAgentCount > 0}
-            <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
-              <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-                <span aria-hidden="true"></span>{unreadAgentCount}
-              </span>
-            </TooltipLabel>
-          {/if}
-        </button>
+        {/snippet}
       </TooltipLabel>
-      {#if projectRailCollapsed}
-        <ProjectKindIndicators
-          {activity}
-          processes={projectProcesses}
-          projectTitle={fullTitle}
-          compact
-          onSelect={(process) => openProjectRailProcess(project, process)}
-          onShowAll={(kind) => openProjectRailOverview(project, kind)}
-        />
-      {:else}
-        <span class="project-row-meta">
+      {#if !projectRailCollapsed}
+        <span class="project-meta-strip" data-project-meta-strip>
           {#if repository}
             <WorktreeRowMeta
               entry={worktree}
               pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
               repositoryName={repository.name}
               refreshing={worktreeRefreshingRepositoryId === repository.id}
+              showNoPullRequest={false}
               onRefresh={() => void refreshWorktreeRepository(project, true)}
             />
           {/if}
@@ -3958,6 +3954,15 @@
             onShowAll={(kind) => openProjectRailOverview(project, kind)}
           />
         </span>
+      {:else}
+        <ProjectKindIndicators
+          {activity}
+          processes={projectProcesses}
+          projectTitle={fullTitle}
+          compact
+          onSelect={(process) => openProjectRailProcess(project, process)}
+          onShowAll={(kind) => openProjectRailOverview(project, kind)}
+        />
       {/if}
       <IconButton
         class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
@@ -4603,12 +4608,13 @@
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
-  .project-row { position: relative; display: flex; min-height: 40px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
-  .project-row.nested { min-height: 36px; }
+  .project-row { position: relative; display: flex; min-height: 44px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row.nested { min-height: 42px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
   .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
-  .project-select { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-content { position: relative; display: block; width: 100%; min-width: 0; height: 100%; min-height: 42px; align-self: stretch; }
+  .project-select { position: absolute; inset: 0; display: grid; width: 100%; height: 100%; min-width: 0; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(16px, 1fr) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
@@ -4616,16 +4622,20 @@
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
-  .project-icon-anchor { display: inline-flex; flex: none; }
+  .project-icon-anchor { display: inline-flex; grid-row: 1 / 3; flex: none; align-self: center; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
-  .project-row-meta { display: inline-flex; flex: none; align-items: center; gap: 1px; }
-  .project-copy { min-width: 0; }
-  .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
+  .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .project-copy .worktree-parent { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
-  .worktree-parent :global(svg) { flex: none; }
-  .worktree-parent span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-meta-strip { position: absolute; z-index: 3; right: 35px; bottom: 3px; left: 34px; display: inline-flex; min-width: 0; height: 20px; align-items: center; justify-content: flex-start; gap: 2px; }
+  .project-row.has-unread .project-meta-strip { right: 59px; }
+  .project-tooltip-copy { display: contents; }
+  .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
+  .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }
+  .project-tooltip-copy > span { color: inherit; font-family: var(--terminal-font-family); font-size: var(--font-size-xs); opacity: .78; }
+  .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
+  .project-tooltip-parent :global(svg) { flex: none; }
+  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1 / 3; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
@@ -4650,7 +4660,8 @@
   .project-rail.collapsed .folder-children { display: contents; }
   .project-rail.collapsed :global(.folder-row) { width: 100%; height: 36px; min-height: 36px; flex: 0 0 36px; margin: 0; }
   .project-rail.collapsed .project-row { width: 100%; height: 40px; min-height: 40px; flex: 0 0 40px; margin: 0; }
-  .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
+  .project-rail.collapsed .project-content { min-height: 40px; }
+  .project-rail.collapsed .project-select { position: relative; inset: auto; display: flex; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }
   .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
@@ -4689,7 +4700,4 @@
   .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
   .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
   .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  @media (max-width: 760px) {
-    .project-copy small { display: none; }
-  }
 </style>

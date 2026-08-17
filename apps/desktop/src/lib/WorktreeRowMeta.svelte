@@ -17,6 +17,7 @@
     pullRequestCache: PullRequestCache | null;
     repositoryName: string;
     refreshing?: boolean;
+    showNoPullRequest?: boolean;
     showRefresh?: boolean;
     onRefresh: () => void;
   }
@@ -26,6 +27,7 @@
     pullRequestCache,
     repositoryName,
     refreshing = false,
+    showNoPullRequest = true,
     showRefresh = false,
     onRefresh
   }: Props = $props();
@@ -58,7 +60,7 @@
   {#if pullRequest}
     {#if pullRequestMode === 'direct'}
       <IconButton
-        class="size-6 border border-border bg-card"
+        class="size-5 border border-border bg-card"
         label={`Open ${pullRequestLabel(pullRequest)}`}
         disabled={openingPullRequest}
         onclick={(event) => { event.stopPropagation(); void openPullRequest(pullRequest); }}
@@ -74,7 +76,7 @@
             {#snippet child({ props })}
               <IconButton
                 {...props}
-                class="size-6 border border-border bg-card"
+                class="size-5 border border-border bg-card"
                 label={`Show ${pullRequests.length} pull requests for ${entry?.branch ?? 'this branch'}`}
               >
                 {#snippet icon()}
@@ -98,14 +100,14 @@
     {/if}
   {:else if pullRequestUnavailable}
     <IconButton
-      class="size-6 text-warning"
+      class="size-5 text-warning"
       label={pullRequestUnavailableLabel}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
     >
       {#snippet icon()}<CircleAlertIcon size={13} strokeWidth={1.9} />{/snippet}
     </IconButton>
-  {:else if entry && pullRequestCache?.available === true}
+  {:else if showNoPullRequest && entry && pullRequestCache?.available === true}
     {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
     <TooltipLabel label={noPullRequestLabel}>
       <span class="no-pull-request" aria-label={noPullRequestLabel}>
@@ -115,7 +117,7 @@
   {/if}
   {#if showRefresh && !pullRequestUnavailable}
     <IconButton
-      class="size-6 opacity-0 group-hover/repository:opacity-100 focus-visible:opacity-100"
+      class="size-5 opacity-0 group-hover/repository:opacity-100 focus-visible:opacity-100"
       label={`Refresh pull request status for ${repositoryName}`}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
@@ -130,7 +132,7 @@
   .pull-request-picker { display: inline-flex; }
   .multi-pr-icon { position: relative; display: inline-flex; }
   .multi-pr-icon > span:last-child { position: absolute; right: -7px; bottom: -6px; display: grid; min-width: 12px; height: 12px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 2px; background: var(--foreground); color: var(--background); font-family: var(--terminal-font-family); font-size: 8px; font-weight: 750; line-height: 1; }
-  .no-pull-request { display: inline-flex; width: 24px; height: 24px; cursor: default; align-items: center; justify-content: center; color: var(--muted-foreground); opacity: .72; }
+  .no-pull-request { display: inline-flex; width: 20px; height: 20px; cursor: default; align-items: center; justify-content: center; color: var(--muted-foreground); opacity: .72; }
   :global(.spin) { animation: worktree-spin 800ms linear infinite; }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }
   @keyframes worktree-spin { to { transform: rotate(360deg); } }

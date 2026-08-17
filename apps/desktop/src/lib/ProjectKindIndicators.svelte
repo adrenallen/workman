@@ -181,10 +181,10 @@
 {/if}
 
 <style>
-  .project-kind-indicators { display: inline-flex; flex: none; align-items: center; gap: 1px; }
+  .project-kind-indicators { display: inline-flex; min-height: 20px; flex: none; align-items: center; gap: 1px; }
   .project-kind-indicator { display: inline-flex; color: var(--agent-state-working); }
   .project-kind-indicator.attention { color: var(--warning-token); }
-  .project-kind-indicator :global(.project-kind-trigger) { width: auto; min-width: 24px; height: 24px; gap: 2px; border-radius: var(--radius); padding: 0 4px; color: inherit; }
+  .project-kind-indicator :global(.project-kind-trigger) { width: auto; min-width: 20px; height: 20px; gap: 2px; border-radius: var(--radius); padding: 0 3px; color: inherit; }
   .kind-glyph { display: inline-flex; align-items: center; gap: 2px; }
   .kind-glyph small { min-width: 8px; color: currentColor; font: 700 9px/1 var(--terminal-font-family); text-align: center; }
 
