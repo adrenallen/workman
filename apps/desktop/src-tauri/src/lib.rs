@@ -3,7 +3,7 @@ use std::{
     env,
     error::Error,
     ffi::OsString,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -1552,9 +1552,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bundle = root.path().join("Workman.app");
         let executable = bundle.join("Contents/MacOS/workman");
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        fs::write(&executable, b"fixture").unwrap();
-        fs::write(bundle.join("Contents/Info.plist"), b"fixture").unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), b"fixture").unwrap();
         assert!(relaunch_supported_from_executable(&executable));
         assert!(!relaunch_supported_from_executable(Path::new(
             "/tmp/target/debug/workman"

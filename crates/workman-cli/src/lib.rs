@@ -2437,17 +2437,15 @@ async fn self_update(
     if installed_via_daemon
         && report.restart_plan.daemon
         && let Some(client) = daemon_client.as_mut()
-    {
-        if let Err(error) = client
+        && let Err(error) = client
             .rpc::<serde_json::Value>("daemon.restart", json!({}))
             .await
-        {
-            // The install report is already printed and the daemon may close before its restart
-            // response reaches us. A bounded daemon-side backstop still completes the restart.
-            eprintln!(
-                "workman: warning: update installed, but the daemon restart acknowledgement failed: {error}"
-            );
-        }
+    {
+        // The install report is already printed and the daemon may close before its restart
+        // response reaches us. A bounded daemon-side backstop still completes the restart.
+        eprintln!(
+            "workman: warning: update installed, but the daemon restart acknowledgement failed: {error}"
+        );
     }
     Ok(())
 }

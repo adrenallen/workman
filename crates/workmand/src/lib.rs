@@ -1815,8 +1815,9 @@ mod tests {
 
     #[test]
     fn update_progress_subscription_accepts_only_its_correlated_request() {
-        let mut subscription = UpdateProgressSubscription::default();
-        subscription.request_id = Some("desktop-update-1".to_owned());
+        let subscription = UpdateProgressSubscription {
+            request_id: Some("desktop-update-1".to_owned()),
+        };
         let matching = updates::UpdateProgressEvent {
             request_id: "desktop-update-1".to_owned(),
             progress: workman_core::UpdateProgress::stage(
