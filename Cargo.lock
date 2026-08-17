@@ -6310,6 +6310,7 @@ dependencies = [
  "image",
  "listeners",
  "notify",
+ "plist",
  "rmcp",
  "rusqlite",
  "serde",

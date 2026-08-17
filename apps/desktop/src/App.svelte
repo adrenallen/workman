@@ -8,6 +8,7 @@
   import PlusIcon from '@lucide/svelte/icons/plus';
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount, tick } from 'svelte';
@@ -44,8 +45,24 @@
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
   import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
-  import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
+  import {
+    applyUpdate,
+    autoImportTerminalProfile,
+    checkForUpdates,
+    type UpdateInstallReport,
+    type UpdateProgress,
+    type UpdateStage,
+    type UpdateStatus
+  } from './lib/settings';
   import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
+  import {
+    canPresentUpdateProgress,
+    idleUpdateFlow,
+    manualUpdateFlow,
+    updateBannerState,
+    updateCompletionAction,
+    type UpdateFlow
+  } from './lib/updateFlow';
   import TerminalView from './lib/TerminalView.svelte';
   import { processCycleDirection } from './lib/terminalKeys';
   import TodoBrowser from './lib/TodoBrowser.svelte';
@@ -246,6 +263,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
@@ -332,9 +350,32 @@
       : client.unsubscribeProcessStatuses();
     void request.catch(reportError);
   });
+  $effect(() => {
+    if (connection.status !== 'connected' || terminalProfileAutoImportStarted) return;
+    terminalProfileAutoImportStarted = true;
+    void autoImportTerminalProfile(client).catch(() => {
+      // Native profile discovery is best-effort; Settings retains the explicit import action.
+    });
+  });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
+  let updateFlow = $state<UpdateFlow>(idleUpdateFlow);
+  let nativeRelaunchAvailable = $state(false);
+  let nativeRelaunchAppBundle = $state<string | null>(null);
+  let updateBannerDismissed = $state(false);
+  let updatedVersionNotice = $state<string | null>(null);
+  let justUpdatedVersion: string | null = null;
+  let daemonOnlyRestartPending = false;
+  let updateInstallActive = false;
+  let installedUpdateReport: UpdateInstallReport | null = null;
+  let updateRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateProgressPresentedAt = 0;
+  let updateProgressTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateProgressQueue: UpdateProgress[] = [];
+  let updateProgressWaiters: Array<() => void> = [];
+  const updateStageMinimumMs = 300;
+  const updateRestartTimeoutMs = 20_000;
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -477,7 +518,14 @@
   let updateAvailable = $derived(startupUpdate?.check.available === true);
   let cliRecoveryRequired = $derived(startupUpdate?.cli_recovery_required === true);
   let startupUpdateCopy = $derived(startupUpdate ? updateActionCopy(startupUpdate) : null);
-  let showVersionBanner = $derived(versionSkew || updateAvailable || cliRecoveryRequired);
+  let updateBanner = $derived(updateBannerState(startupUpdate, updateFlow));
+  let updateFlowBlocksSkew = $derived(
+    updateFlow.kind === 'running'
+      || updateFlow.kind === 'restarting'
+      || (updateFlow.kind === 'needs-restart' && !updateBannerDismissed)
+  );
+  let showVersionSkew = $derived(versionSkew && !updateFlowBlocksSkew);
+  let showVersionBanner = $derived(showVersionSkew || (updateBanner.visible && !updateBannerDismissed));
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
@@ -556,6 +604,16 @@
   });
 
   onMount(() => {
+    justUpdatedVersion = localStorage.getItem('workman.just-updated-to');
+    void invoke<{ supported: boolean; app_bundle: string | null }>('desktop_relaunch_capability')
+      .then((capability) => {
+        nativeRelaunchAvailable = capability.supported;
+        nativeRelaunchAppBundle = capability.app_bundle;
+      })
+      .catch(() => {
+        nativeRelaunchAvailable = false;
+        nativeRelaunchAppBundle = null;
+      });
     const projectPreference = loadPanelPreference(
       'project-rail',
       { collapsed: false, width: projectRailWidth },
@@ -687,6 +745,8 @@
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
       clearInterval(notificationTimer);
+      if (updateProgressTimer) clearTimeout(updateProgressTimer);
+      if (updateRestartTimer) clearTimeout(updateRestartTimer);
       stopStatuses();
       stopNavigation();
       stopNativeMenu();
@@ -721,7 +781,22 @@
         `workman daemon: ${status.daemon_version ?? 'legacy'} ` +
           `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
       );
-      if (status.version_compatible) versionRestarting = false;
+      if (status.version_compatible && updateFlow.kind !== 'running' && updateFlow.kind !== 'restarting') {
+        versionRestarting = false;
+      }
+      if (status.version_compatible && daemonOnlyRestartPending && reconnected) {
+        daemonOnlyRestartPending = false;
+        clearUpdateRestartWatchdog();
+        updateFlow = idleUpdateFlow;
+        startupUpdate = null;
+        versionRestarting = false;
+      }
+      if (justUpdatedVersion && status.app_version === justUpdatedVersion) {
+        updatedVersionNotice = justUpdatedVersion;
+        justUpdatedVersion = null;
+        localStorage.removeItem('workman.just-updated-to');
+        setTimeout(() => (updatedVersionNotice = null), 8_000);
+      }
       if (status.version_compatible && status.port !== startupUpdatePort) {
         startupUpdatePort = status.port;
         void startupUpdateCheck();
@@ -3867,15 +3942,275 @@
       description: copy.dialogDescription,
       confirmLabel: copy.confirmLabel
     }))) return;
+    await performAvailableUpdate();
+  }
+
+  async function performAvailableUpdate(update: UpdateStatus | null = startupUpdate): Promise<void> {
+    if (update) startupUpdate = update;
+    if (
+      !update
+      || !updateActionAvailable(update)
+      || updateInstallActive
+      || updateFlow.kind === 'running'
+      || updateFlow.kind === 'restarting'
+    ) return;
+    updateInstallActive = true;
+    updateBannerDismissed = false;
     versionRestarting = true;
+    installedUpdateReport = null;
+    resetUpdateProgressPresentation();
+    updateFlow = {
+      kind: 'running',
+      progress: updateProgress('checking', 'Checking for the latest Workman release')
+    };
+    updateProgressPresentedAt = Date.now();
     try {
-      const report = await applyUpdate(client);
-      startupUpdate = null;
-      if (report.desktop_instruction) error = report.desktop_instruction;
+      const report = await applyUpdate(client, (progress) => {
+        if (canPresentUpdateProgress(updateFlow, updateInstallActive)) {
+          presentUpdateProgress(progress);
+        }
+      });
+      installedUpdateReport = report;
+      presentUpdateProgress(
+        updateProgress('restarting', `Installed Workman ${report.latest} — restarting…`)
+      );
+      await waitForUpdateProgressPresentation();
+      await completeInstalledUpdate(report);
     } catch (cause) {
+      resetUpdateProgressPresentation();
+      const stage = failedUpdateStage(updateFlow);
+      updateFlow = {
+        kind: 'failed',
+        stage,
+        message: cause instanceof Error ? cause.message : String(cause)
+      };
       versionRestarting = false;
-      reportError(cause);
+    } finally {
+      updateInstallActive = false;
     }
+  }
+
+  async function completeInstalledUpdate(report: UpdateInstallReport): Promise<void> {
+    const action = updateCompletionAction(report, {
+      nativeRelaunchAvailable,
+      appVersion: connection.app_version,
+      appBundle: nativeRelaunchAppBundle
+    });
+    if (action === 'manual-restart') {
+      const canRetryNativeRestart = report.restart_plan?.app === true
+        && report.installed_app_bundle !== undefined
+        && report.installed_app_bundle !== null
+        && report.installed_app_bundle.replace(/\/+$/, '') === nativeRelaunchAppBundle?.replace(/\/+$/, '');
+      updateFlow = manualUpdateFlow(report, null, canRetryNativeRestart ? 'app' : null);
+      startupUpdate = null;
+      versionRestarting = false;
+      return;
+    }
+
+    const restartTarget = action === 'relaunch' ? 'app' : 'daemon';
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartTarget };
+    await delay(1_000);
+    if (action === 'restart-daemon-only') {
+      daemonOnlyRestartPending = true;
+      armUpdateRestartWatchdog(report, 'daemon');
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
+      return;
+    }
+
+    localStorage.setItem('workman.just-updated-to', report.latest);
+    armUpdateRestartWatchdog(report, 'app');
+    try {
+      await invoke('desktop_restart_after_update', {
+        confirmProcessesStopped: true,
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
+      });
+    } catch (cause) {
+      showUpdateRestartFallback(report, cause, 'app');
+    }
+  }
+
+  async function restartInstalledUpdate(): Promise<void> {
+    const report = installedUpdateReport;
+    if (!report || updateFlow.kind !== 'needs-restart') return;
+    const restartAction = updateFlow.restartAction;
+    if (!restartAction) return;
+    updateBannerDismissed = false;
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartAction };
+    versionRestarting = true;
+    armUpdateRestartWatchdog(report, restartAction);
+    if (restartAction === 'daemon') {
+      daemonOnlyRestartPending = true;
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
+      return;
+    }
+    localStorage.setItem('workman.just-updated-to', report.latest);
+    try {
+      await invoke('desktop_restart_after_update', {
+        confirmProcessesStopped: true,
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
+      });
+    } catch (cause) {
+      showUpdateRestartFallback(report, cause, 'app');
+    }
+  }
+
+  function dismissInstalledUpdate(): void {
+    if (updateFlow.kind === 'needs-restart') {
+      updateBannerDismissed = true;
+      startupUpdate = null;
+      versionRestarting = false;
+      return;
+    }
+    resetUpdateProgressPresentation();
+    clearUpdateRestartWatchdog();
+    updateFlow = idleUpdateFlow;
+    installedUpdateReport = null;
+    startupUpdate = null;
+    versionRestarting = false;
+  }
+
+  function showUpdateRestartFallback(
+    report: UpdateInstallReport,
+    cause: unknown,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    localStorage.removeItem('workman.just-updated-to');
+    const message = cause instanceof Error ? cause.message : String(cause);
+    updateFlow = manualUpdateFlow(
+      report,
+      `The update is installed, but automatic restart was unavailable: ${message}`,
+      restartAction
+    );
+    updateBannerDismissed = false;
+    versionRestarting = false;
+  }
+
+  function armUpdateRestartWatchdog(
+    report: UpdateInstallReport,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    updateRestartTimer = setTimeout(() => {
+      updateRestartTimer = null;
+      if (updateFlow.kind !== 'restarting') return;
+      daemonOnlyRestartPending = false;
+      showUpdateRestartFallback(
+        report,
+        restartAction === 'app'
+          ? 'the desktop process did not relaunch within 20 seconds'
+          : 'the updated daemon did not reconnect within 20 seconds',
+        restartAction
+      );
+    }, updateRestartTimeoutMs);
+  }
+
+  function clearUpdateRestartWatchdog(): void {
+    if (updateRestartTimer) clearTimeout(updateRestartTimer);
+    updateRestartTimer = null;
+  }
+
+  function updateProgress(stage: UpdateStage, message: string): UpdateProgress {
+    return {
+      stage,
+      message,
+      bytes_done: null,
+      bytes_total: null,
+      percent: null,
+      failed: false
+    };
+  }
+
+  function presentUpdateProgress(progress: UpdateProgress): void {
+    if (!canPresentUpdateProgress(updateFlow, updateInstallActive)) return;
+    if (progress.failed) {
+      resetUpdateProgressPresentation();
+      updateFlow = { kind: 'failed', stage: progress.stage, message: progress.message };
+      versionRestarting = false;
+      return;
+    }
+    versionRestarting = true;
+    if (
+      updateProgressQueue.length === 0
+      && updateFlow.kind === 'running'
+      && updateFlow.progress.stage === progress.stage
+    ) {
+      updateFlow = { kind: 'running', progress };
+      return;
+    }
+    const queued = updateProgressQueue.at(-1);
+    if (queued?.stage === progress.stage) updateProgressQueue[updateProgressQueue.length - 1] = progress;
+    else updateProgressQueue.push(progress);
+    scheduleUpdateProgressDrain();
+  }
+
+  function scheduleUpdateProgressDrain(): void {
+    if (updateProgressTimer) return;
+    const elapsed = Date.now() - updateProgressPresentedAt;
+    const wait = Math.max(0, updateStageMinimumMs - elapsed);
+    updateProgressTimer = setTimeout(drainUpdateProgress, wait);
+  }
+
+  function drainUpdateProgress(): void {
+    updateProgressTimer = null;
+    const next = updateProgressQueue.shift();
+    if (next && canPresentUpdateProgress(updateFlow, updateInstallActive)) {
+      updateFlow = { kind: 'running', progress: next };
+      updateProgressPresentedAt = Date.now();
+    }
+    if (
+      updateProgressQueue.length > 0
+      || (next && updateProgressWaiters.length > 0)
+    ) {
+      scheduleUpdateProgressDrain();
+      return;
+    }
+    settleUpdateProgressWaiters();
+  }
+
+  function waitForUpdateProgressPresentation(): Promise<void> {
+    const elapsed = Date.now() - updateProgressPresentedAt;
+    if (updateProgressQueue.length === 0 && elapsed >= updateStageMinimumMs) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      updateProgressWaiters.push(resolve);
+      scheduleUpdateProgressDrain();
+    });
+  }
+
+  function resetUpdateProgressPresentation(): void {
+    if (updateProgressTimer) clearTimeout(updateProgressTimer);
+    updateProgressTimer = null;
+    updateProgressQueue = [];
+    settleUpdateProgressWaiters();
+  }
+
+  function settleUpdateProgressWaiters(): void {
+    const waiters = updateProgressWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
+  function failedUpdateStage(flow: UpdateFlow): UpdateStage {
+    if (flow.kind === 'running') return flow.progress.stage;
+    if (flow.kind === 'failed') return flow.stage;
+    return 'restarting';
+  }
+
+  function delay(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 </script>
 
@@ -3886,16 +4221,54 @@
 </svelte:head>
 
 {#if showVersionBanner}
-  <section class="version-banner" aria-live="assertive">
+  <section class="version-banner" aria-live={updateBanner.mode === 'failed' ? 'assertive' : 'polite'}>
     <div>
-      <strong>{versionSkew ? 'Workman daemon is running an older version' : startupUpdateCopy?.bannerTitle}</strong>
-      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : startupUpdateCopy?.bannerDescription} All running project processes will stop.</span>
+      <strong>{showVersionSkew ? 'Workman daemon is running an older version' : updateBanner.title}</strong>
+      <span>{showVersionSkew ? 'Restarting loads this app’s control protocol and agent config.' : updateBanner.description}</span>
     </div>
-    <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : cliRecoveryRequired && !updateAvailable ? `Workman ${startupUpdate?.check.current}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
-    <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
-      {versionRestarting ? (versionSkew ? 'Restarting daemon…' : startupUpdateCopy?.busyLabel) : versionSkew ? 'Restart daemon' : startupUpdateCopy?.buttonLabel}
-    </Button>
+    {#if !showVersionSkew && (updateBanner.mode === 'running' || updateBanner.mode === 'restarting')}
+      <div
+        class:indeterminate={updateBanner.indeterminate}
+        class="update-progress"
+        role="progressbar"
+        aria-label={updateBanner.title}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={updateBanner.percent ?? undefined}
+      >
+        <span style={`width: ${updateBanner.percent ?? 32}%`}></span>
+      </div>
+    {:else}
+      <small>{showVersionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : cliRecoveryRequired && !updateAvailable ? `Workman ${startupUpdate?.check.current}` : startupUpdate ? `current ${startupUpdate.check.current} · latest ${startupUpdate.check.latest}` : ''}</small>
+    {/if}
+    <div class="version-banner-actions">
+      {#if showVersionSkew}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void restartOutdatedDaemon()}>
+          {versionRestarting ? 'Restarting daemon…' : 'Restart daemon'}
+        </Button>
+      {:else if updateBanner.mode === 'available'}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void applyAvailableUpdate()}>
+          {startupUpdateCopy?.buttonLabel}
+        </Button>
+      {:else if updateBanner.retry}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void performAvailableUpdate()}>Retry</Button>
+        {#if updateBanner.dismiss}
+          <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+        {/if}
+      {:else if updateBanner.restart}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void restartInstalledUpdate()}>{updateBanner.restartLabel}</Button>
+        <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+      {:else if updateBanner.dismiss}
+        <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+      {/if}
+    </div>
   </section>
+{/if}
+
+{#if updatedVersionNotice}
+  <button class:with-version-banner={showVersionBanner} class="updated-version-notice" type="button" onclick={() => (updatedVersionNotice = null)}>
+    Updated to Workman {updatedVersionNotice}
+  </button>
 {/if}
 
 <AgentDoneToasts
@@ -4067,6 +4440,7 @@
           processes={profileProcesses}
           {projects}
           connectionStatus={connection.status}
+          visible={documentVisible}
           bind:open={keepAwakeOpen}
           bind:armed={keepAwakeArmed}
           bind:supported={keepAwakeSupported}
@@ -4230,6 +4604,10 @@
           {client}
           project={selectedProject}
           {connection}
+          {updateFlow}
+          onApplyUpdate={performAvailableUpdate}
+          onRestartUpdate={restartInstalledUpdate}
+          onDismissUpdate={dismissInstalledUpdate}
           onError={reportError}
           onProfileSwitched={() => window.location.reload()}
         />
@@ -4616,14 +4994,29 @@
 
 <style>
   .app-shell { display: grid; width: 100%; height: 100%; min-height: 0; max-height: 100%; grid-template-columns: var(--project-rail-width) var(--tree-rail-width) minmax(0, 1fr); overflow: hidden; background: var(--night); }
-  .app-shell.with-version-banner { height: calc(100% - 38px); }
+  .app-shell.with-version-banner { height: calc(100% - 42px); }
   .app-shell.no-project { grid-template-columns: var(--project-rail-width) minmax(0, 1fr); }
-  .version-banner { display: grid; width: 100%; height: 38px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, var(--card)); color: var(--text); }
-  .version-banner div { min-width: 0; }
-  .version-banner strong, .version-banner span { display: block; }
-  .version-banner strong { color: #f2d69a; font-size: var(--font-size-sm); }
-  .version-banner span { overflow: hidden; margin-top: 2px; color: #b3a382; font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
-  .version-banner small { color: #91866f; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .version-banner { display: grid; width: 100%; height: 42px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, var(--card)); color: var(--text); }
+  .version-banner > div:first-child { min-width: 0; }
+  .version-banner > div:first-child strong, .version-banner > div:first-child span { display: block; }
+  .version-banner strong { color: color-mix(in srgb, var(--warning) 78%, var(--foreground)); font-size: var(--font-size-sm); }
+  .version-banner > div:first-child span { overflow: hidden; margin-top: 2px; color: color-mix(in srgb, var(--warning) 44%, var(--muted-foreground)); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .version-banner small { color: color-mix(in srgb, var(--warning) 35%, var(--muted-foreground)); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .version-banner-actions { display: flex; align-items: center; gap: var(--space-1); }
+  .update-progress { position: relative; width: 150px; height: 3px; overflow: hidden; border-radius: 1px; background: color-mix(in srgb, var(--warning) 18%, var(--border)); }
+  .update-progress span { display: block; height: 100%; background: var(--warning); transition: width 120ms linear; }
+  .update-progress.indeterminate span { width: 38% !important; animation: update-progress-scan 900ms ease-in-out infinite; }
+  .updated-version-notice { position: fixed; z-index: 80; top: 12px; right: 12px; min-height: 32px; border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border)); border-radius: var(--radius); padding: 6px 10px; background: color-mix(in srgb, var(--success) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); }
+  .updated-version-notice.with-version-banner { top: 54px; }
+
+  @keyframes update-progress-scan {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(270%); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .update-progress.indeterminate span { animation: none; transform: none; }
+  }
   .project-rail, .tree-rail, .main-frame { min-width: 0; min-height: 0; }
   [data-app-panel] { isolation: isolate; outline: 0; }
   [data-app-panel]:focus-within, [data-app-panel]:focus { box-shadow: inset 0 0 0 1px var(--muted-foreground); }

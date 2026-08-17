@@ -28,10 +28,10 @@ export function updateActionCopy(update: RecoveryAwareUpdate): UpdateActionCopy 
       buttonLabel: 'Repair CLI and update',
       busyLabel: 'Repairing and updating…',
       dialogTitle: `Repair the CLI and update to Workman ${check.latest}?`,
-      dialogDescription: `The wrk and workmand launchers are missing or no longer point to a complete install. Workman will download and verify ${check.latest}, reinstall the command-line tools in the durable versioned layout, repair the launchers in ~/.local/bin, update the desktop app, and restart the daemon. Running project processes will stop.`,
+      dialogDescription: `The wrk and workmand launchers are missing or no longer point to a complete install. Workman will download, verify, and install ${check.latest}, repair the launchers in ~/.local/bin, update the desktop app, then restart the app and daemon automatically. Running project processes will stop.`,
       confirmLabel: 'Repair and update',
       bannerTitle: `Workman ${check.latest} is available and the CLI needs repair`,
-      bannerDescription: 'The verified release can restore wrk and workmand before the update restarts Workman.'
+      bannerDescription: 'The verified release restores wrk and workmand, installs the update, then restarts Workman.'
     };
   }
   if (recovery) {
@@ -39,7 +39,7 @@ export function updateActionCopy(update: RecoveryAwareUpdate): UpdateActionCopy 
       buttonLabel: 'Repair command-line tools',
       busyLabel: 'Repairing…',
       dialogTitle: 'Repair the Workman command-line tools?',
-      dialogDescription: `The wrk and workmand launchers are missing or no longer point to a complete install. Workman will download and verify ${check.current}, reinstall the command-line tools in the durable versioned layout, repair the launchers in ~/.local/bin, and restart the daemon. Running project processes will stop.`,
+      dialogDescription: `The wrk and workmand launchers are missing or no longer point to a complete install. Workman will download, verify, and install ${check.current}, repair the launchers in ~/.local/bin, then restart the app and daemon automatically. Running project processes will stop.`,
       confirmLabel: 'Repair CLI',
       bannerTitle: 'Workman command-line tools need repair',
       bannerDescription: 'The desktop app can restore wrk and workmand from the verified release.'
@@ -49,9 +49,9 @@ export function updateActionCopy(update: RecoveryAwareUpdate): UpdateActionCopy 
     buttonLabel: 'Update now',
     busyLabel: 'Updating…',
     dialogTitle: `Update to Workman ${check.latest}?`,
-    dialogDescription: 'Workman will download and verify the release, replace the CLI and daemon in the configured install directory, then restart the daemon. Running project processes will stop.',
+    dialogDescription: 'Workman will download, verify, and install the release, then restart the app and daemon automatically. Running project processes will stop.',
     confirmLabel: 'Update and restart',
     bannerTitle: `Workman ${check.latest} is available`,
-    bannerDescription: 'The release is downloaded and SHA256 verified before workman and workmand are replaced.'
+    bannerDescription: 'The release is downloaded, SHA256 verified, and installed before Workman restarts.'
   };
 }
