@@ -107,9 +107,10 @@ pub fn streamable_http_service(
 /// Stateless JSON transport for clients that do not consume server-initiated messages.
 ///
 /// Some MCP SDKs open an otherwise-idle SSE stream immediately after initialization and
-/// permanently disable a server after a very small reconnect budget. Workman tools are
-/// request/response only, so this endpoint avoids that unnecessary failure mode while keeping
-/// the stateful endpoint available to clients that need a durable stream.
+/// permanently disable a server after a very small reconnect budget. Workman currently emits no
+/// MCP progress, list-changed, or other server-initiated notifications, so Kimi loses no active
+/// behavior on this request/response-only endpoint. The stateful endpoint remains the default for
+/// every other client and is ready for future server push.
 pub fn stateless_http_service(
     registry: SharedProcessRegistry,
     input_router: crate::ProcessInputRouter,

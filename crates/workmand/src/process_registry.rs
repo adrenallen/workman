@@ -23,7 +23,7 @@ use workman_core::{
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
         PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification,
-        PtySubmissionVerificationMode, RawOutput, WORKMAN_PTY_PROFILE_ENV,
+        PtySubmissionVerificationMode, RawOutput, WORKMAN_PTY_PROFILE_ENV, is_kimi_tool_type,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
 };
@@ -39,17 +39,6 @@ const SUBMIT_MAX_ATTEMPTS: usize = 3;
 const KIMI_INITIAL_PROMPT_KEY_DELAY: Duration = Duration::from_millis(150);
 const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
-
-fn is_kimi_tool_type(tool_type: &str) -> bool {
-    matches!(
-        tool_type
-            .trim()
-            .to_ascii_lowercase()
-            .replace([' ', '-'], "_")
-            .as_str(),
-        "kimi" | "kimi_code"
-    )
-}
 
 use crate::agent_sessions::SessionCapture;
 use crate::config::{
@@ -3123,7 +3112,7 @@ mod tests {
                 kind: ProcessKind::Agent,
                 name: "kimi-input-target".into(),
                 command: Some(
-                    r#"stty raw -echo; exec perl -e '$|=1; print "Session:                       \r\nNo session yet - one will be created on your first message.\r\n| > |\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n| > $draft |\r\n"; next; } print "\r\nSession: session_fixture\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n| > $draft |\r\n"; }'"#
+                    r#"stty raw -echo; exec perl -e '$|=1; print "Session:                       \r\nNo session yet - one will be created on your first message.\r\n| > |\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n| > $draft |\r\n"; next; } print "\033[2J\033[HSession: session_fixture\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n| > $draft |\r\n"; }'"#
                         .into(),
                 ),
                 working_dir: "/tmp".into(),
@@ -3158,12 +3147,14 @@ mod tests {
         }
 
         registry
-            .submit_initial_prompt(21, b"Call whoami once.")
+            .submit_initial_prompt(21, b"Call whoami once.\nSession: review-pr16")
             .unwrap();
         let submitted_deadline = Instant::now() + Duration::from_secs(7);
         loop {
             let output = registry.raw_output(21, None, usize::MAX).unwrap();
-            if String::from_utf8_lossy(&output.data).contains("SUBMITTED:Call whoami once.") {
+            if String::from_utf8_lossy(&output.data)
+                .contains("SUBMITTED:Call whoami once.\nSession: review-pr16")
+            {
                 break;
             }
             assert!(
@@ -3176,9 +3167,11 @@ mod tests {
         assert!(status.events.iter().any(|event| {
             event.kind == "submit_retry" && event.message.contains("retried Enter (2/2)")
         }));
-        assert!(workman_core::pty::kimi_session_started(
-            &registry.rendered_output(21).unwrap().text
-        ));
+        let rendered = registry.rendered_output(21).unwrap().text;
+        assert!(
+            workman_core::pty::kimi_session_started(&rendered),
+            "Kimi session banner was not recognized: {rendered:?}"
+        );
         registry.stop(21).unwrap();
     }
 

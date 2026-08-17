@@ -1185,11 +1185,31 @@ fn wait_for_output_quiet(
     }
 }
 
+/// Return whether a tool type uses Kimi's session-creation submission signal.
+pub fn is_kimi_tool_type(tool_type: &str) -> bool {
+    matches!(
+        tool_type
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str(),
+        "kimi" | "kimi_code"
+    )
+}
+
 /// Kimi creates a session only after its first composer draft was actually submitted.
-/// A non-empty header is therefore stronger evidence than spinner or MCP-status redraws.
+/// A non-empty banner header is therefore stronger evidence than spinner or MCP-status redraws.
 pub fn kimi_session_started(rendered: &str) -> bool {
     rendered.lines().rev().any(|line| {
-        let Some((_, value)) = line.split_once("Session:") else {
+        // Kimi's header may sit inside a Unicode box, while composer rows carry a prompt or
+        // continuation prefix. Preserve indentation so wrapped prompt text such as
+        // `Session: review` cannot masquerade as the banner.
+        let line = line.trim_end();
+        let line = line
+            .strip_prefix('│')
+            .map(|line| line.strip_prefix(' ').unwrap_or(line))
+            .unwrap_or(line);
+        let Some(value) = line.strip_prefix("Session:") else {
             return false;
         };
         !value.trim().trim_matches('│').trim().is_empty()
@@ -1359,6 +1379,22 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn kimi_session_signal_ignores_session_text_in_the_composer() {
+        assert!(!kimi_session_started(
+            "│ Session:                       │\n│ > Investigate Session: review-pr16 │"
+        ));
+        assert!(!kimi_session_started(
+            "Session:                       \n| > Session: review-pr16 |"
+        ));
+        assert!(!kimi_session_started(
+            "Session:                       \n| > Investigate identity\n         Session: review-pr16 |"
+        ));
+        assert!(kimi_session_started(
+            "│ Session: session_fixture      │\n│ >                              │"
+        ));
+    }
 
     fn wait_for_output(process: &PtyProcess, needle: &[u8]) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(5);

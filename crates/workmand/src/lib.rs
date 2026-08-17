@@ -471,13 +471,13 @@ fn router(state: AppState) -> Router {
     let (mcp_service, mcp_sessions) = mcp::streamable_http_service(
         state.registry.clone(),
         state.input_router.clone(),
-        mcp_url,
+        mcp_url.clone(),
         state.timer_events.clone(),
     );
     let stateless_mcp_service = mcp::stateless_http_service(
         state.registry.clone(),
         state.input_router.clone(),
-        format!("http://127.0.0.1:{}/mcp-stateless", state.port),
+        mcp_url,
         state.timer_events.clone(),
     );
     Router::new()

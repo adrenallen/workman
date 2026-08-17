@@ -22,7 +22,7 @@ use workman_core::{
     AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
     ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
     attention::{AttentionState, DEFAULT_IDLE_AFTER},
-    pty::kimi_session_started,
+    pty::{is_kimi_tool_type, kimi_session_started},
 };
 
 use super::{
@@ -34,6 +34,10 @@ use crate::ProcessRegistry;
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 pub(crate) const WORKMAN_EPHEMERAL_AGENT_HOME_ENV: &str = "WORKMAN_EPHEMERAL_AGENT_HOME";
+// Kimi needs its provider credentials to launch, so these are restrictive per-launch snapshots:
+// copied files/directories are forced to 0600/0700, never followed through symlinks, removed on
+// close and graceful shutdown, and swept from persisted process records after daemon restart.
+// Refreshes remain isolated to the disposable snapshot and are intentionally not synced back.
 const KIMI_PRIVATE_HOME_SEED_ENTRIES: &[&str] = &[
     "config.toml",
     "credentials",
@@ -53,7 +57,7 @@ const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INITIAL_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const INITIAL_PROMPT_HARD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INITIAL_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const KIMI_INITIAL_PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(6);
+const KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT: Duration = Duration::from_secs(12);
 const AGENT_TEMPLATE_NAME_MAX_CHARS: usize = 120;
 const AGENT_TEMPLATE_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const AGENT_TEMPLATE_EXTRA_ARGS_MAX_ITEMS: usize = 64;
@@ -83,7 +87,8 @@ struct SpawnProcessArgs {
     /// Safely shell-quoted arguments appended to the registered agent command.
     #[serde(default)]
     extra_args: Vec<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs.
+    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
+    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
 }
@@ -111,7 +116,8 @@ struct SpawnAgentArgs {
     /// Optional first prompt delivered once the agent reaches a safe input state.
     #[serde(default)]
     initial_prompt: Option<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs.
+    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
+    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
 }
@@ -231,7 +237,7 @@ impl McpLaunchAdapter {
             Self::Kimi => McpLaunchCapability {
                 supported: true,
                 mechanism: "private per-launch KIMI_CODE_HOME config",
-                note: "Workman injects a private Kimi Code home with the current URL and an environment-backed process bearer; mutable session state and the user's mcp.json remain isolated.",
+                note: "Workman requires Kimi Code 0.36 or newer and injects a private home with an environment-backed process bearer. The Kimi-only stateless endpoint carries request/response tools but no server push (Workman currently emits none). Mutable session state and the user's mcp.json remain isolated; disabling auto_acknowledge_dialogs also disables private workspace-trust seeding and may make Kimi filter MCP.",
             },
             Self::Unsupported => McpLaunchCapability {
                 supported: false,
@@ -1132,7 +1138,9 @@ async fn confirm_kimi_initial_prompt_submission(
     process_id: ProcessId,
     used_fallback: bool,
 ) {
-    let deadline = Instant::now() + KIMI_INITIAL_PROMPT_CONFIRM_TIMEOUT;
+    let hard_deadline = Instant::now() + INITIAL_PROMPT_HARD_TIMEOUT;
+    let mut quiet_deadline = Instant::now() + KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT;
+    let mut last_output_offset = 0;
     loop {
         let finished = {
             let mut registry = registry.lock().await;
@@ -1157,11 +1165,25 @@ async fn confirm_kimi_initial_prompt_submission(
                 );
                 return;
             }
-            let rendered = registry
-                .rendered_output(process_id)
-                .map(|output| output.text)
-                .unwrap_or_default();
-            if kimi_session_started(&rendered) {
+            let rendered = match registry.rendered_output(process_id) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    let _ = registry.record_process_event(
+                        process_id,
+                        "initial_prompt_dropped",
+                        format!(
+                            "initial prompt dropped (reason: verification_failed): rendered output unavailable: {error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+            let now = Instant::now();
+            if rendered.raw_end_offset != last_output_offset {
+                last_output_offset = rendered.raw_end_offset;
+                quiet_deadline = now + KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT;
+            }
+            if kimi_session_started(&rendered.text) {
                 let suffix = if used_fallback {
                     " using the observed-output quiet fallback"
                 } else {
@@ -1175,11 +1197,24 @@ async fn confirm_kimi_initial_prompt_submission(
                     ),
                 );
                 true
-            } else if Instant::now() >= deadline {
+            } else if now >= hard_deadline {
                 let _ = registry.record_process_event(
                     process_id,
                     "initial_prompt_dropped",
-                    "initial prompt remained unsubmitted after one Kimi Enter retry",
+                    format!(
+                        "initial prompt submission could not be verified before the {}s hard cap",
+                        INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                    ),
+                );
+                true
+            } else if now >= quiet_deadline {
+                let _ = registry.record_process_event(
+                    process_id,
+                    "initial_prompt_dropped",
+                    format!(
+                        "no Kimi session header appeared within {}s of the last PTY output",
+                        KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT.as_secs()
+                    ),
                 );
                 true
             } else {
@@ -1285,6 +1320,23 @@ async fn spawn_registered_agent_for(
             return Err(error);
         }
     };
+    if is_kimi_tool_type(&tool_type) {
+        let (kind, message) = if auto_acknowledge_dialogs {
+            (
+                "kimi_workspace_trust_seeded",
+                "seeded workspace trust inside the disposable Kimi home; the user trust store was not changed",
+            )
+        } else {
+            (
+                "kimi_workspace_trust_skipped",
+                "private Kimi workspace trust was not seeded because auto_acknowledge_dialogs=false; Kimi may filter MCP until trust is established",
+            )
+        };
+        let _ = registry
+            .lock()
+            .await
+            .record_process_event(result.process_id, kind, message);
+    }
     if auto_acknowledge_dialogs
         && supports_first_run_dialog_ack(&tool_type)
         && let Err(error) =
@@ -1496,13 +1548,6 @@ fn supports_first_run_dialog_ack(tool_type: &str) -> bool {
     matches!(
         normalize_tool_type(tool_type).as_str(),
         "claude" | "claude_code" | "codex"
-    )
-}
-
-fn is_kimi_tool_type(tool_type: &str) -> bool {
-    matches!(
-        normalize_tool_type(tool_type).as_str(),
-        "kimi" | "kimi_code"
     )
 }
 
@@ -1836,8 +1881,12 @@ fn kimi_mcp_config(mcp_url: &str) -> String {
 }
 
 fn stateless_mcp_url(mcp_url: &str) -> String {
+    let mcp_url = mcp_url.trim_end_matches('/');
+    if mcp_url.ends_with("/mcp-stateless") {
+        return mcp_url.to_owned();
+    }
     mcp_url.strip_suffix("/mcp").map_or_else(
-        || format!("{}/mcp-stateless", mcp_url.trim_end_matches('/')),
+        || format!("{mcp_url}/mcp-stateless"),
         |base| format!("{base}/mcp-stateless"),
     )
 }
@@ -2043,6 +2092,8 @@ fn copy_private_home_entry(source: &Path, target: &Path) -> std::io::Result<()> 
 }
 
 fn seed_kimi_workspace_trust(home: &Path, working_dir: &Path) -> Result<(), String> {
+    // Validated against Kimi Code 0.36.1's workspace-trust filenames and JSON schema. The
+    // isolated deep check remains the runtime oracle if a future Kimi release changes it.
     let root = working_dir.to_string_lossy().replace('\\', "/");
     let root = root.trim_end_matches('/');
     if root.is_empty() {
@@ -2712,6 +2763,14 @@ mod tests {
 
     #[test]
     fn kimi_launch_uses_private_state_and_an_environment_backed_process_bearer() {
+        assert_eq!(
+            stateless_mcp_url("http://127.0.0.1:43127/mcp"),
+            "http://127.0.0.1:43127/mcp-stateless"
+        );
+        assert_eq!(
+            stateless_mcp_url("http://127.0.0.1:43127/mcp-stateless"),
+            "http://127.0.0.1:43127/mcp-stateless"
+        );
         let deep_check = kimi_deep_check_command(
             "kimi --yolo --model 'kimi test'",
             &["--prompt".into(), "check".into()],
