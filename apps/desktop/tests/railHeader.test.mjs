@@ -12,9 +12,10 @@ test('expanded project rail uses the wide logo and ends with notifications', () 
   assert.ok(header.indexOf('class="brand-collapse') < header.indexOf('class="notification-slot"'));
 });
 
-test('collapsed header stacks the mark, bell, and discoverable expand control', () => {
-  assert.match(app, /grid-template-rows: 28px 28px 24px/);
+test('collapsed header stacks the mark, keep-awake, bell, and expand control', () => {
+  assert.match(app, /grid-template-rows: 28px 28px 28px 24px/);
   assert.match(app, /\.brand-mark \{ grid-row: 1;/);
-  assert.match(app, /\.notification-slot \{ grid-row: 2;/);
-  assert.match(app, /\.brand-collapse\) \{ grid-row: 3;/);
+  assert.match(app, /\.keep-awake-slot \{ grid-row: 2;/);
+  assert.match(app, /\.notification-slot \{ grid-row: 3;/);
+  assert.match(app, /\.brand-collapse\) \{ grid-row: 4;/);
 });

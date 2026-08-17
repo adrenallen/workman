@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "checkJs": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
@@ -8,6 +9,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "noEmit": true,
     "paths": {
       "$lib": ["./src/lib"],
       "$lib/*": ["./src/lib/*"]

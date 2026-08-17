@@ -8,6 +8,7 @@ export type AppNavigationTarget =
   | { type: 'project'; projectId: number }
   | { type: 'item'; selection: ProjectTreeSelection }
   | { type: 'settings'; projectId?: number }
+  | { type: 'keep-awake' }
   | { type: 'new-worktree'; projectId: number }
   | { type: 'new-agent'; projectId: number }
   | { type: 'new-terminal'; projectId: number }
@@ -73,6 +74,8 @@ export function navigationTargetKey(target: AppNavigationTarget): string {
       return `item:${target.selection.projectId}:${target.selection.kind}:${target.selection.id}`;
     case 'settings':
       return `settings:${target.projectId ?? 'current'}`;
+    case 'keep-awake':
+      return 'keep-awake';
     case 'new-terminal':
       return `new-terminal:${target.projectId}`;
     case 'new-worktree':
@@ -120,6 +123,14 @@ export function recordRecentNavigation(target: AppNavigationTarget): void {
 export function fuzzySubsequenceScore(query: string, candidate: string): number | null {
   const needle = query.trim().toLocaleLowerCase();
   const haystack = candidate.toLocaleLowerCase();
+  return fuzzySubsequenceScoreNormalized(needle, haystack);
+}
+
+/** Score strings that the caller has already trimmed/lowercased. */
+export function fuzzySubsequenceScoreNormalized(
+  needle: string,
+  haystack: string
+): number | null {
   if (!needle) return 0;
 
   let score = 0;

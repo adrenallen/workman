@@ -861,6 +861,7 @@ impl ProcessStatusSubscription {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_session_control(
     text: &str,
     registry: &SharedProcessRegistry,

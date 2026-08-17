@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -17,7 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{
-    Emitter, State,
+    Emitter, Manager, RunEvent, State, WindowEvent,
     menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID},
 };
 use tokio::{
@@ -63,6 +63,50 @@ struct BridgeState {
     sender: mpsc::Sender<BridgeCommand>,
     input_sender: mpsc::Sender<TerminalInput>,
     status: Arc<Mutex<ConnectionStatus>>,
+}
+
+#[derive(Default)]
+struct KeepAwakeState {
+    inner: Mutex<KeepAwakeInner>,
+}
+
+#[derive(Default)]
+struct KeepAwakeInner {
+    child: Option<Child>,
+    warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct KeepAwakeStatus {
+    supported: bool,
+    active: bool,
+    warning: Option<String>,
+}
+
+impl KeepAwakeState {
+    fn stop(&self) -> Result<KeepAwakeStatus, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        stop_keep_awake_child(&mut inner)?;
+        inner.warning = None;
+        Ok(KeepAwakeStatus {
+            supported: cfg!(target_os = "macos"),
+            active: false,
+            warning: None,
+        })
+    }
+
+    fn stop_silently(&self) {
+        let _ = self.stop();
+    }
+}
+
+impl Drop for KeepAwakeState {
+    fn drop(&mut self) {
+        self.stop_silently();
+    }
 }
 
 enum BridgeCommand {
@@ -283,6 +327,118 @@ fn daemon_status(state: State<'_, BridgeState>) -> ConnectionStatus {
     lock_status(&state.status).clone()
 }
 
+#[tauri::command]
+fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        refresh_keep_awake_child(&mut inner);
+        if inner.child.is_none() {
+            let child = keep_awake_command(std::process::id())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("could not start macOS keep awake: {error}"))?;
+            inner.child = Some(child);
+            inner.warning = None;
+        }
+        Ok(keep_awake_status_from(&inner))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Ok(KeepAwakeStatus {
+            supported: false,
+            active: false,
+            warning: None,
+        })
+    }
+}
+
+#[tauri::command]
+fn keep_awake_stop(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus, String> {
+    state.stop()
+}
+
+#[tauri::command]
+fn keep_awake_status(state: State<'_, KeepAwakeState>) -> KeepAwakeStatus {
+    let mut inner = state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    refresh_keep_awake_child(&mut inner);
+    keep_awake_status_from(&inner)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keep_awake_command(pid: u32) -> Command {
+    let mut command = Command::new("/usr/bin/caffeinate");
+    command.args(["-i", "-w", &pid.to_string()]);
+    command
+}
+
+fn keep_awake_status_from(inner: &KeepAwakeInner) -> KeepAwakeStatus {
+    KeepAwakeStatus {
+        supported: cfg!(target_os = "macos"),
+        active: inner.child.is_some(),
+        warning: inner.warning.clone(),
+    }
+}
+
+fn refresh_keep_awake_child(inner: &mut KeepAwakeInner) {
+    let Some(child) = inner.child.as_mut() else {
+        return;
+    };
+    match child.try_wait() {
+        Ok(None) => {}
+        Ok(Some(status)) => {
+            inner.child = None;
+            inner.warning = Some(format!("Keep awake helper exited unexpectedly ({status})"));
+        }
+        Err(error) => {
+            if let Some(mut child) = inner.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            inner.warning = Some(format!("Could not inspect keep awake helper: {error}"));
+        }
+    }
+}
+
+fn stop_keep_awake_child(inner: &mut KeepAwakeInner) -> Result<(), String> {
+    let Some(mut child) = inner.child.take() else {
+        return Ok(());
+    };
+    match child.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            if let Err(kill_error) = child.kill() {
+                if child.try_wait().is_ok_and(|status| status.is_some()) {
+                    return Ok(());
+                }
+                inner.child = Some(child);
+                return Err(format!("could not stop macOS keep awake: {kill_error}"));
+            }
+            child
+                .wait()
+                .map(|_| ())
+                .map_err(|error| format!("could not reap macOS keep awake: {error}"))
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!(
+                "could not inspect macOS keep awake before stopping: {error}"
+            ))
+        }
+    }
+}
+
 /// Open an existing workspace path without invoking a command shell.
 #[tauri::command]
 fn shell_open_path(path: String, target: ShellOpenTarget) -> Result<(), String> {
@@ -329,6 +485,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(external_navigation::plugin())
         .manage(state)
+        .manage(KeepAwakeState::default())
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
             if let Some(action) = native_menu_action(event.id().as_ref()) {
@@ -340,6 +497,9 @@ pub fn run() {
             daemon_send_input,
             daemon_restart,
             daemon_status,
+            keep_awake_start,
+            keep_awake_stop,
+            keep_awake_status,
             shell_open_path,
             shell_open_url,
             shell_detect_editors,
@@ -360,8 +520,22 @@ pub fn run() {
             ));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run workman desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build workman desktop")
+        .run(|app, event| {
+            let should_stop = matches!(&event, RunEvent::Exit | RunEvent::ExitRequested { .. })
+                || matches!(
+                    &event,
+                    RunEvent::WindowEvent {
+                        label,
+                        event: WindowEvent::CloseRequested { .. },
+                        ..
+                    } if label == "main"
+                );
+            if should_stop {
+                app.state::<KeepAwakeState>().stop_silently();
+            }
+        });
 }
 
 fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -1243,6 +1417,32 @@ async fn embedded_shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_awake_command_prevents_idle_sleep_until_desktop_exits() {
+        let command = keep_awake_command(42_424);
+        assert_eq!(command.get_program(), "/usr/bin/caffeinate");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["-i", "-w", "42424"]
+        );
+    }
+
+    #[test]
+    fn keep_awake_state_starts_inactive_without_a_warning() {
+        let inner = KeepAwakeInner::default();
+        assert_eq!(
+            keep_awake_status_from(&inner),
+            KeepAwakeStatus {
+                supported: cfg!(target_os = "macos"),
+                active: false,
+                warning: None,
+            }
+        );
+    }
 
     #[test]
     fn native_menu_ids_emit_only_frontend_actions() {

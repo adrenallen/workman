@@ -10,8 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
-    AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectFolder, ProjectId, ProjectLayoutEntry, Store, TimerId,
+    AgentTemplateId, AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus,
+    Project, ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store, TimerId,
 };
 
 use crate::{
@@ -419,6 +419,56 @@ struct AgentToolOrderParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct QuickPromptParams {
+    prompt: QuickPromptInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptInput {
+    #[serde(default)]
+    id: Option<i64>,
+    name: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptIdParams {
+    quick_prompt_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuickPromptOrderParams {
+    quick_prompt_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateParams {
+    template: AgentTemplateInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateInput {
+    #[serde(default)]
+    id: Option<AgentTemplateId>,
+    name: String,
+    agent_tool_id: AgentToolId,
+    #[serde(default)]
+    extra_args: Vec<String>,
+    #[serde(default)]
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateIdParams {
+    agent_template_id: AgentTemplateId,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTemplateOrderParams {
+    agent_template_ids: Vec<AgentTemplateId>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UserShellParams {
     #[serde(default)]
     shell: Option<String>,
@@ -442,11 +492,19 @@ struct AgentToolDeepCheckParams {
 #[derive(Debug, Deserialize)]
 struct SpawnAgentParams {
     project_id: ProjectId,
-    agent_tool_id: AgentToolId,
+    /// Optional registered agent. Overrides an agent template's default when both are present.
+    #[serde(default)]
+    agent_tool_id: Option<AgentToolId>,
+    /// Optional template. Its prompt always applies; its launch arguments apply only when the
+    /// effective agent is the template default.
+    #[serde(default)]
+    agent_template_id: Option<AgentTemplateId>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     extra_args: Vec<String>,
+    #[serde(default)]
+    prompt: Option<String>,
     /// Automatically accept narrowly recognized first-run trust dialogs.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
@@ -519,6 +577,8 @@ async fn dispatch(
         }
         "agents.spawn" => {
             let params: SpawnAgentParams = params_as(params.clone())?;
+            crate::mcp::agent_spawning::validate_initial_prompt(params.prompt.as_deref())
+                .map_err(|error| ("invalid_params", error))?;
             let project = {
                 let registry = registry.lock().await;
                 registry
@@ -531,8 +591,10 @@ async fn dispatch(
                 registry.clone(),
                 project,
                 params.agent_tool_id,
+                params.agent_template_id,
                 params.name,
                 params.extra_args,
+                params.prompt,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,
@@ -1254,6 +1316,149 @@ async fn dispatch(
             .map(|tools| json_value(agent_icons::views(tools, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
         }
+        "quick_prompts.list" => {
+            return registry
+                .store()
+                .list_quick_prompts()
+                .map(json_value)
+                .map_err(quick_prompt_store_error);
+        }
+        "quick_prompts.save" => {
+            let params: QuickPromptParams = params_as(params)?;
+            let name = params.prompt.name.trim();
+            if name.is_empty() {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name cannot be empty".to_owned(),
+                ));
+            }
+            if name.chars().count() > 120 {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name must be 120 characters or fewer".to_owned(),
+                ));
+            }
+            if name.contains('\0') {
+                return Err((
+                    "invalid_params",
+                    "quick prompt name may not contain NUL bytes".to_owned(),
+                ));
+            }
+            if params.prompt.body.len() > 64 * 1024 {
+                return Err((
+                    "invalid_params",
+                    "quick prompt body must be 65536 bytes or fewer".to_owned(),
+                ));
+            }
+            if params.prompt.body.contains('\0') {
+                return Err((
+                    "invalid_params",
+                    "quick prompt body may not contain NUL bytes".to_owned(),
+                ));
+            }
+            let id = match params.prompt.id {
+                Some(id) => {
+                    if registry
+                        .store()
+                        .get_quick_prompt(id)
+                        .map_err(quick_prompt_store_error)?
+                        .is_none()
+                    {
+                        return Err((
+                            "quick_prompt_not_found",
+                            format!("quick prompt {id} does not belong to the active profile"),
+                        ));
+                    }
+                    id
+                }
+                None => registry
+                    .store()
+                    .next_quick_prompt_id()
+                    .map_err(quick_prompt_store_error)?,
+            };
+            registry
+                .store()
+                .put_quick_prompt(&QuickPrompt {
+                    id,
+                    name: name.to_owned(),
+                    body: params.prompt.body,
+                    sort_order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .map_err(|error| quick_prompt_save_error(error, name))?;
+            return registry
+                .store()
+                .get_quick_prompt(id)
+                .map_err(quick_prompt_store_error)?
+                .map(json_value)
+                .ok_or((
+                    "quick_prompt_not_found",
+                    format!("quick prompt {id} does not belong to the active profile"),
+                ));
+        }
+        "quick_prompts.delete" => {
+            let params: QuickPromptIdParams = params_as(params)?;
+            let deleted = registry
+                .store()
+                .delete_quick_prompt(params.quick_prompt_id)
+                .map_err(quick_prompt_store_error)?;
+            return Ok(json!({
+                "quick_prompt_id": params.quick_prompt_id,
+                "deleted": deleted,
+            }));
+        }
+        "quick_prompts.reorder" => {
+            let params: QuickPromptOrderParams = params_as(params)?;
+            registry
+                .store()
+                .reorder_quick_prompts(&params.quick_prompt_ids)
+                .map_err(quick_prompt_store_error)?;
+            return registry
+                .store()
+                .list_quick_prompts()
+                .map(json_value)
+                .map_err(quick_prompt_store_error);
+        }
+        "agent_templates.list" => {
+            return crate::mcp::agent_spawning::load_agent_templates(&registry)
+                .map(json_value)
+                .map_err(|error| ("agent_template_error", error));
+        }
+        "agent_templates.save" => {
+            let params: AgentTemplateParams = params_as(params)?;
+            return crate::mcp::agent_spawning::save_agent_template_from_settings(
+                &registry,
+                params.template.id,
+                params.template.name,
+                params.template.agent_tool_id,
+                params.template.extra_args,
+                params.template.prompt,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_template_error", error));
+        }
+        "agent_templates.delete" => {
+            let params: AgentTemplateIdParams = params_as(params)?;
+            let deleted = crate::mcp::agent_spawning::delete_agent_template_from_settings(
+                &registry,
+                params.agent_template_id,
+            )
+            .map_err(|error| ("agent_template_error", error))?;
+            return Ok(json!({
+                "agent_template_id": params.agent_template_id,
+                "deleted": deleted
+            }));
+        }
+        "agent_templates.reorder" => {
+            let params: AgentTemplateOrderParams = params_as(params)?;
+            return crate::mcp::agent_spawning::reorder_agent_templates_from_settings(
+                &registry,
+                &params.agent_template_ids,
+            )
+            .map(json_value)
+            .map_err(|error| ("agent_template_error", error));
+        }
         _ => {}
     }
 
@@ -1422,6 +1627,24 @@ fn json_value(value: impl serde::Serialize) -> Value {
 
 fn registry_error(error: RegistryError) -> (&'static str, String) {
     (error.code(), error.to_string())
+}
+
+fn quick_prompt_store_error(error: workman_core::StoreError) -> (&'static str, String) {
+    ("quick_prompt_error", error.to_string())
+}
+
+fn quick_prompt_save_error(error: workman_core::StoreError, name: &str) -> (&'static str, String) {
+    if let workman_core::StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, Some(detail))) =
+        &error
+        && code.code == rusqlite::ErrorCode::ConstraintViolation
+        && detail.contains("quick_prompts.profile_id, quick_prompts.name")
+    {
+        return (
+            "quick_prompt_error",
+            format!("A quick prompt named {name} already exists in this profile"),
+        );
+    }
+    quick_prompt_store_error(error)
 }
 
 fn config_error(error: crate::ConfigError) -> (&'static str, String) {

@@ -13,16 +13,17 @@
 
   interface Props {
     onClose: () => void;
+    keepAwakeSupported?: boolean;
   }
 
-  let { onClose }: Props = $props();
+  let { onClose, keepAwakeSupported = false }: Props = $props();
 
-  const groups = [
+  let groups = $derived([
     {
       title: 'Move through the workspace',
       shortcuts: [
         { keys: [mod, '← / →'], label: 'Move between project rail, tree, and main frame' },
-        { keys: [mod, '↑ / ↓'], label: 'Select the previous or next process' },
+        { keys: [mod, '↑ / ↓'], label: 'Select the previous or next process, including from terminal input' },
         { keys: [mod, alt, '← / →'], label: 'Panel traversal alias' },
         { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
         { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
@@ -32,7 +33,11 @@
     {
       title: 'Jump and act',
       shortcuts: [
-        { keys: [mod, 'K'], label: 'Quick jump or create in any project' },
+        {
+          keys: [mod, 'K'],
+          label: `Quick jump or create in any project${keepAwakeSupported ? ', including Keep awake…' : ''}`
+        },
+        { keys: [mod, shift, 'P'], label: 'Open quick prompts for the selected agent' },
         { keys: [shift, 'F10'], label: 'Open the focused row’s context menu' },
         { keys: [alt, '↑ / ↓'], label: 'Reorder the focused project or process' },
         { keys: [mod, '/'], label: 'Show or close this shortcuts reference' },
@@ -49,9 +54,11 @@
         { keys: ['Tab', '↵'], label: 'Use Unfocus, Previous, and Next in the process bar' }
       ]
     }
-  ];
+  ]);
 
-  const unfocusLabel = terminalUnfocusKeys.join(terminalUnfocusKeys[0] === '⌘' ? '' : '+');
+  const chordJoin = mod === '⌘' ? '' : '+';
+  const chord = (...keys: string[]) => keys.join(chordJoin);
+  const unfocusLabel = chord(...terminalUnfocusKeys);
 
   function handleKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape' || (primaryModifier(event) && event.key === '/')) {
@@ -98,7 +105,7 @@
     </ScrollArea>
 
     <footer>
-      <span>Text fields keep Home/End. Terminal input keeps every key except <strong>{unfocusLabel} Unfocus</strong>.</span>
+      <span>Text fields keep Home/End; quick-prompt search uses them for first/last. Terminal input reserves <strong>{unfocusLabel} Unfocus</strong>, <strong>{chord(mod, '↑')}/{chord(mod, '↓')} process selection</strong>, and <strong>{chord(mod, shift, 'P')} quick prompts</strong>; other keys reach the terminal.</span>
       <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
   </Dialog.Content>

@@ -661,6 +661,19 @@ impl ProcessRegistry {
         self.status_view(process)
     }
 
+    /// Snapshot the live attention tracker without observing notifications or mutating the store.
+    pub(crate) fn agent_attention_snapshot(
+        &self,
+        process_id: ProcessId,
+    ) -> RegistryResult<AgentState> {
+        if let Some(output) = self.outputs.get(&process_id) {
+            return Ok(output.attention.snapshot());
+        }
+        let process = self.require(process_id)?;
+        let tool_type = self.tool_type_for(&process)?;
+        Ok(AgentState::exited(tool_type, process.exited_at))
+    }
+
     pub fn list(&mut self, project_id: Option<ProjectId>) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
         Ok(match project_id {
@@ -896,12 +909,11 @@ impl ProcessRegistry {
         // A captured ID only resumes once its conversation is on disk. Claude
         // registers IDs at startup, so a session that exited before its first
         // message would wedge every relaunch into an unresumable --resume.
-        let previous_session = previous_session.filter(|session| {
-            match (&capture, session.session_id.as_deref()) {
+        let previous_session =
+            previous_session.filter(|session| match (&capture, session.session_id.as_deref()) {
                 (Some(capture), Some(session_id)) => capture.session_resumable(session_id),
                 _ => true,
-            }
-        });
+            });
         let needs_continue_check = process.exited_at.is_some()
             && previous_session
                 .as_ref()
@@ -1595,6 +1607,28 @@ impl ProcessRegistry {
         self.status_invalidations.invalidate();
         eprintln!("process {process_id}: {}", event.message);
         Ok(Some(dialog))
+    }
+
+    /// Append an orchestration event to a process's visible lifecycle history.
+    pub(crate) fn record_process_event(
+        &mut self,
+        process_id: ProcessId,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> RegistryResult<ProcessEvent> {
+        let event = ProcessEvent {
+            at: now_millis(),
+            kind: kind.into(),
+            message: message.into(),
+        };
+        let output = self
+            .outputs
+            .get_mut(&process_id)
+            .ok_or(RegistryError::NotRunning(process_id))?;
+        output.events.push(event.clone());
+        self.status_invalidations.invalidate();
+        eprintln!("process {process_id}: {}", event.message);
+        Ok(event)
     }
 
     /// Read a clamped range of physical terminal rows across scrollback and viewport.

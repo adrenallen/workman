@@ -1,3 +1,5 @@
+import { primaryModifier, secondaryModifier } from './primaryModifier.ts';
+
 export interface TerminalKeyboardMode {
   kittyFlags: number;
   modifyOtherKeys: number;
@@ -9,6 +11,15 @@ export interface TerminalKeyEvent {
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
+}
+
+export function processCycleDirection(event: TerminalKeyEvent): -1 | 1 | null {
+  if (!primaryModifier(event) || event.altKey || secondaryModifier(event) || event.shiftKey) {
+    return null;
+  }
+  if (event.key === 'ArrowUp') return -1;
+  if (event.key === 'ArrowDown') return 1;
+  return null;
 }
 
 interface MacOsEditingKeyBinding {

@@ -4,11 +4,11 @@
 
 const macLike = /Mac|iP(hone|ad|od)/.test(globalThis.navigator?.platform ?? '');
 
-type ModifierEvent = Pick<KeyboardEvent, 'metaKey' | 'ctrlKey'>;
+type ModifierEvent = { metaKey?: boolean; ctrlKey?: boolean };
 
 /** True when the platform's primary shortcut modifier is held. */
 export function primaryModifier(event: ModifierEvent): boolean {
-  return macLike ? event.metaKey : event.ctrlKey;
+  return Boolean(macLike ? event.metaKey : event.ctrlKey);
 }
 
 /**
@@ -17,7 +17,7 @@ export function primaryModifier(event: ModifierEvent): boolean {
  * key stays with the operating system elsewhere.
  */
 export function secondaryModifier(event: ModifierEvent): boolean {
-  return macLike ? event.ctrlKey : event.metaKey;
+  return Boolean(macLike ? event.ctrlKey : event.metaKey);
 }
 
 /** The labels shown for modifiers in shortcut help. */
@@ -30,7 +30,7 @@ export const shiftModifierLabel = macLike ? '⇧' : 'Shift';
  * Ctrl+U is shell line editing, and terminal input stays sovereign.
  */
 export function terminalUnfocusChord(
-  event: ModifierEvent & Pick<KeyboardEvent, 'altKey' | 'shiftKey' | 'key'>
+  event: ModifierEvent & { altKey: boolean; shiftKey: boolean; key: string }
 ): boolean {
   return (
     primaryModifier(event) &&

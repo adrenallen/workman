@@ -6239,7 +6239,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "workman-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -6256,7 +6256,7 @@ dependencies = [
 
 [[package]]
 name = "workman-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6281,7 +6281,7 @@ dependencies = [
 
 [[package]]
 name = "workman-desktop"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "futures-util",
  "mac-usernotifications",
@@ -6303,7 +6303,7 @@ dependencies = [
 
 [[package]]
 name = "workmand"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "axum",
  "base64 0.22.1",
