@@ -171,9 +171,11 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         registry
             .store()
             .set_process_mcp_token(1, "scratchpad-first-token", 1_700_000_000_000)?;
-        registry
-            .store()
-            .set_process_mcp_token(2, "scratchpad-cross-project-token", 1_700_000_000_000)?;
+        registry.store().set_process_mcp_token(
+            2,
+            "scratchpad-cross-project-token",
+            1_700_000_000_000,
+        )?;
         registry
             .store()
             .set_process_mcp_token(3, "scratchpad-second-token", 1_700_000_000_000)?;
