@@ -3186,19 +3186,19 @@ where
 }
 
 fn git_executable(environment: &BTreeMap<OsString, OsString>) -> WorktreeResult<PathBuf> {
-    let path = environment
-        .get(std::ffi::OsStr::new("PATH"))
-        .ok_or_else(|| WorktreeError::Git {
+    // Windows reports the variable as `Path` and launches `git.exe` through
+    // PATHEXT, so resolution goes through the runtime doctor's shared lookup.
+    let path = crate::runtime_doctor::path_variable(environment);
+    if path.is_empty() {
+        return Err(WorktreeError::Git {
             operation: "resolve Git executable".into(),
             message: "resolved user environment has no PATH".into(),
-        })?;
-    env::split_paths(path)
-        .map(|directory| directory.join("git"))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| WorktreeError::Git {
-            operation: "resolve Git executable".into(),
-            message: "git was not found in the resolved user PATH".into(),
-        })
+        });
+    }
+    crate::runtime_doctor::resolve_executable("git", &path).ok_or_else(|| WorktreeError::Git {
+        operation: "resolve Git executable".into(),
+        message: "git was not found in the resolved user PATH".into(),
+    })
 }
 
 async fn command_environment(registry: &SharedProcessRegistry) -> BTreeMap<OsString, OsString> {

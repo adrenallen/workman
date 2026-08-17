@@ -435,7 +435,7 @@ fn is_environment_assignment(word: &str) -> bool {
 /// The environment map keeps whatever key case the operating system reports;
 /// Windows usually spells the variable `Path`, so an exact miss falls back to a
 /// case-insensitive scan there.
-fn path_variable(variables: &BTreeMap<OsString, OsString>) -> OsString {
+pub(crate) fn path_variable(variables: &BTreeMap<OsString, OsString>) -> OsString {
     if let Some(path) = variables.get(OsStr::new("PATH")) {
         return path.clone();
     }
@@ -449,7 +449,7 @@ fn path_variable(variables: &BTreeMap<OsString, OsString>) -> OsString {
     OsString::new()
 }
 
-fn resolve_executable(executable: &str, path: &OsString) -> Option<PathBuf> {
+pub(crate) fn resolve_executable(executable: &str, path: &OsString) -> Option<PathBuf> {
     let executable_path = Path::new(executable);
     if executable_path.components().count() > 1 {
         return executable_candidates(executable_path.to_path_buf())
@@ -776,10 +776,10 @@ mod tests {
 
     #[cfg(unix)]
     use super::check_agent_tools_with_user_environment;
-    #[cfg(any(unix, windows))]
-    use super::{DoctorEnvironment, check_agent_tools_in};
     #[cfg(windows)]
     use super::path_variable;
+    #[cfg(any(unix, windows))]
+    use super::{DoctorEnvironment, check_agent_tools_in};
     use super::{apply_config_in, command_executable, config_preview_in, config_target};
 
     fn tool(id: i64, name: &str, command: &str, tool_type: &str, enabled: bool) -> AgentTool {
@@ -929,11 +929,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn path_variable_reads_the_windows_path_key_case_insensitively() {
-        let variables = BTreeMap::from([(
-            OsString::from("Path"),
-            OsString::from("C:\\fixture-path"),
-        )]);
-        assert_eq!(path_variable(&variables), OsString::from("C:\\fixture-path"));
+        let variables =
+            BTreeMap::from([(OsString::from("Path"), OsString::from("C:\\fixture-path"))]);
+        assert_eq!(
+            path_variable(&variables),
+            OsString::from("C:\\fixture-path")
+        );
         assert_eq!(path_variable(&BTreeMap::new()), OsString::new());
     }
 

@@ -1730,6 +1730,10 @@ fn agent_source_home(
         .or_else(|| {
             environment
                 .get(std::ffi::OsStr::new("HOME"))
+                // Windows sessions carry the home directory in USERPROFILE, not
+                // HOME; without it the private launch home misses existing
+                // authentication and configuration files.
+                .or_else(|| environment.get(std::ffi::OsStr::new("USERPROFILE")))
                 .map(PathBuf::from)
                 .map(|home| home.join(default_directory))
         })

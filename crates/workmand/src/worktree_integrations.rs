@@ -553,11 +553,13 @@ fn executable_on_path(
     command: &str,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Option<PathBuf> {
-    environment.get(OsStr::new("PATH")).and_then(|path| {
-        std::env::split_paths(path)
-            .map(|directory| directory.join(command))
-            .find(|candidate| candidate.is_file())
-    })
+    // Windows reports the variable as `Path` and launches `gh.exe` through
+    // PATHEXT, so resolution goes through the runtime doctor's shared lookup.
+    let path = crate::runtime_doctor::path_variable(environment);
+    if path.is_empty() {
+        return None;
+    }
+    crate::runtime_doctor::resolve_executable(command, &path)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -581,6 +583,17 @@ mod tests {
 
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[cfg(windows)]
+    #[test]
+    fn executable_on_path_finds_windows_launchers_through_path_and_pathext() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("gh.exe"), b"fixture").unwrap();
+        let environment =
+            BTreeMap::from([(OsString::from("Path"), temp.path().as_os_str().to_owned())]);
+        let resolved = executable_on_path("gh", &environment).expect("gh.exe resolves");
+        assert!(resolved.ends_with("gh.exe"));
+    }
 
     #[test]
     fn parses_all_prs_per_branch_with_states_titles_and_newest_first() {
