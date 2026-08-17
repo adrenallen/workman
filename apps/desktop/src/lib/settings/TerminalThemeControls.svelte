@@ -14,7 +14,7 @@
     type TerminalThemeSetting
   } from '../appearance';
   import type { DaemonClient } from '../daemon';
-  import { importTerminalTheme } from '../settings';
+  import { applyTerminalThemeImport, importTerminalTheme } from '../settings';
 
   interface Props {
     client: DaemonClient;
@@ -59,15 +59,7 @@
     try {
       const report = await importTerminalTheme(client);
       importMessage = report.message;
-      if (!report.imported || !report.palette) return;
-      updateAppearance({
-        terminalTheme: {
-          id: 'imported',
-          name: report.profile ?? report.source ?? 'Imported',
-          source: report.source,
-          palette: report.palette
-        }
-      });
+      applyTerminalThemeImport(report);
     } catch (cause) {
       importMessage = cause instanceof Error ? cause.message : String(cause);
     } finally {

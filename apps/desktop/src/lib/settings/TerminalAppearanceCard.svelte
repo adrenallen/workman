@@ -23,7 +23,7 @@
 
   let { client, environment, connected, onShellChange }: Props = $props();
 
-  let fontChoices = $state(installedTerminalFonts());
+  let fontChoices = $state(installedTerminalFonts($appearance.terminalProfileStyle));
   let shellMode = $state<'auto' | 'custom'>('auto');
   let customShell = $state('');
   let savingShell = $state(false);
@@ -36,7 +36,11 @@
   });
 
   onMount(() => {
-    fontChoices = installedTerminalFonts();
+    fontChoices = installedTerminalFonts($appearance.terminalProfileStyle);
+  });
+
+  $effect(() => {
+    fontChoices = installedTerminalFonts($appearance.terminalProfileStyle);
   });
 
   function setSize(value: number): void {
@@ -169,7 +173,7 @@
 
   <div
     class="terminal-preview"
-    style={`font-family: ${terminalFontCss($appearance.terminalFont)}; font-size: ${$appearance.terminalFontSize}px; background: ${$appearance.terminalTheme.palette.background}; color: ${$appearance.terminalTheme.palette.foreground}`}
+    style={`font-family: ${terminalFontCss($appearance.terminalFont, $appearance.terminalProfileStyle)}; font-size: ${$appearance.terminalFontSize}px; line-height: ${$appearance.terminalProfileStyle?.lineHeight ?? 1}; letter-spacing: ${$appearance.terminalProfileStyle?.letterSpacing ?? 0}px; background: ${$appearance.terminalTheme.palette.background}; color: ${$appearance.terminalTheme.palette.foreground}`}
   >
     <div class="terminal-bar"><i></i><span>preview</span><small>80 × 24</small></div>
     <p><span style={`color: ${$appearance.terminalTheme.palette.cyan}`}>wrk</span> › cargo test</p>
@@ -181,11 +185,12 @@
     <span>xterm canvas and PTY geometry update together.</span>
     <button
       type="button"
-      disabled={$appearance.terminalFont === DEFAULT_APPEARANCE.terminalFont && $appearance.terminalFontSize === DEFAULT_APPEARANCE.terminalFontSize && $appearance.terminalTheme.id === 'graphite'}
+      disabled={$appearance.terminalFont === DEFAULT_APPEARANCE.terminalFont && $appearance.terminalFontSize === DEFAULT_APPEARANCE.terminalFontSize && $appearance.terminalTheme.id === 'graphite' && $appearance.terminalProfileStyle === null}
       onclick={() => updateAppearance({
         terminalFont: DEFAULT_APPEARANCE.terminalFont,
         terminalFontSize: DEFAULT_APPEARANCE.terminalFontSize,
-        terminalTheme: terminalThemeFromPreset('graphite')
+        terminalTheme: terminalThemeFromPreset('graphite'),
+        terminalProfileStyle: null
       })}
     >Reset terminal</button>
   </footer>

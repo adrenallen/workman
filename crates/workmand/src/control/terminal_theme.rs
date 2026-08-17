@@ -35,7 +35,21 @@ pub(super) struct TerminalThemeImport {
     source: Option<String>,
     profile: Option<String>,
     palette: Option<TerminalPalette>,
+    #[serde(rename = "terminalStyle")]
+    terminal_style: Option<TerminalProfileStyle>,
     message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TerminalProfileStyle {
+    font_family: Option<String>,
+    font_size: Option<f64>,
+    line_height: Option<f64>,
+    letter_spacing: Option<i64>,
+    cursor_style: Option<String>,
+    cursor_blink: Option<bool>,
+    draw_bold_text_in_bright_colors: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -68,6 +82,7 @@ struct Candidate {
     source: &'static str,
     profile: String,
     colors: BTreeMap<String, String>,
+    terminal_style: Option<TerminalProfileStyle>,
 }
 
 pub(super) fn import_terminal_theme() -> TerminalThemeImport {
@@ -82,9 +97,11 @@ pub(super) fn import_terminal_theme() -> TerminalThemeImport {
 
 fn import_terminal_theme_from(home: &Path) -> TerminalThemeImport {
     let mut attempted = Vec::new();
+    // Workman is a macOS desktop app and should initially match the native Terminal.app profile.
+    // iTerm remains the next supported source and every source remains available to manual import.
     let sources: [fn(&Path) -> Option<Candidate>; 6] = [
-        import_iterm2,
         import_terminal_app,
+        import_iterm2,
         import_ghostty,
         import_kitty,
         import_alacritty,
@@ -98,6 +115,7 @@ fn import_terminal_theme_from(home: &Path) -> TerminalThemeImport {
                 source: Some(candidate.source.to_owned()),
                 profile: Some(candidate.profile.clone()),
                 palette: Some(palette),
+                terminal_style: candidate.terminal_style,
                 message: format!(
                     "Imported {} profile ‘{}’.",
                     candidate.source, candidate.profile
@@ -105,8 +123,8 @@ fn import_terminal_theme_from(home: &Path) -> TerminalThemeImport {
             };
         }
         attempted.push(match attempted.len() {
-            0 => "iTerm2",
-            1 => "Terminal.app",
+            0 => "Terminal.app",
+            1 => "iTerm2",
             2 => "Ghostty",
             3 => "kitty",
             4 => "Alacritty",
@@ -125,6 +143,7 @@ fn not_found(message: &str) -> TerminalThemeImport {
         source: None,
         profile: None,
         palette: None,
+        terminal_style: None,
         message: message.to_owned(),
     }
 }
@@ -168,7 +187,35 @@ fn import_iterm2(home: &Path) -> Option<Candidate> {
             colors.insert((*name).to_owned(), color);
         }
     }
-    candidate("iTerm2", profile, colors)
+    let mut candidate = candidate("iTerm2", profile, colors)?;
+    candidate.terminal_style = Some(iterm_style(&path, &base));
+    Some(candidate)
+}
+
+fn iterm_style(path: &Path, base: &str) -> TerminalProfileStyle {
+    let font = plutil_raw_file(path, &format!("{base}.Normal Font"))
+        .and_then(|font| parse_named_font(&font));
+    let font_size = font.as_ref().map(|(_, size)| *size);
+    let horizontal_spacing = plutil_number_file(path, &format!("{base}.Horizontal Spacing"));
+    TerminalProfileStyle {
+        font_family: font.map(|(family, _)| family),
+        font_size,
+        line_height: plutil_number_file(path, &format!("{base}.Vertical Spacing"))
+            .map(normalize_line_height),
+        letter_spacing: horizontal_spacing
+            .zip(font_size)
+            .map(|(ratio, size)| ((ratio - 1.0) * size).round() as i64),
+        cursor_style: plutil_raw_file(path, &format!("{base}.Cursor Type")).and_then(|value| {
+            match value.as_str() {
+                "0" => Some("block".to_owned()),
+                "1" => Some("bar".to_owned()),
+                "2" => Some("underline".to_owned()),
+                _ => None,
+            }
+        }),
+        cursor_blink: plutil_bool_file(path, &format!("{base}.Blinking Cursor")),
+        draw_bold_text_in_bright_colors: plutil_bool_file(path, &format!("{base}.Use Bright Bold")),
+    }
 }
 
 fn iterm_color(path: &Path, key: &str) -> Option<String> {
@@ -226,7 +273,65 @@ fn import_terminal_app(home: &Path) -> Option<Candidate> {
             colors.insert((*target).to_owned(), color);
         }
     }
-    candidate("Terminal.app", profile, colors)
+    let mut candidate = candidate("Terminal.app", profile, colors)?;
+    candidate.terminal_style = Some(terminal_app_style(&path, &base));
+    Some(candidate)
+}
+
+fn terminal_app_style(path: &Path, base: &str) -> TerminalProfileStyle {
+    let font = plutil_raw_file(path, &format!("{base}.Font"))
+        .and_then(|value| BASE64.decode(value).ok())
+        .and_then(|archive| terminal_app_font(&archive));
+    let font_size = font.as_ref().map(|(_, size)| *size);
+    let width_spacing = plutil_number_file(path, &format!("{base}.FontWidthSpacing"));
+    TerminalProfileStyle {
+        font_family: font.map(|(family, _)| family),
+        font_size,
+        line_height: plutil_number_file(path, &format!("{base}.FontHeightSpacing"))
+            .map(normalize_line_height),
+        letter_spacing: width_spacing
+            .zip(font_size)
+            .map(|(ratio, size)| ((ratio - 1.0) * size).round() as i64),
+        // Terminal.app stores 0=block, 1=underline, and 2=vertical bar. Missing keys mean its
+        // native block/non-blinking defaults, which are also xterm's defaults.
+        cursor_style: plutil_raw_file(path, &format!("{base}.CursorType")).and_then(|value| {
+            match value.as_str() {
+                "0" => Some("block".to_owned()),
+                "1" => Some("underline".to_owned()),
+                "2" => Some("bar".to_owned()),
+                _ => None,
+            }
+        }),
+        cursor_blink: plutil_bool_file(path, &format!("{base}.CursorBlink")),
+        // Terminal.app leaves this key absent for its disabled default. xterm defaults it on,
+        // so report the native default explicitly instead of silently brightening bold ANSI text.
+        draw_bold_text_in_bright_colors: Some(
+            plutil_bool_file(path, &format!("{base}.UseBrightBold")).unwrap_or(false),
+        ),
+    }
+}
+
+fn terminal_app_font(archive: &[u8]) -> Option<(String, f64)> {
+    let archive = plist::Value::from_reader(std::io::Cursor::new(archive)).ok()?;
+    let objects = archive.as_dictionary()?.get("$objects")?.as_array()?;
+    let font_size = objects
+        .iter()
+        .find_map(|object| object.as_dictionary()?.get("NSSize")?.as_real())?;
+    let family = objects.iter().find_map(|object| {
+        let value = object.as_string()?;
+        (value != "$null" && value != "NSFont" && value != "NSObject").then(|| value.to_owned())
+    })?;
+    Some((family, font_size))
+}
+
+fn parse_named_font(value: &str) -> Option<(String, f64)> {
+    let (family, size) = value.rsplit_once(' ')?;
+    let size = size.parse::<f64>().ok()?;
+    (!family.trim().is_empty()).then(|| (family.trim().to_owned(), size))
+}
+
+fn normalize_line_height(value: f64) -> f64 {
+    value.clamp(1.0, 3.0)
 }
 
 fn terminal_app_color(path: &Path, key: &str) -> Option<String> {
@@ -472,6 +577,7 @@ fn candidate(
         source,
         profile,
         colors,
+        terminal_style: None,
     })
 }
 
@@ -592,6 +698,18 @@ fn plutil_raw_file(path: &Path, key: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn plutil_number_file(path: &Path, key: &str) -> Option<f64> {
+    plutil_raw_file(path, key)?.parse().ok()
+}
+
+fn plutil_bool_file(path: &Path, key: &str) -> Option<bool> {
+    match plutil_raw_file(path, key)?.as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 fn plutil_raw_stdin(input: &[u8], key: &str) -> Option<String> {
     let mut child = Command::new("/usr/bin/plutil")
         .args(["-extract", key, "raw", "-o", "-", "-"])
@@ -666,11 +784,18 @@ mod tests {
         assert!(report.imported);
         assert_eq!(report.source.as_deref(), Some("Terminal.app"));
         assert_eq!(report.profile.as_deref(), Some("Fixture Dark"));
+        let encoded = serde_json::to_value(&report).expect("serialized import");
+        assert!(encoded.get("terminalStyle").is_some());
+        assert!(encoded.get("terminal_style").is_none());
         let palette = report.palette.expect("palette");
         assert_eq!(palette.background, "#1F3D5C");
         assert_eq!(palette.foreground, "#E6CCB3");
         assert_eq!(palette.cursor, "#33CC99");
         assert_eq!(palette.red, "#BF4033");
+        let style = report.terminal_style.expect("terminal style");
+        assert_eq!(style.font_family.as_deref(), Some("FixtureMono-Regular"));
+        assert_eq!(style.font_size, Some(12.0));
+        assert_eq!(style.draw_bold_text_in_bright_colors, Some(false));
     }
 
     #[test]
@@ -741,6 +866,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn terminal_fixture(background: &str, foreground: &str, cursor: &str, red: &str) -> String {
+        let font = terminal_font_archive("FixtureMono-Regular", 12.0);
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -751,7 +877,20 @@ mod tests {
 <key>TextColor</key><data>{foreground}</data>
 <key>CursorColor</key><data>{cursor}</data>
 <key>ANSIRedColor</key><data>{red}</data>
+<key>Font</key><data>{font}</data>
 </dict></dict></dict></plist>"#
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn terminal_font_archive(name: &str, size: f64) -> String {
+        let archive = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>$objects</key><array>
+<string>$null</string><dict><key>NSSize</key><real>{size}</real></dict><string>{name}</string>
+</array></dict></plist>"#
+        );
+        BASE64.encode(archive.as_bytes())
     }
 }
