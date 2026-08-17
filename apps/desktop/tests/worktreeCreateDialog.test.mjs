@@ -66,7 +66,9 @@ test('worktree title follows the branch default until edited and is sent with ev
   assert.match(dialog, /<span class="text-sm font-medium">Title<\/span>/);
   assert.match(dialog, /defaultWorktreeTitle\(titleBranch\)/);
   assert.match(dialog, /syncProjectTitleDefault\(projectTitle, defaultProjectTitle, projectTitleTouched\)/);
-  assert.match(dialog, /oninput=\{\(\) => \(projectTitleTouched = true\)\}/);
+  assert.match(dialog, /function updateProjectTitle\(event: Event\)/);
+  assert.equal(dialog.match(/value=\{projectTitle\}/g)?.length, 2);
+  assert.equal(dialog.match(/oninput=\{updateProjectTitle\}/g)?.length, 2);
   assert.match(dialog, /onSubmit\(\{ mode, path: adoptPath\.trim\(\), title \}\)/);
   assert.match(dialog, /onSubmit\(\{ mode, branch: nextBranch, title, envPolicy, rememberEnvPolicy \}\)/);
   assert.equal(app.match(/display_name: submission\.title/g)?.length, 2);
@@ -78,6 +80,7 @@ test('adopt starts at the required path and does not select a user-authored titl
   const dialog = await readFile(dialogUrl, 'utf8');
 
   assert.match(dialog, /mode === 'adopt'[\s\S]*?\? adoptPathInput/);
+  assert.match(dialog, /onOpenAutoFocus=\{\(event\) =>/);
   assert.match(dialog, /const selectDerivedTitle = !projectTitleTouched/);
   assert.match(dialog, /if \(selectDerivedTitle\) projectTitleInput\?\.select\(\)/);
   assert.match(dialog, /defaultProjectTitleFromPath\(adoptPath, ''\)/);

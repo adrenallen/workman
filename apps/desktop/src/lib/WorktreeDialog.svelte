@@ -290,6 +290,13 @@
     if (value === 'origin' && effectiveBranchOptions.length === 0) onLoadBranches();
   }
 
+  function updateProjectTitle(event: Event): void {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    projectTitleTouched = true;
+    projectTitle = input.value;
+  }
+
   async function submit(): Promise<void> {
     if (!canSubmit) return;
     const title = resolvedProjectTitle(projectTitle, defaultProjectTitle);
@@ -356,6 +363,15 @@
     class="w-[min(520px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0"
     showCloseButton={false}
     aria-describedby="worktree-dialog-description"
+    onOpenAutoFocus={(event) => {
+      event.preventDefault();
+      queueMicrotask(() => {
+        const input = mode === 'adopt'
+          ? adoptPathInput
+          : mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
+        input?.focus();
+      });
+    }}
   >
     <form class="grid min-h-0 max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto]" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
       <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
@@ -383,16 +399,15 @@
             </span>
             <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not Workman-managed.</small>
           </label>
-          <label class="grid gap-1.5">
+          <label class="grid gap-1.5" oninput={updateProjectTitle}>
             <span class="text-sm font-medium">Title</span>
             <Input
               bind:ref={projectTitleInput}
-              bind:value={projectTitle}
+              value={projectTitle}
               autocomplete="off"
               aria-label="Worktree title"
               aria-describedby="worktree-title-help"
               placeholder="Follows the selected folder"
-              oninput={() => (projectTitleTouched = true)}
             />
             <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults to the existing folder name; an empty title keeps that default.</small>
           </label>
@@ -474,16 +489,15 @@
             </label>
           {/if}
 
-          <label class="grid gap-1.5">
+          <label class="grid gap-1.5" oninput={updateProjectTitle}>
             <span class="text-sm font-medium">Title</span>
             <Input
               bind:ref={projectTitleInput}
-              bind:value={projectTitle}
+              value={projectTitle}
               autocomplete="off"
               aria-label="Worktree title"
               aria-describedby="worktree-title-help"
               placeholder="Follows the branch name"
-              oninput={() => (projectTitleTouched = true)}
             />
             <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults live to the full branch name; an empty title keeps that default.</small>
           </label>
