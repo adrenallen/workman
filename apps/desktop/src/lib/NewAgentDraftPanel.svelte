@@ -4,11 +4,11 @@
   import { onMount } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
+  import { resolveAgentDraftChoice } from './agentDraftChoices';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
   import {
     choiceValue,
-    chooseInitialAgentChoice,
     lastAgentChoiceStorageKey,
     type AgentChoice,
     type AgentTemplate
@@ -32,11 +32,14 @@
     tools: AgentTool[];
     templates: AgentTemplate[];
     loading?: boolean;
+    metadataLoaded?: boolean;
+    focusOnMount?: boolean;
     busy?: boolean;
     onChange: (patch: Partial<AgentCreationDraft>) => void;
     onInitialize: (patch: Partial<AgentCreationDraft>) => void;
     onCreate: (submission: AgentDraftSubmission) => void | Promise<void>;
     onDiscard: () => void;
+    onInitialFocusHandled?: () => void;
     onOpenSettings?: () => void;
     onError?: (message: string) => void;
   }
@@ -47,11 +50,14 @@
     tools,
     templates,
     loading = false,
+    metadataLoaded = false,
+    focusOnMount = false,
     busy = false,
     onChange,
     onInitialize,
     onCreate,
     onDiscard,
+    onInitialFocusHandled = () => undefined,
     onOpenSettings,
     onError = () => undefined
   }: Props = $props();
@@ -60,18 +66,17 @@
   let previewOpen = $state(true);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
 
-  const enabledTools = $derived(tools.filter((tool) => tool.enabled));
-  const availableTemplates = $derived(
-    templates.filter((template) =>
-      enabledTools.some((tool) => tool.id === template.agent_tool_id)
-    )
-  );
-  const selectedTemplate = $derived(
-    availableTemplates.find((template) => template.id === draft.templateId) ?? null
-  );
-  const selectedTool = $derived(
-    enabledTools.find((tool) => tool.id === draft.agentToolId) ?? null
-  );
+  const choice = $derived(resolveAgentDraftChoice(
+    draft,
+    tools,
+    templates,
+    metadataLoaded,
+    readLastChoice()
+  ));
+  const enabledTools = $derived(choice.enabledTools);
+  const availableTemplates = $derived(choice.availableTemplates);
+  const selectedTemplate = $derived(choice.selectedTemplate);
+  const selectedTool = $derived(choice.selectedTool);
   const templateDefaultTool = $derived(
     selectedTemplate
       ? tools.find((tool) => tool.id === selectedTemplate.agent_tool_id) ?? null
@@ -83,24 +88,15 @@
       && selectedTool.id !== selectedTemplate.agent_tool_id
   );
   const templateChoice = $derived(
-    selectedTemplate ? `template:${selectedTemplate.id}` : 'none'
+    draft.templateId !== null ? `template:${draft.templateId}` : 'none'
   );
-  const agentChoice = $derived(selectedTool ? `tool:${selectedTool.id}` : '');
+  const agentChoice = $derived(
+    draft.agentToolId !== null ? `tool:${draft.agentToolId}` : ''
+  );
 
   $effect(() => {
-    if (selectedTool && (draft.templateId === null || selectedTemplate)) return;
-    const preferred = draft.templateId !== null && draft.agentToolId !== null
-      ? `template:${draft.templateId}:tool:${draft.agentToolId}`
-      : draft.agentToolId !== null
-        ? `tool:${draft.agentToolId}`
-        : readLastChoice();
-    const initial = chooseInitialAgentChoice(availableTemplates, enabledTools, preferred);
-    if (!initial) {
-      if (draft.agentToolId !== null || draft.templateId !== null) {
-        onInitialize({ agentToolId: null, templateId: null });
-      }
-      return;
-    }
+    const initial = choice.initialChoice;
+    if (!initial) return;
     const templateId = initial.kind === 'template' ? initial.id : null;
     const agentToolId = initial.kind === 'template'
       ? initial.agentToolId ?? availableTemplates.find((template) => template.id === initial.id)?.agent_tool_id ?? null
@@ -111,7 +107,11 @@
   });
 
   onMount(() => {
-    requestAnimationFrame(() => promptTextarea?.focus());
+    if (!focusOnMount) return;
+    requestAnimationFrame(() => {
+      promptTextarea?.focus();
+      onInitialFocusHandled();
+    });
   });
 
   function readLastChoice(): string | null {
@@ -205,7 +205,10 @@
         <span>Template <small>optional</small></span>
         <Select.Root type="single" value={templateChoice} disabled={loading || busy} onValueChange={selectTemplate}>
           <Select.Trigger id={`draft-agent-template-${draft.id}`} class="w-full text-left">
-            {selectedTemplate?.name ?? 'None'}
+            {selectedTemplate?.name
+              ?? (draft.templateId !== null
+                ? metadataLoaded ? `Unavailable template #${draft.templateId}` : 'Loading template…'
+                : 'None')}
           </Select.Trigger>
           <Select.Content>
             <Select.Item value="none" label="None">None</Select.Item>
@@ -221,6 +224,9 @@
             {/each}
           </Select.Content>
         </Select.Root>
+        {#if choice.missingTemplate}
+          <small class="choice-warning">Template #{draft.templateId} is no longer available. Choose another template or None.</small>
+        {/if}
       </label>
 
       <label for={`draft-agent-tool-${draft.id}`}>
@@ -229,6 +235,8 @@
           <Select.Trigger id={`draft-agent-tool-${draft.id}`} class="w-full text-left">
             {#if selectedTool}
               <span class="flex min-w-0 items-center gap-1.5"><AgentBrandMark tool={selectedTool} size={16} /><span class="truncate">{selectedTool.name}</span></span>
+            {:else if draft.agentToolId !== null}
+              {metadataLoaded ? `Unavailable agent #${draft.agentToolId}` : 'Loading agent…'}
             {:else}Select an agent{/if}
           </Select.Trigger>
           <Select.Content>
@@ -237,6 +245,9 @@
             {/each}
           </Select.Content>
         </Select.Root>
+        {#if choice.missingTool}
+          <small class="choice-warning">Agent #{draft.agentToolId} is no longer available. Choose another agent to create this draft.</small>
+        {/if}
         {#if agentOverridden && templateDefaultTool}
           <small>Template default: {templateDefaultTool.name}. Template launch args are skipped for other agents.</small>
         {/if}
@@ -297,5 +308,6 @@
   .template-preview { max-height: 144px; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 12px; color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
   .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
   .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .choice-warning { color: var(--warning-token); }
   @media (max-width: 620px) { .choice-grid, .advanced-grid { grid-template-columns: 1fr; } }
 </style>

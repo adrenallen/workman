@@ -11,7 +11,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount, tick } from 'svelte';
 
-  import AddCommandDialog, { type CommandInput } from './lib/AddCommandDialog.svelte';
+  import AddCommandDialog from './lib/AddCommandDialog.svelte';
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
@@ -61,6 +61,7 @@
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import { getAgentToolsStore, type AgentTool, type SpawnAgentInput } from './lib/agentTools';
   import type { QuickPrompt } from './lib/quickPrompts';
+  import type { CommandInput } from './lib/commandCreation';
   import {
     getAgentTemplatesStore,
     type AgentTemplate
@@ -320,11 +321,14 @@
   let creationDrafts = $state<CreationDraft[]>([]);
   let activeProfileId = $state<number | null>(null);
   let creationDraftsLoaded = $state(false);
+  let draftFocusRequestId = $state<number | null>(null);
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
   let agentTemplates = $state<AgentTemplate[]>([]);
   let agentToolsLoading = $state(false);
+  let agentDraftMetadataLoaded = $state(false);
+  let agentDraftMetadataPromise: Promise<void> | null = null;
 
   $effect(() => agentToolsStore.subscribe((snapshot) => {
     registeredAgentTools = snapshot.tools;
@@ -434,6 +438,9 @@
       ? creationDrafts.find((draft) => draft.id === selection?.id) ?? null
       : null
   );
+  $effect(() => {
+    if (selectedDraft?.kind === 'agent') void ensureAgentDraftMetadata();
+  });
   let activeWorktreeOperation = $derived(
     $worktreeOperations.find((operation) => operation.id === activeWorktreeOperationId) ?? null
   );
@@ -842,6 +849,23 @@
       treeMultiSelection = null;
       return;
     }
+    const draftForm = target?.closest('[data-creation-draft]') ?? null;
+    const draftCycleDirection = draftForm
+      ? processCycleDirection(event)
+      : null;
+    if (draftCycleDirection !== null) {
+      event.preventDefault();
+      cycleProcess(draftCycleDirection, 'main');
+      return;
+    }
+    if (
+      draftForm && event.metaKey && !event.ctrlKey && !event.shiftKey
+      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+    ) {
+      event.preventDefault();
+      focusAdjacentPanel(panelForTarget(target), event.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
     if (isTextEditingTarget(target)) return;
     if (
       selection?.kind === 'todo' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
@@ -973,6 +997,7 @@
       : (current + direction + treeCycleSelections.length) % treeCycleSelections.length;
     const nextSelection = treeCycleSelections[next];
     if (!nextSelection) return;
+    draftFocusRequestId = null;
     void selectTreeItem(nextSelection);
     if (returnPanel === 'projects' || returnPanel === 'tree') {
       void tick().then(() => focusPanel(returnPanel));
@@ -2177,7 +2202,10 @@
       project.id,
       nextCreationDraftId(creationDrafts)
     );
-    if (!existing) creationDrafts = [...creationDrafts, draft];
+    if (!existing) {
+      creationDrafts = [...creationDrafts, draft];
+      draftFocusRequestId = draft.id;
+    }
     void selectTreeItem(
       projectTreeSelection('draft', draft.id, project.id, creationDraftLabel(draft))
     );
@@ -2330,20 +2358,33 @@
     if (draft?.kind === 'agent' && preferredToolId !== null) {
       patchCreationDraft(draft.id, { templateId: null, agentToolId: preferredToolId }, false);
     }
+    await ensureAgentDraftMetadata();
+  }
+
+  function ensureAgentDraftMetadata(): Promise<void> {
+    if (agentDraftMetadataLoaded) return Promise.resolve();
+    if (agentDraftMetadataPromise) return agentDraftMetadataPromise;
     agentToolsLoading = true;
-    try {
-      const [tools, templates] = await Promise.all([
-        agentToolsStore.refresh(true),
-        agentTemplatesStore.refresh(true)
-      ]);
+    const request = Promise.all([
+      agentToolsStore.refresh(true),
+      agentTemplatesStore.refresh(true)
+    ]).then(([tools, templates]) => {
       registeredAgentTools = tools;
-      agentTools = registeredAgentTools.filter((tool) => tool.enabled);
+      agentTools = tools.filter((tool) => tool.enabled);
       agentTemplates = templates;
-    } catch (cause) {
+      agentDraftMetadataLoaded = true;
+    }).catch((cause) => {
       reportError(cause);
-    } finally {
+    }).finally(() => {
       agentToolsLoading = false;
-    }
+      if (agentDraftMetadataPromise === request) agentDraftMetadataPromise = null;
+    });
+    agentDraftMetadataPromise = request;
+    return request;
+  }
+
+  function consumeDraftInitialFocus(draftId: number): void {
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
   }
 
   async function spawnAgent(
@@ -4344,11 +4385,14 @@
                 tools={registeredAgentTools}
                 templates={agentTemplates}
                 loading={agentToolsLoading}
+                metadataLoaded={agentDraftMetadataLoaded}
+                focusOnMount={draftFocusRequestId === draft.id}
                 busy={detailBusy}
                 onChange={(patch) => patchCreationDraft(draft.id, patch)}
                 onInitialize={(patch) => patchCreationDraft(draft.id, patch, false)}
                 onCreate={(submission) => createAgentFromDraft(draft, submission)}
                 onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
                 onOpenSettings={() => {
                   todoBrowserOpen = false;
                   scratchpadBrowserOpen = false;
@@ -4363,21 +4407,25 @@
                 {client}
                 project={selectedProject}
                 {draft}
+                focusOnMount={draftFocusRequestId === draft.id}
                 onChange={(patch) => patchCreationDraft(draft.id, patch)}
                 onPending={(input) => beginOptimisticCommandDraft(draft, input)}
                 onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
                 onFailed={failPendingProcess}
                 onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
               />
             {:else}
               <NewTodoDraftPanel
                 {draft}
                 projectName={projectDisplayName(selectedProject)}
                 todos={coordination?.todos ?? []}
+                focusOnMount={draftFocusRequestId === draft.id}
                 busy={detailBusy}
                 onChange={(patch) => patchCreationDraft(draft.id, patch)}
                 onCreate={() => void createTodo(draft)}
                 onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
               />
             {/if}
           {/key}

@@ -5,7 +5,12 @@
 
   import { Button } from '$lib/components/ui/button';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
-  import type { CommandInput, CommandProcessReceipt } from './AddCommandDialog.svelte';
+  import {
+    CommandEnvironmentError,
+    submitCommandCreation,
+    type CommandInput,
+    type CommandProcessReceipt
+  } from './commandCreation';
   import type { CommandCreationDraft } from './creationDrafts';
   import { DaemonRequestError, type DaemonClient, type Project } from './daemon';
   import { projectDisplayName } from './worktrees';
@@ -16,23 +21,31 @@
     exists: boolean;
   }
 
-  interface ValidatedWorkingDirectory {
-    absolute: string;
-    relative: string;
-  }
-
   interface Props {
     client: DaemonClient;
     project: Project;
     draft: CommandCreationDraft;
+    focusOnMount?: boolean;
     onChange: (patch: Partial<CommandCreationDraft>) => void;
     onPending?: (input: CommandInput) => number | null;
     onAdded: (process: CommandProcessReceipt, optimisticId: number | null) => void;
     onFailed?: (cause: unknown, optimisticId: number) => void;
     onDiscard: () => void;
+    onInitialFocusHandled?: () => void;
   }
 
-  let { client, project, draft, onChange, onPending, onAdded, onFailed, onDiscard }: Props = $props();
+  let {
+    client,
+    project,
+    draft,
+    focusOnMount = false,
+    onChange,
+    onPending,
+    onAdded,
+    onFailed,
+    onDiscard,
+    onInitialFocusHandled = () => undefined
+  }: Props = $props();
   let configExists = $state<boolean | null>(null);
   let busy = $state(false);
   let attempted = $state(false);
@@ -43,42 +56,12 @@
 
   onMount(() => {
     void loadConfigStatus();
-    requestAnimationFrame(() => nameInput?.focus());
+    if (!focusOnMount) return;
+    requestAnimationFrame(() => {
+      nameInput?.focus();
+      onInitialFocusHandled();
+    });
   });
-
-  function unescapeEnvironmentValue(value: string): string {
-    let result = '';
-    for (let index = 0; index < value.length; index += 1) {
-      const character = value[index];
-      if (character !== '\\' || index + 1 >= value.length) {
-        result += character;
-        continue;
-      }
-      const escaped = value[index + 1];
-      if (escaped === 'n') result += '\n';
-      else if (escaped === 'r') result += '\r';
-      else if (escaped === 't') result += '\t';
-      else if (escaped === '\\') result += '\\';
-      else result += `\\${escaped}`;
-      index += 1;
-    }
-    return result;
-  }
-
-  function parseEnvironment(value: string): Record<string, string> | null {
-    const env: Record<string, string> = {};
-    for (const [index, rawLine] of value.split('\n').entries()) {
-      if (!rawLine.trim()) continue;
-      const separator = rawLine.indexOf('=');
-      const key = separator < 0 ? '' : rawLine.slice(0, separator).trim();
-      if (!key) {
-        environmentError = `Line ${index + 1} must use KEY=value.`;
-        return null;
-      }
-      env[key] = unescapeEnvironmentValue(rawLine.slice(separator + 1));
-    }
-    return env;
-  }
 
   async function loadConfigStatus(): Promise<void> {
     try {
@@ -109,37 +92,19 @@
     workingDirError = null;
     environmentError = null;
     if (!draft.name.trim() || !draft.command.trim()) return;
-    const env = parseEnvironment(draft.environment);
-    if (!env) return;
-
     busy = true;
-    const pendingInput: CommandInput = {
-      project_id: project.id,
-      name: draft.name.trim(),
-      command: draft.command.trim(),
-      working_dir: draft.workingDir,
-      env,
-      auto_start: draft.autoStart,
-      auto_restart: draft.autoRestart,
-      restart_when_changed: draft.restartWhenChanged.split('\n').map((pattern) => pattern.trim()).filter(Boolean)
-    };
-    const optimisticId = onPending?.(pendingInput) ?? null;
+    let optimisticId: number | null = null;
     try {
-      const validated = await client.control<ValidatedWorkingDirectory>('config.validate_working_dir', {
-        project_id: project.id,
-        working_dir: draft.workingDir
+      const result = await submitCommandCreation(client, project.id, draft, (input) => {
+        optimisticId = onPending?.(input) ?? null;
+        return optimisticId;
       });
-      const input: CommandInput = {
-        ...pendingInput,
-        working_dir: draft.saveMode === 'yml' ? validated.relative : validated.absolute
-      };
-      const process = draft.saveMode === 'yml'
-        ? await client.control<CommandProcessReceipt>('config.command_save', { ...input })
-        : await createLocalCommand(input);
-      onAdded(process, optimisticId);
+      onAdded(result.process, result.optimisticId);
     } catch (cause) {
       if (optimisticId !== null && onFailed) {
         onFailed(cause, optimisticId);
+      } else if (cause instanceof CommandEnvironmentError) {
+        environmentError = cause.message;
       } else if (cause instanceof DaemonRequestError && cause.code === 'invalid_working_directory') {
         workingDirError = `Choose an existing folder inside ${project.path}.`;
       } else {
@@ -150,31 +115,6 @@
     }
   }
 
-  async function createLocalCommand(input: CommandInput): Promise<CommandProcessReceipt> {
-    const process = await client.control<CommandProcessReceipt>('process.create', {
-      process: {
-        id: 0,
-        project_id: input.project_id,
-        kind: 'command',
-        name: input.name,
-        command: input.command,
-        working_dir: input.working_dir,
-        env: input.env,
-        auto_start: input.auto_start,
-        auto_restart: input.auto_restart,
-        restart_when_changed: input.restart_when_changed,
-        source: 'local',
-        trust_hash: null,
-        status: 'stopped',
-        pid: null,
-        exit_code: null,
-        exit_signal: null,
-        exited_at: null,
-        agent_tool_id: null
-      }
-    });
-    return input.auto_start ? client.startProcess(process.id) : process;
-  }
 </script>
 
 <CreationDraftScaffold

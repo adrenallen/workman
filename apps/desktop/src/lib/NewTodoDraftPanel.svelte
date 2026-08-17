@@ -11,24 +11,34 @@
     draft: TodoCreationDraft;
     projectName: string;
     todos: TodoSummary[];
+    focusOnMount?: boolean;
     busy?: boolean;
     onChange: (patch: Partial<TodoCreationDraft>) => void;
     onCreate: () => void;
     onDiscard: () => void;
+    onInitialFocusHandled?: () => void;
   }
 
   let {
     draft,
     projectName,
     todos,
+    focusOnMount = false,
     busy = false,
     onChange,
     onCreate,
-    onDiscard
+    onDiscard,
+    onInitialFocusHandled = () => undefined
   }: Props = $props();
   let titleInput = $state<HTMLInputElement | null>(null);
 
-  onMount(() => requestAnimationFrame(() => titleInput?.focus()));
+  onMount(() => {
+    if (!focusOnMount) return;
+    requestAnimationFrame(() => {
+      titleInput?.focus();
+      onInitialFocusHandled();
+    });
+  });
 </script>
 
 <CreationDraftScaffold
