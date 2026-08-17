@@ -20,7 +20,7 @@ const files = {
   shortcuts: new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url)
 };
 
-const connectedAndVisible = { connected: true, visible: true };
+const connected = { connected: true };
 
 function agent(id, attention, status = 'running', lastOutputAt = 1) {
   return {
@@ -39,13 +39,13 @@ function agent(id, attention, status = 'running', lastOutputAt = 1) {
 }
 
 function observeIdleFor(state, processes, start, durationMs, stepMs = 1_000) {
-  let evaluation = evaluateKeepAwake(state, processes, start, connectedAndVisible);
+  let evaluation = evaluateKeepAwake(state, processes, start, connected);
   for (let elapsed = stepMs; elapsed <= durationMs; elapsed += stepMs) {
     evaluation = evaluateKeepAwake(
       evaluation.state,
       processes,
       start + elapsed,
-      connectedAndVisible
+      connected
     );
   }
   return evaluation;
@@ -56,7 +56,6 @@ function observeDisconnectFor(durationMs, unreachableMs) {
     initialKeepAwakeConnectionState(),
     'disconnected',
     1_000,
-    true,
     unreachableMs
   );
   for (let elapsed = 1_000; elapsed <= durationMs; elapsed += 1_000) {
@@ -64,7 +63,6 @@ function observeDisconnectFor(durationMs, unreachableMs) {
       evaluation.state,
       (elapsed / 1_000) % 2 === 0 ? 'connecting' : 'disconnected',
       1_000 + elapsed,
-      true,
       unreachableMs
     );
   }
@@ -78,7 +76,7 @@ test('waiting, needs input, and working are not full idle', () => {
       state,
       [agent(1, attention)],
       1_000,
-      connectedAndVisible
+      connected
     );
     assert.deepEqual(evaluation.waitingAgentIds, [1]);
     assert.equal(evaluation.releaseInSeconds, null);
@@ -102,7 +100,7 @@ test('all agents must be actively observed idle for the full settle window', () 
     almostSettled.state,
     idle,
     5_000 + KEEP_AWAKE_SETTLE_MS,
-    connectedAndVisible
+    connected
   );
   assert.equal(settled.shouldRelease, true);
 });
@@ -114,14 +112,14 @@ test('the UI-tick helper uses its supplied monotonic observation timestamp', () 
     initial,
     idle,
     4_000,
-    connectedAndVisible,
+    connected,
     1_000
   );
   const released = evaluateKeepAwakeAtCurrentTime(
     first.state,
     idle,
     5_000,
-    connectedAndVisible,
+    connected,
     1_000
   );
   assert.equal(released.shouldRelease, true);
@@ -134,9 +132,9 @@ test('working inside the settle window resets active idle observation', () => {
     settling.state,
     [agent(1, 'working')],
     32_000,
-    connectedAndVisible
+    connected
   );
-  const restarted = evaluateKeepAwake(flapped.state, idle, 33_000, connectedAndVisible);
+  const restarted = evaluateKeepAwake(flapped.state, idle, 33_000, connected);
 
   assert.equal(flapped.state.idleObservedMs, 0);
   assert.equal(flapped.state.lastIdleObservationAt, null);
@@ -146,10 +144,10 @@ test('working inside the settle window resets active idle observation', () => {
 
 test('a closed or exited specific agent settles before release', () => {
   const initial = armKeepAwake('specific', 7);
-  assert.equal(evaluateKeepAwake(initial, [], 1_000, connectedAndVisible).releaseInSeconds, 60);
+  assert.equal(evaluateKeepAwake(initial, [], 1_000, connected).releaseInSeconds, 60);
   assert.equal(observeIdleFor(initial, [], 1_000, KEEP_AWAKE_SETTLE_MS).shouldRelease, true);
   assert.equal(
-    evaluateKeepAwake(initial, [agent(7, 'exited', 'exited')], 1_000, connectedAndVisible)
+    evaluateKeepAwake(initial, [agent(7, 'exited', 'exited')], 1_000, connected)
       .releaseInSeconds,
     60
   );
@@ -172,7 +170,7 @@ test('all-agent mode watches agents spawned after arming', () => {
     settling.state,
     [agent(1, 'idle'), agent(2, 'working')],
     32_000,
-    connectedAndVisible
+    connected
   );
 
   assert.deepEqual(initial.watchedAgentIds, []);
@@ -188,7 +186,7 @@ test('an agent appearing after an empty snapshot resets idle observation', () =>
     empty.state,
     [agent(3, 'waiting')],
     32_000,
-    connectedAndVisible
+    connected
   );
 
   assert.deepEqual(appeared.waitingAgentIds, [3]);
@@ -201,7 +199,7 @@ test('an idle agent with no output is not ready to release', () => {
     armKeepAwake('all', null),
     [agent(4, 'idle', 'starting', null)],
     1_000,
-    connectedAndVisible
+    connected
   );
   assert.deepEqual(evaluation.waitingAgentIds, [4]);
   assert.equal(evaluation.state.lastIdleObservationAt, null);
@@ -215,8 +213,7 @@ test('transient daemon disconnects never request disarm and reconnect resets obs
   const reconnected = evaluateKeepAwakeConnection(
     disconnected.state,
     'connected',
-    122_000,
-    true
+    122_000
   );
   assert.deepEqual(reconnected.state, initialKeepAwakeConnectionState());
   assert.equal(reconnected.daemonUnreachable, false);
@@ -229,51 +226,79 @@ test('a long actively observed disconnect warns but does not disarm', () => {
   assert.equal('shouldDisarm' in disconnected, false);
 });
 
-test('a sleep-sized clock gap is not counted as idle or disconnected observation', () => {
+test('a sleep-sized clock gap is clamped instead of counted as suspended time', () => {
   const idle = [agent(1, 'idle')];
   const beforeSleep = observeIdleFor(armKeepAwake('all', null), idle, 1_000, 4_000);
   const afterSleep = evaluateKeepAwake(
     beforeSleep.state,
     idle,
     60 * 60_000,
-    connectedAndVisible
+    connected
   );
   assert.equal(afterSleep.shouldRelease, false);
-  assert.equal(afterSleep.state.idleObservedMs, 0);
-  assert.equal(afterSleep.releaseInSeconds, 60);
+  assert.equal(afterSleep.state.idleObservedMs, 9_000);
+  assert.equal(afterSleep.releaseInSeconds, 51);
 
   const disconnectBeforeSleep = observeDisconnectFor(4_000, 10_000);
   const disconnectAfterSleep = evaluateKeepAwakeConnection(
     disconnectBeforeSleep.state,
     'disconnected',
     60 * 60_000,
-    true,
     10_000
   );
   assert.equal(disconnectAfterSleep.daemonUnreachable, false);
-  assert.equal(disconnectAfterSleep.state.disconnectedObservedMs, 0);
+  assert.equal(disconnectAfterSleep.state.disconnectedObservedMs, 9_000);
 });
 
-test('hidden visibility freezes evaluation and visible return starts a fresh observation', () => {
+test('hidden but delivered idle observations still release keep awake', () => {
   const idle = [agent(1, 'idle')];
-  const settling = observeIdleFor(armKeepAwake('all', null), idle, 1_000, 4_000);
-  const hidden = evaluateKeepAwake(
+  const hidden = observeIdleFor(
+    armKeepAwake('all', null),
+    idle,
+    1_000,
+    KEEP_AWAKE_SETTLE_MS
+  );
+  assert.equal(hidden.shouldRelease, true);
+});
+
+test('periodic slow ticks preserve progress and eventually release', () => {
+  const idle = [agent(1, 'idle')];
+  let evaluation = evaluateKeepAwake(armKeepAwake('all', null), idle, 1_000, connected);
+  let now = 1_000;
+  for (let tick = 1; tick <= 20 && !evaluation.shouldRelease; tick += 1) {
+    now += tick % 10 === 0 ? 6_000 : 1_000;
+    evaluation = evaluateKeepAwake(evaluation.state, idle, now, connected);
+  }
+  assert.equal(evaluation.shouldRelease, false);
+  assert.equal(evaluation.state.idleObservedMs, 28_000);
+
+  for (let tick = 21; tick <= 50 && !evaluation.shouldRelease; tick += 1) {
+    now += tick % 10 === 0 ? 6_000 : 1_000;
+    evaluation = evaluateKeepAwake(evaluation.state, idle, now, connected);
+  }
+  assert.equal(evaluation.shouldRelease, true);
+});
+
+test('disconnect pauses idle progress and reconnect resumes it', () => {
+  const idle = [agent(1, 'idle')];
+  const settling = observeIdleFor(armKeepAwake('all', null), idle, 1_000, 30_000);
+  const disconnected = evaluateKeepAwake(
     settling.state,
     idle,
-    6_000,
-    { connected: true, visible: false }
+    40_000,
+    { connected: false }
   );
-  assert.equal(hidden.state.idleObservedMs, 0);
-  assert.equal(hidden.state.lastIdleObservationAt, null);
+  assert.equal(disconnected.state.idleObservedMs, 30_000);
+  assert.equal(disconnected.state.lastIdleObservationAt, null);
+  assert.equal(disconnected.releaseInSeconds, null);
 
-  const visibleAgain = evaluateKeepAwake(
-    hidden.state,
-    idle,
-    60_000,
-    connectedAndVisible
-  );
-  assert.equal(visibleAgain.shouldRelease, false);
-  assert.equal(visibleAgain.releaseInSeconds, 60);
+  const reconnected = observeIdleFor(disconnected.state, idle, 50_000, 30_000);
+  assert.equal(reconnected.shouldRelease, true);
+});
+
+test('disconnect observations keep accumulating when the window is hidden', () => {
+  const disconnected = observeDisconnectFor(10_000, 10_000);
+  assert.equal(disconnected.daemonUnreachable, true);
 });
 
 test('armed keep awake retains process statuses while the document is hidden', () => {

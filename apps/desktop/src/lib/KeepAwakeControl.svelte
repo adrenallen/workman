@@ -74,13 +74,12 @@
     machine,
     processes,
     clockTick,
-    { connected: connectionStatus === 'connected', visible }
+    { connected: connectionStatus === 'connected' }
   ));
   let connectionEvaluation = $derived(evaluateKeepAwakeConnection(
     connectionMachine,
     connectionStatus,
-    clockTick,
-    visible
+    clockTick
   ));
   let selectedAgent = $derived(
     availableAgents.find((process) => String(process.id) === specificAgentId) ?? null
