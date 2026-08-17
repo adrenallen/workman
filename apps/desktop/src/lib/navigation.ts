@@ -1,11 +1,12 @@
 import { writable, type Readable } from 'svelte/store';
 
 import type { CoordinationSnapshot } from './coordination';
-import type { ProcessView } from './daemon';
+import type { ProcessKind, ProcessView } from './daemon';
 import type { ProjectTreeSelection } from './projectTree';
 
 export type AppNavigationTarget =
   | { type: 'project'; projectId: number }
+  | { type: 'processes'; projectId: number; kind: ProcessKind }
   | { type: 'item'; selection: ProjectTreeSelection }
   | { type: 'settings'; projectId?: number }
   | { type: 'keep-awake' }
@@ -70,6 +71,8 @@ export function navigationTargetKey(target: AppNavigationTarget): string {
   switch (target.type) {
     case 'project':
       return `project:${target.projectId}`;
+    case 'processes':
+      return `project:${target.projectId}`;
     case 'item':
       return `item:${target.selection.projectId}:${target.selection.kind}:${target.selection.id}`;
     case 'settings':
@@ -103,7 +106,7 @@ export function readRecentNavigationKeys(): string[] {
 }
 
 export function recordRecentNavigation(target: AppNavigationTarget): void {
-  if (target.type !== 'project' && target.type !== 'item') return;
+  if (target.type !== 'project' && target.type !== 'processes' && target.type !== 'item') return;
   const key = navigationTargetKey(target);
   try {
     const next = [key, ...readRecentNavigationKeys().filter((candidate) => candidate !== key)].slice(
