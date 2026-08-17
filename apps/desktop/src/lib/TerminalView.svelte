@@ -29,10 +29,15 @@
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import {
     hasRetainedTerminalOutput,
+    isUnstyledRetainedSnapshot,
     rawReplayHasGap,
     shouldShowRetainedPreview
   } from './terminalFirstPaint';
-  import { shouldAttemptWebglRecovery, webglRecoveryDelay } from './terminalRenderer';
+  import {
+    WEBGL_STABLE_RESET_MS,
+    shouldAttemptWebglRecovery,
+    webglRecoveryDelay
+  } from './terminalRenderer';
   import {
     isQuickPromptPaletteShortcut,
     sanitizeQuickPromptBody
@@ -82,17 +87,21 @@
   let webglAddon: WebglAddon | null = null;
   let webglRecovering = false;
   let webglRecoveryAttempt = 0;
+  let webglUnavailable = false;
   let webglRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let webglStabilityTimer: ReturnType<typeof setTimeout> | null = null;
   let terminalTransfers: TerminalTransfers | null = null;
   let hasOutput = $state(false);
   let liveOutputPreviewElement = $state<HTMLPreElement | null>(null);
   let liveOutputPreview = $state('');
   let liveOutputLoaded = $state(false);
   let liveOutputRetained = $state(false);
+  let retainedSnapshotOnly = $state(false);
   let replayPreviewAllowed = $state(false);
   let replayComplete = $state(false);
   let replayUnavailableMessage = $state<string | null>(null);
   let replayWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  let replayWarningTimer: ReturnType<typeof setTimeout> | null = null;
   let linkHintVisible = $state(false);
   let hoveredLinkUri: string | null = null;
   let transferDropActive = $state(false);
@@ -144,6 +153,7 @@
     modifyOtherKeys: number;
     finishing: boolean;
     focusRequested: boolean;
+    gapDetected: boolean;
   }
 
   /** Insert through xterm so bracketed-paste mode and replay-safe input ordering are preserved. */
@@ -235,11 +245,14 @@
       setPasteSaving: (saving) => { imagePasteSaving = saving; }
     });
 
-    installWebglRenderer(instance, false);
+    if (!installWebglRenderer(instance, false)) {
+      webglRecovering = true;
+      scheduleWebglRecovery(instance);
+    }
     const recoverVisibleRenderer = () => {
       if (document.visibilityState !== 'visible' || !visible) return;
+      if (webglAddon !== null || webglUnavailable) return;
       webglRecovering = webglAddon === null;
-      webglRecoveryAttempt = 0;
       scheduleWebglRecovery(instance);
     };
     document.addEventListener('visibilitychange', recoverVisibleRenderer);
@@ -334,7 +347,9 @@
       window.removeEventListener('focus', recoverVisibleRenderer);
       if (webglRecoveryTimer) clearTimeout(webglRecoveryTimer);
       webglRecoveryTimer = null;
+      clearWebglStabilityTimer();
       clearReplayWatchdog();
+      clearReplayWarning();
       webglAddon = null;
       void client.detachTerminal().catch(() => undefined);
       instance.dispose();
@@ -398,9 +413,8 @@
     const processStatus = process.status;
     const isVisible = visible;
     if (!instance) return;
-    if (isVisible && webglAddon === null) {
+    if (isVisible && webglAddon === null && !webglUnavailable) {
       webglRecovering = true;
-      webglRecoveryAttempt = 0;
       scheduleWebglRecovery(instance);
     }
     const sameProcessSession = attachedProcessId === processId
@@ -424,6 +438,7 @@
       inputEnabled = false;
       replayState = null;
       clearReplayWatchdog();
+      clearReplayWarning();
       terminalOffset = 0;
       setKeyboardProtocol(0, 0);
       instance.reset();
@@ -434,6 +449,7 @@
       liveOutputPreview = '';
       liveOutputLoaded = false;
       liveOutputRetained = false;
+      retainedSnapshotOnly = false;
       linkHintVisible = false;
       hoveredLinkUri = null;
       if (isConnected) void client.detachTerminal().catch(() => undefined);
@@ -448,6 +464,8 @@
       attachmentGeneration += 1;
       replayState = null;
       clearReplayWatchdog();
+      clearReplayWarning();
+      replayUnavailableMessage = null;
       inputEnabled = true;
       return;
     }
@@ -456,6 +474,9 @@
     flushInput();
     inputEnabled = false;
     replayState = null;
+    clearReplayWatchdog();
+    clearReplayWarning();
+    replayUnavailableMessage = null;
     if (!resumingConnection) {
       terminalOffset = 0;
       setKeyboardProtocol(0, 0);
@@ -467,6 +488,7 @@
       liveOutputPreview = '';
       liveOutputLoaded = false;
       liveOutputRetained = false;
+      retainedSnapshotOnly = false;
       linkHintVisible = false;
       hoveredLinkUri = null;
     }
@@ -482,19 +504,10 @@
       kittyKeyboardFlags: 0,
       modifyOtherKeys: 0,
       finishing: false,
-      focusRequested: true
+      focusRequested: true,
+      gapDetected: false
     };
     replayState = state;
-    clearReplayWatchdog();
-    replayWatchdogTimer = setTimeout(() => {
-      replayWatchdogTimer = null;
-      if (replayState !== state || state.generation !== attachmentGeneration || replayComplete) {
-        return;
-      }
-      replayPreviewAllowed = false;
-      replayComplete = true;
-      replayUnavailableMessage = 'Styled terminal replay did not complete. Reopen this agent to retry.';
-    }, 5_000);
     instance.focus();
     if (!resumingConnection) {
       replayPreviewAllowed = true;
@@ -519,22 +532,23 @@
       }
 
       const requestedOffset = terminalOffset;
+      armReplayWatchdog(state);
       const attached = await client.attachTerminal(processId, requestedOffset);
       if (replayState !== state) return;
-      if (rawReplayHasGap(requestedOffset, attached.replay_start_offset)) {
-        replayUnavailableMessage = 'Some styled output was not retained; showing the available tail.';
-      }
+      state.gapDetected = requestedOffset > 0
+        && rawReplayHasGap(requestedOffset, attached.replay_start_offset);
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
       state.focusReporting = attached.focus_reporting;
       state.kittyKeyboardFlags = attached.keyboard_protocol.kitty_flags;
       state.modifyOtherKeys = attached.keyboard_protocol.modify_other_keys;
       setKeyboardProtocol(state.kittyKeyboardFlags, state.modifyOtherKeys);
+      armReplayWatchdog(state);
       finishReplayIfReady(state);
     })().catch((cause) => {
       if (replayState !== state) return;
       clearReplayWatchdog();
-      replayPreviewAllowed = false;
+      replayPreviewAllowed = retainedSnapshotOnly;
       replayComplete = true;
       replayUnavailableMessage = 'Styled terminal replay is unavailable. Reopen this agent to retry.';
       onError(cause instanceof Error ? cause.message : String(cause));
@@ -579,8 +593,10 @@
       state.kittyKeyboardFlags = frame.kitty_keyboard_flags;
       state.modifyOtherKeys = frame.modify_other_keys;
     }
-    if (frame.gap) {
-      replayUnavailableMessage = 'Some styled output was not retained; showing the available tail.';
+    if (frame.gap && replayComplete) {
+      showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
+    } else if (frame.gap && state && terminalOffset > 0) {
+      state.gapDetected = true;
     }
     setKeyboardProtocol(frame.kitty_keyboard_flags, frame.modify_other_keys);
     terminal.write(Uint8Array.from(frame.data), () => {
@@ -591,12 +607,15 @@
       ) {
         hasOutput = true;
         terminalOffset = Math.max(terminalOffset, frame.start_offset + frame.data.length);
+        retainedSnapshotOnly = false;
+        replayPreviewAllowed = false;
       }
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
       state.parsedThrough = Math.max(
         state.parsedThrough,
         frame.start_offset + frame.data.length
       );
+      armReplayWatchdog(state);
       finishReplayIfReady(state);
     });
   }
@@ -607,10 +626,8 @@
       if (replayState !== state || state.generation !== attachmentGeneration) return;
       liveOutputPreview = output.text;
       liveOutputRetained = hasRetainedTerminalOutput(output);
+      retainedSnapshotOnly = isUnstyledRetainedSnapshot(output);
       liveOutputLoaded = true;
-      if (output.text && output.raw_end_offset === 0) {
-        replayUnavailableMessage = 'Styled terminal replay is unavailable for this retained output.';
-      }
       if (!output.text) return;
 
       await nextAnimationFrame();
@@ -704,38 +721,40 @@
   }
 
   function installWebglRenderer(instance: Terminal, recovering: boolean): boolean {
-    if (webglAddon) return true;
+    if (webglAddon || webglUnavailable) return webglAddon !== null;
     let addon: WebglAddon | null = null;
     try {
       addon = new WebglAddon();
       addon.onContextLoss(() => {
         if (webglAddon !== addon) return;
-        // WKWebView commonly discards hidden canvases. The canvas fallback keeps the same xterm
-        // metrics temporarily, then a fresh addon restores native-quality glyph rendering.
+        // WKWebView commonly discards hidden canvases. xterm's DOM fallback keeps the configured
+        // metrics while a bounded recovery campaign restores WebGL-quality glyph rendering.
+        clearWebglStabilityTimer();
         webglAddon = null;
         addon?.dispose();
+        if (webglUnavailable) return;
         webglRecovering = true;
-        webglRecoveryAttempt = 0;
         scheduleWebglRecovery(instance);
       });
-      instance.loadAddon(addon);
       webglAddon = addon;
+      instance.loadAddon(addon);
+      if (webglAddon !== addon) return false;
       webglRecovering = false;
-      webglRecoveryAttempt = 0;
+      armWebglStabilityReset(addon);
       if (recovering) {
         instance.clearTextureAtlas();
         instance.refresh(0, Math.max(0, instance.rows - 1));
       }
       return true;
     } catch {
+      if (webglAddon === addon) webglAddon = null;
       addon?.dispose();
       return false;
     }
   }
 
   function scheduleWebglRecovery(instance: Terminal): void {
-    if (webglRecoveryTimer) clearTimeout(webglRecoveryTimer);
-    webglRecoveryTimer = null;
+    if (webglRecoveryTimer || webglUnavailable) return;
     if (!shouldAttemptWebglRecovery({
       terminalVisible: visible,
       documentVisible: document.visibilityState === 'visible',
@@ -743,11 +762,29 @@
       recovering: webglRecovering
     })) return;
     const delay = webglRecoveryDelay(webglRecoveryAttempt++);
-    if (delay === null) return;
+    if (delay === null) {
+      webglRecovering = false;
+      webglUnavailable = true;
+      return;
+    }
     webglRecoveryTimer = setTimeout(() => {
       webglRecoveryTimer = null;
       if (!installWebglRenderer(instance, true)) scheduleWebglRecovery(instance);
     }, delay);
+  }
+
+  function armWebglStabilityReset(addon: WebglAddon): void {
+    clearWebglStabilityTimer();
+    webglStabilityTimer = setTimeout(() => {
+      webglStabilityTimer = null;
+      if (webglAddon !== addon) return;
+      webglRecoveryAttempt = 0;
+    }, WEBGL_STABLE_RESET_MS);
+  }
+
+  function clearWebglStabilityTimer(): void {
+    if (webglStabilityTimer) clearTimeout(webglStabilityTimer);
+    webglStabilityTimer = null;
   }
 
   function scheduleFit(): void {
@@ -773,6 +810,12 @@
     const instance = terminal;
     if (!instance || !fitAddon || host.clientWidth === 0 || host.clientHeight === 0) return null;
     fitAddon.fit();
+    const screenHeight = instance.element
+      ?.querySelector<HTMLElement>('.xterm-screen')
+      ?.getBoundingClientRect().height;
+    if (screenHeight && instance.rows > 0) {
+      frame.style.setProperty('--terminal-cell-height', `${screenHeight / instance.rows}px`);
+    }
     return instance;
   }
 
@@ -802,10 +845,15 @@
     const activate = () => {
       if (replayState !== state || state.generation !== attachmentGeneration) return;
       clearReplayWatchdog();
+      clearReplayWarning();
+      replayUnavailableMessage = null;
       replayPreviewAllowed = false;
       replayComplete = true;
       const alreadyFocused = document.activeElement !== null && host.contains(document.activeElement);
       inputEnabled = true;
+      if (state.gapDetected) {
+        showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
+      }
       if (!state.focusRequested) return;
       if (alreadyFocused && state.focusReporting) {
         // Replay enabled mode 1004 after the DOM focus event, so xterm has no new event to report.
@@ -827,6 +875,39 @@
   function clearReplayWatchdog(): void {
     if (replayWatchdogTimer) clearTimeout(replayWatchdogTimer);
     replayWatchdogTimer = null;
+  }
+
+  function armReplayWatchdog(state: TerminalReplayState): void {
+    clearReplayWatchdog();
+    if (
+      replayState !== state
+      || replayComplete
+      || state.finishing
+      || (state.replayEndOffset !== null && state.parsedThrough >= state.replayEndOffset)
+    ) return;
+    replayWatchdogTimer = setTimeout(() => {
+      replayWatchdogTimer = null;
+      if (replayState !== state || state.generation !== attachmentGeneration || replayComplete) {
+        return;
+      }
+      replayPreviewAllowed = retainedSnapshotOnly;
+      replayComplete = true;
+      replayUnavailableMessage = 'Styled terminal replay stalled. Reopen this agent to retry.';
+    }, 10_000);
+  }
+
+  function showTransientReplayWarning(message: string): void {
+    clearReplayWarning();
+    replayUnavailableMessage = message;
+    replayWarningTimer = setTimeout(() => {
+      replayWarningTimer = null;
+      if (replayUnavailableMessage === message) replayUnavailableMessage = null;
+    }, 4_000);
+  }
+
+  function clearReplayWarning(): void {
+    if (replayWarningTimer) clearTimeout(replayWarningTimer);
+    replayWarningTimer = null;
   }
 
   function outputTail(output: string): string {
@@ -883,12 +964,19 @@
     aria-label={`${process.name} terminal`}
     oncontextmenu={showTerminalContextMenu}
   ></div>
-  {#if process.status === 'running' && replayPreviewAllowed && liveOutputRetained && shouldShowRetainedPreview({ text: liveOutputPreview }, replayComplete)}
-    <pre
-      class="terminal-retained-preview"
-      bind:this={liveOutputPreviewElement}
-      aria-label={`Retained output from ${process.name}`}
-    >{liveOutputPreview}</pre>
+  {#if process.status === 'running' && (replayPreviewAllowed || retainedSnapshotOnly) && liveOutputRetained && shouldShowRetainedPreview({ text: liveOutputPreview }, replayComplete, retainedSnapshotOnly)}
+    <div class="terminal-retained-surface" class:is-snapshot={retainedSnapshotOnly}>
+      {#if retainedSnapshotOnly}
+        <span class="terminal-snapshot-label">Unstyled retained snapshot · live output will replace it</span>
+      {/if}
+      <pre
+        class="terminal-retained-preview"
+        bind:this={liveOutputPreviewElement}
+        aria-label={retainedSnapshotOnly
+          ? `Unstyled retained snapshot from ${process.name}`
+          : `Retained output from ${process.name}`}
+      >{liveOutputPreview}</pre>
+    </div>
   {:else if process.status === 'running' && !hasOutput && liveOutputLoaded && !liveOutputRetained}
     <div class="terminal-starting" aria-live="polite">
       <span aria-hidden="true"></span>
@@ -1061,20 +1149,53 @@
 
   @keyframes terminal-waiting-spin { to { transform: rotate(360deg); } }
 
-  .terminal-retained-preview {
+  .terminal-retained-surface {
     position: absolute;
     inset: 0;
     z-index: 1;
+    overflow: hidden;
+    background: var(--terminal-background);
+    pointer-events: none;
+  }
+
+  .terminal-retained-preview {
     box-sizing: border-box;
+    width: 100%;
+    height: 100%;
     margin: 0;
     overflow: hidden;
     padding: 7px 6px 5px 8px;
     color: var(--terminal-foreground);
     background: var(--terminal-background);
-    font: normal var(--terminal-font-size)/var(--terminal-line-height) var(--terminal-font-family);
+    font-family: var(--terminal-font-family);
+    font-size: var(--terminal-font-size);
+    font-style: normal;
+    font-weight: normal;
+    line-height: var(
+      --terminal-cell-height,
+      calc(var(--terminal-font-size) * var(--terminal-line-height) * 1.2)
+    );
     letter-spacing: var(--terminal-letter-spacing);
     white-space: pre;
     pointer-events: none;
+  }
+
+  .terminal-retained-surface.is-snapshot .terminal-retained-preview {
+    padding-top: 36px;
+    opacity: .82;
+  }
+
+  .terminal-snapshot-label {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 1;
+    border: 1px solid color-mix(in srgb, var(--warning-token) 42%, var(--border));
+    border-radius: 3px;
+    padding: 4px 7px;
+    color: var(--terminal-foreground);
+    background: color-mix(in srgb, var(--terminal-background) 91%, var(--warning-token));
+    font: 500 var(--font-size-xs)/1.2 var(--terminal-font-family);
   }
 
   .terminal-replay-warning {

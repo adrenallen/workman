@@ -5,7 +5,10 @@ export interface WebglRecoveryState {
   recovering: boolean;
 }
 
-/** WebGL recovery waits for a visible canvas and never loops for an unsupported renderer. */
+/** A healthy context earns a fresh recovery budget after surviving normal GPU churn. */
+export const WEBGL_STABLE_RESET_MS = 30_000;
+
+/** WebGL recovery waits for a visible canvas and respects the view's unsupported-renderer latch. */
 export function shouldAttemptWebglRecovery(state: WebglRecoveryState): boolean {
   return state.recovering
     && state.terminalVisible
