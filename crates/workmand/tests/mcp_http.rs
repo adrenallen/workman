@@ -224,13 +224,20 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         tools_help["text"]
             .as_str()
             .unwrap()
-            .contains("plain agent by default")
+            .contains("complete core tool list")
     );
+    let spawning_help = call(&process_client, "help", json!({ "topic": "spawning" })).await;
     assert!(
-        tools_help["text"]
+        spawning_help["text"]
             .as_str()
             .unwrap()
             .contains("only when the user names a template or explicitly asks for one")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("pick agent_tool_id from list_agent_tools")
     );
     let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
     assert!(tools_summary["count"].as_u64().unwrap() >= 13);
