@@ -17,6 +17,7 @@ use workman_core::{
 use crate::{
     DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService, RegistryError,
     SharedProcessRegistry,
+    project_titles::{normalized_optional_project_title, normalized_project_title},
     timer_events::{TimerLifecycleEvent, TimerLifecycleHub, TimerLifecycleKind},
     timers::{TimerEdit, TimerError, TimerService},
 };
@@ -1733,10 +1734,7 @@ fn register_project(
         .filter(|name| !name.is_empty())
         .unwrap_or("Project")
         .to_owned();
-    let display_name = display_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned);
+    let display_name = normalized_optional_project_title(display_name);
     if let Some(project) = store
         .get_project_by_path_any(&canonical)
         .map_err(project_store_error)?
@@ -1744,9 +1742,6 @@ fn register_project(
         store
             .attach_project_to_active_profile(project.id)
             .map_err(project_store_error)?;
-        if let Some(display_name) = display_name.as_deref() {
-            rename_project(store, project.id, display_name)?;
-        }
     } else {
         let selected = store
             .list_projects()
@@ -1784,13 +1779,12 @@ fn rename_project(
     project_id: ProjectId,
     name: &str,
 ) -> Result<(), (&'static str, String)> {
-    let name = name.trim();
-    if name.is_empty() {
+    let Some(name) = normalized_project_title(name) else {
         return Err((
             "invalid_project_name",
             "project name cannot be empty".to_owned(),
         ));
-    }
+    };
     let changed = store
         .connection()
         .execute(
@@ -1810,13 +1804,12 @@ fn update_project_settings(
 ) -> Result<(), (&'static str, String)> {
     const COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
 
-    let display_name = params.display_name.trim();
-    if display_name.is_empty() {
+    let Some(display_name) = normalized_project_title(&params.display_name) else {
         return Err((
             "invalid_project_name",
             "project name cannot be empty".to_owned(),
         ));
-    }
+    };
     if params
         .icon
         .as_deref()

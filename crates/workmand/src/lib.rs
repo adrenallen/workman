@@ -48,6 +48,7 @@ mod process_registry;
 pub mod process_stats;
 mod process_tree;
 mod profiles;
+mod project_titles;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;
@@ -2099,6 +2100,25 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["display_name"], "Frontend lab");
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "register-first-again",
+                    "method": "projects.register",
+                    "params": {
+                        "path": first_path,
+                        "display_name": "Folder default must not replace a rename"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["display_name"], "Frontend lab");
 
         socket

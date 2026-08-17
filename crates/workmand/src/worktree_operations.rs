@@ -541,6 +541,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn async_worktree_params_remain_compatible_without_display_name() {
+        let create: CreateParams = parse_params(serde_json::json!({
+            "operation_id": "create-1",
+            "project_id": 7,
+            "branch": "feature/legacy-client"
+        }))
+        .unwrap();
+        assert!(create.display_name.is_none());
+
+        let fork: ForkParams = parse_params(serde_json::json!({
+            "operation_id": "fork-1",
+            "project_id": 7,
+            "branch": "feature/legacy-fork"
+        }))
+        .unwrap();
+        assert!(fork.display_name.is_none());
+
+        let adopt: AdoptParams = parse_params(serde_json::json!({
+            "operation_id": "adopt-1",
+            "path": "/tmp/legacy-worktree"
+        }))
+        .unwrap();
+        assert!(adopt.display_name.is_none());
+    }
+
+    #[test]
     fn hub_tracks_steps_and_failure_on_the_active_step() {
         let invalidations = StatusInvalidationHub::default();
         let hub = WorktreeOperationHub::new(invalidations.clone());

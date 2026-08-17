@@ -432,7 +432,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         CreateWorktree {
             source_project_id: 1,
             branch: "remote-only".into(),
-            display_name: None,
+            display_name: Some("Remote checkout".into()),
             from_ref: None,
             managed_root: None,
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -488,7 +488,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         &fixture.registry,
         AdoptWorktree {
             path: remote_path.clone(),
-            display_name: None,
+            display_name: Some("Folder default must not replace a rename".into()),
             preferences: BTreeMap::new(),
         },
     )
@@ -496,6 +496,11 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     assert_eq!(
         readopted.project.project.id, remote.project.project.id,
         "a kept checkout must reattach its canonical project instead of duplicating it"
+    );
+    assert_eq!(
+        readopted.project.project.display_name.as_deref(),
+        Some("Remote checkout"),
+        "re-adopting a known checkout must preserve its explicit title"
     );
 
     git(

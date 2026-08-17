@@ -25,6 +25,7 @@ use workman_core::{
 
 use crate::{
     RegistryError, SharedProcessRegistry,
+    project_titles::normalized_optional_project_title,
     user_config::user_config_path,
     user_environment::UserEnvironmentResolver,
     worktree_integrations::{
@@ -1960,22 +1961,9 @@ fn register_project(
     let canonical = std::fs::canonicalize(path)?;
     let canonical_string = canonical.to_string_lossy().into_owned();
     let existing = store.get_project_by_path_any(&canonical_string)?;
-    let display_name = display_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned);
-    let project = if let Some(mut project) = existing {
+    let display_name = normalized_optional_project_title(display_name);
+    let project = if let Some(project) = existing {
         store.attach_project_to_active_profile(project.id)?;
-        if let Some(display_name) = display_name {
-            store
-                .connection()
-                .execute(
-                    "UPDATE projects SET display_name = ?1 WHERE id = ?2",
-                    (&display_name, project.id),
-                )
-                .map_err(StoreError::from)?;
-            project.display_name = Some(display_name);
-        }
         project
     } else {
         let project = Project {

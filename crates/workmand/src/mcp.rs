@@ -27,7 +27,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use workman_core::{Actor, Process, ProcessId, ProcessStatus, Project, ProjectId};
 
-use crate::{ProcessRegistry, SharedProcessRegistry, timer_events::TimerLifecycleHub};
+use crate::{
+    ProcessRegistry, SharedProcessRegistry, project_titles::normalized_project_title,
+    timer_events::TimerLifecycleHub,
+};
 
 pub(crate) mod agent_spawning;
 mod tools_lock;
@@ -184,10 +187,7 @@ struct ProjectRenameArgs {
 }
 
 fn apply_explicit_project_name(project: &mut Project, name: &str) -> Result<(), &'static str> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("project name must not be empty");
-    }
+    let name = normalized_project_title(name).ok_or("project name must not be empty")?;
     project.display_name = Some(name.to_owned());
     Ok(())
 }
