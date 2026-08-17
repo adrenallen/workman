@@ -2418,6 +2418,7 @@ async fn self_update(
         return Ok(());
     }
 
+    let installed_via_daemon = daemon_client.is_some();
     let report = if let Some(client) = daemon_client.as_mut() {
         eprintln!(
             "workman: warning: updating restarts workmand and stops all running project processes"
@@ -2433,6 +2434,19 @@ async fn self_update(
         updater.install_target(&check, &install_target).await?
     };
     print_update_report(&report);
+    if installed_via_daemon
+        && report.restart_plan.daemon
+        && let Some(client) = daemon_client.as_mut()
+        && let Err(error) = client
+            .rpc::<serde_json::Value>("daemon.restart", json!({}))
+            .await
+    {
+        // The install report is already printed and the daemon may close before its restart
+        // response reaches us. A bounded daemon-side backstop still completes the restart.
+        eprintln!(
+            "workman: warning: update installed, but the daemon restart acknowledgement failed: {error}"
+        );
+    }
     Ok(())
 }
 
@@ -2497,7 +2511,11 @@ impl Client {
                 .ok_or_else(|| cli_error("daemon closed the control connection"))??;
             match message {
                 Message::Text(text) => {
-                    let response: RpcResponse = serde_json::from_str(&text)?;
+                    let Some(response) = rpc_response(&text)? else {
+                        // Control sessions can carry opt-in push events alongside RPC replies.
+                        // They are not responses and must never abort an in-flight CLI command.
+                        continue;
+                    };
                     if response.id != id {
                         return Err(cli_error(format!(
                             "daemon response ID mismatch: expected {id}, got {}",
@@ -2521,6 +2539,14 @@ impl Client {
             }
         }
     }
+}
+
+fn rpc_response(text: &str) -> Result<Option<RpcResponse>> {
+    let value: Value = serde_json::from_str(text)?;
+    if value.get("id").is_none() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_value(value)?))
 }
 
 async fn negotiate_daemon_version(socket: &mut Socket) -> Option<DaemonVersion> {
@@ -2662,6 +2688,19 @@ fn terminal_size(fd: RawFd) -> io::Result<TerminalSize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_reader_skips_a_push_frame_during_an_in_flight_request() {
+        let progress = r#"{"event":"daemon.update_progress","request_id":"update-1","progress":{"stage":"downloading","message":"Downloading archive","bytes_done":1,"bytes_total":2,"percent":50,"failed":false}}"#;
+        assert!(rpc_response(progress).unwrap().is_none());
+
+        let response = rpc_response(r#"{"id":7,"ok":true,"result":{"done":true}}"#)
+            .unwrap()
+            .expect("the following RPC response is still decoded");
+        assert_eq!(response.id, 7);
+        assert!(response.ok);
+        assert_eq!(response.result, json!({ "done": true }));
+    }
 
     fn create_test_app_bundle(bundle: &Path) {
         let executable = bundle.join("Contents/MacOS/workman-desktop");

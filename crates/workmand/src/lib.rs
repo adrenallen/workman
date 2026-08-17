@@ -115,6 +115,7 @@ const TERMINAL_INPUT_HEADER_LEN: usize = 12;
 const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
 const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
+const UPDATE_RESTART_BACKSTOP: Duration = Duration::from_secs(120);
 
 /// The name of the secure daemon discovery file in the workman data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
@@ -545,6 +546,8 @@ async fn control_session(
     let concurrent_invalidations = status_invalidations.clone();
     let mut status_subscription =
         ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
+    let mut update_progress_subscription = UpdateProgressSubscription::default();
+    let mut update_progress = settings.updates().subscribe_progress();
     let (control_request_tx, mut control_request_rx) = mpsc::unbounded_channel::<String>();
     let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel::<String>();
     let control_registry = registry.clone();
@@ -563,6 +566,7 @@ async fn control_session(
         let mut detached_terminal = TerminalSubscription::default();
         let mut detached_status =
             ProcessStatusSubscription::new(control_live_stats, control_invalidations.clone());
+        let mut detached_update_progress = UpdateProgressSubscription::default();
         while let Some(text) = control_request_rx.recv().await {
             let response = match handle_session_control(
                 &text,
@@ -572,6 +576,7 @@ async fn control_session(
                 &control_shutdown_request,
                 &mut detached_terminal,
                 &mut detached_status,
+                &mut detached_update_progress,
                 &control_worktree_operations,
             )
             .await
@@ -633,6 +638,7 @@ async fn control_session(
                                 &shutdown_request,
                                 &mut terminal,
                                 &mut status_subscription,
+                                &mut update_progress_subscription,
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
@@ -693,6 +699,23 @@ async fn control_session(
             Some(response) = control_response_rx.recv() => {
                 if socket.send(Message::Text(response.into())).await.is_err() {
                     break;
+                }
+            }
+            progress = update_progress.recv() => {
+                match progress {
+                    Ok(progress) if update_progress_subscription.accepts(&progress) => {
+                        let event = json!({
+                            "event": "daemon.update_progress",
+                            "request_id": progress.request_id,
+                            "progress": progress.progress,
+                        });
+                        if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             _ = &mut output_ready => {
@@ -785,6 +808,8 @@ fn request_requires_session_state(text: &str) -> bool {
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
+            | "daemon.update_progress_subscribe"
+            | "daemon.update_progress_unsubscribe"
     )
 }
 
@@ -833,6 +858,17 @@ struct ProcessStatusSubscription {
     last_event: Option<String>,
 }
 
+#[derive(Default)]
+struct UpdateProgressSubscription {
+    request_id: Option<String>,
+}
+
+impl UpdateProgressSubscription {
+    fn accepts(&self, progress: &updates::UpdateProgressEvent) -> bool {
+        self.request_id.as_deref() == Some(progress.request_id.as_str())
+    }
+}
+
 impl ProcessStatusSubscription {
     fn new(
         live_stats: process_stats::LiveStatsHub,
@@ -877,6 +913,7 @@ async fn handle_session_control(
     shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
     status_subscription: &mut ProcessStatusSubscription,
+    update_progress_subscription: &mut UpdateProgressSubscription,
     worktree_operations: &worktree_operations::WorktreeOperationHub,
 ) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -893,6 +930,8 @@ async fn handle_session_control(
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
+            | "daemon.update_progress_subscribe"
+            | "daemon.update_progress_unsubscribe"
             | "worktree.create_async"
             | "worktree.fork_async"
             | "worktree.adopt_async"
@@ -1013,6 +1052,34 @@ async fn handle_session_control(
             },
         );
     }
+    if method == "daemon.update_progress_subscribe" {
+        let request_id = request
+            .get("params")
+            .and_then(|params| params.get("request_id"))
+            .and_then(serde_json::Value::as_str);
+        let Some(request_id) = request_id.filter(|value| !value.is_empty() && value.len() <= 128)
+        else {
+            return Some(
+                json!({
+                    "id": id,
+                    "ok": false,
+                    "error": {
+                        "code": "invalid_params",
+                        "message": "request_id must be a non-empty string of at most 128 bytes"
+                    }
+                })
+                .to_string(),
+            );
+        };
+        update_progress_subscription.request_id = Some(request_id.to_owned());
+        return Some(json!({ "id": id, "ok": true, "result": { "subscribed": true } }).to_string());
+    }
+    if method == "daemon.update_progress_unsubscribe" {
+        update_progress_subscription.request_id = None;
+        return Some(
+            json!({ "id": id, "ok": true, "result": { "subscribed": false } }).to_string(),
+        );
+    }
     if method == "daemon.update_apply" {
         let params = request.get("params").cloned().unwrap_or_default();
         let key =
@@ -1028,17 +1095,50 @@ async fn handle_session_control(
                 },
                 None => None,
             };
-        let result = match key {
-            Some(key) => settings.updates().install_with_key(Some(key)).await,
-            None => settings.updates().install().await,
+        let request_id = match params.get("request_id") {
+            Some(value) => match value.as_str() {
+                Some(value) if !value.is_empty() && value.len() <= 128 => Some(value.to_owned()),
+                _ => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": {
+                                "code": "invalid_params",
+                                "message": "request_id must be a non-empty string of at most 128 bytes"
+                            }
+                        })
+                        .to_string(),
+                    );
+                }
+            },
+            None => None,
+        };
+        let result = match (key, request_id) {
+            (Some(key), Some(request_id)) => {
+                settings
+                    .updates()
+                    .install_with_key_for(Some(key), Some(request_id))
+                    .await
+            }
+            (None, Some(request_id)) => {
+                settings
+                    .updates()
+                    .install_with_key_for(None, Some(request_id))
+                    .await
+            }
+            (Some(key), None) => settings.updates().install_with_key(Some(key)).await,
+            (None, None) => settings.updates().install().await,
         };
         return Some(match result {
             Ok(result) => {
-                let shutdown_request = shutdown_request.clone();
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(150)).await;
-                    let _ = shutdown_request.send(true);
-                });
+                // Installation no longer races a fixed reply-then-shutdown timer. The report's
+                // restart plan transfers ownership to the caller: desktop first presents the
+                // installed state, then its native bridge stops the daemon and relaunches the
+                // refreshed bundle; `wrk update` explicitly requests daemon.restart.
+                // If that ownership transfer is interrupted, the old daemon still exits within
+                // a bounded window instead of running forever against replaced binaries.
+                schedule_update_restart_backstop(shutdown_request.clone());
                 json!({ "id": id, "ok": true, "result": result }).to_string()
             }
             Err(error) => update_error_reply(id, error),
@@ -1215,6 +1315,17 @@ async fn handle_session_control(
         })
         .to_string(),
     )
+}
+
+fn schedule_update_restart_backstop(shutdown_request: watch::Sender<bool>) {
+    schedule_update_restart_backstop_after(shutdown_request, UPDATE_RESTART_BACKSTOP);
+}
+
+fn schedule_update_restart_backstop_after(shutdown_request: watch::Sender<bool>, delay: Duration) {
+    tokio::spawn(async move {
+        sleep(delay).await;
+        let _ = shutdown_request.send(true);
+    });
 }
 
 fn status_event_if_changed(
@@ -1687,6 +1798,8 @@ mod tests {
             "terminal.detach",
             "process.status_subscribe",
             "process.status_unsubscribe",
+            "daemon.update_progress_subscribe",
+            "daemon.update_progress_unsubscribe",
         ] {
             assert!(request_requires_session_state(
                 &json!({ "id": 1, "method": method, "params": {} }).to_string()
@@ -1718,6 +1831,37 @@ mod tests {
             })
             .to_string()
         ));
+    }
+
+    #[test]
+    fn update_progress_subscription_accepts_only_its_correlated_request() {
+        let subscription = UpdateProgressSubscription {
+            request_id: Some("desktop-update-1".to_owned()),
+        };
+        let matching = updates::UpdateProgressEvent {
+            request_id: "desktop-update-1".to_owned(),
+            progress: workman_core::UpdateProgress::stage(
+                workman_core::UpdateStage::Downloading,
+                "Downloading",
+            ),
+        };
+        let foreign = updates::UpdateProgressEvent {
+            request_id: "cli-update-2".to_owned(),
+            progress: matching.progress.clone(),
+        };
+        assert!(subscription.accepts(&matching));
+        assert!(!subscription.accepts(&foreign));
+    }
+
+    #[tokio::test]
+    async fn successful_update_restart_backstop_eventually_requests_shutdown() {
+        let (shutdown, mut requested) = watch::channel(false);
+        schedule_update_restart_backstop_after(shutdown, Duration::from_millis(10));
+        timeout(Duration::from_secs(1), requested.changed())
+            .await
+            .expect("backstop fired")
+            .expect("shutdown sender remained alive");
+        assert!(*requested.borrow());
     }
 
     #[test]

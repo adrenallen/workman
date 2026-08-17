@@ -1,4 +1,6 @@
 import type { ConnectionStatus, DaemonClient, ProcessView, Project } from './daemon';
+import type { UpdateFlow } from './updateFlow';
+import type { UpdateStatus } from './settings';
 
 export type WorkspaceSection =
   | 'terminal'
@@ -23,6 +25,10 @@ export interface SettingsPanelProps {
   client: DaemonClient;
   project: Project | null;
   connection: ConnectionStatus;
+  updateFlow: UpdateFlow;
+  onApplyUpdate: (update: UpdateStatus) => Promise<void>;
+  onRestartUpdate: () => Promise<void>;
+  onDismissUpdate: () => void;
   onError: (message: string) => void;
   onProfileSwitched: () => void;
 }

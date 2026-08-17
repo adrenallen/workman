@@ -65,6 +65,7 @@ import {
 } from './worktreeProgress';
 import type { ClaimedTodo } from './claimedTodos';
 import { DaemonRequestTimeoutError } from './daemonLog';
+import type { UpdateInstallReport, UpdateProgress } from './settings';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -306,11 +307,19 @@ interface ProcessStatusesEvent {
   worktree_operations?: WorktreeOperation[];
 }
 
+interface UpdateProgressEvent {
+  event: 'daemon.update_progress';
+  request_id: string;
+  progress: UpdateProgress;
+}
+
 interface PendingRequest {
   method: string;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  activityId: string | null;
+  refreshTimeout: () => void;
 }
 
 interface QueuedTerminalInput {
@@ -330,6 +339,7 @@ export class DaemonClient
   private unlisten: UnlistenFn[] = [];
   private terminalListeners = new Set<(frame: TerminalFrame) => void>();
   private processListeners = new Set<(processes: ProcessView[]) => void>();
+  private updateProgressListeners = new Map<string, (progress: UpdateProgress) => void>();
 
   async start(
     onStatus: (status: ConnectionStatus) => void,
@@ -827,6 +837,38 @@ export class DaemonClient
     return () => this.processListeners.delete(listener);
   }
 
+  async applyUpdate(
+    onProgress: (progress: UpdateProgress) => void
+  ): Promise<UpdateInstallReport> {
+    const operationId = `desktop-update-${Date.now()}-${++this.sequence}`;
+    const subscription = await this.requestOptional<{ subscribed: boolean }>(
+      'daemon.update_progress_subscribe',
+      { request_id: operationId },
+      { subscribed: false }
+    );
+    if (!subscription.subscribed) {
+      // A legacy daemon has no progress subscription or restart-plan metadata. Its response is
+      // still accepted and normalized by the update-flow compatibility layer.
+      return this.request('daemon.update_apply');
+    }
+
+    this.updateProgressListeners.set(operationId, onProgress);
+    try {
+      return await this.request(
+        'daemon.update_apply',
+        { request_id: operationId },
+        operationId
+      );
+    } finally {
+      this.updateProgressListeners.delete(operationId);
+      await this.requestOptional(
+        'daemon.update_progress_unsubscribe',
+        {},
+        { subscribed: false }
+      ).catch(() => undefined);
+    }
+  }
+
   close(): void {
     this.connected = false;
     if (this.inputRetry) clearTimeout(this.inputRetry);
@@ -840,6 +882,7 @@ export class DaemonClient
     this.pending.clear();
     this.terminalListeners.clear();
     this.processListeners.clear();
+    this.updateProgressListeners.clear();
     resetLiveStats();
     resetTimerLifecycle();
     resetWorktreeOperations();
@@ -867,7 +910,11 @@ export class DaemonClient
     }
   }
 
-  private async request<T>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
+  private async request<T>(
+    type: string,
+    fields: Record<string, unknown> = {},
+    activityId: string | null = null
+  ): Promise<T> {
     const id = `desktop-${Date.now()}-${++this.sequence}`;
     const message = JSON.stringify({ id, method: type, params: fields });
     const response = new Promise<T>((resolve, reject) => {
@@ -880,16 +927,22 @@ export class DaemonClient
           : deepCheckInFlight
             ? 65_000
           : 5_000;
-      const timeout = setTimeout(() => {
+      const onTimeout = () => {
         this.pending.delete(id);
         reject(new DaemonRequestTimeoutError(type, requestTimeout));
-      }, requestTimeout);
-      this.pending.set(id, {
+      };
+      const pendingRequest: PendingRequest = {
         method: type,
         resolve: (result) => resolve(result as T),
         reject,
-        timeout
-      });
+        timeout: setTimeout(onTimeout, requestTimeout),
+        activityId,
+        refreshTimeout: () => {
+          clearTimeout(pendingRequest.timeout);
+          pendingRequest.timeout = setTimeout(onTimeout, requestTimeout);
+        }
+      };
+      this.pending.set(id, pendingRequest);
     });
 
     try {
@@ -941,7 +994,7 @@ export class DaemonClient
   }
 
   private handleText(text: string, onProtocolError: (message: string) => void): void {
-    let response: DaemonResponse | ProcessStatusesEvent;
+    let response: DaemonResponse | ProcessStatusesEvent | UpdateProgressEvent;
     try {
       response = JSON.parse(text) as DaemonResponse | ProcessStatusesEvent;
     } catch {
@@ -963,6 +1016,18 @@ export class DaemonClient
         replaceWorktreeOperations(event.worktree_operations);
       }
       for (const listener of this.processListeners) listener(event.processes);
+      return;
+    }
+    const updateEvent = response as unknown as UpdateProgressEvent;
+    if (
+      updateEvent.event === 'daemon.update_progress'
+      && typeof updateEvent.request_id === 'string'
+      && updateEvent.progress
+    ) {
+      for (const pending of this.pending.values()) {
+        if (pending.activityId === updateEvent.request_id) pending.refreshTimeout();
+      }
+      this.updateProgressListeners.get(updateEvent.request_id)?.(updateEvent.progress);
       return;
     }
     const rpc = response as DaemonResponse;
