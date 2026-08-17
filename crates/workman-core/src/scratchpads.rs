@@ -10,7 +10,10 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{Project, ProjectId, Scratchpad, ScratchpadId, Store, StoreError};
+use crate::{
+    Project, ProjectId, Scratchpad, ScratchpadComment, ScratchpadCommentId, ScratchpadId, Store,
+    StoreError,
+};
 
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 200;
@@ -18,6 +21,8 @@ const DEFAULT_FIND_LIMIT: usize = 20;
 const MAX_FIND_LIMIT: usize = 100;
 const MAX_CONTEXT_LINES: usize = 3;
 const MAX_SNIPPET_CHARS: usize = 240;
+const MAX_COMMENT_BODY_CHARS: usize = 65_536;
+const MAX_ANCHOR_CONTEXT_CHARS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScratchpadReadMode {
@@ -72,9 +77,53 @@ pub struct ScratchpadSummary {
     pub tags: Vec<String>,
     pub created_by: String,
     pub updated_by: String,
+    pub unresolved_comment_count: usize,
     pub matched_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchpadAnchorState {
+    Anchored,
+    Orphaned,
+    Unanchored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScratchpadAnchorResolution {
+    pub anchor_state: ScratchpadAnchorState,
+    pub current_start: Option<usize>,
+    pub current_end: Option<usize>,
+    pub current_start_line: Option<usize>,
+    pub current_end_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScratchpadCommentView {
+    #[serde(flatten)]
+    pub comment: ScratchpadComment,
+    #[serde(flatten)]
+    pub anchor: ScratchpadAnchorResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScratchpadCommentPage {
+    pub comments: Vec<ScratchpadCommentView>,
+    pub total_count: usize,
+    pub unresolved_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NewScratchpadComment {
+    pub body: String,
+    pub quote: Option<String>,
+    pub anchor_start: Option<usize>,
+    pub anchor_end: Option<usize>,
+    pub anchor_prefix: Option<String>,
+    pub anchor_suffix: Option<String>,
+    pub allow_unanchored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +213,7 @@ pub enum ScratchpadServiceError {
     Io(String),
     ProjectNotFound(ProjectId),
     ScratchpadNotFound(ScratchpadId),
+    CommentNotFound(ScratchpadCommentId),
     RevisionConflict {
         scratchpad_id: ScratchpadId,
         expected: i64,
@@ -185,6 +235,7 @@ impl ScratchpadServiceError {
             Self::Io(_) => "scratchpad_io_error",
             Self::ProjectNotFound(_) => "project_not_found",
             Self::ScratchpadNotFound(_) => "scratchpad_not_found",
+            Self::CommentNotFound(_) => "scratchpad_comment_not_found",
             Self::RevisionConflict { .. } => "scratchpad_revision_conflict",
             Self::NameConflict { .. } => "scratchpad_name_conflict",
             Self::HeadingNotFound(_) => "scratchpad_heading_not_found",
@@ -204,6 +255,7 @@ impl fmt::Display for ScratchpadServiceError {
             Self::ScratchpadNotFound(id) => {
                 write!(formatter, "scratchpad {id} was not found in this project")
             }
+            Self::CommentNotFound(id) => write!(formatter, "scratchpad comment {id} was not found"),
             Self::RevisionConflict {
                 scratchpad_id,
                 expected,
@@ -388,6 +440,212 @@ impl<'store> ScratchpadService<'store> {
             returned_lines: end - offset,
             has_more: end < total_lines,
         })
+    }
+
+    pub fn comment_create(
+        &self,
+        project_id: ProjectId,
+        scratchpad_id: ScratchpadId,
+        mut input: NewScratchpadComment,
+        now_ms: i64,
+    ) -> ScratchpadServiceResult<ScratchpadCommentView> {
+        validate_comment_body(&input.body)?;
+        let scratchpad = self.require_scratchpad(project_id, scratchpad_id)?;
+        let (anchor_start, anchor_end, anchor_prefix, anchor_suffix, anchor_revision) = match input
+            .quote
+            .as_deref()
+        {
+            None => {
+                if input.anchor_start.is_some()
+                    || input.anchor_end.is_some()
+                    || input.anchor_prefix.is_some()
+                    || input.anchor_suffix.is_some()
+                {
+                    return Err(ScratchpadServiceError::InvalidInput(
+                        "anchor fields require a non-empty quote".into(),
+                    ));
+                }
+                (None, None, None, None, None)
+            }
+            Some("") => {
+                return Err(ScratchpadServiceError::InvalidInput(
+                    "comment quote must not be empty".into(),
+                ));
+            }
+            Some(quote) => {
+                let range = match (input.anchor_start, input.anchor_end) {
+                    (Some(start), Some(end)) => {
+                        if utf16_slice(&scratchpad.content, start, end) != Some(quote) {
+                            return Err(ScratchpadServiceError::InvalidInput(
+                                "anchor offsets do not select the supplied quote".into(),
+                            ));
+                        }
+                        Some((start, end))
+                    }
+                    (None, None) => {
+                        let matches = exact_quote_ranges_utf16(&scratchpad.content, quote);
+                        match matches.as_slice() {
+                            [range] => Some(*range),
+                            [] if input.allow_unanchored => None,
+                            [] => {
+                                return Err(ScratchpadServiceError::InvalidInput(
+                                        "comment quote was not found in the scratchpad; set allow_unanchored=true to keep it as orphaned"
+                                            .into(),
+                                    ));
+                            }
+                            _ => {
+                                return Err(ScratchpadServiceError::InvalidInput(
+                                        "comment quote appears more than once; provide anchor_start and anchor_end"
+                                            .into(),
+                                    ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(ScratchpadServiceError::InvalidInput(
+                            "anchor_start and anchor_end must be provided together".into(),
+                        ));
+                    }
+                };
+                let (prefix, suffix) = if let Some((start, end)) = range {
+                    let prefix = input
+                        .anchor_prefix
+                        .take()
+                        .unwrap_or_else(|| utf16_prefix(&scratchpad.content, start));
+                    let suffix = input
+                        .anchor_suffix
+                        .take()
+                        .unwrap_or_else(|| utf16_suffix(&scratchpad.content, end));
+                    validate_anchor_context("anchor_prefix", &prefix)?;
+                    validate_anchor_context("anchor_suffix", &suffix)?;
+                    (Some(prefix), Some(suffix))
+                } else {
+                    (None, None)
+                };
+                (
+                    range.map(|range| range.0),
+                    range.map(|range| range.1),
+                    prefix,
+                    suffix,
+                    Some(scratchpad.revision),
+                )
+            }
+        };
+
+        self.store.connection().execute(
+            "INSERT INTO scratchpad_comments (
+                scratchpad_id, actor, body, quote, anchor_start, anchor_end,
+                anchor_prefix, anchor_suffix, anchor_revision, resolved, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?10)",
+            params![
+                scratchpad_id,
+                self.actor_label,
+                input.body,
+                input.quote,
+                anchor_start,
+                anchor_end,
+                anchor_prefix,
+                anchor_suffix,
+                anchor_revision,
+                now_ms,
+            ],
+        )?;
+        let id = self.store.connection().last_insert_rowid();
+        self.require_comment(project_id, id)
+    }
+
+    pub fn comment_list(
+        &self,
+        project_id: ProjectId,
+        scratchpad_id: ScratchpadId,
+        include_resolved: bool,
+    ) -> ScratchpadServiceResult<ScratchpadCommentPage> {
+        let scratchpad = self.require_scratchpad(project_id, scratchpad_id)?;
+        let total_count = self.comment_count(project_id, scratchpad_id, true)?;
+        let unresolved_count = self.comment_count(project_id, scratchpad_id, false)?;
+        let mut statement = self.store.connection().prepare(
+            "SELECT id, scratchpad_id, actor, body, quote, anchor_start, anchor_end,
+                    anchor_prefix, anchor_suffix, anchor_revision, resolved, created_at, updated_at
+             FROM scratchpad_comments
+             WHERE scratchpad_id = ?1 AND (?2 OR resolved = 0)
+             ORDER BY created_at, id",
+        )?;
+        let mut comments = statement
+            .query_map(params![scratchpad_id, include_resolved], comment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for comment in &mut comments {
+            comment.actor = self.store.actor_display_label(&comment.actor);
+        }
+        Ok(ScratchpadCommentPage {
+            comments: comments
+                .into_iter()
+                .map(|comment| comment_view(comment, &scratchpad.content))
+                .collect(),
+            total_count,
+            unresolved_count,
+        })
+    }
+
+    pub fn comment_update(
+        &self,
+        project_id: ProjectId,
+        comment_id: ScratchpadCommentId,
+        body: String,
+        now_ms: i64,
+    ) -> ScratchpadServiceResult<ScratchpadCommentView> {
+        validate_comment_body(&body)?;
+        self.require_comment(project_id, comment_id)?;
+        self.store.connection().execute(
+            "UPDATE scratchpad_comments SET body = ?1, updated_at = ?2 WHERE id = ?3",
+            params![body, now_ms, comment_id],
+        )?;
+        self.require_comment(project_id, comment_id)
+    }
+
+    pub fn comment_set_resolved(
+        &self,
+        project_id: ProjectId,
+        comment_id: ScratchpadCommentId,
+        resolved: bool,
+        now_ms: i64,
+    ) -> ScratchpadServiceResult<ScratchpadCommentView> {
+        self.require_comment(project_id, comment_id)?;
+        self.store.connection().execute(
+            "UPDATE scratchpad_comments SET resolved = ?1, updated_at = ?2 WHERE id = ?3",
+            params![resolved, now_ms, comment_id],
+        )?;
+        self.require_comment(project_id, comment_id)
+    }
+
+    pub fn comment_delete(
+        &self,
+        project_id: ProjectId,
+        comment_id: ScratchpadCommentId,
+    ) -> ScratchpadServiceResult<ScratchpadId> {
+        let comment = self.require_comment(project_id, comment_id)?;
+        self.store.connection().execute(
+            "DELETE FROM scratchpad_comments WHERE id = ?1",
+            [comment_id],
+        )?;
+        Ok(comment.comment.scratchpad_id)
+    }
+
+    pub fn comment_count(
+        &self,
+        project_id: ProjectId,
+        scratchpad_id: ScratchpadId,
+        include_resolved: bool,
+    ) -> ScratchpadServiceResult<usize> {
+        self.require_scratchpad(project_id, scratchpad_id)?;
+        self.store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM scratchpad_comments
+                 WHERE scratchpad_id = ?1 AND (?2 OR resolved = 0)",
+                params![scratchpad_id, include_resolved],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn append(
@@ -681,6 +939,7 @@ impl<'store> ScratchpadService<'store> {
                 tags: scratchpad.tags,
                 created_by: scratchpad.created_by,
                 updated_by: scratchpad.updated_by,
+                unresolved_comment_count: self.comment_count(project_id, id, false)?,
                 matched_fields,
                 match_snippet,
             });
@@ -962,6 +1221,28 @@ impl<'store> ScratchpadService<'store> {
             .ok_or(ScratchpadServiceError::ScratchpadNotFound(scratchpad_id))
     }
 
+    fn require_comment(
+        &self,
+        project_id: ProjectId,
+        comment_id: ScratchpadCommentId,
+    ) -> ScratchpadServiceResult<ScratchpadCommentView> {
+        let mut comment = self
+            .store
+            .connection()
+            .query_row(
+                "SELECT id, scratchpad_id, actor, body, quote, anchor_start, anchor_end,
+                        anchor_prefix, anchor_suffix, anchor_revision, resolved, created_at, updated_at
+                 FROM scratchpad_comments WHERE id = ?1",
+                [comment_id],
+                comment_from_row,
+            )
+            .optional()?
+            .ok_or(ScratchpadServiceError::CommentNotFound(comment_id))?;
+        let scratchpad = self.require_scratchpad(project_id, comment.scratchpad_id)?;
+        comment.actor = self.store.actor_display_label(&comment.actor);
+        Ok(comment_view(comment, &scratchpad.content))
+    }
+
     fn require_revision(
         &self,
         project_id: ProjectId,
@@ -1040,6 +1321,195 @@ impl<'store> ScratchpadService<'store> {
         transaction.commit()?;
         self.require_scratchpad(scratchpad.project_id, scratchpad.id)
     }
+}
+
+/// Resolve a saved scratchpad quote against current content.
+///
+/// Offsets are UTF-16 code units. The saved range wins while it still selects
+/// the quote. Otherwise an exact quote match must be unique, optionally after
+/// exact prefix/suffix context filtering; ambiguous and missing quotes orphan.
+pub fn resolve_scratchpad_anchor(
+    content: &str,
+    quote: Option<&str>,
+    anchor_start: Option<usize>,
+    anchor_end: Option<usize>,
+    anchor_prefix: Option<&str>,
+    anchor_suffix: Option<&str>,
+) -> ScratchpadAnchorResolution {
+    let Some(quote) = quote else {
+        return ScratchpadAnchorResolution {
+            anchor_state: ScratchpadAnchorState::Unanchored,
+            current_start: None,
+            current_end: None,
+            current_start_line: None,
+            current_end_line: None,
+        };
+    };
+    if let (Some(start), Some(end)) = (anchor_start, anchor_end)
+        && utf16_slice(content, start, end) == Some(quote)
+    {
+        return anchored_resolution(content, quote, start, end);
+    }
+
+    let candidates = exact_quote_ranges_utf16(content, quote);
+    let contextual = candidates
+        .iter()
+        .copied()
+        .filter(|(start, end)| {
+            let Some(start_byte) = utf16_to_byte(content, *start) else {
+                return false;
+            };
+            let Some(end_byte) = utf16_to_byte(content, *end) else {
+                return false;
+            };
+            anchor_prefix
+                .filter(|prefix| !prefix.is_empty())
+                .is_none_or(|prefix| content[..start_byte].ends_with(prefix))
+                && anchor_suffix
+                    .filter(|suffix| !suffix.is_empty())
+                    .is_none_or(|suffix| content[end_byte..].starts_with(suffix))
+        })
+        .collect::<Vec<_>>();
+    let resolved = match contextual.as_slice() {
+        [range] => Some(*range),
+        [] if candidates.len() == 1 => candidates.first().copied(),
+        _ => None,
+    };
+    match resolved {
+        Some((start, end)) => anchored_resolution(content, quote, start, end),
+        None => ScratchpadAnchorResolution {
+            anchor_state: ScratchpadAnchorState::Orphaned,
+            current_start: None,
+            current_end: None,
+            current_start_line: None,
+            current_end_line: None,
+        },
+    }
+}
+
+fn anchored_resolution(
+    content: &str,
+    quote: &str,
+    start: usize,
+    end: usize,
+) -> ScratchpadAnchorResolution {
+    let start_line = utf16_to_byte(content, start).map(|byte| {
+        content[..byte]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1
+    });
+    ScratchpadAnchorResolution {
+        anchor_state: ScratchpadAnchorState::Anchored,
+        current_start: Some(start),
+        current_end: Some(end),
+        current_start_line: start_line,
+        current_end_line: start_line
+            .map(|line| line + quote.bytes().filter(|byte| *byte == b'\n').count()),
+    }
+}
+
+fn comment_view(comment: ScratchpadComment, content: &str) -> ScratchpadCommentView {
+    let anchor = resolve_scratchpad_anchor(
+        content,
+        comment.quote.as_deref(),
+        comment.anchor_start,
+        comment.anchor_end,
+        comment.anchor_prefix.as_deref(),
+        comment.anchor_suffix.as_deref(),
+    );
+    ScratchpadCommentView { comment, anchor }
+}
+
+fn comment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScratchpadComment> {
+    Ok(ScratchpadComment {
+        id: row.get(0)?,
+        scratchpad_id: row.get(1)?,
+        actor: row.get(2)?,
+        body: row.get(3)?,
+        quote: row.get(4)?,
+        anchor_start: row.get(5)?,
+        anchor_end: row.get(6)?,
+        anchor_prefix: row.get(7)?,
+        anchor_suffix: row.get(8)?,
+        anchor_revision: row.get(9)?,
+        resolved: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn validate_comment_body(body: &str) -> ScratchpadServiceResult<()> {
+    validate_nonempty("comment", body)?;
+    if body.chars().count() > MAX_COMMENT_BODY_CHARS {
+        return Err(ScratchpadServiceError::InvalidInput(format!(
+            "comment must not exceed {MAX_COMMENT_BODY_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_anchor_context(field: &str, context: &str) -> ScratchpadServiceResult<()> {
+    if context.chars().count() > MAX_ANCHOR_CONTEXT_CHARS {
+        return Err(ScratchpadServiceError::InvalidInput(format!(
+            "{field} must not exceed {MAX_ANCHOR_CONTEXT_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn exact_quote_ranges_utf16(content: &str, quote: &str) -> Vec<(usize, usize)> {
+    content
+        .match_indices(quote)
+        .map(|(start, matched)| {
+            let start_utf16 = content[..start].encode_utf16().count();
+            (start_utf16, start_utf16 + matched.encode_utf16().count())
+        })
+        .collect()
+}
+
+fn utf16_to_byte(content: &str, offset: usize) -> Option<usize> {
+    let mut utf16 = 0;
+    for (byte, character) in content.char_indices() {
+        if utf16 == offset {
+            return Some(byte);
+        }
+        utf16 += character.len_utf16();
+        if utf16 > offset {
+            return None;
+        }
+    }
+    (utf16 == offset).then_some(content.len())
+}
+
+fn utf16_slice(content: &str, start: usize, end: usize) -> Option<&str> {
+    if end <= start {
+        return None;
+    }
+    let start = utf16_to_byte(content, start)?;
+    let end = utf16_to_byte(content, end)?;
+    content.get(start..end)
+}
+
+fn utf16_prefix(content: &str, start: usize) -> String {
+    let Some(start) = utf16_to_byte(content, start) else {
+        return String::new();
+    };
+    let chars = content[..start].chars().collect::<Vec<_>>();
+    chars[chars.len().saturating_sub(MAX_ANCHOR_CONTEXT_CHARS)..]
+        .iter()
+        .collect()
+}
+
+fn utf16_suffix(content: &str, end: usize) -> String {
+    let Some(end) = utf16_to_byte(content, end) else {
+        return String::new();
+    };
+    content[end..]
+        .chars()
+        .take(MAX_ANCHOR_CONTEXT_CHARS)
+        .collect()
 }
 
 #[derive(Debug, Clone)]

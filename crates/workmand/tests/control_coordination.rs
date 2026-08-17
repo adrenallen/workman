@@ -550,3 +550,94 @@ async fn coordination_rpcs_expose_board_detail_and_live_scratchpad_revisions() {
     socket.close(None).await.unwrap();
     server.stop().await;
 }
+
+#[tokio::test]
+async fn coordination_scratchpad_comment_rpcs_cover_anchors_and_lifecycle() {
+    let server = TestServer::start().await;
+    let (mut socket, _) = connect_async(server.request()).await.unwrap();
+    let snapshot = rpc(
+        &mut socket,
+        "snapshot",
+        "coordination.snapshot",
+        json!({ "project_id": 1 }),
+    )
+    .await;
+    let scratchpad_id = snapshot["scratchpads"][0]["id"].as_i64().unwrap();
+
+    let created = rpc(
+        &mut socket,
+        "comment-create",
+        "coordination.scratchpad_comment_create",
+        json!({
+            "project_id": 1,
+            "scratchpad_id": scratchpad_id,
+            "body": "Clarify the opening.",
+            "quote": "First revision.",
+            "anchor_start": 0,
+            "anchor_end": 15,
+            "anchor_prefix": "",
+            "anchor_suffix": ""
+        }),
+    )
+    .await;
+    assert_eq!(created["actor"], "user");
+    assert_eq!(created["anchor_state"], "anchored");
+    assert_eq!(created["current_start_line"], 1);
+    let comment_id = created["id"].as_i64().unwrap();
+
+    let snapshot = rpc(
+        &mut socket,
+        "snapshot-count",
+        "coordination.snapshot",
+        json!({ "project_id": 1 }),
+    )
+    .await;
+    assert_eq!(snapshot["scratchpads"][0]["unresolved_comment_count"], 1);
+    let detail = rpc(
+        &mut socket,
+        "detail",
+        "coordination.scratchpad",
+        json!({ "project_id": 1, "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert_eq!(detail["unresolved_comment_count"], 1);
+    assert_eq!(detail["comments"][0]["id"], comment_id);
+
+    let updated = rpc(
+        &mut socket,
+        "comment-update",
+        "coordination.scratchpad_comment_update",
+        json!({ "project_id": 1, "comment_id": comment_id, "body": "Opening is clear." }),
+    )
+    .await;
+    assert_eq!(updated["body"], "Opening is clear.");
+    let resolved = rpc(
+        &mut socket,
+        "comment-resolve",
+        "coordination.scratchpad_comment_resolve",
+        json!({ "project_id": 1, "comment_id": comment_id }),
+    )
+    .await;
+    assert_eq!(resolved["resolved"], true);
+    let unresolved = rpc(
+        &mut socket,
+        "comments-unresolved",
+        "coordination.scratchpad_comments",
+        json!({ "project_id": 1, "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert_eq!(unresolved["comments"].as_array().unwrap().len(), 0);
+    assert_eq!(unresolved["total_count"], 1);
+
+    let deleted = rpc(
+        &mut socket,
+        "comment-delete",
+        "coordination.scratchpad_comment_delete",
+        json!({ "project_id": 1, "comment_id": comment_id }),
+    )
+    .await;
+    assert_eq!(deleted["deleted"], true);
+
+    socket.close(None).await.unwrap();
+    server.stop().await;
+}

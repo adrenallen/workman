@@ -152,6 +152,34 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             .and_then(Value::as_object)
             .is_some_and(|properties| properties.contains_key("create_heading"))
     );
+    let read_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_read")
+        .expect("scratchpad_read tool is registered");
+    assert!(
+        read_tool.input_schema["properties"]
+            .get("include_comments")
+            .is_some()
+    );
+    let comment_create_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_comment_create")
+        .expect("scratchpad_comment_create tool is registered");
+    for property in [
+        "scratchpad_id",
+        "body",
+        "quote",
+        "anchor_start",
+        "anchor_end",
+        "allow_unanchored",
+    ] {
+        assert!(
+            comment_create_tool.input_schema["properties"]
+                .get(property)
+                .is_some(),
+            "scratchpad_comment_create is missing {property}"
+        );
+    }
     let tool_names = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
@@ -175,6 +203,11 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "scratchpad_transfer",
         "scratchpad_save_to_file",
         "scratchpad_load_from_file",
+        "scratchpad_comment_create",
+        "scratchpad_comment_list",
+        "scratchpad_comment_update",
+        "scratchpad_comment_resolve",
+        "scratchpad_comment_delete",
     ] {
         assert!(
             tool_names.iter().any(|candidate| candidate == name),
@@ -209,6 +242,86 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             ("scratchpad-agent".into(), "scratchpad-agent".into())
         );
     }
+
+    let comment = call(
+        &first,
+        "scratchpad_comment_create",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "body": "Make this step concrete.",
+            "quote": "Alpha"
+        }),
+    )
+    .await;
+    assert_eq!(comment["actor"], "scratchpad-agent");
+    assert_eq!(comment["anchor_state"], "anchored");
+    assert_eq!(comment["current_start_line"], 5);
+    let comment_id = comment["id"].as_i64().unwrap();
+
+    let commented_read = call(
+        &first,
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id, "include_comments": true }),
+    )
+    .await;
+    assert_eq!(commented_read["unresolved_comment_count"], 1);
+    assert_eq!(
+        commented_read["comments"][0]["body"],
+        "Make this step concrete."
+    );
+    let updated_comment = call(
+        &first,
+        "scratchpad_comment_update",
+        json!({ "comment_id": comment_id, "body": "Concrete now." }),
+    )
+    .await;
+    assert_eq!(updated_comment["body"], "Concrete now.");
+    let resolved_comment = call(
+        &first,
+        "scratchpad_comment_resolve",
+        json!({ "comment_id": comment_id }),
+    )
+    .await;
+    assert_eq!(resolved_comment["resolved"], true);
+    let unresolved_comments = call(
+        &first,
+        "scratchpad_comment_list",
+        json!({ "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert_eq!(unresolved_comments["comments"].as_array().unwrap().len(), 0);
+    let all_comments = call(
+        &first,
+        "scratchpad_comment_list",
+        json!({ "scratchpad_id": scratchpad_id, "include_resolved": true }),
+    )
+    .await;
+    assert_eq!(all_comments["comments"].as_array().unwrap().len(), 1);
+    let missing_quote = invoke(
+        &first,
+        "scratchpad_comment_create",
+        json!({ "scratchpad_id": scratchpad_id, "body": "Missing", "quote": "not here" }),
+    )
+    .await;
+    assert_error_code(&missing_quote, "invalid_scratchpad_input");
+    let orphaned = call(
+        &first,
+        "scratchpad_comment_create",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "body": "Keep this reference.",
+            "quote": "not here",
+            "allow_unanchored": true
+        }),
+    )
+    .await;
+    assert_eq!(orphaned["anchor_state"], "orphaned");
+    call(
+        &first,
+        "scratchpad_comment_delete",
+        json!({ "comment_id": comment_id }),
+    )
+    .await;
 
     let headings = call(
         &first,
