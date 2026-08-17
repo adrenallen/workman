@@ -249,6 +249,7 @@ pub struct WorktreePreferenceMutation {
 pub struct CreateWorktree {
     pub source_project_id: ProjectId,
     pub branch: String,
+    pub display_name: Option<String>,
     pub from_ref: Option<String>,
     pub managed_root: Option<PathBuf>,
     pub preferences: BTreeMap<String, String>,
@@ -294,6 +295,7 @@ pub struct EnvironmentPortResult {
 pub struct ForkWorktree {
     pub source_project_id: ProjectId,
     pub branch: String,
+    pub display_name: Option<String>,
     pub managed_root: Option<PathBuf>,
     pub preferences: BTreeMap<String, String>,
     pub env_policy: Option<EnvPortPolicy>,
@@ -303,6 +305,7 @@ pub struct ForkWorktree {
 #[derive(Clone, Debug)]
 pub struct AdoptWorktree {
     pub path: PathBuf,
+    pub display_name: Option<String>,
     pub preferences: BTreeMap<String, String>,
 }
 
@@ -1112,6 +1115,7 @@ pub(crate) async fn create_with_progress(
             &repository,
             &destination,
             &request.branch,
+            request.display_name.as_deref(),
             true,
         )?
     };
@@ -1160,6 +1164,7 @@ pub(crate) async fn fork_with_progress(
         CreateWorktree {
             source_project_id: request.source_project_id,
             branch: request.branch,
+            display_name: request.display_name,
             from_ref: Some(record.head.clone()),
             managed_root: request.managed_root,
             preferences: request.preferences,
@@ -1232,7 +1237,14 @@ pub(crate) async fn adopt_with_progress(
     };
     let project = {
         let registry = registry.lock().await;
-        register_project(registry.store(), &repository, &top, &branch, false)?
+        register_project(
+            registry.store(),
+            &repository,
+            &top,
+            &branch,
+            request.display_name.as_deref(),
+            false,
+        )?
     };
     if let Some(progress) = progress {
         progress.completed(
@@ -1942,20 +1954,35 @@ fn register_project(
     repository: &WorktreeRepository,
     path: &Path,
     branch: &str,
+    display_name: Option<&str>,
     managed: bool,
 ) -> WorktreeResult<Project> {
     let canonical = std::fs::canonicalize(path)?;
     let canonical_string = canonical.to_string_lossy().into_owned();
     let existing = store.get_project_by_path_any(&canonical_string)?;
-    let project = if let Some(project) = existing {
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let project = if let Some(mut project) = existing {
         store.attach_project_to_active_profile(project.id)?;
+        if let Some(display_name) = display_name {
+            store
+                .connection()
+                .execute(
+                    "UPDATE projects SET display_name = ?1 WHERE id = ?2",
+                    (&display_name, project.id),
+                )
+                .map_err(StoreError::from)?;
+            project.display_name = Some(display_name);
+        }
         project
     } else {
         let project = Project {
             id: store.next_project_id()?,
             path: canonical_string,
             name: format!("{}: {branch}", repository.name),
-            display_name: None,
+            display_name,
             icon: None,
             selected: false,
             sort_order: store.next_project_sort_order()?,

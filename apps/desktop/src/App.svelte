@@ -36,6 +36,7 @@
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
   import ProjectFolderMenu from './lib/ProjectFolderMenu.svelte';
   import ProjectOverview from './lib/ProjectOverview.svelte';
+  import RegisterProjectDialog from './lib/RegisterProjectDialog.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
@@ -139,6 +140,7 @@
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
   import type { ProjectSettingsInput } from './lib/projectAppearance';
+  import { defaultProjectTitleFromPath, resolvedProjectTitle } from './lib/projectTitles';
   import {
     createProjectFolder,
     deleteProjectFolder,
@@ -355,6 +357,9 @@
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
+  let registerProjectDialog = $state<{ path: string; defaultTitle: string } | null>(null);
+  let registerProjectBusy = $state(false);
+  let registerProjectError = $state<string | null>(null);
   let worktreeDialog = $state<{
     mode: 'create' | 'fork' | 'adopt';
     sourceProject: Project;
@@ -2723,14 +2728,29 @@
   async function registerProject(): Promise<void> {
     const path = await open({ directory: true, multiple: false, title: 'Register a project folder' });
     if (typeof path !== 'string') return;
-    busy = true;
+    registerProjectError = null;
+    registerProjectDialog = {
+      path,
+      defaultTitle: defaultProjectTitleFromPath(path)
+    };
+  }
+
+  async function submitRegisterProject(title: string): Promise<void> {
+    const state = registerProjectDialog;
+    if (!state || registerProjectBusy) return;
+    registerProjectBusy = true;
+    registerProjectError = null;
     try {
-      projects = await client.register(path);
+      projects = await client.register(
+        state.path,
+        resolvedProjectTitle(title, state.defaultTitle)
+      );
+      registerProjectDialog = null;
       await refreshWorktreeMetadata(projects, false, true);
     } catch (cause) {
-      reportError(cause);
+      registerProjectError = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      busy = false;
+      registerProjectBusy = false;
     }
   }
 
@@ -2833,6 +2853,7 @@
         await client.createWorktreeAsync(operationId, {
             project_id: state.sourceProject.id,
             branch: submission.branch,
+            display_name: submission.title,
             from_ref: submission.fromRef,
             env_policy: submission.envPolicy,
             remember_env_policy: submission.rememberEnvPolicy
@@ -2841,11 +2862,12 @@
         await client.forkWorktreeAsync(operationId, {
               project_id: state.sourceProject.id,
               branch: submission.branch,
+              display_name: submission.title,
               env_policy: submission.envPolicy,
               remember_env_policy: submission.rememberEnvPolicy
         });
       } else {
-        await client.adoptWorktreeAsync(operationId, submission.path);
+        await client.adoptWorktreeAsync(operationId, submission.path, submission.title);
       }
     } catch (cause) {
       failWorktreeOperation(
@@ -4396,6 +4418,22 @@
     onInsert={insertQuickPrompt}
     onClose={closeQuickPrompts}
     onError={reportError}
+  />
+{/if}
+
+{#if registerProjectDialog}
+  <RegisterProjectDialog
+    path={registerProjectDialog.path}
+    defaultTitle={registerProjectDialog.defaultTitle}
+    busy={registerProjectBusy}
+    error={registerProjectError}
+    onSubmit={(title) => void submitRegisterProject(title)}
+    onClose={() => {
+      if (!registerProjectBusy) {
+        registerProjectDialog = null;
+        registerProjectError = null;
+      }
+    }}
   />
 {/if}
 

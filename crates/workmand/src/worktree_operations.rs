@@ -245,6 +245,8 @@ struct CreateParams {
     project_id: ProjectId,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     from_ref: Option<String>,
     #[serde(default)]
     managed_root: Option<String>,
@@ -262,6 +264,8 @@ struct ForkParams {
     project_id: ProjectId,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
@@ -275,6 +279,8 @@ struct ForkParams {
 struct AdoptParams {
     operation_id: String,
     path: String,
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
 }
@@ -310,6 +316,7 @@ pub(crate) async fn start(
                     worktrees::CreateWorktree {
                         source_project_id: params.project_id,
                         branch: params.branch,
+                        display_name: params.display_name,
                         from_ref: params.from_ref,
                         managed_root: params.managed_root.map(PathBuf::from),
                         preferences: params.preferences,
@@ -350,6 +357,7 @@ pub(crate) async fn start(
                     worktrees::ForkWorktree {
                         source_project_id: params.project_id,
                         branch: params.branch,
+                        display_name: params.display_name,
                         managed_root: params.managed_root.map(PathBuf::from),
                         preferences: params.preferences,
                         env_policy: params.env_policy,
@@ -387,6 +395,7 @@ pub(crate) async fn start(
                     &registry,
                     worktrees::AdoptWorktree {
                         path: PathBuf::from(params.path),
+                        display_name: params.display_name,
                         preferences: params.preferences,
                     },
                     Some(&reporter),

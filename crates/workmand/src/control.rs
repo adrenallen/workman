@@ -184,6 +184,8 @@ struct UpdateCommandParams {
 #[derive(Debug, Deserialize)]
 struct RegisterProjectParams {
     path: String,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +266,8 @@ struct WorktreeCreateParams {
     project_id: Option<ProjectId>,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     from_ref: Option<String>,
     #[serde(default)]
     managed_root: Option<String>,
@@ -281,6 +285,8 @@ struct WorktreeForkParams {
     project_id: Option<ProjectId>,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
@@ -293,6 +299,8 @@ struct WorktreeForkParams {
 #[derive(Debug, Deserialize)]
 struct WorktreeAdoptParams {
     path: String,
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
 }
@@ -661,6 +669,7 @@ async fn dispatch(
                 crate::worktrees::CreateWorktree {
                     source_project_id: project_id,
                     branch: params.branch,
+                    display_name: params.display_name,
                     from_ref: params.from_ref,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
@@ -680,6 +689,7 @@ async fn dispatch(
                 crate::worktrees::ForkWorktree {
                     source_project_id: project_id,
                     branch: params.branch,
+                    display_name: params.display_name,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
                     env_policy: params.env_policy,
@@ -707,6 +717,7 @@ async fn dispatch(
                 registry,
                 crate::worktrees::AdoptWorktree {
                     path: PathBuf::from(params.path),
+                    display_name: params.display_name,
                     preferences: params.preferences,
                 },
             )
@@ -1019,7 +1030,11 @@ async fn dispatch(
         }
         "projects.register" => {
             let params: RegisterProjectParams = params_as(params)?;
-            register_project(registry.store(), &params.path)?;
+            register_project(
+                registry.store(),
+                &params.path,
+                params.display_name.as_deref(),
+            )?;
             let _ = crate::worktrees::reconcile_existing_projects(registry.store());
             return project_result(list_projects(registry.store()));
         }
@@ -1694,7 +1709,11 @@ fn project_rail_result(store: &Store) -> Result<Value, (&'static str, String)> {
     }))
 }
 
-fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, String)> {
+fn register_project(
+    store: &Store,
+    path: &str,
+    display_name: Option<&str>,
+) -> Result<(), (&'static str, String)> {
     let canonical = std::fs::canonicalize(path).map_err(|error| {
         (
             "invalid_project_path",
@@ -1714,6 +1733,10 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
         .filter(|name| !name.is_empty())
         .unwrap_or("Project")
         .to_owned();
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
     if let Some(project) = store
         .get_project_by_path_any(&canonical)
         .map_err(project_store_error)?
@@ -1721,6 +1744,9 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
         store
             .attach_project_to_active_profile(project.id)
             .map_err(project_store_error)?;
+        if let Some(display_name) = display_name.as_deref() {
+            rename_project(store, project.id, display_name)?;
+        }
     } else {
         let selected = store
             .list_projects()
@@ -1731,7 +1757,7 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
                 id: store.next_project_id().map_err(project_store_error)?,
                 path: canonical,
                 name,
-                display_name: None,
+                display_name,
                 icon: None,
                 selected,
                 sort_order: store

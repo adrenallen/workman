@@ -402,8 +402,8 @@ export class DaemonClient
       .then((result) => result.profile);
   }
 
-  register(path: string): Promise<Project[]> {
-    return this.request('projects.register', { path });
+  register(path: string, displayName?: string): Promise<Project[]> {
+    return this.request('projects.register', { path, display_name: displayName });
   }
 
   select(projectId: number): Promise<Project[]> {
@@ -652,12 +652,20 @@ export class DaemonClient
     return this.request('worktree.fork_async', { operation_id: operationId, ...input });
   }
 
-  adoptWorktree(path: string): Promise<WorktreeMutation> {
-    return this.request('worktree.adopt', { path });
+  adoptWorktree(path: string, displayName?: string): Promise<WorktreeMutation> {
+    return this.request('worktree.adopt', { path, display_name: displayName });
   }
 
-  adoptWorktreeAsync(operationId: string, path: string): Promise<WorktreeOperationAck> {
-    return this.request('worktree.adopt_async', { operation_id: operationId, path });
+  adoptWorktreeAsync(
+    operationId: string,
+    path: string,
+    displayName?: string
+  ): Promise<WorktreeOperationAck> {
+    return this.request('worktree.adopt_async', {
+      operation_id: operationId,
+      path,
+      display_name: displayName
+    });
   }
 
   removeWorktree(input: RemoveWorktreeInput): Promise<WorktreeRemoval> {
