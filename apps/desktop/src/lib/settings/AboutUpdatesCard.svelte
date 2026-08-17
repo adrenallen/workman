@@ -20,6 +20,7 @@
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
   import { updateActionAvailable, updateActionCopy } from '../updateRecovery';
+  import { updateBannerState, type UpdateFlow } from '../updateFlow';
   import workmanLogo from '../../../../../assets/branding/workman-logo-wide.png';
 
   const repositoryUrl = 'https://github.com/adrenallen/workman';
@@ -31,6 +32,7 @@
     connection: ConnectionStatus;
     updateBusy: 'check' | 'apply' | 'preference' | null;
     updateMessage: string | null;
+    updateFlow: UpdateFlow;
     onCheckUpdate: () => void;
     onUpdateNow: () => void;
     onAutomaticChecks: (enabled: boolean) => void;
@@ -42,6 +44,7 @@
     connection,
     updateBusy,
     updateMessage,
+    updateFlow,
     onCheckUpdate,
     onUpdateNow,
     onAutomaticChecks,
@@ -57,6 +60,8 @@
   let hasChecked = $derived(update.last_checked_at !== null && check.checked_at > 0);
   let connected = $derived(connection.status === 'connected');
   let currentReleaseUrl = $derived(`${releasesUrl}/tag/v${encodeURIComponent(check.current)}`);
+  let flowBanner = $derived(updateBannerState(update, updateFlow));
+  let flowActive = $derived(updateFlow.kind !== 'idle');
 
   function formatChecked(timestamp: number | null): string {
     if (!timestamp) return 'Not checked yet';
@@ -190,7 +195,10 @@
             {/if}
           </span>
           <div class="min-w-0">
-            {#if recoveryRequired}
+            {#if flowActive}
+              <strong class="text-sm">{flowBanner.title}</strong>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">{flowBanner.description}</p>
+            {:else if recoveryRequired}
               <div class="flex flex-wrap items-center gap-2">
                 <strong class="text-sm">
                   {check.available
@@ -223,7 +231,20 @@
             {/if}
           </div>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <div class="flex min-w-40 flex-wrap justify-end gap-2">
+          {#if flowBanner.mode === 'running' || flowBanner.mode === 'restarting'}
+            <div class="w-44 py-2" role="progressbar" aria-label={flowBanner.title} aria-valuemin="0" aria-valuemax="100" aria-valuenow={flowBanner.percent ?? undefined}>
+              <div class="h-1 overflow-hidden rounded-[1px] bg-warning/15">
+                <span
+                  class={cn('block h-full bg-warning transition-[width]', flowBanner.indeterminate && 'animate-pulse')}
+                  style={`width: ${flowBanner.percent ?? 38}%`}
+                ></span>
+              </div>
+              <span class="mt-1.5 block text-right font-mono text-xs text-warning">{flowBanner.title}</span>
+            </div>
+          {:else if flowBanner.retry}
+            <Button size="sm" variant="outline" onclick={onUpdateNow}>Retry update</Button>
+          {:else if !flowBanner.restart}
           <Button
             variant={check.available ? 'outline' : 'default'}
             size="sm"
@@ -246,6 +267,7 @@
               {/if}
               {updateBusy === 'apply' ? actionCopy.busyLabel : actionCopy.buttonLabel}
             </Button>
+          {/if}
           {/if}
         </div>
       </div>

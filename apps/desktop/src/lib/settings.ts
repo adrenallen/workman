@@ -74,6 +74,23 @@ export interface UpdateInstallReport {
   updated_files: string[];
   desktop_instruction: string | null;
   quarantine_cleared: boolean;
+  restart_plan: UpdateRestartPlan;
+}
+
+export interface UpdateRestartPlan {
+  daemon: boolean;
+  app: boolean;
+}
+
+export type UpdateStage = 'checking' | 'downloading' | 'verifying' | 'installing' | 'restarting';
+
+export interface UpdateProgress {
+  stage: UpdateStage;
+  message: string;
+  bytes_done: number | null;
+  bytes_total: number | null;
+  percent: number | null;
+  failed: boolean;
 }
 
 export interface DaemonRestartResult {

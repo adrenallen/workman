@@ -65,6 +65,7 @@ import {
 } from './worktreeProgress';
 import type { ClaimedTodo } from './claimedTodos';
 import { DaemonRequestTimeoutError } from './daemonLog';
+import type { UpdateProgress } from './settings';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -306,6 +307,11 @@ interface ProcessStatusesEvent {
   worktree_operations?: WorktreeOperation[];
 }
 
+interface UpdateProgressEvent {
+  event: 'daemon.update_progress';
+  progress: UpdateProgress;
+}
+
 interface PendingRequest {
   method: string;
   resolve: (result: unknown) => void;
@@ -330,6 +336,7 @@ export class DaemonClient
   private unlisten: UnlistenFn[] = [];
   private terminalListeners = new Set<(frame: TerminalFrame) => void>();
   private processListeners = new Set<(processes: ProcessView[]) => void>();
+  private updateProgressListeners = new Set<(progress: UpdateProgress) => void>();
 
   async start(
     onStatus: (status: ConnectionStatus) => void,
@@ -827,6 +834,11 @@ export class DaemonClient
     return () => this.processListeners.delete(listener);
   }
 
+  onUpdateProgress(listener: (progress: UpdateProgress) => void): () => void {
+    this.updateProgressListeners.add(listener);
+    return () => this.updateProgressListeners.delete(listener);
+  }
+
   close(): void {
     this.connected = false;
     if (this.inputRetry) clearTimeout(this.inputRetry);
@@ -840,6 +852,7 @@ export class DaemonClient
     this.pending.clear();
     this.terminalListeners.clear();
     this.processListeners.clear();
+    this.updateProgressListeners.clear();
     resetLiveStats();
     resetTimerLifecycle();
     resetWorktreeOperations();
@@ -941,7 +954,7 @@ export class DaemonClient
   }
 
   private handleText(text: string, onProtocolError: (message: string) => void): void {
-    let response: DaemonResponse | ProcessStatusesEvent;
+    let response: DaemonResponse | ProcessStatusesEvent | UpdateProgressEvent;
     try {
       response = JSON.parse(text) as DaemonResponse | ProcessStatusesEvent;
     } catch {
@@ -963,6 +976,11 @@ export class DaemonClient
         replaceWorktreeOperations(event.worktree_operations);
       }
       for (const listener of this.processListeners) listener(event.processes);
+      return;
+    }
+    const updateEvent = response as unknown as UpdateProgressEvent;
+    if (updateEvent.event === 'daemon.update_progress' && updateEvent.progress) {
+      for (const listener of this.updateProgressListeners) listener(updateEvent.progress);
       return;
     }
     const rpc = response as DaemonResponse;

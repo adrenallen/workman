@@ -186,6 +186,11 @@ struct DaemonRestartResult {
     restarting: bool,
 }
 
+#[derive(Clone, Serialize)]
+struct DesktopRelaunchCapability {
+    supported: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ShellOpenTarget {
@@ -320,6 +325,70 @@ async fn daemon_restart(
         .map_err(|_| "timed out waiting for the daemon to stop".to_owned())?
         .map_err(|_| "daemon bridge dropped the restart request".to_owned())??;
     Ok(DaemonRestartResult { restarting: true })
+}
+
+#[tauri::command]
+fn desktop_relaunch_capability() -> DesktopRelaunchCapability {
+    let supported = env::current_exe()
+        .ok()
+        .is_some_and(|executable| relaunch_supported_from_executable(&executable));
+    DesktopRelaunchCapability { supported }
+}
+
+/// Stop the replaced daemon before asking Tauri to reopen the replaced application bundle.
+///
+/// `refresh_application_bundle` swaps the bundle at the same path. `current_exe()` therefore
+/// still names `Workman.app/Contents/MacOS/<binary>`, but that path resolves to the new binary
+/// after the rename dance. Delaying the restart briefly lets the command response reach the
+/// webview and prevents the old supervisor from winning the daemon respawn race.
+#[tauri::command]
+async fn desktop_restart_after_update(
+    confirm_processes_stopped: bool,
+    restart_daemon: bool,
+    state: State<'_, BridgeState>,
+    app: tauri::AppHandle,
+) -> Result<DaemonRestartResult, String> {
+    if !confirm_processes_stopped {
+        return Err("update restart requires confirmation that project processes will stop".into());
+    }
+    if restart_daemon {
+        let (reply, receive) = oneshot::channel();
+        state
+            .sender
+            .send(BridgeCommand::Restart(reply))
+            .await
+            .map_err(|_| "daemon bridge is not running".to_owned())?;
+        timeout(RESTART_TIMEOUT, receive)
+            .await
+            .map_err(|_| "timed out waiting for the updated daemon to stop".to_owned())?
+            .map_err(|_| "daemon bridge dropped the update restart request".to_owned())??;
+    }
+    tauri::async_runtime::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        app.request_restart();
+    });
+    Ok(DaemonRestartResult { restarting: true })
+}
+
+fn relaunch_supported_from_executable(executable: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(contents) = executable.parent().and_then(Path::parent) else {
+            return false;
+        };
+        contents.file_name().and_then(|name| name.to_str()) == Some("Contents")
+            && contents.parent().is_some_and(|bundle| {
+                bundle
+                    .extension()
+                    .is_some_and(|extension| extension == "app")
+            })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = executable;
+        false
+    }
 }
 
 #[tauri::command]
@@ -497,6 +566,8 @@ pub fn run() {
             daemon_send_input,
             daemon_restart,
             daemon_status,
+            desktop_relaunch_capability,
+            desktop_restart_after_update,
             keep_awake_start,
             keep_awake_stop,
             keep_awake_status,
@@ -1411,6 +1482,17 @@ async fn embedded_shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn relaunch_requires_an_application_bundle_executable() {
+        assert!(relaunch_supported_from_executable(Path::new(
+            "/tmp/Workman.app/Contents/MacOS/workman"
+        )));
+        assert!(!relaunch_supported_from_executable(Path::new(
+            "/tmp/target/debug/workman"
+        )));
+    }
 
     #[test]
     fn keep_awake_command_prevents_idle_sleep_until_desktop_exits() {
