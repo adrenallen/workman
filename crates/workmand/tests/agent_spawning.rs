@@ -1,12 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    time::Duration,
+    collections::BTreeMap, error::Error, os::unix::fs::PermissionsExt, path::Path, time::Duration,
 };
 
-use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo},
@@ -19,7 +14,7 @@ use workman_core::{
     AgentTemplate, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus,
     Project,
 };
-use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
+use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
     value
@@ -145,6 +140,26 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             resume_args: None,
             continue_args: None,
         })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 102,
+            name: "Model capture agent".into(),
+            command: "true --model command-default".into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 103,
+            name: "Swap model agent".into(),
+            command: "true -m swap-default".into(),
+            tool_type: "opencode".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 300,
             profile_id: 1,
@@ -153,6 +168,18 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             extra_args: Vec::new(),
             prompt: String::new(),
             sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        })?;
+        registry.store().put_agent_template(&AgentTemplate {
+            id: 301,
+            profile_id: 1,
+            name: "Reviewer".into(),
+            agent_tool_id: 102,
+            extra_args: vec!["--review".into()],
+            prompt: "🧪 Review the implementation carefully and report concrete findings. "
+                .repeat(3),
+            sort_order: 1,
             created_at: 0,
             updated_at: 0,
         })?;
@@ -187,6 +214,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "parent-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -196,10 +226,52 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let parent_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-            .auth_header(discovery.token.clone()),
+            .auth_header("parent-process-token".to_owned()),
     );
     let parent = ClientInfo::default().serve(parent_transport).await?;
-    call(&parent, "identify_session", json!({ "process_id": 1 })).await;
+
+    let advertised_tools = parent.list_all_tools().await?;
+    let spawn_tool = advertised_tools
+        .iter()
+        .find(|tool| tool.name == "spawn_agent")
+        .expect("spawn_agent tool is present");
+    for parameter in ["agent_template_id", "model"] {
+        assert!(
+            spawn_tool.input_schema["properties"]
+                .get(parameter)
+                .is_some(),
+            "spawn_agent schema advertises {parameter}"
+        );
+    }
+    assert!(
+        spawn_tool.input_schema["properties"]
+            .get("agent_template")
+            .is_none(),
+        "spawn_agent keeps template selection unambiguous and ID-only"
+    );
+    assert!(
+        spawn_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("plain agent by default"))
+    );
+    assert!(
+        spawn_tool.input_schema["properties"]["agent_tool_id"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("default plain-agent path"))
+    );
+    assert!(
+        spawn_tool.input_schema["properties"]["agent_template_id"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("only when the user names one"))
+    );
+    assert!(
+        spawn_tool.input_schema["properties"]["model"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("tool_type") && description.contains("registered command")
+            })
+    );
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
     assert!(tools["agent_tools"].as_array().unwrap().iter().any(|tool| {
@@ -212,8 +284,201 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
     let templates = call(&parent, "list_agent_templates", json!({})).await;
-    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 1);
+    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 2);
     assert_eq!(templates["agent_templates"][0]["id"], 300);
+    assert_eq!(templates["agent_templates"][0]["model"], Value::Null);
+    assert_eq!(templates["agent_templates"][1]["id"], 301);
+    assert_eq!(templates["agent_templates"][1]["name"], "Reviewer");
+    assert_eq!(
+        templates["agent_templates"][1]["default_agent"],
+        json!({
+            "agent_tool_id": 102,
+            "name": "Model capture agent",
+            "tool_type": "codex",
+            "enabled": true
+        })
+    );
+    assert_eq!(templates["agent_templates"][1]["model"], "command-default");
+    assert_eq!(
+        templates["agent_templates"][1]["extra_args"],
+        json!(["--review"])
+    );
+    assert!(
+        templates["agent_templates"][1]["prompt_preview"]
+            .as_str()
+            .unwrap()
+            .starts_with("🧪 Review the implementation")
+    );
+    assert_eq!(
+        templates["agent_templates"][1]["prompt_preview"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        120
+    );
+    assert!(
+        templates["agent_templates"][1]["prompt_preview"]
+            .as_str()
+            .unwrap()
+            .ends_with('…')
+    );
+    assert!(templates["agent_templates"][1].get("prompt").is_none());
+
+    let default_model_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 301,
+            "name": "reviewer-default-model"
+        }),
+    )
+    .await;
+    let default_model_process_id = default_model_spawn["process_id"].as_i64().unwrap();
+    let default_model_command = registry
+        .lock()
+        .await
+        .get_status(default_model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(default_model_command.matches("--model").count(), 1);
+    assert!(default_model_command.contains("--model command-default"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": default_model_process_id }),
+    )
+    .await;
+
+    let override_model_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 301,
+            "model": "override/provider-model",
+            "extra_args": ["-m", "caller-default"],
+            "name": "reviewer-override-model"
+        }),
+    )
+    .await;
+    let override_model_process_id = override_model_spawn["process_id"].as_i64().unwrap();
+    let override_model_command = registry
+        .lock()
+        .await
+        .get_status(override_model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(override_model_command.matches("--model").count(), 1);
+    assert!(override_model_command.contains("--model override/provider-model"));
+    assert!(!override_model_command.contains("command-default"));
+    assert!(!override_model_command.contains("caller-default"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": override_model_process_id }),
+    )
+    .await;
+
+    let plain_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_tool_id": 102,
+            "model": "plain-model",
+            "name": "plain-model-agent"
+        }),
+    )
+    .await;
+    let plain_process_id = plain_spawn["process_id"].as_i64().unwrap();
+    let plain_command = registry
+        .lock()
+        .await
+        .get_status(plain_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(plain_command.matches("--model").count(), 1);
+    assert!(plain_command.contains("--model plain-model"));
+    assert!(!plain_command.contains("command-default"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": plain_process_id }),
+    )
+    .await;
+
+    let swapped_model_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 301,
+            "agent_tool_id": 103,
+            "model": "swapped/provider-model",
+            "name": "reviewer-swapped-model"
+        }),
+    )
+    .await;
+    let swapped_model_process_id = swapped_model_spawn["process_id"].as_i64().unwrap();
+    let swapped_model_command = registry
+        .lock()
+        .await
+        .get_status(swapped_model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(swapped_model_command.matches("--model").count(), 1);
+    assert!(swapped_model_command.contains("--model swapped/provider-model"));
+    assert!(!swapped_model_command.contains("swap-default"));
+    assert!(!swapped_model_command.contains("--review"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": swapped_model_process_id }),
+    )
+    .await;
+
+    for (model, expected_code, expected_message) in [
+        (
+            "",
+            "invalid_params",
+            "model must not be empty when provided",
+        ),
+        (
+            "   ",
+            "invalid_params",
+            "model must not be empty when provided",
+        ),
+        (
+            "unsupported-model",
+            "spawn_failed",
+            "this agent tool has no known model flag",
+        ),
+    ] {
+        let rejected = parent
+            .call_tool(
+                CallToolRequestParams::new("spawn_agent").with_arguments(arguments(json!({
+                    "project_id": 7,
+                    "agent_tool_id": 99,
+                    "model": model
+                }))),
+            )
+            .await?;
+        assert_eq!(rejected.is_error, Some(true));
+        let details = rejected.structured_content.unwrap();
+        assert_eq!(details["code"], expected_code);
+        assert!(
+            details["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected_message)
+        );
+    }
 
     let cross_profile = parent
         .call_tool(
@@ -342,12 +607,8 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         wait_for_fake_agent_context(&context_file).await?;
     assert_eq!(injected_process_id, process_id);
     assert_eq!(injected_url, endpoint);
-    let agent_headers = HashMap::from([(
-        HeaderName::from_static(WORKMAN_MCP_TOKEN_HEADER),
-        HeaderValue::from_str(&injected_token)?,
-    )]);
     let agent_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(endpoint).custom_headers(agent_headers),
+        StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(injected_token),
     );
     let agent = ClientInfo::default().serve(agent_transport).await?;
     let identity = call(&agent, "whoami", json!({})).await;
