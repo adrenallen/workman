@@ -148,8 +148,18 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         registry.store().put_agent_tool(&AgentTool {
             id: 102,
             name: "Model capture agent".into(),
-            command: "true".into(),
+            command: "true --model command-default".into(),
             tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 103,
+            name: "Swap model agent".into(),
+            command: "true -m swap-default".into(),
+            tool_type: "opencode".into(),
             enabled: true,
             source: AgentToolSource::Local,
             resume_args: None,
@@ -171,12 +181,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             profile_id: 1,
             name: "Reviewer".into(),
             agent_tool_id: 102,
-            extra_args: vec![
-                "--model".into(),
-                "reviewer-default".into(),
-                "--review".into(),
-            ],
-            prompt: "Review the implementation carefully and report concrete findings. ".repeat(3),
+            extra_args: vec!["--review".into()],
+            prompt: "🧪 Review the implementation carefully and report concrete findings. "
+                .repeat(3),
             sort_order: 1,
             created_at: 0,
             updated_at: 0,
@@ -264,7 +271,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     assert!(
         spawn_tool.input_schema["properties"]["model"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("unsupported custom tool types"))
+            .is_some_and(|description| {
+                description.contains("tool_type") && description.contains("registered command")
+            })
     );
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;
@@ -288,19 +297,20 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         json!({
             "agent_tool_id": 102,
             "name": "Model capture agent",
-            "tool_type": "codex"
+            "tool_type": "codex",
+            "enabled": true
         })
     );
-    assert_eq!(templates["agent_templates"][1]["model"], "reviewer-default");
+    assert_eq!(templates["agent_templates"][1]["model"], "command-default");
     assert_eq!(
         templates["agent_templates"][1]["extra_args"],
-        json!(["--model", "reviewer-default", "--review"])
+        json!(["--review"])
     );
     assert!(
         templates["agent_templates"][1]["prompt_preview"]
             .as_str()
             .unwrap()
-            .starts_with("Review the implementation")
+            .starts_with("🧪 Review the implementation")
     );
     assert_eq!(
         templates["agent_templates"][1]["prompt_preview"]
@@ -309,6 +319,12 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .chars()
             .count(),
         120
+    );
+    assert!(
+        templates["agent_templates"][1]["prompt_preview"]
+            .as_str()
+            .unwrap()
+            .ends_with('…')
     );
     assert!(templates["agent_templates"][1].get("prompt").is_none());
 
@@ -331,7 +347,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         .command
         .unwrap();
     assert_eq!(default_model_command.matches("--model").count(), 1);
-    assert!(default_model_command.contains("--model reviewer-default"));
+    assert!(default_model_command.contains("--model command-default"));
     call(
         &parent,
         "close_process",
@@ -346,6 +362,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "project_id": 7,
             "agent_template_id": 301,
             "model": "override/provider-model",
+            "extra_args": ["-m", "caller-default"],
             "name": "reviewer-override-model"
         }),
     )
@@ -360,7 +377,8 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         .unwrap();
     assert_eq!(override_model_command.matches("--model").count(), 1);
     assert!(override_model_command.contains("--model override/provider-model"));
-    assert!(!override_model_command.contains("reviewer-default"));
+    assert!(!override_model_command.contains("command-default"));
+    assert!(!override_model_command.contains("caller-default"));
     call(
         &parent,
         "close_process",
@@ -389,12 +407,81 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         .unwrap();
     assert_eq!(plain_command.matches("--model").count(), 1);
     assert!(plain_command.contains("--model plain-model"));
+    assert!(!plain_command.contains("command-default"));
     call(
         &parent,
         "close_process",
         json!({ "project_id": 7, "process_id": plain_process_id }),
     )
     .await;
+
+    let swapped_model_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 301,
+            "agent_tool_id": 103,
+            "model": "swapped/provider-model",
+            "name": "reviewer-swapped-model"
+        }),
+    )
+    .await;
+    let swapped_model_process_id = swapped_model_spawn["process_id"].as_i64().unwrap();
+    let swapped_model_command = registry
+        .lock()
+        .await
+        .get_status(swapped_model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(swapped_model_command.matches("--model").count(), 1);
+    assert!(swapped_model_command.contains("--model swapped/provider-model"));
+    assert!(!swapped_model_command.contains("swap-default"));
+    assert!(!swapped_model_command.contains("--review"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": swapped_model_process_id }),
+    )
+    .await;
+
+    for (model, expected_code, expected_message) in [
+        (
+            "",
+            "invalid_params",
+            "model must not be empty when provided",
+        ),
+        (
+            "   ",
+            "invalid_params",
+            "model must not be empty when provided",
+        ),
+        (
+            "unsupported-model",
+            "spawn_failed",
+            "this agent tool has no known model flag",
+        ),
+    ] {
+        let rejected = parent
+            .call_tool(
+                CallToolRequestParams::new("spawn_agent").with_arguments(arguments(json!({
+                    "project_id": 7,
+                    "agent_tool_id": 99,
+                    "model": model
+                }))),
+            )
+            .await?;
+        assert_eq!(rejected.is_error, Some(true));
+        let details = rejected.structured_content.unwrap();
+        assert_eq!(details["code"], expected_code);
+        assert!(
+            details["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected_message)
+        );
+    }
 
     let cross_profile = parent
         .call_tool(

@@ -304,7 +304,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         json!({
             "tool": {
                 "name": "Model test agent",
-                "command": "true",
+                "command": "true --model command/provider-model",
                 "tool_type": "opencode",
                 "enabled": true
             }
@@ -350,6 +350,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         .unwrap();
     assert_eq!(model_command.matches("--model").count(), 1);
     assert!(model_command.contains("--model override/provider-model"));
+    assert!(!model_command.contains("command/provider-model"));
     assert!(!model_command.contains("default/provider-model"));
 
     let clipboard_dir = temp.path().join("Application Support/terminal-clipboard");
