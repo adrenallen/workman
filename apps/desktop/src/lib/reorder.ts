@@ -115,11 +115,9 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     // only gestures that cross the movement threshold, leaving ordinary button clicks unchanged.
     node.draggable = false;
     node.dataset.reorderable = enabled ? 'true' : 'false';
+    node.removeAttribute('title');
     if (enabled) {
       node.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
-      node.title = options.label
-        ? `${options.label} · Drag to reorder · Alt+↑/↓`
-        : 'Drag to reorder · Alt+↑/↓';
     } else {
       node.removeAttribute('aria-keyshortcuts');
       clearMark(node);

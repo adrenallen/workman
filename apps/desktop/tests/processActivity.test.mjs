@@ -51,6 +51,15 @@ test('agent colors distinguish working, waiting, idle, and needs-input states', 
   assert.equal(processActivityTone('needs_input'), 'needs-input');
 });
 
+test('per-process roster tones cover every activity state without borrowing the kind rollup', () => {
+  assert.deepEqual(
+    ['working', 'needs_input', 'waiting', 'idle', 'stopped', 'crashed'].map(processActivityTone),
+    ['success', 'needs-input', 'waiting', 'neutral', 'neutral', 'danger']
+  );
+  assert.equal(processActivity(process(5, 'agent', 'stopped', 'exited')).shortLabel, 'Stopped');
+  assert.equal(processActivity(process(6, 'command', 'crashed')).shortLabel, 'Crashed');
+});
+
 test('project rollup stays green with one working agent and three idle terminals', () => {
   const processes = [
     process(1, 'agent', 'running', 'working'),

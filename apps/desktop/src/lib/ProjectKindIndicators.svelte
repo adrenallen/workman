@@ -4,9 +4,15 @@
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import * as Popover from '$lib/components/ui/popover';
   import type { ProcessKind, ProcessView } from './daemon';
-  import type { ProjectKindActivityRollup } from './processActivity';
+  import {
+    processActivity,
+    processActivityTone,
+    type ProcessActivityPresentation,
+    type ProjectKindActivityRollup
+  } from './processActivity';
 
   interface Props {
     activity: ProjectKindActivityRollup;
@@ -79,25 +85,11 @@
     return kind === 'agent' ? 'Agents' : kind === 'terminal' ? 'Terminals' : 'Commands';
   }
 
-  function agentNeedsInput(process: ProcessView): boolean {
-    return process.kind === 'agent'
-      && (process.agent_state.needs_input || String(process.agent_state.state) === 'needs_input');
-  }
-
-  function stateLabel(process: ProcessView): string {
-    if (process.status === 'crashed') return 'crashed';
-    if (process.status === 'stopped' || process.status === 'exited') return process.status;
-    if (process.kind === 'agent') {
-      if (agentNeedsInput(process)) return 'needs input';
-      if (String(process.agent_state.state) === 'waiting') return 'waiting';
-      if (process.status === 'starting') return 'starting';
-      return process.agent_state.working ? 'working' : 'idle';
-    }
-    if (process.status === 'starting') return 'starting';
-    if (process.kind === 'terminal') {
-      return activity.terminal.activeProcessIds.includes(process.id) ? 'live' : 'idle';
-    }
-    return 'running';
+  function rowActivity(process: ProcessView): ProcessActivityPresentation {
+    const stats = process.kind === 'terminal'
+      ? { foreground_active: activity.terminal.activeProcessIds.includes(process.id) }
+      : undefined;
+    return processActivity(process, stats);
   }
 
   function compactCount(count: number): string {
@@ -126,6 +118,7 @@
                 {...props}
                 class={compact ? 'project-kind-pip' : 'project-kind-trigger'}
                 label={detail.label}
+                tooltip={false}
                 data-project-kind={kind}
                 data-project-kind-compact={compact ? 'true' : 'false'}
                 aria-expanded={kindIsOpen(kind)}
@@ -175,15 +168,19 @@
             </header>
             <div class="kind-process-list">
               {#each kindProcesses(kind) as process (process.id)}
+                {@const processState = rowActivity(process)}
+                {@const processTone = processActivityTone(processState.state)}
                 <button
                   type="button"
-                  class:needs-input={agentNeedsInput(process)}
                   class="kind-process"
                   data-project-process-id={process.id}
+                  data-process-state={processState.state}
+                  data-process-tone={processTone}
                   onclick={() => chooseProcess(process)}
                 >
+                  <StatusIndicator state={processState.state} tone={processTone} label={processState.label} />
                   <span class="process-name">{process.name}</span>
-                  <span class="process-state">{stateLabel(process)}</span>
+                  <span class="process-state" data-tone={processTone}>{processState.shortLabel.toLocaleLowerCase()}</span>
                 </button>
               {:else}
                 <p class="kind-empty">No {kindTitle(kind).toLocaleLowerCase()} in this project</p>
@@ -208,10 +205,10 @@
   .kind-glyph { position: relative; display: grid; width: 14px; height: 14px; place-items: center; }
   .kind-glyph small { position: absolute; top: -5px; right: -5px; display: grid; min-width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 1px; color: var(--card); background: var(--indicator-tone); font: 750 8px/1 var(--terminal-font-family); text-align: center; }
 
-  .project-kind-indicators.compact { position: absolute; z-index: 4; right: 0; bottom: 0; align-items: end; gap: 0; }
-  .compact .project-kind-indicator :global(.project-kind-pip) { display: grid; width: 12px; min-width: 12px; height: 12px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: transparent; }
+  .project-kind-indicators.compact { height: 8px; min-height: 8px; align-items: end; gap: 0; pointer-events: none; }
+  .compact .project-kind-indicator :global(.project-kind-pip) { display: grid; width: 8px; min-width: 8px; height: 8px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: transparent; pointer-events: auto; }
   .compact .project-kind-indicator :global(.project-kind-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
-  .pip-mark { display: block; width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; background: var(--agent-state-working); }
+  .pip-mark { display: block; width: 5px; height: 5px; border: 1px solid var(--card); border-radius: 999px; background: var(--agent-state-working); }
   .project-kind-indicator[data-tone='needs-input'] .pip-mark { background: var(--warning-token); }
   .project-kind-indicator[data-tone='danger'] .pip-mark { background: var(--destructive); }
   .project-kind-indicator[data-tone='idle'] .pip-mark { background: var(--muted-foreground); opacity: .58; }
@@ -227,11 +224,14 @@
   .kind-popover-header small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .kind-process-list { display: grid; gap: 1px; padding: 4px 0; }
   .kind-empty { margin: 0; padding: 8px 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .kind-process { display: grid; min-height: 34px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); border: 0; border-radius: var(--radius); padding: 4px 6px; background: transparent; text-align: left; cursor: pointer; }
+  .kind-process { display: grid; min-height: 34px; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); border: 0; border-radius: var(--radius); padding: 4px 6px; background: transparent; text-align: left; cursor: pointer; }
   .kind-process:hover, .kind-process:focus-visible { outline: none; background: var(--accent); }
   .process-name { overflow: hidden; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 590; text-overflow: ellipsis; white-space: nowrap; }
-  .process-state { color: var(--agent-state-working); font: 600 var(--font-size-xs)/1 var(--terminal-font-family); white-space: nowrap; }
-  .kind-process.needs-input .process-state { color: var(--warning-token); }
+  .process-state { color: var(--muted-foreground); font: 600 var(--font-size-xs)/1 var(--terminal-font-family); white-space: nowrap; }
+  .process-state[data-tone='success'] { color: var(--success); }
+  .process-state[data-tone='needs-input'] { color: var(--agent-state-needs-input); }
+  .process-state[data-tone='waiting'] { color: var(--agent-state-waiting); }
+  .process-state[data-tone='danger'] { color: var(--destructive); }
   .show-all { width: 100%; min-height: 28px; border: 0; border-top: 1px solid var(--border); border-radius: 0 0 var(--radius) var(--radius); padding: 6px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 620; text-align: left; cursor: pointer; }
   .show-all:hover, .show-all:focus-visible { outline: none; color: var(--foreground); background: var(--accent); }
 </style>

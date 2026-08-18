@@ -4,7 +4,6 @@
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
-  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import * as Popover from '$lib/components/ui/popover';
   import { openBrowserUrl } from './openers';
   import PullRequestList from './PullRequestList.svelte';
@@ -22,6 +21,7 @@
     refreshing?: boolean;
     showNoPullRequest?: boolean;
     showRefresh?: boolean;
+    compact?: boolean;
     onRefresh: () => void;
   }
 
@@ -35,6 +35,7 @@
     refreshing = false,
     showNoPullRequest = true,
     showRefresh = false,
+    compact = false,
     onRefresh
   }: Props = $props();
 
@@ -75,7 +76,7 @@
   }
 </script>
 
-<span class="worktree-meta">
+<span class:compact class="worktree-meta" data-project-pr-compact={compact ? 'true' : undefined}>
   {#if pullRequest}
     <span class="pull-request-picker">
       <Popover.Root open={popoverOpen} onOpenChange={changeOpen}>
@@ -83,15 +84,18 @@
           {#snippet child({ props })}
             <IconButton
               {...props}
-              class="size-5 border border-border bg-card"
+              class={compact ? 'project-pr-pip' : 'size-5 border border-border bg-card'}
               label={`Show ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} for ${entry?.branch ?? 'this branch'}`}
+              tooltip={false}
               disabled={openingPullRequest}
               aria-expanded={popoverOpen}
               data-project-pr-trigger
               onclick={togglePopover}
             >
               {#snippet icon()}
-                {#if pullRequests.length === 1}
+                {#if compact}
+                  <span class="pr-pip-mark" data-state={pullRequest.state} aria-hidden="true"></span>
+                {:else if pullRequests.length === 1}
                   <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
                 {:else}
                   <span class="multi-pr-icon">
@@ -120,25 +124,27 @@
     </span>
   {:else if pullRequestUnavailable}
     <IconButton
-      class="size-5 text-warning"
+      class={compact ? 'project-pr-pip' : 'size-5 text-warning'}
       label={pullRequestUnavailableLabel}
+      tooltip={false}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
     >
-      {#snippet icon()}<CircleAlertIcon size={13} strokeWidth={1.9} />{/snippet}
+      {#snippet icon()}
+        {#if compact}<span class="pr-pip-mark unavailable" aria-hidden="true"></span>{:else}<CircleAlertIcon size={13} strokeWidth={1.9} />{/if}
+      {/snippet}
     </IconButton>
   {:else if showNoPullRequest && entry && pullRequestCache?.available === true}
     {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
-    <TooltipLabel label={noPullRequestLabel}>
-      <span class="no-pull-request" aria-label={noPullRequestLabel}>
-        <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
-      </span>
-    </TooltipLabel>
+    <span class="no-pull-request" role="img" aria-label={noPullRequestLabel}>
+      <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+    </span>
   {/if}
   {#if showRefresh && !pullRequestUnavailable}
     <IconButton
       class="size-5 opacity-0 group-hover/repository:opacity-100 focus-visible:opacity-100"
       label={`Refresh pull request status for ${repositoryName}`}
+      tooltip={false}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
     >
@@ -149,6 +155,14 @@
 
 <style>
   .worktree-meta { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
+  .worktree-meta.compact { height: 8px; gap: 0; pointer-events: none; }
+  .worktree-meta.compact :global(.project-pr-pip) { display: grid; width: 8px; min-width: 8px; height: 8px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; pointer-events: auto; }
+  .worktree-meta.compact :global(.project-pr-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
+  .pr-pip-mark { display: block; width: 5px; height: 5px; border: 1px solid var(--card); border-radius: 999px; background: var(--success); }
+  .pr-pip-mark[data-state='merged'] { background: var(--pull-request-merged); }
+  .pr-pip-mark[data-state='draft'] { background: var(--muted-foreground); opacity: .7; }
+  .pr-pip-mark[data-state='closed'] { background: var(--destructive); }
+  .pr-pip-mark.unavailable { background: var(--warning-token); }
   .pull-request-picker { display: inline-flex; }
   .multi-pr-icon { position: relative; display: inline-flex; }
   .multi-pr-icon > span:last-child { position: absolute; top: -6px; right: -7px; display: grid; min-width: 12px; height: 12px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 2px; background: var(--foreground); color: var(--background); font-family: var(--terminal-font-family); font-size: 8px; font-weight: 750; line-height: 1; }

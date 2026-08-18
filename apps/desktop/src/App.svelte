@@ -417,6 +417,7 @@
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let projectRailPopoverKey = $state<string | null>(null);
+  let projectRailTooltipOpenId = $state<number | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
@@ -4285,7 +4286,28 @@
     savePanelPreference('section-rail', { collapsed: treeRailCollapsed, width: treeRailWidth });
   }
 
+  function closeProjectRailTooltip(): void {
+    projectRailTooltipOpenId = null;
+  }
+
+  function changeProjectRailTooltipOpen(projectId: number, open: boolean): void {
+    if (open) {
+      projectRailTooltipOpenId = projectId;
+    } else if (projectRailTooltipOpenId === projectId) {
+      projectRailTooltipOpenId = null;
+    }
+  }
+
+  function closeProjectRailTooltipOnUnmount(_node: HTMLElement, projectId: number) {
+    return {
+      destroy(): void {
+        if (projectRailTooltipOpenId === projectId) closeProjectRailTooltip();
+      }
+    };
+  }
+
   function toggleProjectRail(): void {
+    closeProjectRailTooltip();
     projectRailCollapsed = !projectRailCollapsed;
     persistProjectRail();
   }
@@ -4739,6 +4761,7 @@
     class:has-unread={unreadAgentCount > 0}
     class:nested
     class="project-row group/project group/repository"
+    use:closeProjectRailTooltipOnUnmount={project.id}
   >
     {#if renameId === project.id}
       <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
@@ -4776,6 +4799,10 @@
                   skipDelayDuration={0}
                   contentClass="project-rail-tooltip"
                   tabindex={-1}
+                  open={projectRailTooltipOpenId === project.id}
+                  onOpenChange={(open) => changeProjectRailTooltipOpen(project.id, open)}
+                  onpointerleave={closeProjectRailTooltip}
+                  onpointerdown={closeProjectRailTooltip}
                 >
                   {#snippet children()}
                     <span class="project-kind-icon" aria-hidden="true">
@@ -4806,19 +4833,24 @@
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}
-                <TooltipLabel
-                  label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}
-                  tabindex={-1}
-                >
-                  <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-                    <span aria-hidden="true"></span>{unreadAgentCount}
-                  </span>
-                </TooltipLabel>
+                <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                  <span aria-hidden="true"></span>{unreadAgentCount}
+                </span>
               {/if}
         </button>
       </span>
       {#if !projectRailCollapsed}
         <span class="project-meta-strip" data-project-meta-strip>
+          <ProjectKindIndicators
+            {activity}
+            processes={projectProcesses}
+            projectId={project.id}
+            projectTitle={fullTitle}
+            openPopoverKey={projectRailPopoverKey}
+            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+            onSelect={(process) => openProjectRailProcess(project, process)}
+            onShowAll={(kind) => openProjectRailOverview(project, kind)}
+          />
           {#if repository}
             <WorktreeRowMeta
               entry={worktree}
@@ -4832,6 +4864,9 @@
               onRefresh={() => void refreshWorktreeRepository(project, true)}
             />
           {/if}
+        </span>
+      {:else}
+        <span class="project-compact-meta" data-project-compact-meta>
           <ProjectKindIndicators
             {activity}
             processes={projectProcesses}
@@ -4839,22 +4874,25 @@
             projectTitle={fullTitle}
             openPopoverKey={projectRailPopoverKey}
             onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+            compact
             onSelect={(process) => openProjectRailProcess(project, process)}
             onShowAll={(kind) => openProjectRailOverview(project, kind)}
           />
+          {#if repository}
+            <WorktreeRowMeta
+              entry={worktree}
+              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              projectId={project.id}
+              repositoryName={repository.name}
+              openPopoverKey={projectRailPopoverKey}
+              onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+              refreshing={worktreeRefreshingRepositoryId === repository.id}
+              showNoPullRequest={false}
+              compact
+              onRefresh={() => void refreshWorktreeRepository(project, true)}
+            />
+          {/if}
         </span>
-      {:else}
-        <ProjectKindIndicators
-          {activity}
-          processes={projectProcesses}
-          projectId={project.id}
-          projectTitle={fullTitle}
-          openPopoverKey={projectRailPopoverKey}
-          onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-          compact
-          onSelect={(process) => openProjectRailProcess(project, process)}
-          onShowAll={(kind) => openProjectRailOverview(project, kind)}
-        />
       {/if}
       <IconButton
         class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
@@ -4896,6 +4934,7 @@
     aria-label="Projects"
     data-app-panel="projects"
     tabindex="-1"
+    onpointerdown={closeProjectRailTooltip}
   >
     <header class="brand" data-tauri-drag-region>
       {#if projectRailCollapsed}
@@ -4949,7 +4988,7 @@
     </header>
 
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
-    <div class="project-list" aria-live="polite">
+    <div class="project-list" aria-live="polite" onscroll={closeProjectRailTooltip}>
       {#if projects.length === 0 && projectFolders.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder or switch profiles.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
       {/if}
@@ -5565,6 +5604,7 @@
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
   .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
+  .project-compact-meta { position: absolute; z-index: 4; right: 0; bottom: 0; display: inline-flex; height: 8px; align-items: end; pointer-events: none; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
   .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }
@@ -5572,8 +5612,7 @@
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
   :global(.project-rail-tooltip) { pointer-events: none; }
-  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
-  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; grid-column: 3; grid-row: 1; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }

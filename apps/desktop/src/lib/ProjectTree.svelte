@@ -696,7 +696,6 @@
             data-group={group}
             aria-expanded={openGroups[group]}
             aria-label={`${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
-            title={`${openGroups[group] ? 'Collapse' : 'Expand'} ${groupLabel[group]}`}
             onclick={() => toggleGroup(group)}
           >
             <span class="caret" aria-hidden="true">
@@ -709,7 +708,6 @@
             data-tree-row
             data-group={group}
             aria-expanded={openGroups[group]}
-            title={`Browse all ${groupLabel[group].toLowerCase()}`}
             onclick={() => openGroup(group)}
           >
             <span class="group-icon">
@@ -761,7 +759,7 @@
                     <button type="button" disabled={bulkBusy} onclick={() => onBulkAction('archive')}>Archive</button>
                     <button class="destructive" type="button" disabled={bulkBusy} onclick={() => onBulkAction('delete')}>Delete</button>
                   {/if}
-                  <button class="clear" type="button" disabled={bulkBusy} aria-label="Clear selection" title="Clear selection · Esc" onclick={() => onMultiSelectionChange(null)}><XIcon size={12} /></button>
+                  <button class="clear" type="button" disabled={bulkBusy} aria-label="Clear selection · Esc" onclick={() => onMultiSelectionChange(null)}><XIcon size={12} /></button>
                 </span>
               </div>
             {/if}
@@ -791,7 +789,7 @@
                           <span class="todo-assigned-marker" aria-label="Assigned to you"><UserRoundCheckIcon size={12} strokeWidth={1.8} aria-hidden="true" /></span>
                         </TooltipLabel>
                       {/if}
-                      {#if todo.comment_count > 0}<span class="row-meta" title={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
+                      {#if todo.comment_count > 0}<span class="row-meta" aria-label={`${todo.comment_count} comments`}>{todo.comment_count}</span>{/if}
                     </span>
                   {/if}
                 </button>
@@ -808,7 +806,6 @@
                   type="button"
                   data-tree-row
                   aria-label={`${hiddenTodoCount} more todos; browse all todos`}
-                  title="Browse all todos"
                   onclick={onBrowseTodos}
                 >
                   +{hiddenTodoCount} more
@@ -1012,11 +1009,11 @@
                     oncontextmenu={(event) => openSelectablePointerMenu(event, scratchpadTarget(scratchpad), 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
                   >
-                    <span class="scratchpad-ref" title={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
+                    <span class="scratchpad-ref" aria-label={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
                     <span class="row-copy"><strong>{scratchpad.name}</strong></span>
                     <span class="row-badges">
                       {#if scratchpad.unresolved_comment_count > 0}<CountBadge value={scratchpad.unresolved_comment_count} title={`${scratchpad.unresolved_comment_count} unresolved scratchpad comments`} />{/if}
-                      <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
+                      <span class="row-meta" aria-label={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
                     </span>
                   </button>
                 {/if}

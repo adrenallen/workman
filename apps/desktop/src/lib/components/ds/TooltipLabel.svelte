@@ -14,6 +14,10 @@
     skipDelayDuration?: number;
     contentClass?: string;
     tabindex?: number;
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+    onpointerleave?: (event: PointerEvent) => void;
+    onpointerdown?: (event: PointerEvent) => void;
   }
 
   let {
@@ -26,15 +30,35 @@
     disableHoverableContent = false,
     skipDelayDuration = 300,
     contentClass,
-    tabindex = 0
+    tabindex = 0,
+    open = $bindable(false),
+    onOpenChange,
+    onpointerleave,
+    onpointerdown
   }: Props = $props();
+
+  function changeOpen(nextOpen: boolean): void {
+    open = nextOpen;
+    onOpenChange?.(nextOpen);
+  }
 </script>
 
 <Tooltip.Provider {delayDuration} {disableHoverableContent} {skipDelayDuration}>
-  <Tooltip.Root>
+  <Tooltip.Root {open} onOpenChange={changeOpen}>
     <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
-        <span {...props} class="tooltip-anchor">{@render children()}</span>
+        <span
+          {...props}
+          class="tooltip-anchor"
+          onpointerleave={(event) => {
+            (props.onpointerleave as ((event: PointerEvent) => void) | undefined)?.(event);
+            onpointerleave?.(event);
+          }}
+          onpointerdown={(event) => {
+            (props.onpointerdown as ((event: PointerEvent) => void) | undefined)?.(event);
+            onpointerdown?.(event);
+          }}
+        >{@render children()}</span>
       {/snippet}
     </Tooltip.Trigger>
     <Tooltip.Content {side} {sideOffset} class={contentClass}>

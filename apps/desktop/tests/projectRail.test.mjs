@@ -57,7 +57,7 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
     dataset = {};
     listeners = new Map();
     draggable = false;
-    title = '';
+    title = 'Legacy drag hover hint';
     capturedPointer = null;
 
     constructor(top) {
@@ -80,6 +80,7 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
     removeAttribute(name) {
       if (name === 'data-reorder-dragging') delete this.dataset.reorderDragging;
       if (name === 'data-reorder-drop') delete this.dataset.reorderDrop;
+      if (name === 'title') this.title = '';
     }
     contains() {
       return false;
@@ -118,6 +119,8 @@ test('shared row action uses a pointer threshold, reorders, and never turns a dr
   });
   const destroySource = reorderItem(source, options(1));
   const destroyTarget = reorderItem(target, options(2));
+  assert.equal(source.title, '', 'reorderable rows do not expose native hover hints');
+  assert.equal(target.title, '', 'all reorderable row types share the no-title contract');
   let navigationCount = 0;
   target.addEventListener('click', () => navigationCount += 1);
   source.dispatch('pointerdown', {
