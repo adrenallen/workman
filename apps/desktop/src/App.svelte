@@ -439,6 +439,7 @@
   let agentDoneNoticeSequence = 0;
   let notifications = $state<Notification[]>([]);
   let notificationBusy = $state(false);
+  const notificationIdleWaiters = new Set<() => void>();
   let notificationRequest = 0;
   let notificationUnreadSignature: string | null = null;
   let nativeNotificationBaselineReady = false;
@@ -1161,28 +1162,85 @@
     );
   }
 
+  function setNotificationBusy(busy: boolean): void {
+    notificationBusy = busy;
+    if (busy) return;
+    for (const resolve of notificationIdleWaiters) resolve();
+    notificationIdleWaiters.clear();
+  }
+
+  async function waitForNotificationIdle(): Promise<void> {
+    while (notificationBusy) {
+      await new Promise<void>((resolve) => notificationIdleWaiters.add(resolve));
+    }
+  }
+
   async function markProjectRead(projectId: number): Promise<void> {
-    if (notificationBusy) return;
-    const previousNotifications = notifications;
-    const previousProcesses = processes;
-    const previousNavigationIndex = navigationIndex;
-    const previousAgentDoneNotices = agentDoneNotices;
-    const previousNotifiedIds = new Set(notifiedUnreadProcessIds);
-    notificationBusy = true;
+    await waitForNotificationIdle();
+    const projectAgents = new Map<number, ProcessView>();
+    for (const process of [...processes, ...(navigationIndex[projectId]?.processes ?? [])]) {
+      if (process.project_id === projectId && process.kind === 'agent') {
+        projectAgents.set(process.id, process);
+      }
+    }
+    const pendingProcessIds = new Set(projectAgents.keys());
+    const unreadProcessIds = new Set(
+      [...projectAgents.values()]
+        .filter((process) => process.agent_state.unread)
+        .map((process) => process.id)
+    );
+    const unreadNotificationIds = new Set(
+      notifications
+        .filter((notification) =>
+          notification.project_id === projectId && notification.read_at === null
+        )
+        .map((notification) => notification.id)
+    );
+    const removedNotices = agentDoneNotices.filter((notice) => notice.projectId === projectId);
+    const removedNotifiedIds = new Set(
+      [...pendingProcessIds].filter((processId) => notifiedUnreadProcessIds.has(processId))
+    );
+    for (const processId of pendingProcessIds) markReadPending.add(processId);
+    setNotificationBusy(true);
     clearProjectUnreadLocally(projectId);
+    let succeeded = false;
     try {
       await client.markProjectRead(projectId);
-      await Promise.all([refreshNotifications(), refreshProcesses(projectId)]);
+      succeeded = true;
     } catch (cause) {
-      notifications = previousNotifications;
-      processes = previousProcesses;
-      navigationIndex = previousNavigationIndex;
-      agentDoneNotices = previousAgentDoneNotices;
-      notifiedUnreadProcessIds.clear();
-      for (const processId of previousNotifiedIds) notifiedUnreadProcessIds.add(processId);
+      const restore = (process: ProcessView): ProcessView =>
+        process.project_id === projectId && unreadProcessIds.has(process.id)
+          ? { ...process, agent_state: { ...process.agent_state, unread: true } }
+          : process;
+      processes = processes.map(restore);
+      const snapshot = navigationIndex[projectId];
+      if (snapshot) {
+        navigationIndex = {
+          ...navigationIndex,
+          [projectId]: { ...snapshot, processes: snapshot.processes.map(restore) }
+        };
+      }
+      notifications = notifications.map((notification) =>
+        notification.project_id === projectId && unreadNotificationIds.has(notification.id)
+          ? { ...notification, read_at: null }
+          : notification
+      );
+      for (const processId of removedNotifiedIds) notifiedUnreadProcessIds.add(processId);
+      const currentNoticeIds = new Set(agentDoneNotices.map((notice) => notice.id));
+      agentDoneNotices = [
+        ...removedNotices.filter((notice) => !currentNoticeIds.has(notice.id)),
+        ...agentDoneNotices
+      ].slice(-4);
       reportError(cause);
     } finally {
-      notificationBusy = false;
+      for (const processId of pendingProcessIds) markReadPending.delete(processId);
+    }
+    try {
+      if (succeeded) {
+        await Promise.all([refreshNotifications(), refreshProcesses(projectId)]);
+      }
+    } finally {
+      setNotificationBusy(false);
     }
   }
 
@@ -1215,7 +1273,7 @@
   async function markCenterNotificationRead(notification: Notification): Promise<void> {
     if (notificationBusy || notification.read_at !== null) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     notifications = notifications.map((candidate) => candidate.id === notification.id
       ? { ...candidate, read_at: Date.now() }
       : candidate);
@@ -1227,14 +1285,14 @@
       reportError(cause);
       if (notification.project_id !== null) await refreshProcesses(notification.project_id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 
   async function markAllNotificationsRead(): Promise<void> {
     if (notificationBusy || notifications.every((notification) => notification.read_at !== null)) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     const readAt = Date.now();
     const processIds = new Set(
       notifications
@@ -1252,7 +1310,7 @@
       reportError(cause);
       if (selectedProject) await refreshProcesses(selectedProject.id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 

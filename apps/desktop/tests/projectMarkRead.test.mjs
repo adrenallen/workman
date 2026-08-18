@@ -19,6 +19,10 @@ test('project mark as read uses one bulk RPC and clears only project-local UI st
   assert.match(app, /case 'mark-read':\s*await markProjectRead\(project\.id\);/);
   assert.match(app, /notification\.project_id === projectId && notification\.read_at === null/);
   assert.match(app, /process\.project_id === projectId && process\.kind === 'agent' && process\.agent_state\.unread/);
+  assert.match(app, /await waitForNotificationIdle\(\);/);
+  assert.match(app, /for \(const processId of pendingProcessIds\) markReadPending\.add\(processId\);/);
+  assert.match(app, /for \(const processId of pendingProcessIds\) markReadPending\.delete\(processId\);/);
   assert.match(app, /await client\.markProjectRead\(projectId\);/);
+  assert.match(app, /notifications = notifications\.map\(\(notification\) =>[\s\S]*unreadNotificationIds\.has\(notification\.id\)[\s\S]*read_at: null/);
   assert.match(app, /Promise\.all\(\[refreshNotifications\(\), refreshProcesses\(projectId\)\]\)/);
 });
