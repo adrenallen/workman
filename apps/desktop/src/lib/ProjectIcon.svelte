@@ -76,5 +76,5 @@
   .project-icon img { display: block; max-width: none; border-radius: 3px; object-fit: contain; image-rendering: auto; }
   .project-icon > :global(.tooltip-anchor) { position: absolute; z-index: 2; top: -4px; left: -4px; overflow: visible; }
   .project-icon > .worktree-badge { position: absolute; z-index: 2; top: -4px; left: -4px; overflow: visible; }
-  .worktree-badge { display: grid; width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 3px; color: var(--muted-foreground); background: var(--card); }
+  .worktree-badge { display: grid; width: 11px; height: 11px; place-items: center; border: 1px solid var(--project-icon-badge-background, var(--card)); border-radius: 3px; color: var(--muted-foreground); background: var(--project-icon-badge-background, var(--card)); }
 </style>

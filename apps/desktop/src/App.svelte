@@ -4782,7 +4782,7 @@
                         icon={project.icon}
                         color={project.icon_color}
                         image={project.icon_image?.data_url}
-                        fallback={project.repository_id !== null ? 'repository' : 'project'}
+                        fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
                         worktree={parentLabel !== null}
                         worktreeTooltip={false}
                         size={15}
@@ -5543,13 +5543,13 @@
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
-  .project-row { position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row { --project-icon-badge-background: var(--card); position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row.nested { min-height: 42px; }
-  .project-row:hover { background: var(--popover); }
-  .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .project-row:hover { --project-icon-badge-background: var(--popover); background: var(--popover); }
+  .project-row.active { --project-icon-badge-background: var(--accent); border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
   .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; grid-column: 1; grid-row: 1; align-self: stretch; }
   .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
-  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
+  .project-select:focus-visible { --project-icon-badge-background: var(--border); outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }

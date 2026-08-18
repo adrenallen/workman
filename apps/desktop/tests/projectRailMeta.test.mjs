@@ -40,6 +40,7 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.match(app, /\.project-select \{[^}]*position: relative;[^}]*grid-template-rows: minmax\(20px, auto\) 20px;/);
   assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
+  assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--accent\);/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
 
@@ -136,7 +137,7 @@ test('rail badges overflow upward and worktrees mark the project icon corner', a
     readFile(new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url), 'utf8')
   ]);
 
-  assert.match(row, /fallback=\{project\.repository_id !== null \? 'repository' : 'project'\}/);
+  assert.match(row, /fallback=\{parentLabel !== null \? 'worktree' : project\.repository_id !== null \? 'repository' : 'project'\}/);
   assert.match(row, /worktree=\{parentLabel !== null\}/);
   assert.match(icon, /worktree\?: boolean/);
   assert.match(icon, /worktreeTooltip\?: boolean/);
@@ -144,6 +145,7 @@ test('rail badges overflow upward and worktrees mark the project icon corner', a
   assert.match(icon, /label="Worktree"/);
   assert.match(icon, /\.project-icon > :global\(\.tooltip-anchor\) \{[^}]*top: -4px;[^}]*left: -4px;/);
   assert.match(icon, /\.project-icon > \.worktree-badge \{[^}]*top: -4px;[^}]*left: -4px;/);
+  assert.match(icon, /background: var\(--project-icon-badge-background, var\(--card\)\)/);
   assert.match(indicators, /\.kind-glyph small \{[^}]*top: -5px;[^}]*right: -5px;/);
   assert.doesNotMatch(indicators, /\.kind-glyph small \{[^}]*bottom:/);
   assert.match(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*top: -6px;[^}]*right: -7px;/);
