@@ -274,6 +274,7 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
     .await?;
     assert!(removed_missing.project_unregistered && removed_missing.files_untouched);
     assert!(!removed_missing.deleted_from_disk);
+    assert!(!removed_missing.metadata_pruned);
     assert!(
         removed_missing
             .registration_issue
@@ -290,8 +291,7 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
             .is_none()
     );
 
-    let alias = fixture._temp.path().join("duplicate-main-alias");
-    symlink(&fixture.main, &alias)?;
+    let alias = format!("{}/", fixture.main.display());
     let duplicate_id = {
         let registry = fixture.registry.lock().await;
         let repository = registry
@@ -301,7 +301,7 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
         let duplicate_id = registry.store().next_project_id()?;
         let duplicate = Project {
             id: duplicate_id,
-            path: alias.to_string_lossy().into_owned(),
+            path: alias.clone(),
             name: "duplicate root".into(),
             display_name: None,
             icon: None,
@@ -320,6 +320,21 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
         )?;
         duplicate_id
     };
+    let canonical_refused = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("the canonical owner cannot be deleted while an alias is registered");
+    assert_eq!(canonical_refused.code(), "invalid_worktree_path");
+
     let removed_duplicate = worktrees::remove(
         &fixture.registry,
         RemoveWorktree {
@@ -333,6 +348,7 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
     )
     .await?;
     assert!(removed_duplicate.project_unregistered && removed_duplicate.files_untouched);
+    assert!(!removed_duplicate.metadata_pruned);
     assert!(
         removed_duplicate
             .registration_issue
@@ -340,7 +356,6 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
             .is_some_and(|issue| issue.contains("duplicate registration"))
     );
     assert!(fixture.main.exists());
-    assert!(alias.exists());
     assert!(
         fixture
             .registry
@@ -349,6 +364,85 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
             .store()
             .get_project_any(duplicate_id)?
             .is_none()
+    );
+
+    let canonical_id = {
+        let registry = fixture.registry.lock().await;
+        let root_project = registry
+            .store()
+            .get_project_any(1)?
+            .expect("canonical root registration");
+        let root_link = registry
+            .store()
+            .get_project_worktree(1)?
+            .expect("canonical root worktree link");
+        registry.store().delete_project_everywhere(1)?;
+        let lower_alias = Project {
+            id: 1,
+            path: alias,
+            name: "lower-id duplicate root".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+        registry.store().put_project_with_worktree(
+            &lower_alias,
+            &ProjectWorktree {
+                project_id: lower_alias.id,
+                ..root_link.clone()
+            },
+        )?;
+        let canonical = Project {
+            id: 2,
+            selected: false,
+            ..root_project
+        };
+        registry.store().put_project_with_worktree(
+            &canonical,
+            &ProjectWorktree {
+                project_id: canonical.id,
+                ..root_link
+            },
+        )?;
+        canonical.id
+    };
+    let reverse_refused = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: canonical_id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await
+    .expect_err("canonical precedence must not depend on id order");
+    assert_eq!(reverse_refused.code(), "invalid_worktree_path");
+    let removed_lower_alias = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed_lower_alias.files_untouched && !removed_lower_alias.metadata_pruned);
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project_any(canonical_id)?
+            .is_some(),
+        "the canonical row wins when its id is higher"
     );
     Ok(())
 }
@@ -1832,6 +1926,10 @@ async fn pruned_git_metadata_unregisters_without_deleting_remaining_folder()
             .get_project(created.project.project.id)?
             .is_some()
     );
+    let other_profile = {
+        let registry = fixture.registry.lock().await;
+        registry.store().create_profile("Other", true)?.0
+    };
 
     let removed = worktrees::remove(
         &fixture.registry,
@@ -1845,7 +1943,7 @@ async fn pruned_git_metadata_unregisters_without_deleting_remaining_folder()
         },
     )
     .await?;
-    assert!(removed.project_unregistered && removed.metadata_pruned);
+    assert!(removed.project_unregistered && !removed.metadata_pruned);
     assert!(removed.files_untouched && !removed.deleted_from_disk);
     assert!(removed.branch_kept && removed.project_unregistered);
     assert!(
@@ -1858,6 +1956,209 @@ async fn pruned_git_metadata_unregisters_without_deleting_remaining_folder()
         fs::read_to_string(path.join("remaining.tmp"))?,
         "left after partial deletion\n",
         "an unverified remaining folder must never be removed"
+    );
+    {
+        let registry = fixture.registry.lock().await;
+        registry.store().switch_profile(other_profile.id)?;
+        assert!(
+            registry
+                .store()
+                .get_project(created.project.project.id)?
+                .is_some(),
+            "a detached-parent cleanup is scoped to the active profile"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_parent_cleanup_is_profile_scoped() -> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/unavailable-parent".into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let other_profile = {
+        let registry = fixture.registry.lock().await;
+        let link = registry
+            .store()
+            .get_project_worktree(created.project.project.id)?
+            .expect("created worktree link");
+        let mut repository = registry
+            .store()
+            .get_worktree_repository(link.repository_id)?
+            .expect("created worktree repository");
+        repository.root_path = fixture
+            ._temp
+            .path()
+            .join("unavailable-parent")
+            .to_string_lossy()
+            .into_owned();
+        registry.store().put_worktree_repository(&repository)?;
+        registry.store().create_profile("Other", true)?.0
+    };
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed.files_untouched && !removed.metadata_pruned);
+    assert!(
+        removed
+            .registration_issue
+            .as_deref()
+            .is_some_and(|issue| issue.contains("parent Git repository is unavailable"))
+    );
+    {
+        let registry = fixture.registry.lock().await;
+        assert!(
+            registry
+                .store()
+                .get_project(created.project.project.id)?
+                .is_none()
+        );
+        registry.store().switch_profile(other_profile.id)?;
+        assert!(
+            registry
+                .store()
+                .get_project(created.project.project.id)?
+                .is_some(),
+            "an unavailable-parent cleanup is scoped to the active profile"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn apfs_case_alias_duplicate_precedence_is_independent_of_id_order()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    let case_alias = fixture
+        .main
+        .parent()
+        .expect("fixture parent")
+        .join("SAMPLE-REPO");
+    if !case_alias.exists() {
+        return Ok(());
+    }
+    let (root_project, root_link) = {
+        let registry = fixture.registry.lock().await;
+        (
+            registry.store().get_project_any(1)?.expect("root project"),
+            registry
+                .store()
+                .get_project_worktree(1)?
+                .expect("root worktree link"),
+        )
+    };
+    let higher_alias_id = {
+        let registry = fixture.registry.lock().await;
+        let alias = Project {
+            id: 2,
+            path: case_alias.to_string_lossy().into_owned(),
+            name: "case alias".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 1,
+        };
+        registry.store().put_project_with_worktree(
+            &alias,
+            &ProjectWorktree {
+                project_id: alias.id,
+                ..root_link.clone()
+            },
+        )?;
+        alias.id
+    };
+    let removed_higher_alias = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: higher_alias_id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed_higher_alias.files_untouched && fixture.main.exists());
+
+    {
+        let registry = fixture.registry.lock().await;
+        registry.store().delete_project_everywhere(1)?;
+        let lower_alias = Project {
+            id: 1,
+            path: case_alias.to_string_lossy().into_owned(),
+            name: "lower case alias".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+        registry.store().put_project_with_worktree(
+            &lower_alias,
+            &ProjectWorktree {
+                project_id: lower_alias.id,
+                ..root_link.clone()
+            },
+        )?;
+        let canonical = Project {
+            id: 2,
+            selected: false,
+            ..root_project
+        };
+        registry.store().put_project_with_worktree(
+            &canonical,
+            &ProjectWorktree {
+                project_id: canonical.id,
+                ..root_link
+            },
+        )?;
+    }
+    let removed_lower_alias = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: 1,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed_lower_alias.files_untouched && fixture.main.exists());
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project_any(2)?
+            .is_some(),
+        "the canonical case-form row wins when its id is higher"
     );
     Ok(())
 }

@@ -417,6 +417,29 @@ struct DeleteRecoveryHint {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrationIssueKind {
+    Duplicate,
+    MissingPath,
+    ParentUnavailable,
+    NotRecordedByParent,
+}
+
+#[derive(Clone, Debug)]
+struct RegistrationIssue {
+    kind: RegistrationIssueKind,
+    message: String,
+}
+
+impl RegistrationIssue {
+    fn remove_everywhere(&self) -> bool {
+        matches!(
+            self.kind,
+            RegistrationIssueKind::Duplicate | RegistrationIssueKind::MissingPath
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeleteTargetKind {
     LinkedWorktree,
     PrimaryCheckout,
@@ -1639,7 +1662,7 @@ pub async fn remove(
         .clone()
         .unwrap_or_else(|| project.name.clone());
     let mut deleted_from_disk = false;
-    let mut metadata_pruned = registration_issue.is_some();
+    let mut metadata_pruned = false;
     let mut branch_kept = true;
     let mut post_delete_issue = None;
     if request.delete_from_disk && registration_issue.is_none() {
@@ -1773,7 +1796,11 @@ pub async fn remove(
     // already finished the Git operation before its process can disappear.
     let (project_unregistered, selected_project_id) = {
         let registry = registry.lock().await;
-        let project_unregistered = if deleted_from_disk || registration_issue.is_some() {
+        let project_unregistered = if deleted_from_disk
+            || registration_issue
+                .as_ref()
+                .is_some_and(RegistrationIssue::remove_everywhere)
+        {
             registry.store().delete_project_everywhere(project.id)?
         } else {
             registry.store().delete_project(project.id)?
@@ -1808,7 +1835,7 @@ pub async fn remove(
         branch_kept,
         files_removed: deleted_from_disk,
         files_untouched: !deleted_from_disk,
-        registration_issue,
+        registration_issue: registration_issue.map(|issue| issue.message),
         selected_project_id,
     })
 }
@@ -1818,7 +1845,7 @@ async fn broken_registration_issue(
     all_projects: &[Project],
     recovery_hint: Option<&DeleteRecoveryHint>,
     command_environment: &BTreeMap<OsString, OsString>,
-) -> Option<String> {
+) -> Option<RegistrationIssue> {
     let path = Path::new(&project.path);
     let canonical = canonical_display(path);
     let duplicate_owner = all_projects
@@ -1827,34 +1854,43 @@ async fn broken_registration_issue(
             candidate.id != project.id && same_path(Path::new(&candidate.path), path)
         })
         .min_by_key(|candidate| (candidate.path != canonical, candidate.id));
-    if let Some(owner) = duplicate_owner.filter(|owner| {
-        project.path != canonical || (owner.path != canonical && owner.id < project.id)
-    }) {
-        return Some(format!(
-            "duplicate registration: project {} owns the same canonical path; files were left untouched",
-            owner.id
-        ));
+    if project.path != canonical
+        && let Some(owner) = duplicate_owner
+    {
+        return Some(RegistrationIssue {
+            kind: RegistrationIssueKind::Duplicate,
+            message: format!(
+                "duplicate registration: project {} owns the same canonical path; files were left untouched",
+                owner.id
+            ),
+        });
     }
     if !path.exists() {
-        return Some(
-            "broken registration: the project path is missing; files were left untouched".into(),
-        );
+        return Some(RegistrationIssue {
+            kind: RegistrationIssueKind::MissingPath,
+            message: "broken registration: the project path is missing; files were left untouched"
+                .into(),
+        });
     }
     let recovery_hint = recovery_hint?;
     let snapshot = match snapshot_async(&recovery_hint.repository_root, command_environment).await {
         Ok(snapshot) => snapshot,
         Err(_) => {
-            return Some(
-                "broken registration: the parent Git repository is unavailable; files were left untouched"
-                    .into(),
-            );
+            return Some(RegistrationIssue {
+                kind: RegistrationIssueKind::ParentUnavailable,
+                message:
+                    "broken registration: the parent Git repository is unavailable; files were left untouched"
+                        .into(),
+            });
         }
     };
     if matching_record(&snapshot, path).is_none() {
-        return Some(
-            "broken registration: the path is not a worktree of its recorded parent; files were left untouched"
-                .into(),
-        );
+        return Some(RegistrationIssue {
+            kind: RegistrationIssueKind::NotRecordedByParent,
+            message:
+                "broken registration: the path is not a worktree of its recorded parent; files were left untouched"
+                    .into(),
+        });
     }
     None
 }
