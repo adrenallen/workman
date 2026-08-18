@@ -392,7 +392,11 @@ function rosterCandidate(
 ): KindTargetCandidate {
   return {
     id: process.id,
-    priority: state === 'needs_input' ? 2 : 1,
+    priority: state === 'needs_input'
+      ? 3
+      : process.status === 'running' || process.status === 'starting'
+        ? 2
+        : 1,
     recency: process.kind === 'agent'
       ? agentRecency(process, stats)
       : process.exited_at ?? runtimeRecency(stats)
@@ -405,12 +409,13 @@ function agentRecency(
 ): number {
   return process.agent_state.last_content_change_at
     ?? process.agent_state.last_output_at
+    ?? process.exited_at
     ?? runtimeRecency(stats);
 }
 
 function runtimeRecency(stats: ProcessRuntimeStats | undefined): number {
   return stats && Number.isFinite(stats.uptime_seconds)
-    ? -stats.uptime_seconds
+    ? Date.now() - stats.uptime_seconds * 1_000
     : Number.NEGATIVE_INFINITY;
 }
 

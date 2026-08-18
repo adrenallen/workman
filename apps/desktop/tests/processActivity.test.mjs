@@ -221,6 +221,29 @@ test('jump targets prefer input and foreground work, then output or process star
   assert.equal(projectKindActivity([process(8, 'terminal', 'stopped')], {}).terminal.targetProcessId, null);
 });
 
+test('mixed rosters keep live terminals, commands, and fresh agents above exited processes', () => {
+  const now = Date.now();
+  const activity = projectKindActivity([
+    process(1, 'agent', 'running', 'working'),
+    process(2, 'agent', 'exited', 'exited', {
+      exited_at: now,
+      agent_state: { last_output_at: now }
+    }),
+    process(3, 'terminal', 'running'),
+    process(4, 'terminal', 'exited', 'idle', { exited_at: now }),
+    process(5, 'command', 'running'),
+    process(6, 'command', 'exited', 'idle', { exited_at: now })
+  ], {
+    1: { uptime_seconds: 1 },
+    3: { foreground_active: true, uptime_seconds: 2 },
+    5: { uptime_seconds: 3 }
+  });
+
+  assert.deepEqual(activity.agent.processIds, [1, 2]);
+  assert.deepEqual(activity.terminal.processIds, [3, 4]);
+  assert.deepEqual(activity.command.processIds, [5, 6]);
+});
+
 test('per-kind activity hides idle shells and includes agent and command startup', () => {
   const idleTerminal = process(1, 'terminal', 'running');
   const activeTerminal = process(2, 'terminal', 'running');
