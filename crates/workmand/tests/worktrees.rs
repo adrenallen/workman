@@ -452,6 +452,7 @@ enum GitRemoveFixture {
     AlwaysFail,
     SwapPathOnce,
     RecreateOnPrune,
+    FailListAfterAdd,
 }
 
 impl GitFixture {
@@ -469,6 +470,10 @@ impl GitFixture {
 
     fn new_with_path_recreated_during_prune() -> Result<Self, Box<dyn Error>> {
         Self::new_with_remove_fixture(Some(GitRemoveFixture::RecreateOnPrune))
+    }
+
+    fn new_with_post_create_list_failure() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::FailListAfterAdd))
     }
 
     fn new_with_remove_fixture(
@@ -551,18 +556,31 @@ impl GitFixture {
                     git = git_executable.display(),
                     marker = temp.path().join("removed-worktree-path").display(),
                 ),
+                GitRemoveFixture::FailListAfterAdd => ":".to_owned(),
             };
             let prune_script = match remove_fixture {
                 GitRemoveFixture::RecreateOnPrune => format!(
                     "if [ -s '{marker}' ]; then\n  target=$(/bin/cat '{marker}')\n  /bin/mkdir -p \"$target\"\n  printf 'replacement created after initial verification\\n' > \"$target/reappeared.txt\"\n  /bin/rm '{marker}'\nfi",
                     marker = temp.path().join("removed-worktree-path").display(),
                 ),
-                GitRemoveFixture::AlwaysFail | GitRemoveFixture::SwapPathOnce => ":".to_owned(),
+                GitRemoveFixture::AlwaysFail
+                | GitRemoveFixture::SwapPathOnce
+                | GitRemoveFixture::FailListAfterAdd => ":".to_owned(),
+            };
+            let operation_script = match remove_fixture {
+                GitRemoveFixture::FailListAfterAdd => format!(
+                    "if [ \"$3\" = worktree ] && [ \"$4\" = add ]; then\n  '{git}' \"$@\"\n  status=$?\n  if [ \"$status\" -eq 0 ]; then : > '{marker}'; fi\n  exit \"$status\"\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = list ] && [ -e '{marker}' ]; then\n  echo 'error: simulated post-registration worktree listing failure' >&2\n  exit 255\nfi",
+                    git = git_executable.display(),
+                    marker = temp.path().join("fail-list-after-add").display(),
+                ),
+                GitRemoveFixture::AlwaysFail
+                | GitRemoveFixture::SwapPathOnce
+                | GitRemoveFixture::RecreateOnPrune => ":".to_owned(),
             };
             fs::write(
                 &git_wrapper,
                 format!(
-                    "#!/bin/sh\nif [ \"$3\" = worktree ] && [ \"$4\" = remove ]; then\n{remove_script}\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = prune ]; then\n{prune_script}\nfi\nexec '{}' \"$@\"\n",
+                    "#!/bin/sh\n{operation_script}\nif [ \"$3\" = worktree ] && [ \"$4\" = remove ]; then\n{remove_script}\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = prune ]; then\n{prune_script}\nfi\nexec '{}' \"$@\"\n",
                     git_executable.display()
                 ),
             )?;
@@ -598,6 +616,54 @@ impl GitFixture {
             registry,
         })
     }
+}
+
+#[tokio::test]
+async fn post_registration_assembly_failure_keeps_checkout_branch_and_project()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_post_create_list_failure()?;
+    let branch = "feature/keep-after-read-failure";
+    let destination = fixture.managed.join(worktrees::site_slug(branch));
+    let failure = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: branch.into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("the fixture fails only the final mutation assembly read");
+    assert!(failure.to_string().contains("simulated post-registration"));
+    assert!(
+        destination.is_dir(),
+        "the successfully created checkout remains"
+    );
+    assert!(
+        !git(&fixture.main, &["branch", "--list", branch])?
+            .trim()
+            .is_empty(),
+        "the successfully created branch remains"
+    );
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project_by_path_any(
+                &workman_core::canonical_path(&destination)?.to_string_lossy()
+            )?
+            .is_some(),
+        "the committed project registration remains"
+    );
+    Ok(())
 }
 
 #[tokio::test]

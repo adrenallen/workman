@@ -1387,7 +1387,7 @@ pub(crate) async fn create_with_progress(
 
     let registration = {
         let registry = registry.lock().await;
-        (|| -> WorktreeResult<(Project, bool)> {
+        (|| -> WorktreeResult<Project> {
             registry.store().put_worktree_repository(&repository)?;
             for (key, value) in &request.preferences {
                 validate_preference_key(key)?;
@@ -1404,10 +1404,6 @@ pub(crate) async fn create_with_progress(
                     Some(policy.preference()),
                 )?;
             }
-            let was_new = registry
-                .store()
-                .get_project_by_path_any(&canonical_display(&destination))?
-                .is_none();
             let project = register_project(
                 registry.store(),
                 &repository,
@@ -1416,10 +1412,10 @@ pub(crate) async fn create_with_progress(
                 request.display_name.as_deref(),
                 true,
             )?;
-            Ok((project, was_new))
+            Ok(project)
         })()
     };
-    let (project, project_was_created) = match registration {
+    let project = match registration {
         Ok(registration) => registration,
         Err(error) => {
             rollback_created_worktree(
@@ -1439,24 +1435,7 @@ pub(crate) async fn create_with_progress(
             Some(format!("Project {} registered", project.id)),
         );
     }
-    match mutation_for_project(registry, project.id, Some(environment)).await {
-        Ok(mutation) => Ok(mutation),
-        Err(error) => {
-            if project_was_created {
-                let registry = registry.lock().await;
-                let _ = registry.store().delete_project_everywhere(project.id);
-            }
-            rollback_created_worktree(
-                &snapshot.root_path,
-                &destination,
-                &request.branch,
-                branch_state != BranchState::Local,
-                &command_environment,
-            )
-            .await;
-            Err(error)
-        }
-    }
+    mutation_for_project(registry, project.id, Some(environment)).await
 }
 
 /// SWM's "fork again": create from the selected worktree's exact HEAD, not
