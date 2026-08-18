@@ -255,6 +255,7 @@
     type WorktreeDialogSubmission,
     type WorktreeEntry,
     type WorktreeList,
+    type WorktreeRemoval,
     type WorktreeRefOption,
     type WorktreeRefValidation,
     type WorktreeRepository
@@ -461,6 +462,7 @@
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
   let removeWorktreeForceRequired = $state(false);
+  let removeWorktreeNotice = $state<string | null>(null);
   let terminalView = $state<{
     insertQuickPrompt: (text: string, submit?: boolean) => boolean;
     focusInput: () => void;
@@ -3488,7 +3490,7 @@
     removeWorktreeBusy = true;
     removeWorktreeError = null;
     try {
-      await client.control('projects.remove', {
+      const removal = await client.control<WorktreeRemoval>('projects.remove', {
         project_id: state.project.id,
         confirm_remove: true,
         confirm_stop_running: true,
@@ -3496,6 +3498,9 @@
         force_dirty: forceDirty
       });
       removeWorktreeDialog = null;
+      if (removal.registration_issue || (deleteFromDisk && removal.files_untouched)) {
+        removeWorktreeNotice = `Files left untouched at ${removal.path}.${removal.registration_issue ? ` ${removal.registration_issue}` : ''}`;
+      }
       projects = await client.projects();
       if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {
         await refreshWorktreeMetadata(projects, true, true, state.repository.id);
@@ -4774,6 +4779,12 @@
   </button>
 {/if}
 
+{#if removeWorktreeNotice}
+  <button class:with-version-banner={showVersionBanner} class="remove-worktree-notice" type="button" aria-live="polite" onclick={() => (removeWorktreeNotice = null)}>
+    {removeWorktreeNotice}
+  </button>
+{/if}
+
 <AgentDoneToasts
   notices={agentDoneNotices}
   onOpen={openAgentDoneNotice}
@@ -5595,6 +5606,7 @@
   .update-progress.indeterminate span { width: 38% !important; animation: update-progress-scan 900ms ease-in-out infinite; }
   .updated-version-notice { position: fixed; z-index: 80; top: 12px; right: 12px; min-height: 32px; border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border)); border-radius: var(--radius); padding: 6px 10px; background: color-mix(in srgb, var(--success) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); }
   .updated-version-notice.with-version-banner { top: 54px; }
+  .remove-worktree-notice { position: fixed; z-index: 80; right: 12px; bottom: 12px; max-width: min(560px, calc(100vw - 24px)); border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border)); border-radius: var(--radius); padding: 8px 10px; background: color-mix(in srgb, var(--warning) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); text-align: left; }
 
   @keyframes update-progress-scan {
     from { transform: translateX(-110%); }

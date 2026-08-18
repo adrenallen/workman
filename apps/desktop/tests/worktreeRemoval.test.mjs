@@ -50,13 +50,20 @@ test('broken or duplicate registrations are unregistered with files untouched', 
     'utf8'
   );
 
-  assert.match(dialog, /project\.repository_id !== null && entry === null/);
-  assert.match(dialog, /This entry is broken or duplicates another project/);
+  const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+
+  assert.match(dialog, /entry\?\.status === 'missing'/);
+  assert.doesNotMatch(dialog, /entry === null/);
+  assert.match(dialog, /This worktree is known to be missing/);
   assert.match(dialog, /Registration cleanup only/);
   assert.match(dialog, /Git worktree removal will not run/);
-  assert.match(dialog, /disabled=\{brokenRegistration\}/);
-  assert.match(dialog, /if \(brokenRegistration\) deleteFromDisk = false/);
+  assert.match(dialog, /disabled=\{knownMissingRegistration\}/);
+  assert.match(dialog, /if \(knownMissingRegistration\) deleteFromDisk = false/);
   assert.match(dialog, /files stay untouched/);
+  assert.match(app, /client\.control<WorktreeRemoval>\('projects\.remove'/);
+  assert.match(app, /removal\.registration_issue \|\| \(deleteFromDisk && removal\.files_untouched\)/);
+  assert.match(app, /Files left untouched at \$\{removal\.path\}/);
+  assert.match(app, /class="remove-worktree-notice"/);
 });
 
 test('project removal RPC is reachable only from the explicit in-app dialog confirmation', async () => {
@@ -66,14 +73,14 @@ test('project removal RPC is reachable only from the explicit in-app dialog conf
 
   assert.match(menuAction, /openRemoveWorktree\(project\)/);
   assert.doesNotMatch(menuAction, /client\.control|confirm_remove/);
-  assert.match(confirmation, /client\.control\('projects\.remove'/);
+  assert.match(confirmation, /client\.control<WorktreeRemoval>\('projects\.remove'/);
   assert.match(confirmation, /confirm_remove: true/);
   assert.match(confirmation, /removeWorktreeDialog = null/);
   assert.match(confirmation, /catch \(cause\)/);
   assert.match(confirmation, /removeWorktreeError = cause instanceof Error/);
   assert.match(app, /<WorktreeRemoveDialog/);
   assert.match(app, /onConfirm=\{\(deleteFromDisk, forceDirty\)/);
-  assert.equal((app.match(/client\.control\('projects\.remove'/g) ?? []).length, 1);
+  assert.equal((app.match(/client\.control<WorktreeRemoval>\('projects\.remove'/g) ?? []).length, 1);
 });
 
 test('removal, confirmation, and quick jump dialogs use wider responsive bounds', async () => {
