@@ -116,10 +116,11 @@ test('show-all process navigation is serialized and contributes the project to r
   assert.match(app, /case 'processes':\s*openProcessOverview\(target\.kind\);/);
 });
 
-test('kind indicators expose click-only idle rosters and shared popover state', async () => {
-  const [indicators, iconButton] = await Promise.all([
+test('kind indicators expose click-only per-process rosters and shared popover state', async () => {
+  const [indicators, iconButton, statusIndicator] = await Promise.all([
     readFile(new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url), 'utf8'),
-    readFile(new URL('../src/lib/components/ds/IconButton.svelte', import.meta.url), 'utf8')
+    readFile(new URL('../src/lib/components/ds/IconButton.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/components/ds/StatusIndicator.svelte', import.meta.url), 'utf8')
   ]);
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
@@ -129,6 +130,12 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   assert.match(indicators, /compact \? kinds\.filter\(\(kind\) => activity\[kind\]\.active > 0\) : kinds/);
   assert.match(indicators, /\{#each visibleKinds as kind \(kind\)\}/);
   assert.match(indicators, /activity\[kind\]\.processIds/);
+  assert.match(indicators, /processActivity\(process, stats\)/);
+  assert.match(indicators, /processActivityTone\(processState\.state\)/);
+  assert.match(indicators, /<StatusIndicator state=\{processState\.state\} tone=\{processTone\} label=\{processState\.label\}/);
+  assert.match(indicators, /class="process-state" data-tone=\{processTone\}>\{processState\.shortLabel\.toLocaleLowerCase\(\)\}/);
+  assert.match(indicators, /\.process-state\[data-tone='needs-input'\][^{]*\{[^}]*var\(--agent-state-needs-input\)/);
+  assert.match(indicators, /\.process-state\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
   assert.match(indicators, /No \{kindTitle\(kind\)\.toLocaleLowerCase\(\)\} in this project/);
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);
   assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
@@ -143,6 +150,9 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   assert.doesNotMatch(indicators, /onpointer(?:enter|leave)/);
   assert.doesNotMatch(indicators, /PopoverHoverIntent/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
+  assert.match(statusIndicator, /state\?: StatusState/);
+  assert.match(statusIndicator, /state === 'working'[\s\S]*<LoaderCircleIcon/);
+  assert.match(statusIndicator, /state === 'stopped' \|\| state === 'crashed'[\s\S]*<CircleXIcon/);
 });
 
 test('pull request icons always open a coordinated click-only list popover', async () => {

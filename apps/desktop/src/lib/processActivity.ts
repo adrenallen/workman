@@ -18,6 +18,8 @@ export interface ProcessActivityPresentation {
   label: string;
 }
 
+export type ProcessActivityRuntimeStats = Pick<ProcessRuntimeStats, 'foreground_active'>;
+
 export interface ProjectActivityRollup {
   state: ProcessActivityState;
   active: number;
@@ -66,7 +68,7 @@ interface KindTargetCandidate {
 /** Resolve lifecycle and live telemetry into the color-bearing activity state. */
 export function processActivity(
   process: ProcessView,
-  stats?: ProcessRuntimeStats
+  stats?: ProcessActivityRuntimeStats
 ): ProcessActivityPresentation {
   if (process.status === 'crashed') {
     return presentation('crashed', 'Crashed', `${process.name} · crashed`);
