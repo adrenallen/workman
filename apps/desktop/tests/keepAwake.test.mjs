@@ -3,12 +3,19 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+  activeKeepAwakeAgents,
   armKeepAwake,
+  evaluateAutoKeepAwake,
   evaluateKeepAwake,
   evaluateKeepAwakeAtCurrentTime,
   evaluateKeepAwakeConnection,
+  initialAutoKeepAwakeState,
   initialKeepAwakeConnectionState,
   KEEP_AWAKE_SETTLE_MS,
+  loadAutoKeepAwakePreference,
+  runningAgents,
+  saveAutoKeepAwakePreference,
+  suppressAutoKeepAwake,
   shouldSubscribeProcessStatuses
 } from '../src/lib/keepAwake.ts';
 
@@ -18,7 +25,8 @@ const files = {
   navigation: new URL('../src/lib/navigation.ts', import.meta.url),
   palette: new URL('../src/lib/QuickJumpPalette.svelte', import.meta.url),
   shortcuts: new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url),
-  native: new URL('../src-tauri/src/lib.rs', import.meta.url)
+  native: new URL('../src-tauri/src/lib.rs', import.meta.url),
+  config: new URL('../src-tauri/tauri.conf.json', import.meta.url)
 };
 
 const connected = { connected: true };
@@ -84,6 +92,80 @@ test('waiting, needs input, and working are not full idle', () => {
     assert.equal(evaluation.shouldRelease, false);
     assert.equal(evaluation.state.lastIdleObservationAt, null);
   }
+});
+
+test('auto activity follows agent attention rather than a merely live process', () => {
+  for (const attention of ['waiting', 'needs_input', 'working']) {
+    assert.deepEqual(activeKeepAwakeAgents([agent(1, attention)]).map(({ id }) => id), [1]);
+  }
+  const thinking = agent(2, 'idle');
+  thinking.agent_state.thinking = true;
+  assert.deepEqual(activeKeepAwakeAgents([thinking]).map(({ id }) => id), [2]);
+  const planning = agent(5, 'idle');
+  planning.agent_state.planning = true;
+  assert.deepEqual(activeKeepAwakeAgents([planning]).map(({ id }) => id), [5]);
+  assert.deepEqual(activeKeepAwakeAgents([agent(6, 'idle', 'starting', null)]).map(({ id }) => id), [6]);
+  assert.deepEqual(activeKeepAwakeAgents([agent(3, 'idle')]), []);
+  assert.deepEqual(activeKeepAwakeAgents([agent(4, 'working', 'exited')]), []);
+  assert.deepEqual(runningAgents([agent(3, 'idle')]).map(({ id }) => id), [3]);
+});
+
+test('auto mode requests an all-agent arm on the first active edge', () => {
+  const evaluation = evaluateAutoKeepAwake(
+    initialAutoKeepAwakeState(),
+    [agent(1, 'working'), agent(2, 'idle')],
+    true
+  );
+  assert.equal(evaluation.activityEdge, true);
+  assert.equal(evaluation.shouldArm, true);
+  assert.deepEqual(evaluation.activeAgentIds, [1]);
+  assert.equal(armKeepAwake('all', null, 'auto').armSource, 'auto');
+});
+
+test('manual disarm suppresses auto re-arm until a fresh agent activity edge', () => {
+  const working = [agent(1, 'working')];
+  const observed = evaluateAutoKeepAwake(initialAutoKeepAwakeState(), working, true);
+  const suppressed = suppressAutoKeepAwake(observed.state, working);
+  const sameActivity = evaluateAutoKeepAwake(suppressed, working, true);
+  assert.equal(sameActivity.shouldArm, false);
+  assert.equal(sameActivity.state.suppressedUntilActivityEdge, true);
+
+  const freshAgent = evaluateAutoKeepAwake(
+    sameActivity.state,
+    [agent(1, 'working'), agent(2, 'needs_input')],
+    true
+  );
+  assert.equal(freshAgent.activityEdge, true);
+  assert.equal(freshAgent.shouldArm, true);
+  assert.equal(freshAgent.state.suppressedUntilActivityEdge, false);
+});
+
+test('the same agent becoming active again is a fresh edge after idle', () => {
+  const observed = evaluateAutoKeepAwake(
+    initialAutoKeepAwakeState(),
+    [agent(1, 'working')],
+    true
+  );
+  const suppressed = suppressAutoKeepAwake(observed.state, [agent(1, 'working')]);
+  const idle = evaluateAutoKeepAwake(suppressed, [agent(1, 'idle')], true);
+  assert.equal(idle.shouldArm, false);
+  assert.equal(idle.state.suppressedUntilActivityEdge, true);
+  const resumed = evaluateAutoKeepAwake(idle.state, [agent(1, 'waiting')], true);
+  assert.equal(resumed.activityEdge, true);
+  assert.equal(resumed.shouldArm, true);
+});
+
+test('auto preference persists as a per-machine boolean', () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value)
+  };
+  assert.equal(loadAutoKeepAwakePreference(storage), false);
+  saveAutoKeepAwakePreference(true, storage);
+  assert.equal(loadAutoKeepAwakePreference(storage), true);
+  saveAutoKeepAwakePreference(false, storage);
+  assert.equal(loadAutoKeepAwakePreference(storage), false);
 });
 
 test('all agents must be actively observed idle for the full settle window', () => {
@@ -305,25 +387,32 @@ test('disconnect observations do not depend on document visibility', () => {
 test('armed keep awake retains process statuses while the document is hidden', () => {
   assert.equal(shouldSubscribeProcessStatuses(true, false), true);
   assert.equal(shouldSubscribeProcessStatuses(false, true), true);
+  assert.equal(shouldSubscribeProcessStatuses(false, false, true), true);
   assert.equal(shouldSubscribeProcessStatuses(false, false), false);
 });
 
 test('control exposes resilient, truthful keep-awake status and copy', async () => {
-  const [app, control, navigation, palette, shortcuts, native] = await Promise.all(
+  const [app, control, navigation, palette, shortcuts, native, config] = await Promise.all(
     Object.values(files).map((file) => readFile(file, 'utf8'))
   );
 
   assert.match(app, /<KeepAwakeControl/);
   assert.match(app, /visible=\{documentVisible\}/);
   assert.match(app, /bind:armed=\{keepAwakeArmed\}/);
-  assert.match(app, /shouldSubscribeProcessStatuses\(documentVisible, keepAwakeArmed\)/);
+  assert.match(app, /shouldSubscribeProcessStatuses\([\s\S]*autoKeepAwakeEnabled/);
+  assert.match(app, /bind:autoEnabled=\{autoKeepAwakeEnabled\}/);
   assert.match(control, /CoffeeIcon/);
   assert.match(control, /Until all agents are idle/);
   assert.match(control, /Until a specific agent is idle/);
+  assert.match(control, /Auto keep awake while agents are running/);
+  assert.match(control, /Manual disarm pauses auto mode until fresh agent activity/);
+  assert.match(control, /Keeping Mac awake — auto/);
+  assert.match(control, /loadAutoKeepAwakePreference/);
+  assert.match(control, /saveAutoKeepAwakePreference/);
   assert.match(control, /keep_awake_start/);
   assert.match(control, /keep_awake_stop/);
   assert.match(control, /keep_awake_status/);
-  assert.doesNotMatch(control, /await invoke<NativeKeepAwakeStatus>\('keep_awake_start'\)[\s\S]*keep_awake_start/);
+  assert.equal(control.match(/invoke<NativeKeepAwakeStatus>\('keep_awake_start'\)/g)?.length, 2);
   assert.match(control, /Daemon reconnecting — still keeping Mac awake/);
   assert.match(control, /Daemon unreachable — still keeping Mac awake/);
   assert.match(control, /Keep awake assertion restored/);
@@ -344,4 +433,5 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(native, /if !inner\.armed \|\| inner\.child\.is_some\(\)/);
   assert.match(native, /KEEP_AWAKE_MAX_RETRY_DELAY/);
   assert.match(native, /respawn_count/);
+  assert.match(config, /"acceptFirstMouse": true/);
 });

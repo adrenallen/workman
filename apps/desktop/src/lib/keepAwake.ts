@@ -3,15 +3,35 @@ import type { ConnectionStatus, ProcessStatus, ProcessView } from './daemon';
 export const KEEP_AWAKE_SETTLE_MS = 60_000;
 export const KEEP_AWAKE_UNREACHABLE_MS = 10 * 60_000;
 export const KEEP_AWAKE_MAX_OBSERVATION_GAP_MS = 5_000;
+export const KEEP_AWAKE_AUTO_STORAGE_KEY = 'workman.keep-awake.auto.v1';
 
 export type KeepAwakeMode = 'all' | 'specific';
+export type KeepAwakeArmSource = 'manual' | 'auto' | null;
 
 export interface KeepAwakeMachineState {
   armed: boolean;
   mode: KeepAwakeMode;
+  armSource: KeepAwakeArmSource;
   watchedAgentIds: number[];
   idleObservedMs: number;
   lastIdleObservationAt: number | null;
+}
+
+export interface AutoKeepAwakeState {
+  activeAgentIds: number[];
+  suppressedUntilActivityEdge: boolean;
+}
+
+export interface AutoKeepAwakeEvaluation {
+  state: AutoKeepAwakeState;
+  activeAgentIds: number[];
+  activityEdge: boolean;
+  shouldArm: boolean;
+}
+
+interface KeepAwakePreferenceStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
 }
 
 export interface KeepAwakeEvaluation {
@@ -45,10 +65,41 @@ export function initialKeepAwakeState(): KeepAwakeMachineState {
   return {
     armed: false,
     mode: 'all',
+    armSource: null,
     watchedAgentIds: [],
     idleObservedMs: 0,
     lastIdleObservationAt: null
   };
+}
+
+export function initialAutoKeepAwakeState(): AutoKeepAwakeState {
+  return {
+    activeAgentIds: [],
+    suppressedUntilActivityEdge: false
+  };
+}
+
+export function loadAutoKeepAwakePreference(
+  storage: KeepAwakePreferenceStorage | null = browserStorage()
+): boolean {
+  if (!storage) return false;
+  try {
+    return JSON.parse(storage.getItem(KEEP_AWAKE_AUTO_STORAGE_KEY) ?? 'false') === true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveAutoKeepAwakePreference(
+  enabled: boolean,
+  storage: KeepAwakePreferenceStorage | null = browserStorage()
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(KEEP_AWAKE_AUTO_STORAGE_KEY, JSON.stringify(enabled));
+  } catch {
+    // Keep the current session usable if per-machine storage is unavailable or full.
+  }
 }
 
 export function initialKeepAwakeConnectionState(): KeepAwakeConnectionState {
@@ -64,16 +115,35 @@ export function runningAgents<T extends KeepAwakeAgent>(processes: T[]): T[] {
   );
 }
 
+export function activeKeepAwakeAgents<T extends KeepAwakeAgent>(processes: T[]): T[] {
+  return runningAgents(processes).filter(
+    (process) => {
+      const attention = String(process.agent_state.state);
+      return process.agent_state.needs_input
+        || process.agent_state.working
+        || process.agent_state.thinking
+        || process.agent_state.planning
+        || attention === 'needs_input'
+        || attention === 'working'
+        || attention === 'waiting'
+        // Preserve PR #15's protection for a just-launched agent before its first status sample.
+        || (process.status === 'starting' && process.agent_state.last_output_at == null);
+    }
+  );
+}
+
 export function shouldSubscribeProcessStatuses(
   documentVisible: boolean,
-  keepAwakeArmed: boolean
+  keepAwakeArmed: boolean,
+  autoKeepAwakeEnabled = false
 ): boolean {
-  return documentVisible || keepAwakeArmed;
+  return documentVisible || keepAwakeArmed || autoKeepAwakeEnabled;
 }
 
 export function armKeepAwake(
   mode: KeepAwakeMode,
-  specificAgentId: number | null
+  specificAgentId: number | null,
+  armSource: Exclude<KeepAwakeArmSource, null> = 'manual'
 ): KeepAwakeMachineState {
   const watchedAgentIds = mode === 'specific'
     ? specificAgentId === null ? [] : [specificAgentId]
@@ -82,6 +152,7 @@ export function armKeepAwake(
   return {
     armed: true,
     mode,
+    armSource,
     watchedAgentIds,
     idleObservedMs: 0,
     lastIdleObservationAt: null
@@ -98,10 +169,56 @@ export function disarmKeepAwake(state: KeepAwakeMachineState): KeepAwakeMachineS
   return {
     ...state,
     armed: false,
+    armSource: null,
     watchedAgentIds: [],
     idleObservedMs: 0,
     lastIdleObservationAt: null
   };
+}
+
+/**
+ * Coordinate the persistent auto preference with the existing arm/release machine.
+ * A manual disarm records the currently active ids and suppresses re-arming until
+ * any agent has a fresh inactive-to-active edge. Other already-active agents do
+ * not cause a render-loop re-arm.
+ */
+export function evaluateAutoKeepAwake(
+  state: AutoKeepAwakeState,
+  processes: KeepAwakeAgent[],
+  enabled: boolean
+): AutoKeepAwakeEvaluation {
+  const activeAgentIds = activeKeepAwakeAgents(processes)
+    .map((process) => process.id)
+    .sort((left, right) => left - right);
+  const previous = new Set(state.activeAgentIds);
+  const activityEdge = activeAgentIds.some((id) => !previous.has(id));
+  const suppressedUntilActivityEdge = enabled
+    ? state.suppressedUntilActivityEdge && !activityEdge
+    : false;
+  const nextState = sameIds(state.activeAgentIds, activeAgentIds)
+    && state.suppressedUntilActivityEdge === suppressedUntilActivityEdge
+    ? state
+    : { activeAgentIds, suppressedUntilActivityEdge };
+
+  return {
+    state: nextState,
+    activeAgentIds,
+    activityEdge,
+    shouldArm: enabled && activeAgentIds.length > 0 && !suppressedUntilActivityEdge
+  };
+}
+
+export function suppressAutoKeepAwake(
+  state: AutoKeepAwakeState,
+  processes: KeepAwakeAgent[]
+): AutoKeepAwakeState {
+  const activeAgentIds = activeKeepAwakeAgents(processes)
+    .map((process) => process.id)
+    .sort((left, right) => left - right);
+  if (sameIds(state.activeAgentIds, activeAgentIds) && state.suppressedUntilActivityEdge) {
+    return state;
+  }
+  return { activeAgentIds, suppressedUntilActivityEdge: true };
 }
 
 export function evaluateKeepAwake(
@@ -238,4 +355,12 @@ function resetConnectionObservation(
 ): KeepAwakeConnectionState {
   if (state.disconnectedObservedMs === 0 && state.lastObservationAt === null) return state;
   return initialKeepAwakeConnectionState();
+}
+
+function sameIds(left: number[], right: number[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+function browserStorage(): KeepAwakePreferenceStorage | null {
+  return typeof localStorage === 'undefined' ? null : localStorage;
 }

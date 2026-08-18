@@ -196,8 +196,12 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(palette, /Select a running agent first/);
   assert.match(palette, /<Command\.Input[\s\S]*autofocus/);
   assert.match(palette, /aria-activedescendant=\{activePrompt \? `quick-prompt-option-\$\{activePrompt\.id\}` : undefined\}/);
+  assert.match(palette, /data-selected=\{index === selectedIndex \? '' : undefined\}/);
+  assert.match(palette, /aria-selected=\{index === selectedIndex\}/);
   assert.match(palette, /vimBindings=\{false\}/);
-  assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(palette, /bind:ref=\{promptList\}/);
+  assert.match(palette, /querySelector<HTMLElement>[\s\S]*scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(palette, /\.quick-prompt-option\[data-selected\][\s\S]*background: var\(--accent\)[\s\S]*box-shadow: inset 3px 0 var\(--ring\)/);
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /\{sendChord\} · insert and send/);

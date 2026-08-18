@@ -594,16 +594,32 @@
     if (request > 0) editorFocusRequest += 1;
   });
 
+  $effect(() => {
+    const activeId = activeOutlineId;
+    if (activeId === null) return;
+    queueMicrotask(() => {
+      const list = document.querySelector<HTMLElement>('[data-scratchpad-outline="desktop"]');
+      const active = [...(list?.querySelectorAll<HTMLElement>('[data-outline-id]') ?? [])]
+        .find((item) => item.dataset.outlineId === activeId);
+      active?.scrollIntoView({ block: 'nearest' });
+    });
+  });
+
   $effect(() => () => clearSaveTimer());
 </script>
 
 {#snippet outlineList(closeAfterSelect: boolean)}
-  <nav class="outline-list" aria-label="On this page">
+  <nav
+    class="outline-list"
+    aria-label="On this page"
+    data-scratchpad-outline={closeAfterSelect ? 'mobile' : 'desktop'}
+  >
     {#each outline as item (item.id)}
       <button
         type="button"
         class:active={activeOutlineId === item.id}
         class:level-three={item.level === 3}
+        data-outline-id={item.id}
         aria-current={activeOutlineId === item.id ? 'location' : undefined}
         onclick={() => selectOutline(item, closeAfterSelect)}
       >
@@ -738,14 +754,16 @@
           <h2>On this page</h2>
           {@render outlineList(false)}
         </div>
-        <Collapsible.Root bind:open={commentsOpen}>
-          <Collapsible.Trigger class="comments-trigger">
-            <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
-            <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
-            <ChevronDownIcon class={commentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
-          </Collapsible.Trigger>
-          <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
-        </Collapsible.Root>
+        <div class="comments-section">
+          <Collapsible.Root bind:open={commentsOpen}>
+            <Collapsible.Trigger class="comments-trigger">
+              <span><MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />Comments</span>
+              <CountBadge value={read.unresolved_comment_count} title={`${read.unresolved_comment_count} unresolved scratchpad comments`} />
+              <ChevronDownIcon class={commentsOpen ? 'open' : ''} size={14} strokeWidth={1.8} aria-hidden="true" />
+            </Collapsible.Trigger>
+            <Collapsible.Content><div class="comments-panel">{@render commentsPanelContent()}</div></Collapsible.Content>
+          </Collapsible.Root>
+        </div>
       </section>
     {/snippet}
 
@@ -899,10 +917,12 @@
   .recovery-banner { border-color: var(--border); background: var(--card); color: var(--muted-foreground); }
   .recovery-banner span { min-width: 0; flex: 1; }
   .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
-  .outline-rail { position: sticky; top: 18px; display: grid; gap: 16px; }
+  .outline-rail { position: sticky; top: 18px; display: grid; max-height: calc(100vh - 36px); min-height: 0; grid-template-rows: minmax(112px, 1fr) auto; gap: 16px; overflow: hidden; }
+  .outline-section { display: grid; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
   .outline-section > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
   .outline-section h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
   .outline-list { display: grid; gap: 2px; }
+  .outline-list[data-scratchpad-outline='desktop'] { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .outline-list button { width: 100%; min-height: 28px; overflow: hidden; border: 0; border-left: 2px solid var(--border); border-radius: 0 var(--radius) var(--radius) 0; padding: 4px 7px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .outline-list button.level-three { padding-left: 17px; }
   .outline-list button:hover { background: var(--card); color: var(--text-soft); }
@@ -913,7 +933,11 @@
   :global(.comments-trigger > span) { display: inline-flex; align-items: center; gap: 6px; font-size: var(--font-size-sm); font-weight: 650; }
   :global(.comments-trigger > svg) { color: var(--muted-foreground); transition: transform 150ms ease; }
   :global(.comments-trigger > svg.open) { transform: rotate(180deg); }
-  .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); }
+  .comments-section { min-height: 0; overflow: hidden; }
+  .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); scrollbar-gutter: stable; }
+  .outline-list[data-scratchpad-outline='desktop'], .comments-panel { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .outline-list[data-scratchpad-outline='desktop']::-webkit-scrollbar, .comments-panel::-webkit-scrollbar { width: 6px; }
+  .outline-list[data-scratchpad-outline='desktop']::-webkit-scrollbar-thumb, .comments-panel::-webkit-scrollbar-thumb { border-radius: var(--radius); background: var(--border-strong); }
   .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
   .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
