@@ -29,7 +29,24 @@ use super::{
     SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp, ensure_actor, failure,
     process_project_id, scoped_project, success,
 };
-use crate::ProcessRegistry;
+use crate::{
+    ProcessRegistry,
+    process_registry::{StagedAgentAttachments, stage_agent_attachments},
+};
+
+const WORKMAN_ATTACHMENT_SOURCE_DIRECTORIES: &[&str] = &[
+    "agent-attachments",
+    "terminal-clipboard",
+    "draft-attachments",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttachmentSourceScope {
+    /// Authenticated desktop/CLI control paths originate from an explicit local user gesture.
+    DesktopControl,
+    /// MCP paths must stay inside the caller's project or Workman's managed image directories.
+    McpProject,
+}
 
 const WORKMAN_MCP_URL_ENV: &str = "WORKMAN_MCP_URL";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
@@ -536,6 +553,7 @@ impl WorkmanMcp {
                     None,
                     None,
                     Vec::new(),
+                    AttachmentSourceScope::McpProject,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
                     spawned_by_process_id,
@@ -580,6 +598,7 @@ impl WorkmanMcp {
             args.model,
             args.initial_prompt,
             args.attachments,
+            AttachmentSourceScope::McpProject,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
             spawned_by_process_id,
@@ -1024,6 +1043,7 @@ pub(crate) async fn spawn_registered_agent(
     model: Option<String>,
     initial_prompt: Option<String>,
     attachments: Vec<String>,
+    attachment_source_scope: AttachmentSourceScope,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
@@ -1040,7 +1060,39 @@ pub(crate) async fn spawn_registered_agent(
             initial_prompt,
         )?
     };
-    let result = spawn_registered_agent_for(
+    let mut staged_attachments = if attachments.is_empty() {
+        None
+    } else {
+        let root = registry
+            .lock()
+            .await
+            .agent_attachment_root()
+            .map_err(|error| format!("could not prepare agent attachment storage: {error}"))?;
+        let allowed_roots = match attachment_source_scope {
+            AttachmentSourceScope::DesktopControl => None,
+            AttachmentSourceScope::McpProject => {
+                let data_dir = root.parent().ok_or_else(|| {
+                    "could not resolve Workman attachment source directories".to_owned()
+                })?;
+                let mut roots = vec![PathBuf::from(&project.path)];
+                roots.extend(
+                    WORKMAN_ATTACHMENT_SOURCE_DIRECTORIES
+                        .iter()
+                        .map(|directory| data_dir.join(directory)),
+                );
+                Some(roots)
+            }
+        };
+        Some(
+            tokio::task::spawn_blocking(move || {
+                stage_agent_attachments(root, attachments, allowed_roots)
+            })
+            .await
+            .map_err(|error| format!("agent attachment staging task failed: {error}"))?
+            .map_err(|error| format!("could not stage agent attachments: {error}"))?,
+        )
+    };
+    let result = match spawn_registered_agent_for(
         registry.clone(),
         project,
         resolved.agent_tool_id,
@@ -1052,20 +1104,40 @@ pub(crate) async fn spawn_registered_agent(
         spawned_by_process_id,
         AgentLaunchPurpose::Normal,
     )
-    .await?;
-    let saved_attachments = if attachments.is_empty() {
-        Vec::new()
-    } else {
-        let saved = registry
-            .lock()
-            .await
-            .save_agent_attachments(result.process_id, &attachments)
-            .map_err(|error| format!("could not save agent attachments: {error}"));
-        match saved {
-            Ok(saved) => saved,
-            Err(error) => {
-                let _ = registry.lock().await.close(result.process_id);
-                return Err(error);
+    .await
+    {
+        Ok(result) => result,
+        Err(mut error) => {
+            if let Some(staged) = staged_attachments.take()
+                && let Err(cleanup_error) = cleanup_staged_attachments(staged).await
+            {
+                error = format!("{error}; staged attachment cleanup also failed: {cleanup_error}");
+            }
+            return Err(error);
+        }
+    };
+    let saved_attachments = match staged_attachments.take() {
+        None => Vec::new(),
+        Some(staged) => {
+            let process_id = result.process_id;
+            match tokio::task::spawn_blocking(move || staged.promote(process_id)).await {
+                Ok(Ok(saved)) => saved,
+                Ok(Err(error)) => {
+                    return Err(close_spawn_after_failure(
+                        &registry,
+                        result.process_id,
+                        format!("could not publish agent attachments: {error}"),
+                    )
+                    .await);
+                }
+                Err(error) => {
+                    return Err(close_spawn_after_failure(
+                        &registry,
+                        result.process_id,
+                        format!("agent attachment publish task failed: {error}"),
+                    )
+                    .await);
+                }
             }
         }
     };
@@ -1077,8 +1149,7 @@ pub(crate) async fn spawn_registered_agent(
     let initial_prompt = match initial_prompt {
         Ok(prompt) => prompt,
         Err(error) => {
-            let _ = registry.lock().await.close(result.process_id);
-            return Err(error);
+            return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
         }
     };
     if let Some(prompt) = initial_prompt {
@@ -1090,6 +1161,26 @@ pub(crate) async fn spawn_registered_agent(
         );
     }
     Ok(result)
+}
+
+async fn cleanup_staged_attachments(staged: StagedAgentAttachments) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || staged.cleanup())
+        .await
+        .map_err(|error| format!("attachment cleanup task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn close_spawn_after_failure(
+    registry: &crate::SharedProcessRegistry,
+    process_id: ProcessId,
+    error: String,
+) -> String {
+    match registry.lock().await.close(process_id) {
+        Ok(_) => error,
+        Err(close_error) => {
+            format!("{error}; closing spawned agent {process_id} also failed: {close_error}")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

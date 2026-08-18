@@ -612,6 +612,7 @@ async fn dispatch(
                 params.model,
                 params.prompt,
                 params.attachments,
+                crate::mcp::agent_spawning::AttachmentSourceScope::DesktopControl,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,

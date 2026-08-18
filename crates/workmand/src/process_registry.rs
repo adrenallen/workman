@@ -4,8 +4,8 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
-    fs::{self, File},
-    io::{self, Read, Seek, SeekFrom},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -89,6 +89,9 @@ pub enum RegistryError {
         process_id: ProcessId,
         message: String,
     },
+    AttachmentStorage {
+        message: String,
+    },
 }
 
 impl RegistryError {
@@ -107,6 +110,7 @@ impl RegistryError {
             Self::InvalidName => "invalid_process_name",
             Self::Pty { .. } => "pty_error",
             Self::OutputPersistence { .. } => "output_persistence_error",
+            Self::AttachmentStorage { .. } => "attachment_storage_error",
         }
     }
 }
@@ -153,6 +157,9 @@ impl fmt::Display for RegistryError {
                 formatter,
                 "output persistence for process {process_id} failed: {message}"
             ),
+            Self::AttachmentStorage { message } => {
+                write!(formatter, "agent attachment storage failed: {message}")
+            }
         }
     }
 }
@@ -623,6 +630,11 @@ impl ProcessRegistry {
         };
         registry.reconcile_stale_processes()?;
         registry.reload_persisted_outputs()?;
+        registry
+            .sweep_orphaned_agent_attachments()
+            .map_err(|error| RegistryError::AttachmentStorage {
+                message: error.to_string(),
+            })?;
         Ok(registry)
     }
 
@@ -650,46 +662,11 @@ impl ProcessRegistry {
         &self.user_environment
     }
 
-    /// Copy user-selected image files into daemon-owned storage before their paths enter a prompt.
-    pub(crate) fn save_agent_attachments(
-        &self,
-        process_id: ProcessId,
-        sources: &[String],
-    ) -> io::Result<Vec<PathBuf>> {
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        if sources.len() > MAX_AGENT_ATTACHMENTS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("at most {MAX_AGENT_ATTACHMENTS} image attachments are allowed"),
-            ));
-        }
-        let root = self
-            .agent_attachments_directory
+    pub(crate) fn agent_attachment_root(&self) -> io::Result<PathBuf> {
+        self.agent_attachments_directory
             .as_ref()
-            .ok_or_else(|| io::Error::other("agent attachment storage is unavailable"))?;
-        fs::create_dir_all(root)?;
-        let root_metadata = fs::symlink_metadata(root)?;
-        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-            return Err(io::Error::other(format!(
-                "agent attachment root is not a private directory: {}",
-                root.display()
-            )));
-        }
-        set_private_directory_permissions(root)?;
-        let destination = root.join(process_id.to_string());
-        fs::create_dir(&destination)?;
-        set_private_directory_permissions(&destination)?;
-        let copied = sources
-            .iter()
-            .enumerate()
-            .map(|(index, source)| copy_agent_attachment(source, &destination, index + 1))
-            .collect::<io::Result<Vec<_>>>();
-        if copied.is_err() {
-            let _ = fs::remove_dir_all(&destination);
-        }
-        copied
+            .cloned()
+            .ok_or_else(|| io::Error::other("agent attachment storage is unavailable"))
     }
 
     /// Insert a new stopped process. An ID <= 0 is replaced with the next database ID.
@@ -2203,6 +2180,48 @@ impl ProcessRegistry {
         }
     }
 
+    fn sweep_orphaned_agent_attachments(&self) -> io::Result<()> {
+        let Some(root) = &self.agent_attachments_directory else {
+            return Ok(());
+        };
+        let metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::other(format!(
+                "agent attachment root is not a private directory: {}",
+                root.display()
+            )));
+        }
+        let live_processes = self
+            .store
+            .list_processes(None)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .into_iter()
+            .map(|process| process.id)
+            .collect::<HashSet<_>>();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let process_id = entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<ProcessId>()
+                .ok();
+            if process_id.is_some_and(|process_id| live_processes.contains(&process_id)) {
+                continue;
+            }
+            if file_type.is_dir() {
+                fs::remove_dir_all(entry.path())?;
+            } else if file_type.is_symlink() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
     fn require(&self, process_id: ProcessId) -> RegistryResult<Process> {
         self.store
             .get_process(process_id)?
@@ -2255,21 +2274,154 @@ impl ProcessRegistry {
     }
 }
 
-fn copy_agent_attachment(source: &str, destination: &Path, index: usize) -> io::Result<PathBuf> {
+pub(crate) struct StagedAgentAttachments {
+    root: PathBuf,
+    directory: Option<PathBuf>,
+    file_names: Vec<std::ffi::OsString>,
+}
+
+impl StagedAgentAttachments {
+    pub(crate) fn promote(mut self, process_id: ProcessId) -> io::Result<Vec<PathBuf>> {
+        let directory = self
+            .directory
+            .take()
+            .ok_or_else(|| io::Error::other("attachment staging directory is unavailable"))?;
+        let destination = self.root.join(process_id.to_string());
+        if let Err(error) = fs::rename(&directory, &destination) {
+            let _ = fs::remove_dir_all(directory);
+            return Err(error);
+        }
+        Ok(std::mem::take(&mut self.file_names)
+            .into_iter()
+            .map(|name| destination.join(name))
+            .collect())
+    }
+
+    pub(crate) fn cleanup(mut self) -> io::Result<()> {
+        let Some(directory) = self.directory.take() else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for StagedAgentAttachments {
+    fn drop(&mut self) {
+        if let Some(directory) = self.directory.take() {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+}
+
+/// Stage bounded copies before an agent exists. MCP callers pass canonical scope roots; desktop
+/// control callers pass `None` because their paths come from an explicit local user gesture.
+pub(crate) fn stage_agent_attachments(
+    root: PathBuf,
+    sources: Vec<String>,
+    allowed_roots: Option<Vec<PathBuf>>,
+) -> io::Result<StagedAgentAttachments> {
+    if sources.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one attachment is required",
+        ));
+    }
+    if sources.len() > MAX_AGENT_ATTACHMENTS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("at most {MAX_AGENT_ATTACHMENTS} image attachments are allowed"),
+        ));
+    }
+    fs::create_dir_all(&root)?;
+    let root_metadata = fs::symlink_metadata(&root)?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "agent attachment root is not a private directory: {}",
+            root.display()
+        )));
+    }
+    set_private_directory_permissions(&root)?;
+    let allowed_roots = allowed_roots.map(canonical_attachment_roots).transpose()?;
+    let directory = root.join(format!(".staged-{}", Uuid::new_v4().simple()));
+    fs::create_dir(&directory)?;
+    set_private_directory_permissions(&directory)?;
+    let copied = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            copy_agent_attachment(source, &directory, index + 1, allowed_roots.as_deref())
+        })
+        .collect::<io::Result<Vec<_>>>();
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(error);
+        }
+    };
+    Ok(StagedAgentAttachments {
+        root,
+        directory: Some(directory),
+        file_names: copied
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("copied attachment path has a generated file name")
+                    .to_os_string()
+            })
+            .collect(),
+    })
+}
+
+fn canonical_attachment_roots(roots: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
+    let mut canonical = Vec::new();
+    for root in roots {
+        match fs::canonicalize(root) {
+            Ok(root) => canonical.push(root),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(canonical)
+}
+
+fn copy_agent_attachment(
+    source: &str,
+    destination: &Path,
+    index: usize,
+    allowed_roots: Option<&[PathBuf]>,
+) -> io::Result<PathBuf> {
     if source.len() > 4_096 || source.chars().any(char::is_control) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "attachment path is invalid",
         ));
     }
-    let source = Path::new(source);
-    if !source.is_absolute() {
+    let requested_source = Path::new(source);
+    if !requested_source.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "attachment paths must be absolute",
         ));
     }
-    let metadata = fs::metadata(source)?;
+    let source = fs::canonicalize(requested_source)?;
+    if let Some(allowed_roots) = allowed_roots
+        && !allowed_roots.iter().any(|root| source.starts_with(root))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "MCP attachment is outside the caller project and Workman attachment directories: {}",
+                requested_source.display()
+            ),
+        ));
+    }
+    let mut input = File::open(&source)?;
+    let metadata = input.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2286,26 +2438,79 @@ fn copy_agent_attachment(source: &str, destination: &Path, index: usize) -> io::
             ),
         ));
     }
-    let extension = source
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .filter(|extension| {
-            matches!(
-                extension.as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
-            )
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("attachment is not a supported image: {}", source.display()),
-            )
-        })?;
+    let mut header = [0_u8; 16];
+    let header_len = input.read(&mut header)?;
+    let extension = sniff_agent_attachment(&header[..header_len]).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "attachment content is not PNG, JPEG, GIF, WebP, BMP, or TIFF (HEIC is not supported): {}",
+                source.display()
+            ),
+        )
+    })?;
+    input.seek(SeekFrom::Start(0))?;
     let target = destination.join(format!("{index:02}.{extension}"));
-    fs::copy(source, &target)?;
-    set_private_file_permissions(&target)?;
+    let mut output = create_private_attachment_file(&target)?;
+    let copied = match io::copy(
+        &mut Read::by_ref(&mut input).take(MAX_AGENT_ATTACHMENT_BYTES + 1),
+        &mut output,
+    ) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = fs::remove_file(&target);
+            return Err(error);
+        }
+    };
+    if copied == 0 || copied > MAX_AGENT_ATTACHMENT_BYTES {
+        let _ = fs::remove_file(&target);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "attachment must be between 1 byte and {} MiB: {}",
+                MAX_AGENT_ATTACHMENT_BYTES / 1024 / 1024,
+                source.display()
+            ),
+        ));
+    }
+    if let Err(error) = output.flush().and_then(|_| output.sync_all()) {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
     Ok(target)
+}
+
+fn sniff_agent_attachment(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if header.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        Some("webp")
+    } else if header.starts_with(b"BM") {
+        Some("bmp")
+    } else if header.starts_with(b"II*\0") || header.starts_with(b"MM\0*") {
+        Some("tiff")
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn create_private_attachment_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_attachment_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 #[cfg(unix)]
@@ -2316,17 +2521,6 @@ fn set_private_directory_permissions(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_directory_permissions(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -2704,8 +2898,9 @@ mod tests {
     #[test]
     fn agent_attachments_are_copied_privately_and_removed_with_process() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("clipboard image.png");
-        fs::write(&source, b"not-a-real-png-but-bounded-fixture").unwrap();
+        let source = temp.path().join("clipboard image.not-png");
+        let fixture = b"\x89PNG\r\n\x1a\nbounded-fixture";
+        fs::write(&source, fixture).unwrap();
         let store = Store::open_in_memory().unwrap();
         store
             .put_project(&Project {
@@ -2729,11 +2924,15 @@ mod tests {
         process.command = Some("true".into());
         registry.create(process).unwrap();
 
-        let saved = registry
-            .save_agent_attachments(31, &[source.to_string_lossy().into_owned()])
-            .unwrap();
+        let staged = stage_agent_attachments(
+            registry.agent_attachment_root().unwrap(),
+            vec![source.to_string_lossy().into_owned()],
+            None,
+        )
+        .unwrap();
+        let saved = staged.promote(31).unwrap();
         assert_eq!(saved, vec![temp.path().join("agent-attachments/31/01.png")]);
-        assert_eq!(fs::read(&saved[0]).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(fs::read(&saved[0]).unwrap(), fixture);
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(&saved[0]).unwrap().permissions().mode() & 0o777,
@@ -2742,6 +2941,105 @@ mod tests {
 
         registry.close(31).unwrap();
         assert!(!temp.path().join("agent-attachments/31").exists());
+    }
+
+    #[test]
+    fn agent_attachment_magic_bytes_determine_the_stored_extension() {
+        assert_eq!(
+            sniff_agent_attachment(b"\x89PNG\r\n\x1a\nrest"),
+            Some("png")
+        );
+        assert_eq!(sniff_agent_attachment(b"\xff\xd8\xffrest"), Some("jpg"));
+        assert_eq!(sniff_agent_attachment(b"GIF87arest"), Some("gif"));
+        assert_eq!(sniff_agent_attachment(b"GIF89arest"), Some("gif"));
+        assert_eq!(sniff_agent_attachment(b"RIFF0000WEBPrest"), Some("webp"));
+        assert_eq!(sniff_agent_attachment(b"BMrest"), Some("bmp"));
+        assert_eq!(sniff_agent_attachment(b"II*\0rest"), Some("tiff"));
+        assert_eq!(sniff_agent_attachment(b"MM\0*rest"), Some("tiff"));
+        assert_eq!(sniff_agent_attachment(b"\0\0\0\x18ftypheic"), None);
+        assert_eq!(sniff_agent_attachment(b"plain text"), None);
+    }
+
+    #[test]
+    fn agent_attachment_staging_rejects_unsupported_content_and_cleans_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("agent-attachments");
+        let source = temp.path().join("disguised.png");
+        fs::write(&source, b"\0\0\0\x18ftypheic").unwrap();
+
+        let error = stage_agent_attachments(
+            root.clone(),
+            vec![source.to_string_lossy().into_owned()],
+            None,
+        )
+        .err()
+        .expect("HEIC content should be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("HEIC is not supported"));
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn mcp_attachment_staging_is_limited_to_the_project_or_managed_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let outside = temp.path().join("outside");
+        let root = temp.path().join("agent-attachments");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let inside_source = project.join("inside.bin");
+        let outside_source = outside.join("outside.bin");
+        let fixture = b"\x89PNG\r\n\x1a\nfixture";
+        fs::write(&inside_source, fixture).unwrap();
+        fs::write(&outside_source, fixture).unwrap();
+
+        let staged = stage_agent_attachments(
+            root.clone(),
+            vec![inside_source.to_string_lossy().into_owned()],
+            Some(vec![project.clone()]),
+        )
+        .unwrap();
+        drop(staged);
+
+        let error = stage_agent_attachments(
+            root,
+            vec![outside_source.to_string_lossy().into_owned()],
+            Some(vec![project]),
+        )
+        .err()
+        .expect("out-of-scope MCP attachment should be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("outside the caller project"));
+    }
+
+    #[test]
+    fn registry_start_sweeps_orphaned_and_staged_agent_attachment_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join(OUTPUT_DIRECTORY);
+        let attachment_root = temp.path().join("agent-attachments");
+        fs::create_dir_all(attachment_root.join("31")).unwrap();
+        fs::create_dir_all(attachment_root.join("999")).unwrap();
+        fs::create_dir_all(attachment_root.join(".staged-abandoned")).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "attachment-sweep".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        store
+            .put_process(&output_test_process(temp.path().to_str().unwrap()))
+            .unwrap();
+
+        let _registry = ProcessRegistry::with_output_persistence(store, output, 1024).unwrap();
+        assert!(attachment_root.join("31").is_dir());
+        assert!(!attachment_root.join("999").exists());
+        assert!(!attachment_root.join(".staged-abandoned").exists());
     }
 
     #[test]
