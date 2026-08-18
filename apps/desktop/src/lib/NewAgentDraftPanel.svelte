@@ -1,12 +1,19 @@
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import FileImageIcon from '@lucide/svelte/icons/file-image';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
-  import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+  import { invoke, isTauri } from '@tauri-apps/api/core';
   import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
   import { onDestroy, onMount } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
+  import {
+    attachmentName,
+    attachImagePaths as selectAttachmentPaths,
+    handleNativePromptDrop as resolveNativePromptDrop,
+    maxAgentDraftAttachments
+  } from './agentAttachmentDrafts.ts';
   import { resolveAgentDraftChoice } from './agentDraftChoices';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
@@ -18,12 +25,17 @@
   } from './agentTemplates';
   import type { AgentCreationDraft } from './creationDrafts';
   import { Button } from './components/ui/button';
+  import IconButton from './components/ds/IconButton.svelte';
   import * as Collapsible from './components/ui/collapsible';
   import { Input } from './components/ui/input';
   import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
   import { primaryModifier, primaryModifierLabel } from './primaryModifier';
-  import { pointIsInsideRect } from './terminalInput';
+
+  interface AttachmentImageRead {
+    bytes: number[];
+    mime_type: string;
+  }
 
   interface AgentDraftSubmission {
     input: SpawnAgentInput;
@@ -74,6 +86,7 @@
   let attachmentSaving = $state(false);
   let attachmentDropActive = $state(false);
   let attachmentPreviews = $state<Record<string, string>>({});
+  let failedAttachmentPreviews = $state<Record<string, true>>({});
   let removeNativeDropListener: (() => void) | null = null;
   let destroyed = false;
 
@@ -196,10 +209,14 @@
   }
 
   async function attachImages(files: File[]): Promise<void> {
-    const available = Math.max(0, 8 - draft.attachments.length);
+    if (attachmentSaving) {
+      onError('Image attachments are already being saved.');
+      return;
+    }
+    const available = Math.max(0, maxAgentDraftAttachments - draft.attachments.length);
     const images = files.filter((file) => file.type.startsWith('image/')).slice(0, available);
     if (images.length === 0) {
-      if (available === 0) onError('A new-agent draft can have at most 8 image attachments.');
+      if (available === 0) onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
       return;
     }
     attachmentSaving = true;
@@ -208,20 +225,68 @@
     try {
       for (const image of images) {
         const bytes = Array.from(new Uint8Array(await image.arrayBuffer()));
-        const path = await invoke<string>('terminal_save_clipboard_image', {
+        const path = await invoke<string>('terminal_save_draft_image', {
           bytes,
           mimeType: image.type
         });
         paths.push(path);
         previews[path] = URL.createObjectURL(image);
       }
-      attachmentPreviews = { ...attachmentPreviews, ...previews };
-      onChange({ attachments: [...draft.attachments, ...paths] });
+      commitAttachmentPaths(paths, previews);
     } catch (cause) {
       for (const preview of Object.values(previews)) URL.revokeObjectURL(preview);
       onError(`Could not attach image: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
       attachmentSaving = false;
+    }
+  }
+
+  async function importAttachmentPaths(paths: string[]): Promise<void> {
+    if (attachmentSaving) {
+      onError('Image attachments are already being saved.');
+      return;
+    }
+    const selection = selectAttachmentPaths(draft.attachments, paths);
+    if (selection.added.length === 0) {
+      if (selection.capReached) {
+        onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
+      }
+      return;
+    }
+    attachmentSaving = true;
+    const imported: string[] = [];
+    try {
+      for (const path of selection.added) {
+        imported.push(await invoke<string>('terminal_import_draft_image', { path }));
+      }
+      commitAttachmentPaths(imported);
+      await loadAttachmentPreviews(imported, false);
+    } catch (cause) {
+      onError(`Could not attach image: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      attachmentSaving = false;
+    }
+  }
+
+  function commitAttachmentPaths(
+    paths: string[],
+    previews: Record<string, string> = {}
+  ): void {
+    const current = draft.attachments;
+    const available = Math.max(0, maxAgentDraftAttachments - current.length);
+    const existing = new Set(current);
+    const committed = paths.filter((path) => !existing.has(path)).slice(0, available);
+    const committedSet = new Set(committed);
+    for (const [path, preview] of Object.entries(previews)) {
+      if (!committedSet.has(path)) URL.revokeObjectURL(preview);
+    }
+    attachmentPreviews = {
+      ...attachmentPreviews,
+      ...Object.fromEntries(Object.entries(previews).filter(([path]) => committedSet.has(path)))
+    };
+    if (committed.length > 0) onChange({ attachments: [...current, ...committed] });
+    if (committed.length < paths.length) {
+      onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
     }
   }
 
@@ -245,37 +310,19 @@
     void attachImages(files);
   }
 
-  function attachImagePaths(paths: string[]): void {
-    const available = Math.max(0, 8 - draft.attachments.length);
-    const existing = new Set(draft.attachments);
-    const images = paths
-      .filter((path) => /\.(?:png|jpe?g|gif|webp|bmp|tiff?)$/iu.test(path))
-      .filter((path) => !existing.has(path))
-      .slice(0, available);
-    if (images.length === 0) {
-      if (available === 0) onError('A new-agent draft can have at most 8 image attachments.');
-      return;
-    }
-    onChange({ attachments: [...draft.attachments, ...images] });
-  }
-
   function handleNativePromptDrop(payload: DragDropEvent): void {
-    if (payload.type === 'leave') {
-      attachmentDropActive = false;
-      return;
-    }
-    if (!promptField) return;
-    const inside = pointIsInsideRect(
-      payload.position,
-      promptField.getBoundingClientRect(),
-      window.devicePixelRatio
+    const result = resolveNativePromptDrop(
+      payload,
+      promptField?.getBoundingClientRect() ?? null,
+      window.devicePixelRatio,
+      draft.attachments
     );
-    if (payload.type === 'enter' || payload.type === 'over') {
-      attachmentDropActive = inside;
-      return;
+    attachmentDropActive = result.dropActive;
+    if (result.selection?.added.length) {
+      void importAttachmentPaths(result.selection.added);
+    } else if (result.selection?.capReached) {
+      onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
     }
-    attachmentDropActive = false;
-    if (inside) attachImagePaths(payload.paths);
   }
 
   function removeAttachment(path: string): void {
@@ -283,19 +330,51 @@
     if (preview) URL.revokeObjectURL(preview);
     const { [path]: _, ...remainingPreviews } = attachmentPreviews;
     attachmentPreviews = remainingPreviews;
+    const { [path]: __, ...remainingFailures } = failedAttachmentPreviews;
+    failedAttachmentPreviews = remainingFailures;
     onChange({ attachments: draft.attachments.filter((candidate) => candidate !== path) });
   }
 
-  function attachmentName(path: string): string {
-    return path.split('/').at(-1) || 'image';
+  function attachmentPreview(path: string): string {
+    return failedAttachmentPreviews[path] ? '' : attachmentPreviews[path] ?? '';
   }
 
-  function attachmentPreview(path: string): string {
-    return attachmentPreviews[path] ?? (isTauri() ? convertFileSrc(path) : '');
+  function handleAttachmentPreviewError(path: string): void {
+    const preview = attachmentPreviews[path];
+    if (preview) URL.revokeObjectURL(preview);
+    failedAttachmentPreviews = { ...failedAttachmentPreviews, [path]: true };
+  }
+
+  async function loadAttachmentPreviews(paths: string[], dropDead: boolean): Promise<void> {
+    if (!isTauri()) return;
+    const loaded: Record<string, string> = {};
+    const dead: string[] = [];
+    for (const path of paths) {
+      if (attachmentPreviews[path]) continue;
+      try {
+        const image = await invoke<AttachmentImageRead>('terminal_read_attachment_image', { path });
+        const preview = URL.createObjectURL(new Blob(
+          [new Uint8Array(image.bytes)],
+          { type: image.mime_type }
+        ));
+        if (destroyed) URL.revokeObjectURL(preview);
+        else loaded[path] = preview;
+      } catch {
+        if (dropDead) dead.push(path);
+      }
+    }
+    if (destroyed) return;
+    attachmentPreviews = { ...attachmentPreviews, ...loaded };
+    if (dead.length > 0) {
+      const deadSet = new Set(dead);
+      onChange({ attachments: draft.attachments.filter((path) => !deadSet.has(path)) });
+      onError(`Removed ${dead.length} missing or unreadable image attachment${dead.length === 1 ? '' : 's'} from this draft.`);
+    }
   }
 
   onMount(() => {
     if (!isTauri()) return;
+    void loadAttachmentPreviews([...draft.attachments], true);
     void getCurrentWebview()
       .onDragDropEvent((event) => handleNativePromptDrop(event.payload))
       .then((unlisten) => {
@@ -421,19 +500,26 @@
         onpaste={handlePromptPaste}
       />
       {#if draft.attachments.length > 0}
-        <div class="attachment-list" aria-label="Attached images">
+        <div class="attachment-list" role="group" aria-label="Attached images">
           {#each draft.attachments as attachment, index (attachment)}
             <div class="attachment-chip">
               {#if attachmentPreview(attachment)}
-                <img src={attachmentPreview(attachment)} alt="" />
+                <img
+                  src={attachmentPreview(attachment)}
+                  alt=""
+                  onerror={() => handleAttachmentPreviewError(attachment)}
+                />
+              {:else}
+                <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
               {/if}
               <span>{attachmentName(attachment)}</span>
-              <button
-                type="button"
-                aria-label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
+              <IconButton
+                class="size-6 rounded-sm"
+                label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
+                tooltip={false}
                 disabled={busy || attachmentSaving}
                 onclick={() => removeAttachment(attachment)}
-              ><XIcon size={13} /></button>
+              >{#snippet icon()}<XIcon size={14} strokeWidth={1.8} />{/snippet}</IconButton>
             </div>
           {/each}
         </div>
@@ -478,7 +564,5 @@
   .attachment-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 5px 3px 3px; background: var(--muted); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 500; }
   .attachment-chip img { width: 28px; height: 28px; flex: 0 0 auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
   .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .attachment-chip button { display: inline-grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); }
-  .attachment-chip button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 10%, transparent); color: var(--foreground); }
   @media (max-width: 620px) { .choice-grid, .advanced-grid { grid-template-columns: 1fr; } }
 </style>

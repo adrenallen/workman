@@ -1,4 +1,5 @@
 import type { TodoPriority } from './coordination';
+import { isPlatformAbsolutePath } from './agentAttachmentDrafts.ts';
 
 export type CreationDraftKind = 'agent' | 'command' | 'todo';
 
@@ -235,13 +236,12 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
     touched: value.touched
   };
   if (value.kind === 'agent') {
-    const attachments = value.attachments ?? [];
+    const attachments = parseAgentAttachments(value.attachments ?? []);
     if (
       !isNullablePositiveInteger(value.agentToolId)
       || !isNullablePositiveInteger(value.templateId)
       || !isDraftText(value.name)
       || !isDraftText(value.prompt)
-      || !isAgentAttachments(attachments)
       || !isDraftText(value.extraArgs)
     ) return null;
     return {
@@ -251,7 +251,7 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
       templateId: value.templateId,
       name: value.name,
       prompt: value.prompt,
-      attachments: [...attachments],
+      attachments,
       extraArgs: value.extraArgs
     };
   }
@@ -328,15 +328,23 @@ function isDraftText(value: unknown): value is string {
   return typeof value === 'string' && value.length <= maxDraftTextLength;
 }
 
-function isAgentAttachments(value: unknown): value is string[] {
-  return Array.isArray(value)
-    && value.length <= maxAgentAttachments
-    && value.every((path) =>
-      typeof path === 'string'
-      && path.startsWith('/')
-      && path.length <= maxAttachmentPathLength
-      && !/[\0\r\n]/u.test(path)
-    );
+function parseAgentAttachments(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const attachments: string[] = [];
+  const seen = new Set<string>();
+  for (const path of value) {
+    if (
+      typeof path !== 'string'
+      || !isPlatformAbsolutePath(path)
+      || path.length > maxAttachmentPathLength
+      || /[\0\r\n]/u.test(path)
+      || seen.has(path)
+    ) continue;
+    seen.add(path);
+    attachments.push(path);
+    if (attachments.length >= maxAgentAttachments) break;
+  }
+  return attachments;
 }
 
 function creationDraftTextLength(draft: CreationDraft): number {

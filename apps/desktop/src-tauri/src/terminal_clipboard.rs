@@ -22,6 +22,7 @@ use objc2_foundation::{NSData, NSString};
 use serde::Serialize;
 
 const CLIPBOARD_DIRECTORY: &str = "terminal-clipboard";
+const DRAFT_ATTACHMENT_DIRECTORY: &str = "draft-attachments";
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RETAINED_FILES: usize = 64;
@@ -40,6 +41,12 @@ pub enum TerminalClipboardRead {
         clipboard_ready: bool,
     },
     Empty,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttachmentImageRead {
+    bytes: Vec<u8>,
+    mime_type: &'static str,
 }
 
 #[tauri::command]
@@ -142,34 +149,7 @@ fn read_clipboard_file_url(
     let path = url
         .to_file_path()
         .map_err(|()| "clipboard file URL is not local".to_owned())?;
-    let mut file = fs::File::open(&path)
-        .map_err(|error| format!("could not open clipboard image file: {error}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("could not inspect clipboard image file: {error}"))?;
-    if !metadata.is_file() {
-        return Err("clipboard file URL is not a regular file".to_owned());
-    }
-    if metadata.len() > MAX_IMAGE_BYTES as u64 {
-        return Err(format!(
-            "clipboard image exceeds the {} MiB limit",
-            MAX_IMAGE_BYTES / 1024 / 1024
-        ));
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    Read::by_ref(&mut file)
-        .take(MAX_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("could not read clipboard image file: {error}"))?;
-    (bytes.len() <= MAX_IMAGE_BYTES)
-        .then_some((bytes, "application/octet-stream"))
-        .ok_or_else(|| {
-            format!(
-                "clipboard image exceeds the {} MiB limit",
-                MAX_IMAGE_BYTES / 1024 / 1024
-            )
-        })
-        .map(Some)
+    Ok(Some((read_image_path(&path)?, "application/octet-stream")))
 }
 
 #[cfg(target_os = "macos")]
@@ -235,6 +215,117 @@ pub async fn terminal_save_clipboard_png(
     })
     .await
     .map_err(|error| format!("clipboard image task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_save_draft_image(
+    bytes: Vec<u8>,
+    mime_type: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let png = normalize_image_png(&bytes, &mime_type)?;
+        save_draft_png(&png)
+    })
+    .await
+    .map_err(|error| format!("draft image task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_import_draft_image(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = read_image_path(Path::new(&path))?;
+        let png = normalize_image_png(&bytes, "application/octet-stream")?;
+        save_draft_png(&png)
+    })
+    .await
+    .map_err(|error| format!("draft image import task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_read_attachment_image(path: String) -> Result<AttachmentImageRead, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = read_image_path(Path::new(&path))?;
+        let png = normalize_image_png(&bytes, "application/octet-stream")?;
+        Ok(AttachmentImageRead {
+            bytes: png,
+            mime_type: "image/png",
+        })
+    })
+    .await
+    .map_err(|error| format!("attachment image read task failed: {error}"))?
+}
+
+fn read_image_path(path: &Path) -> Result<Vec<u8>, String> {
+    if !path.is_absolute() {
+        return Err("image path must be absolute".to_owned());
+    }
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("could not open image: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect image: {error}"))?;
+    if !metadata.is_file() {
+        return Err("image path is not a regular file".to_owned());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err(format!(
+            "image exceeds the {} MiB limit",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read image: {error}"))?;
+    (bytes.len() <= MAX_IMAGE_BYTES)
+        .then_some(bytes)
+        .ok_or_else(|| {
+            format!(
+                "image exceeds the {} MiB limit",
+                MAX_IMAGE_BYTES / 1024 / 1024
+            )
+        })
+}
+
+fn save_draft_png(png: &[u8]) -> Result<String, String> {
+    let _guard = CLIPBOARD_LOCK
+        .lock()
+        .map_err(|_| "draft image lock is poisoned".to_owned())?;
+    let directory = default_data_dir().join(DRAFT_ATTACHMENT_DIRECTORY);
+    save_draft_png_in(&directory, png, SystemTime::now())?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "draft image path is not valid UTF-8".to_owned())
+}
+
+fn save_draft_png_in(directory: &Path, png: &[u8], now: SystemTime) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create draft attachment directory: {error}"))?;
+    secure_directory(directory)?;
+    let millis = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    for _ in 0..16 {
+        let sequence = PASTE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "draft-{millis}-{}-{sequence}.png",
+            std::process::id()
+        ));
+        match create_private_file(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(png).and_then(|_| file.sync_data()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("could not save draft image: {error}"));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("could not create draft image: {error}")),
+        }
+    }
+    Err("could not allocate a unique draft image path".to_owned())
 }
 
 fn normalize_image_png(bytes: &[u8], mime_type: &str) -> Result<Vec<u8>, String> {
@@ -578,6 +669,28 @@ mod tests {
 
         let png = normalize_image_png(&tiff.into_inner(), "image/tiff").unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn draft_images_use_a_private_unswept_store() {
+        let root = tempdir().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let first = save_draft_png_in(root.path(), b"first", now).unwrap();
+        let second = save_draft_png_in(root.path(), b"second", now).unwrap();
+
+        assert_eq!(fs::read(first).unwrap(), b"first");
+        assert_eq!(fs::read(second).unwrap(), b"second");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in fs::read_dir(root.path()).unwrap() {
+                assert_eq!(
+                    entry.unwrap().metadata().unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
     }
 
     #[test]

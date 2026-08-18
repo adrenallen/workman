@@ -75,7 +75,7 @@ test('persistence round-trips each kind per profile and clones array fields', ()
   assert.deepEqual(loadCreationDrafts(3, storage)[2].blockerIds, [4, 5]);
 });
 
-test('agent draft attachments start empty and restore only bounded absolute paths', () => {
+test('agent draft attachments start empty and restore valid Unix and Windows paths independently', () => {
   const empty = createCreationDraft('agent', 7, -1, 10);
   assert.deepEqual(empty.attachments, []);
 
@@ -83,14 +83,26 @@ test('agent draft attachments start empty and restore only bounded absolute path
     [creationDraftStorageKey(3)]: JSON.stringify({
       version: 1,
       drafts: [
-        { ...empty, attachments: ['/tmp/a.png', '/tmp/b.webp'], touched: true },
+        { ...empty, attachments: ['/tmp/a.png', 'C:\\Users\\g\\b.webp'], touched: true },
         { ...empty, id: -2, attachments: ['relative.png'], touched: true },
-        { ...empty, id: -3, attachments: Array(9).fill('/tmp/a.png'), touched: true }
+        {
+          ...empty,
+          id: -3,
+          attachments: Array.from({ length: 9 }, (_, index) => `/tmp/${index}.png`),
+          touched: true
+        }
       ]
     })
   });
   assert.deepEqual(loadCreationDrafts(3, storage), [
-    { ...empty, attachments: ['/tmp/a.png', '/tmp/b.webp'], touched: true }
+    { ...empty, attachments: ['/tmp/a.png', 'C:\\Users\\g\\b.webp'], touched: true },
+    { ...empty, id: -2, attachments: [], touched: true },
+    {
+      ...empty,
+      id: -3,
+      attachments: Array.from({ length: 8 }, (_, index) => `/tmp/${index}.png`),
+      touched: true
+    }
   ]);
 });
 
