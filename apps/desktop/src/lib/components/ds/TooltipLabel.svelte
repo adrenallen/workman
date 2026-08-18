@@ -13,6 +13,7 @@
     disableHoverableContent?: boolean;
     skipDelayDuration?: number;
     contentClass?: string;
+    tabindex?: number;
   }
 
   let {
@@ -24,13 +25,14 @@
     delayDuration = 350,
     disableHoverableContent = false,
     skipDelayDuration = 300,
-    contentClass
+    contentClass,
+    tabindex = 0
   }: Props = $props();
 </script>
 
 <Tooltip.Provider {delayDuration} {disableHoverableContent} {skipDelayDuration}>
   <Tooltip.Root>
-    <Tooltip.Trigger>
+    <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
         <span {...props} class="tooltip-anchor">{@render children()}</span>
       {/snippet}

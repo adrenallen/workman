@@ -4774,6 +4774,7 @@
                   disableHoverableContent={true}
                   skipDelayDuration={0}
                   contentClass="project-rail-tooltip"
+                  tabindex={-1}
                 >
                   {#snippet children()}
                     <span class="project-kind-icon" aria-hidden="true">
@@ -4804,7 +4805,10 @@
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}
-                <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
+                <TooltipLabel
+                  label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}
+                  tabindex={-1}
+                >
                   <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
                     <span aria-hidden="true"></span>{unreadAgentCount}
                   </span>

@@ -60,12 +60,15 @@ test('project tooltip is icon-only, delayed, non-blocking, and keeps worktree co
   assert.match(row, /disableHoverableContent=\{true\}/);
   assert.match(row, /skipDelayDuration=\{0\}/);
   assert.match(row, /contentClass="project-rail-tooltip"/);
+  assert.match(row, /contentClass="project-rail-tooltip"\s*tabindex=\{-1\}/);
   assert.match(row, /worktreeTooltip=\{false\}/);
   assert.match(row, /\{#snippet content\(\)\}[\s\S]*<strong>\{fullTitle\}<\/strong>[\s\S]*<span>\{project\.path\}<\/span>/);
   assert.match(row, /<GitBranchIcon[^>]*>[\s\S]*Worktree of \{parentLabel\}/);
   assert.match(app, /:global\(\.project-rail-tooltip\) \{ pointer-events: none; \}/);
   assert.match(tooltip, /delayDuration\?: number/);
+  assert.match(tooltip, /tabindex\?: number/);
   assert.match(tooltip, /<Tooltip\.Provider \{delayDuration\} \{disableHoverableContent\} \{skipDelayDuration\}>/);
+  assert.match(tooltip, /<Tooltip\.Trigger \{tabindex\}>/);
   assert.match(timing, /PROJECT_RAIL_TOOLTIP_DELAY_MS = 800/);
   assert.doesNotMatch(row, /<small>\{project\.path\}<\/small>/);
   assert.doesNotMatch(row, /class="worktree-parent"/);

@@ -155,11 +155,15 @@
             {@const project = notificationProject(notification)}
             {@const attachedProjectName = notificationProjectName(notification, project)}
             <article class:read={notification.read_at !== null}>
-              <TooltipLabel label={`${attachedProjectName} · ${notification.body}`} side="left">
+              <TooltipLabel
+                label={`${attachedProjectName} · ${notification.body}`}
+                side="left"
+                tabindex={-1}
+              >
                 <button
                   type="button"
                   class="notification-open"
-                  aria-label={`${notificationTypeLabel(notification)} · ${attachedProjectName} · ${notification.body}`}
+                  aria-label={`${notificationTypeLabel(notification)} · ${attachedProjectName}${project?.parent_project_id !== null && project?.parent_project_id !== undefined ? ' · Worktree' : ''} · ${notification.body}`}
                   onclick={() => choose(notification)}
                 >
                   <span class="notification-project-icon">
@@ -170,6 +174,7 @@
                         image={project.icon_image?.data_url}
                         fallback={project.repository_id !== null ? 'repository' : 'project'}
                         worktree={project.parent_project_id !== null}
+                        worktreeTooltip={false}
                         size={16}
                       />
                     {:else}

@@ -10,9 +10,10 @@ test('notification rows show project icons, worktree markers, names, and aligned
   assert.match(center, /projects: Project\[\]/);
   assert.match(center, /projects\.find\(\(project\) => project\.id === notification\.project_id\)/);
   assert.match(center, /project\.display_name\?\.trim\(\) \|\| project\.name\.trim\(\) \|\| project\.path/);
-  assert.match(center, /<TooltipLabel label=\{`\$\{attachedProjectName\} · \$\{notification\.body\}`\} side="left">/);
-  assert.match(center, /aria-label=\{`\$\{notificationTypeLabel\(notification\)\} · \$\{attachedProjectName\} · \$\{notification\.body\}`\}/);
+  assert.match(center, /<TooltipLabel[\s\S]*label=\{`\$\{attachedProjectName\} · \$\{notification\.body\}`\}[\s\S]*side="left"[\s\S]*tabindex=\{-1\}/);
+  assert.match(center, /aria-label=\{`\$\{notificationTypeLabel\(notification\)\} · \$\{attachedProjectName\}\$\{project\?\.parent_project_id[\s\S]*' · Worktree'/);
   assert.match(center, /worktree=\{project\.parent_project_id !== null\}/);
+  assert.match(center, /worktreeTooltip=\{false\}/);
   assert.match(center, /Project no longer registered/);
   assert.match(center, /No project/);
   assert.match(center, /\{:else\}\s*<BellIcon/);
