@@ -17,6 +17,7 @@ use workman_core::{
 use crate::{
     DEFAULT_PORT_WAIT, MAX_PORT_WAIT, ReadinessError, ReadinessService, RegistryError,
     SharedProcessRegistry,
+    project_titles::{normalized_optional_project_title, normalized_project_title},
     timer_events::{TimerLifecycleEvent, TimerLifecycleHub, TimerLifecycleKind},
     timers::{TimerEdit, TimerError, TimerService},
 };
@@ -184,6 +185,8 @@ struct UpdateCommandParams {
 #[derive(Debug, Deserialize)]
 struct RegisterProjectParams {
     path: String,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +267,8 @@ struct WorktreeCreateParams {
     project_id: Option<ProjectId>,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     from_ref: Option<String>,
     #[serde(default)]
     managed_root: Option<String>,
@@ -281,6 +286,8 @@ struct WorktreeForkParams {
     project_id: Option<ProjectId>,
     branch: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
@@ -293,6 +300,8 @@ struct WorktreeForkParams {
 #[derive(Debug, Deserialize)]
 struct WorktreeAdoptParams {
     path: String,
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
 }
@@ -501,6 +510,9 @@ struct SpawnAgentParams {
     agent_template_id: Option<AgentTemplateId>,
     #[serde(default)]
     name: Option<String>,
+    /// Optional tool-aware model override. Prefer this to --model in extra_args.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     extra_args: Vec<String>,
     #[serde(default)]
@@ -594,6 +606,7 @@ async fn dispatch(
                 params.agent_template_id,
                 params.name,
                 params.extra_args,
+                params.model,
                 params.prompt,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
@@ -661,6 +674,7 @@ async fn dispatch(
                 crate::worktrees::CreateWorktree {
                     source_project_id: project_id,
                     branch: params.branch,
+                    display_name: params.display_name,
                     from_ref: params.from_ref,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
@@ -680,6 +694,7 @@ async fn dispatch(
                 crate::worktrees::ForkWorktree {
                     source_project_id: project_id,
                     branch: params.branch,
+                    display_name: params.display_name,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
                     env_policy: params.env_policy,
@@ -707,6 +722,7 @@ async fn dispatch(
                 registry,
                 crate::worktrees::AdoptWorktree {
                     path: PathBuf::from(params.path),
+                    display_name: params.display_name,
                     preferences: params.preferences,
                 },
             )
@@ -842,7 +858,10 @@ async fn dispatch(
                 .map_err(|error| ("agent_tool_icon_error", error.to_string()));
         }
         "settings.terminal_theme_import" => {
-            return Ok(json_value(terminal_theme::import_terminal_theme()));
+            let report = tokio::task::spawn_blocking(terminal_theme::import_terminal_theme)
+                .await
+                .map_err(|error| ("terminal_theme_import_error", error.to_string()))?;
+            return Ok(json_value(report));
         }
         _ => {}
     }
@@ -1011,6 +1030,15 @@ async fn dispatch(
                 .map(|updated| json!({ "updated": usize::from(updated) }))
                 .map_err(project_store_error);
         }
+        "projects.mark_read" => {
+            let params: ProjectParams = params_as(params)?;
+            let result = registry
+                .store()
+                .mark_project_read(params.project_id, crate::timers::now_millis())
+                .map_err(project_store_error)?;
+            registry.status_invalidations().invalidate();
+            return Ok(json_value(result));
+        }
         "projects.list" => {
             return project_result(list_projects(registry.store()));
         }
@@ -1019,7 +1047,11 @@ async fn dispatch(
         }
         "projects.register" => {
             let params: RegisterProjectParams = params_as(params)?;
-            register_project(registry.store(), &params.path)?;
+            register_project(
+                registry.store(),
+                &params.path,
+                params.display_name.as_deref(),
+            )?;
             let _ = crate::worktrees::reconcile_existing_projects(registry.store());
             return project_result(list_projects(registry.store()));
         }
@@ -1694,7 +1726,11 @@ fn project_rail_result(store: &Store) -> Result<Value, (&'static str, String)> {
     }))
 }
 
-fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, String)> {
+fn register_project(
+    store: &Store,
+    path: &str,
+    display_name: Option<&str>,
+) -> Result<(), (&'static str, String)> {
     let canonical = workman_core::canonical_path(path).map_err(|error| {
         (
             "invalid_project_path",
@@ -1714,6 +1750,7 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
         .filter(|name| !name.is_empty())
         .unwrap_or("Project")
         .to_owned();
+    let display_name = normalized_optional_project_title(display_name);
     if let Some(project) = store
         .get_project_by_path_any(&canonical)
         .map_err(project_store_error)?
@@ -1731,7 +1768,7 @@ fn register_project(store: &Store, path: &str) -> Result<(), (&'static str, Stri
                 id: store.next_project_id().map_err(project_store_error)?,
                 path: canonical,
                 name,
-                display_name: None,
+                display_name,
                 icon: None,
                 selected,
                 sort_order: store
@@ -1758,13 +1795,12 @@ fn rename_project(
     project_id: ProjectId,
     name: &str,
 ) -> Result<(), (&'static str, String)> {
-    let name = name.trim();
-    if name.is_empty() {
+    let Some(name) = normalized_project_title(name) else {
         return Err((
             "invalid_project_name",
             "project name cannot be empty".to_owned(),
         ));
-    }
+    };
     let changed = store
         .connection()
         .execute(
@@ -1784,13 +1820,12 @@ fn update_project_settings(
 ) -> Result<(), (&'static str, String)> {
     const COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
 
-    let display_name = params.display_name.trim();
-    if display_name.is_empty() {
+    let Some(display_name) = normalized_project_title(&params.display_name) else {
         return Err((
             "invalid_project_name",
             "project name cannot be empty".to_owned(),
         ));
-    }
+    };
     if params
         .icon
         .as_deref()

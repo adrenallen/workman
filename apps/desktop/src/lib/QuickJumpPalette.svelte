@@ -38,7 +38,7 @@
     onClose: () => void;
   }
 
-  type PaletteKind = 'action' | 'project' | ProjectTreeItemKind;
+  type PaletteKind = 'action' | 'project' | Exclude<ProjectTreeItemKind, 'draft'>;
 
   interface PaletteEntry {
     key: string;

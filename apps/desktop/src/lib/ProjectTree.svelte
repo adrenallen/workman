@@ -18,6 +18,7 @@
   import type { Component } from 'svelte';
 
   import CountBadge from './CountBadge.svelte';
+  import CreationDraftTreeRow from './CreationDraftTreeRow.svelte';
   import AgentBrandMark from './AgentBrandMark.svelte';
   import InlineTreeRename from './InlineTreeRename.svelte';
   import MemoryBadge from './MemoryBadge.svelte';
@@ -33,6 +34,7 @@
   import type { ProcessKind, ProcessView, Project } from './daemon';
   import type { AgentTool } from './agentTools';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
+  import type { CreationDraft } from './creationDrafts';
   import {
     contextMenuRequest,
     keyboardContextMenuRequest,
@@ -72,6 +74,7 @@
     agentTools: AgentTool[];
     todos: TodoSummary[];
     scratchpads: ScratchpadSummary[];
+    drafts: CreationDraft[];
     selection: ProjectTreeSelection | null;
     multiSelection: ProjectTreeMultiSelection | null;
     collapsed: boolean;
@@ -109,6 +112,7 @@
     agentTools,
     todos,
     scratchpads,
+    drafts,
     selection,
     multiSelection,
     collapsed,
@@ -197,6 +201,19 @@
   let visibleCommands = $derived(
     commands.filter((process) => matchesQuery(`${process.name} ${process.command ?? ''}`))
   );
+  let visibleTodoDrafts = $derived(drafts.filter((draft) =>
+    draft.projectId === project.id && draft.kind === 'todo' && matchesQuery(draft.title)
+  ));
+  let visibleAgentDrafts = $derived(drafts.filter((draft) =>
+    draft.projectId === project.id
+    && draft.kind === 'agent'
+    && matchesQuery(`${draft.name} ${draft.prompt}`)
+  ));
+  let visibleCommandDrafts = $derived(drafts.filter((draft) =>
+    draft.projectId === project.id
+    && draft.kind === 'command'
+    && matchesQuery(`${draft.name} ${draft.command}`)
+  ));
   let orderedScratchpads = $derived(
     [...scratchpads].sort((left, right) => left.sort_order - right.sort_order || left.id - right.id)
   );
@@ -778,9 +795,13 @@
                     </span>
                   {/if}
                 </button>
-              {:else}
-                <p class="empty-row">{query ? 'No matching todos' : 'No open todos'}</p>
               {/each}
+              {#each visibleTodoDrafts as draft (draft.id)}
+                <CreationDraftTreeRow {draft} {selection} {onSelect} {onContextMenu} />
+              {/each}
+              {#if visibleTodos.length === 0 && visibleTodoDrafts.length === 0}
+                <p class="empty-row">{query ? 'No matching todos' : 'No open todos'}</p>
+              {/if}
               {#if hiddenTodoCount > 0}
                 <button
                   class="show-all"
@@ -863,9 +884,13 @@
                     {/if}
                   </div>
                 {/if}
-              {:else}
-                <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
               {/each}
+              {#each visibleAgentDrafts as draft (draft.id)}
+                <CreationDraftTreeRow {draft} {selection} {onSelect} {onContextMenu} />
+              {/each}
+              {#if visibleAgentRows.length === 0 && visibleAgentDrafts.length === 0}
+                <p class="empty-row">{query ? 'No matching agents' : 'No agents'}</p>
+              {/if}
               {#if agents.length === 0}
                 <button class="add-row" type="button" data-tree-row onclick={onAddAgent}>+ Add agent</button>
               {/if}
@@ -959,9 +984,13 @@
                     </div>
                   </div>
                 {/if}
-              {:else}
-                <p class="empty-row">{query ? 'No matching commands' : 'No commands in workman.yml'}</p>
               {/each}
+              {#each visibleCommandDrafts as draft (draft.id)}
+                <CreationDraftTreeRow {draft} {selection} {onSelect} {onContextMenu} />
+              {/each}
+              {#if visibleCommands.length === 0 && visibleCommandDrafts.length === 0}
+                <p class="empty-row">{query ? 'No matching commands' : 'No commands in workman.yml'}</p>
+              {/if}
               {#if commands.length === 0}
                 <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
               {/if}
@@ -985,7 +1014,10 @@
                   >
                     <span class="scratchpad-ref" title={`Scratchpad #${scratchpad.id} · revision ${scratchpad.revision}`}>#{scratchpad.id}</span>
                     <span class="row-copy"><strong>{scratchpad.name}</strong></span>
-                    <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
+                    <span class="row-badges">
+                      {#if scratchpad.unresolved_comment_count > 0}<CountBadge value={scratchpad.unresolved_comment_count} title={`${scratchpad.unresolved_comment_count} unresolved scratchpad comments`} />{/if}
+                      <span class="row-meta" title={`Scratchpad revision ${scratchpad.revision}`}>r{scratchpad.revision}</span>
+                    </span>
                   </button>
                 {/if}
               {:else}

@@ -1,11 +1,13 @@
 import type { ProcessKind, ProcessView, Project } from './daemon';
 import type { SpawnAgentInput } from './agentTools';
+import { cloneCreationDraft, type CommandCreationDraft } from './creationDrafts.ts';
 
 export interface OptimisticProcess {
   process: ProcessView;
   error: string | null;
   retry: 'agent' | 'command' | null;
   agentSpawnInput: SpawnAgentInput | null;
+  commandDraft: CommandCreationDraft | null;
   createdAt: number;
 }
 
@@ -18,6 +20,7 @@ export interface OptimisticProcessInput {
   agentToolId?: number | null;
   retry?: OptimisticProcess['retry'];
   agentSpawnInput?: SpawnAgentInput | null;
+  commandDraft?: CommandCreationDraft | null;
 }
 
 export function createOptimisticProcess(input: OptimisticProcessInput): OptimisticProcess {
@@ -65,6 +68,9 @@ export function createOptimisticProcess(input: OptimisticProcessInput): Optimist
     retry: input.retry ?? null,
     agentSpawnInput: input.agentSpawnInput
       ? { ...input.agentSpawnInput, extra_args: [...input.agentSpawnInput.extra_args] }
+      : null,
+    commandDraft: input.commandDraft
+      ? cloneCreationDraft(input.commandDraft) as CommandCreationDraft
       : null,
     createdAt: Date.now()
   };

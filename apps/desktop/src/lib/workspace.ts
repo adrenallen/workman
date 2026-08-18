@@ -1,4 +1,6 @@
-import type { ConnectionStatus, DaemonClient, ProcessView, Project } from './daemon';
+import type { ConnectionStatus, DaemonClient, Project } from './daemon';
+import type { UpdateFlow } from './updateFlow';
+import type { UpdateStatus } from './settings';
 
 export type WorkspaceSection =
   | 'terminal'
@@ -8,21 +10,14 @@ export type WorkspaceSection =
   | 'agents'
   | 'settings';
 
-export interface AgentsPanelProps {
-  client: DaemonClient;
-  project: Project;
-  processes: ProcessView[];
-  selectedProcessId: number | null;
-  spawnSignal: number;
-  connected: boolean;
-  onSelectProcess: (processId: number) => void;
-  onError: (message: string) => void;
-}
-
 export interface SettingsPanelProps {
   client: DaemonClient;
   project: Project | null;
   connection: ConnectionStatus;
+  updateFlow: UpdateFlow;
+  onApplyUpdate: (update: UpdateStatus) => Promise<void>;
+  onRestartUpdate: () => Promise<void>;
+  onDismissUpdate: () => void;
   onError: (message: string) => void;
   onProfileSwitched: () => void;
 }

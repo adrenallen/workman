@@ -23,6 +23,12 @@
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import * as Tabs from '$lib/components/ui/tabs';
   import { fuzzySubsequenceScore } from './navigation';
+  import {
+    defaultProjectTitleFromPath,
+    defaultWorktreeTitle,
+    resolvedProjectTitle,
+    syncProjectTitleDefault
+  } from './projectTitles';
   import type { Project } from './daemon';
   import type {
     EnvironmentPolicy,
@@ -84,12 +90,16 @@
   let resolvedRef = $state<string | null>(null);
   let resolvedCommit = $state<string | null>(null);
   let adoptPath = $state('');
+  let projectTitle = $state('');
+  let projectTitleTouched = $state(false);
   let envPolicy = $state<EnvironmentPolicy>('skip');
   let rememberEnvPolicy = $state(true);
   let advancedOpen = $state(false);
   let branchInput = $state<HTMLInputElement | null>(null);
   let branchSearchInput = $state<HTMLInputElement | null>(null);
+  let adoptPathInput = $state<HTMLInputElement | null>(null);
   let baseRefInput = $state<HTMLInputElement | null>(null);
+  let projectTitleInput = $state<HTMLInputElement | null>(null);
   let baseRefPicker = $state<HTMLDivElement | null>(null);
   let refValidationTimer: ReturnType<typeof setTimeout> | null = null;
   let refValidationSequence = 0;
@@ -101,6 +111,10 @@
   let activeBranch = $derived(rankedBranches[branchOptionIndex] ?? null);
   let rankedRefOptions = $derived(rankRefOptions(refOptions, baseRef));
   let activeRefOption = $derived(rankedRefOptions[baseRefOptionIndex] ?? null);
+  let titleBranch = $derived(mode === 'create' && createKind === 'origin' ? existingBranch : branch);
+  let defaultProjectTitle = $derived(mode === 'adopt'
+    ? defaultProjectTitleFromPath(adoptPath, '')
+    : defaultWorktreeTitle(titleBranch));
   let previewBranch = $derived(branch.trim() || 'branch-name');
   let previewRef = $derived(resolvedRef ?? (baseRef.trim() || 'starting-ref'));
   let previewCommit = $derived(resolvedCommit?.slice(0, 10) ?? null);
@@ -128,8 +142,14 @@
     : repository.herd.available ? 'Herd available' : 'No Herd');
 
   $effect(() => {
-    const input = mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
+    const input = mode === 'adopt'
+      ? adoptPathInput
+      : mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
     if (input) queueMicrotask(() => input?.focus());
+  });
+
+  $effect(() => {
+    projectTitle = syncProjectTitleDefault(projectTitle, defaultProjectTitle, projectTitleTouched);
   });
 
   $effect(() => {
@@ -270,10 +290,18 @@
     if (value === 'origin' && effectiveBranchOptions.length === 0) onLoadBranches();
   }
 
+  function updateProjectTitle(event: Event): void {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    projectTitleTouched = true;
+    projectTitle = input.value;
+  }
+
   async function submit(): Promise<void> {
     if (!canSubmit) return;
+    const title = resolvedProjectTitle(projectTitle, defaultProjectTitle);
     if (mode === 'adopt') {
-      onSubmit({ mode, path: adoptPath.trim() });
+      onSubmit({ mode, path: adoptPath.trim(), title });
       return;
     }
     const nextBranch = mode === 'create' && createKind === 'origin'
@@ -281,13 +309,14 @@
       : branch.trim();
     if (!nextBranch) return;
     if (mode === 'fork') {
-      onSubmit({ mode, branch: nextBranch, envPolicy, rememberEnvPolicy });
+      onSubmit({ mode, branch: nextBranch, title, envPolicy, rememberEnvPolicy });
       return;
     }
     if (createKind === 'new' && !(await validateBaseRef())) return;
     onSubmit({
       mode,
       branch: nextBranch,
+      title,
       fromRef: createKind === 'new' && baseRef.trim() ? baseRef.trim() : undefined,
       envPolicy,
       rememberEnvPolicy
@@ -296,7 +325,14 @@
 
   async function chooseDirectory(): Promise<void> {
     const path = await open({ directory: true, multiple: false, title: 'Choose an existing Git worktree' });
-    if (typeof path === 'string') adoptPath = path;
+    if (typeof path === 'string') {
+      const selectDerivedTitle = !projectTitleTouched;
+      adoptPath = path;
+      queueMicrotask(() => {
+        projectTitleInput?.focus();
+        if (selectDerivedTitle) projectTitleInput?.select();
+      });
+    }
   }
 
   function chooseBranch(option: WorktreeBranchOption | null): void {
@@ -327,6 +363,15 @@
     class="w-[min(520px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0"
     showCloseButton={false}
     aria-describedby="worktree-dialog-description"
+    onOpenAutoFocus={(event) => {
+      event.preventDefault();
+      queueMicrotask(() => {
+        const input = mode === 'adopt'
+          ? adoptPathInput
+          : mode === 'create' && createKind === 'origin' ? branchSearchInput : branchInput;
+        input?.focus();
+      });
+    }}
   >
     <form class="grid min-h-0 max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto]" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
       <Dialog.Header class="flex-row items-start justify-between border-b border-border px-4 py-3 text-left">
@@ -349,10 +394,22 @@
           <label class="grid gap-1.5">
             <span class="text-sm font-medium">Existing worktree folder</span>
             <span class="flex gap-2">
-              <Input bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
+              <Input bind:ref={adoptPathInput} bind:value={adoptPath} class="min-w-0 flex-1 font-mono" placeholder="/path/to/existing-worktree" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
               <Button type="button" variant="outline" onclick={() => void chooseDirectory()}><FolderOpenIcon size={14} />Choose…</Button>
             </span>
             <small class="text-xs text-muted-foreground">The folder stays where it is and is marked adopted, not Workman-managed.</small>
+          </label>
+          <label class="grid gap-1.5" oninput={updateProjectTitle}>
+            <span class="text-sm font-medium">Title</span>
+            <Input
+              bind:ref={projectTitleInput}
+              value={projectTitle}
+              autocomplete="off"
+              aria-label="Worktree title"
+              aria-describedby="worktree-title-help"
+              placeholder="Follows the selected folder"
+            />
+            <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults to the existing folder name; an empty title keeps that default.</small>
           </label>
         {:else}
           {#if mode === 'create'}
@@ -431,6 +488,19 @@
               <Input bind:ref={branchInput} bind:value={branch} class="font-mono" placeholder={mode === 'fork' ? 'feature/follow-up' : 'feature/new-worktree'} autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} />
             </label>
           {/if}
+
+          <label class="grid gap-1.5" oninput={updateProjectTitle}>
+            <span class="text-sm font-medium">Title</span>
+            <Input
+              bind:ref={projectTitleInput}
+              value={projectTitle}
+              autocomplete="off"
+              aria-label="Worktree title"
+              aria-describedby="worktree-title-help"
+              placeholder="Follows the branch name"
+            />
+            <small id="worktree-title-help" class="text-xs text-muted-foreground">Defaults live to the full branch name; an empty title keeps that default.</small>
+          </label>
 
           {#if mode === 'create' && createKind === 'new'}
             <section class="grid gap-1.5" aria-labelledby="worktree-base-ref-label">

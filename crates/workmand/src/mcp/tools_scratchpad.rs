@@ -9,11 +9,12 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::json;
 use workman_core::{
-    ProjectId, ScratchpadEditTarget, ScratchpadFindQuery, ScratchpadFindScope, ScratchpadId,
-    ScratchpadListQuery, ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
+    NewScratchpadComment, ProjectId, ScratchpadCommentId, ScratchpadEditTarget,
+    ScratchpadFindQuery, ScratchpadFindScope, ScratchpadId, ScratchpadListQuery,
+    ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
 };
 
-use super::{WorkmanMcp, failure, scoped_project, success};
+use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +104,77 @@ struct ScratchpadReadArgs {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Include unresolved anchored, orphaned, and whole-document comments.
+    #[serde(default)]
+    include_comments: bool,
+    /// Include resolved comments when include_comments=true.
+    #[serde(default)]
+    include_resolved: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ScratchpadCommentCreateArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    scratchpad_id: ScratchpadId,
+    body: String,
+    #[serde(default)]
+    quote: Option<String>,
+    /// UTF-16 code-unit offset into the current scratchpad content.
+    #[serde(default)]
+    anchor_start: Option<usize>,
+    /// Exclusive UTF-16 code-unit offset into the current scratchpad content.
+    #[serde(default)]
+    anchor_end: Option<usize>,
+    /// Up to 64 characters immediately before the quote, used to re-anchor it.
+    #[serde(default)]
+    anchor_prefix: Option<String>,
+    /// Up to 64 characters immediately after the quote, used to re-anchor it.
+    #[serde(default)]
+    anchor_suffix: Option<String>,
+    /// Keep a missing quote as an orphaned comment instead of returning an error.
+    #[serde(default)]
+    allow_unanchored: bool,
+    /// Scratchpad revision the anchor was selected from; stale revisions are rejected.
+    #[serde(default)]
+    expected_revision: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ScratchpadCommentListArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    scratchpad_id: ScratchpadId,
+    #[serde(default)]
+    include_resolved: bool,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ScratchpadCommentUpdateArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    comment_id: ScratchpadCommentId,
+    body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ScratchpadCommentResolveArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    comment_id: ScratchpadCommentId,
+    #[serde(default = "default_true")]
+    resolved: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ScratchpadCommentDeleteArgs {
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    comment_id: ScratchpadCommentId,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -290,11 +362,12 @@ impl WorkmanMcp {
         Parameters(args): Parameters<ScratchpadReadArgs>,
     ) -> CallToolResult {
         let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).read(
+        let service = ScratchpadService::attributed(registry.store(), actor.id);
+        match service.read(
             project.id,
             args.scratchpad_id,
             args.mode.into(),
@@ -302,13 +375,156 @@ impl WorkmanMcp {
             args.offset.unwrap_or(0),
             args.limit,
         ) {
-            Ok(read) => success(json!({
-                "found": true,
-                "scratchpad": read.scratchpad,
-                "total_lines": read.total_lines,
-                "offset": read.offset,
-                "returned_lines": read.returned_lines,
-                "has_more": read.has_more,
+            Ok(read) => {
+                let mut response = json!({
+                    "found": true,
+                    "scratchpad": read.scratchpad,
+                    "total_lines": read.total_lines,
+                    "offset": read.offset,
+                    "returned_lines": read.returned_lines,
+                    "has_more": read.has_more,
+                });
+                if args.include_comments {
+                    let comments = match service.comment_list(
+                        project.id,
+                        args.scratchpad_id,
+                        args.include_resolved,
+                    ) {
+                        Ok(comments) => comments,
+                        Err(error) => return scratchpad_failure(error),
+                    };
+                    response["comments"] = json!(comments.comments);
+                    response["comment_total_count"] = json!(comments.total_count);
+                    response["unresolved_comment_count"] = json!(comments.unresolved_count);
+                    response["comments_revision"] = json!(comments.comments_revision);
+                }
+                success(response)
+            }
+            Err(error) => scratchpad_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "Create a scratchpad comment owned by the calling agent. Omit quote for a whole-document comment; quotes are limited to 4096 characters, quote-only anchors must match uniquely, explicit offsets use UTF-16 code units, and expected_revision guards stale selections"
+    )]
+    async fn scratchpad_comment_create(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<ScratchpadCommentCreateArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_create(
+            project.id,
+            args.scratchpad_id,
+            NewScratchpadComment {
+                body: args.body,
+                quote: args.quote,
+                anchor_start: args.anchor_start,
+                anchor_end: args.anchor_end,
+                anchor_prefix: args.anchor_prefix,
+                anchor_suffix: args.anchor_suffix,
+                allow_unanchored: args.allow_unanchored,
+                expected_revision: args.expected_revision,
+            },
+            now_millis(),
+        ) {
+            Ok(comment) => success(comment),
+            Err(error) => scratchpad_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "List a page of scratchpad comments with actor, mutation capabilities, body, quote, current UTF-16 offsets, line range, and anchor state"
+    )]
+    async fn scratchpad_comment_list(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<ScratchpadCommentListArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_list_page(
+            project.id,
+            args.scratchpad_id,
+            args.include_resolved,
+            args.offset.unwrap_or(0),
+            Some(args.limit.unwrap_or(50)),
+        ) {
+            Ok(comments) => success(comments),
+            Err(error) => scratchpad_failure(error),
+        }
+    }
+
+    #[tool(description = "Update the body of a scratchpad comment authored by the calling agent")]
+    async fn scratchpad_comment_update(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<ScratchpadCommentUpdateArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_update(
+            project.id,
+            args.comment_id,
+            args.body,
+            now_millis(),
+        ) {
+            Ok(comment) => success(comment),
+            Err(error) => scratchpad_failure(error),
+        }
+    }
+
+    #[tool(description = "Resolve or reopen a scratchpad comment authored by the calling agent")]
+    async fn scratchpad_comment_resolve(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<ScratchpadCommentResolveArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_set_resolved(
+            project.id,
+            args.comment_id,
+            args.resolved,
+            now_millis(),
+        ) {
+            Ok(comment) => success(comment),
+            Err(error) => scratchpad_failure(error),
+        }
+    }
+
+    #[tool(description = "Delete a scratchpad comment authored by the calling agent")]
+    async fn scratchpad_comment_delete(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<ScratchpadCommentDeleteArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
+            Ok(scoped) => scoped,
+            Err(error) => return failure("project_scope_error", error),
+        };
+        match ScratchpadService::attributed(registry.store(), actor.id)
+            .comment_delete(project.id, args.comment_id)
+        {
+            Ok(scratchpad_id) => success(json!({
+                "project_id": project.id,
+                "scratchpad_id": scratchpad_id,
+                "comment_id": args.comment_id,
+                "deleted": true,
             })),
             Err(error) => scratchpad_failure(error),
         }
@@ -741,4 +957,8 @@ fn revision_receipt(scratchpad: &workman_core::Scratchpad) -> CallToolResult {
 
 fn scratchpad_failure(error: ScratchpadServiceError) -> CallToolResult {
     failure(error.code(), error.to_string())
+}
+
+const fn default_true() -> bool {
+    true
 }

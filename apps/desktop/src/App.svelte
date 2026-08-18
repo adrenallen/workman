@@ -6,8 +6,8 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal';
   import PlusIcon from '@lucide/svelte/icons/plus';
-  import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount, tick } from 'svelte';
@@ -16,10 +16,8 @@
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
-  import StatusIndicator from './lib/components/ds/StatusIndicator.svelte';
   import TooltipLabel from './lib/components/ds/TooltipLabel.svelte';
   import { Button } from './lib/components/ui/button';
-  import * as Dialog from './lib/components/ui/dialog';
   import ContextMenu from './lib/ContextMenu.svelte';
   import ClaimedTodoOverlay from './lib/ClaimedTodoOverlay.svelte';
   import ConfirmationDialog from './lib/ConfirmationDialog.svelte';
@@ -27,29 +25,48 @@
   import KeepAwakeControl from './lib/KeepAwakeControl.svelte';
   import { shouldSubscribeProcessStatuses } from './lib/keepAwake';
   import NotificationsCenter from './lib/NotificationsCenter.svelte';
-  import NewAgentDialog, { type NewAgentSubmission } from './lib/NewAgentDialog.svelte';
+  import NewAgentDraftPanel from './lib/NewAgentDraftPanel.svelte';
+  import NewCommandDraftPanel from './lib/NewCommandDraftPanel.svelte';
+  import NewTodoDraftPanel from './lib/NewTodoDraftPanel.svelte';
   import OptimisticProcessPanel from './lib/OptimisticProcessPanel.svelte';
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import { PROJECT_RAIL_TOOLTIP_DELAY_MS } from './lib/projectRailTooltip';
+  import ProjectKindIndicators from './lib/ProjectKindIndicators.svelte';
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
   import ProjectFolderMenu from './lib/ProjectFolderMenu.svelte';
   import ProjectOverview from './lib/ProjectOverview.svelte';
+  import RegisterProjectDialog from './lib/RegisterProjectDialog.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import QuickPromptPalette from './lib/QuickPromptPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
   import ScratchpadDetailView from './lib/ScratchpadDetailView.svelte';
-  import { submitOnEnter } from './lib/formInputConventions';
   import SettingsPanel from './lib/SettingsPanel.svelte';
-  import { applyUpdate, checkForUpdates, type UpdateStatus } from './lib/settings';
+  import {
+    applyUpdate,
+    autoImportTerminalProfile,
+    checkForUpdates,
+    type UpdateInstallReport,
+    type UpdateProgress,
+    type UpdateStage,
+    type UpdateStatus
+  } from './lib/settings';
   import { updateActionAvailable, updateActionCopy } from './lib/updateRecovery';
+  import {
+    canPresentUpdateProgress,
+    idleUpdateFlow,
+    manualUpdateFlow,
+    updateBannerState,
+    updateCompletionAction,
+    type UpdateFlow
+  } from './lib/updateFlow';
   import TerminalView from './lib/TerminalView.svelte';
   import { processCycleDirection } from './lib/terminalKeys';
   import TodoBrowser from './lib/TodoBrowser.svelte';
-  import TodoBlockerPicker from './lib/TodoBlockerPicker.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
   import WorktreeDialog from './lib/WorktreeDialog.svelte';
@@ -61,8 +78,9 @@
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
-  import { getAgentToolsStore, type AgentTool } from './lib/agentTools';
+  import { getAgentToolsStore, type AgentTool, type SpawnAgentInput } from './lib/agentTools';
   import type { QuickPrompt } from './lib/quickPrompts';
+  import type { CommandInput } from './lib/commandCreation';
   import {
     getAgentTemplatesStore,
     type AgentTemplate
@@ -75,13 +93,29 @@
   import type { ClaimedTodo } from './lib/claimedTodos';
   import type {
     CoordinationSnapshot,
+    NewScratchpadCommentInput,
     NewTodoInput,
     ScratchpadRead,
     ScratchpadSummary,
     TodoDetail,
-    TodoPriority,
     UpdateTodoInput
   } from './lib/coordination';
+  import {
+    creationDraftHasContent,
+    creationDraftLabel,
+    creationDraftsForCycle,
+    createCreationDraft,
+    findUntouchedCreationDraft,
+    loadCreationDrafts,
+    nextCreationDraftId,
+    pruneCreationDraftsToProjects,
+    saveCreationDrafts,
+    type AgentCreationDraft,
+    type CommandCreationDraft,
+    type CreationDraft,
+    type CreationDraftKind,
+    type TodoCreationDraft
+  } from './lib/creationDrafts';
   import {
     contextMenuRequest,
     describeContextMenu,
@@ -139,6 +173,7 @@
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
   import type { ProjectSettingsInput } from './lib/projectAppearance';
+  import { registrationTitleForPath, resolvedProjectTitle } from './lib/projectTitles';
   import {
     createProjectFolder,
     deleteProjectFolder,
@@ -206,9 +241,8 @@
     type OptimisticProcess
   } from './lib/optimisticProcesses';
   import {
-    processActivityTone,
-    projectActivityRollup,
-    type ProjectActivityRollup
+    projectKindActivity,
+    type ProjectKindActivityRollup
   } from './lib/processActivity';
   import {
     initialFlatProjectOrder,
@@ -246,6 +280,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
@@ -304,19 +339,24 @@
   let treeRailWidth = $state(280);
   let treeRailCollapsed = $state(false);
 
-  let dialog = $state<'todo' | 'agent' | 'command' | null>(null);
+  let dialog = $state<'command' | null>(null);
   let commandDialogProcess = $state<ProcessView | null>(null);
-  let todoTitle = $state('');
-  let todoBody = $state('');
-  let todoPriority = $state<TodoPriority>('medium');
-  let todoTags = $state('');
-  let todoBlockerIds = $state<number[]>([]);
+  let creationDrafts = $state<CreationDraft[]>([]);
+  let activeProfileId = $state<number | null>(null);
+  let creationDraftsLoaded = $state(false);
+  let draftFocusRequestId = $state<number | null>(null);
+  let creationDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingCreationDraftSave: {
+    profileId: number;
+    drafts: readonly CreationDraft[];
+  } | null = null;
   let scratchpadFocusRequest = $state(0);
   let agentTools = $state<AgentTool[]>([]);
   let registeredAgentTools = $state<AgentTool[]>([]);
   let agentTemplates = $state<AgentTemplate[]>([]);
-  let preferredAgentToolId = $state<number | null>(null);
   let agentToolsLoading = $state(false);
+  let agentDraftMetadataLoaded = $state(false);
+  let agentDraftMetadataPromise: Promise<void> | null = null;
 
   $effect(() => agentToolsStore.subscribe((snapshot) => {
     registeredAgentTools = snapshot.tools;
@@ -332,9 +372,32 @@
       : client.unsubscribeProcessStatuses();
     void request.catch(reportError);
   });
+  $effect(() => {
+    if (connection.status !== 'connected' || terminalProfileAutoImportStarted) return;
+    terminalProfileAutoImportStarted = true;
+    void autoImportTerminalProfile(client).catch(() => {
+      // Native profile discovery is best-effort; Settings retains the explicit import action.
+    });
+  });
   let versionRestarting = $state(false);
   let startupUpdate = $state<UpdateStatus | null>(null);
   let startupUpdatePort = $state<number | null>(null);
+  let updateFlow = $state<UpdateFlow>(idleUpdateFlow);
+  let nativeRelaunchAvailable = $state(false);
+  let nativeRelaunchAppBundle = $state<string | null>(null);
+  let updateBannerDismissed = $state(false);
+  let updatedVersionNotice = $state<string | null>(null);
+  let justUpdatedVersion: string | null = null;
+  let daemonOnlyRestartPending = false;
+  let updateInstallActive = false;
+  let installedUpdateReport: UpdateInstallReport | null = null;
+  let updateRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateProgressPresentedAt = 0;
+  let updateProgressTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateProgressQueue: UpdateProgress[] = [];
+  let updateProgressWaiters: Array<() => void> = [];
+  const updateStageMinimumMs = 300;
+  const updateRestartTimeoutMs = 20_000;
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -353,9 +416,13 @@
   let agentCascadeError = $state<string | null>(null);
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
+  let projectRailPopoverKey = $state<string | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
+  let registerProjectDialog = $state<{ path: string; defaultTitle: string } | null>(null);
+  let registerProjectBusy = $state(false);
+  let registerProjectError = $state<string | null>(null);
   let worktreeDialog = $state<{
     mode: 'create' | 'fork' | 'adopt';
     sourceProject: Project;
@@ -373,6 +440,7 @@
   let agentDoneNoticeSequence = 0;
   let notifications = $state<Notification[]>([]);
   let notificationBusy = $state(false);
+  const notificationIdleWaiters = new Set<() => void>();
   let notificationRequest = 0;
   let notificationUnreadSignature: string | null = null;
   let nativeNotificationBaselineReady = false;
@@ -421,6 +489,16 @@
       ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
       : null
   );
+  let selectedDraft = $derived.by(() => {
+    const currentSelection = selection;
+    if (currentSelection?.kind !== 'draft') return null;
+    return creationDrafts.find((draft) =>
+      draft.id === currentSelection.id && draft.projectId === currentSelection.projectId
+    ) ?? null;
+  });
+  $effect(() => {
+    if (selectedDraft?.kind === 'agent') void ensureAgentDraftMetadata();
+  });
   let activeWorktreeOperation = $derived(
     $worktreeOperations.find((operation) => operation.id === activeWorktreeOperationId) ?? null
   );
@@ -435,6 +513,25 @@
     ...visibleProcesses.filter((process) => process.kind === 'terminal'),
     ...visibleProcesses.filter((process) => process.kind === 'command')
   ]);
+  let treeCycleSelections = $derived.by(() => {
+    if (!selectedProject) return [];
+    const projectId = selectedProject.id;
+    return [
+      ...visibleProcesses
+        .filter((process) => process.kind === 'agent')
+        .map((process) => projectTreeSelection('agent', process.id, projectId, processLabel(process))),
+      ...creationDraftsForCycle(creationDrafts, projectId, 'agent')
+        .map((draft) => projectTreeSelection('draft', draft.id, projectId, creationDraftLabel(draft))),
+      ...visibleProcesses
+        .filter((process) => process.kind === 'terminal')
+        .map((process) => projectTreeSelection('terminal', process.id, projectId, processLabel(process))),
+      ...visibleProcesses
+        .filter((process) => process.kind === 'command')
+        .map((process) => projectTreeSelection('command', process.id, projectId, processLabel(process))),
+      ...creationDraftsForCycle(creationDrafts, projectId, 'command')
+        .map((draft) => projectTreeSelection('draft', draft.id, projectId, creationDraftLabel(draft)))
+    ];
+  });
   let projectOverviewOpen = $derived(
     selectedProject !== null &&
       !settingsOpen &&
@@ -462,8 +559,8 @@
                 : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
-    selectedProject && selectedProcess
-      ? `${projectLabel(selectedProject)}: ${selectedProcess.name}`
+    selectedProject && (selectedProcess || selectedDraft)
+      ? `${projectLabel(selectedProject)}: ${selectedProcess?.name ?? creationDraftLabel(selectedDraft!)}`
       : projectOverviewOpen && selectedProject
         ? projectLabel(selectedProject)
         : 'workman'
@@ -477,7 +574,14 @@
   let updateAvailable = $derived(startupUpdate?.check.available === true);
   let cliRecoveryRequired = $derived(startupUpdate?.cli_recovery_required === true);
   let startupUpdateCopy = $derived(startupUpdate ? updateActionCopy(startupUpdate) : null);
-  let showVersionBanner = $derived(versionSkew || updateAvailable || cliRecoveryRequired);
+  let updateBanner = $derived(updateBannerState(startupUpdate, updateFlow));
+  let updateFlowBlocksSkew = $derived(
+    updateFlow.kind === 'running'
+      || updateFlow.kind === 'restarting'
+      || (updateFlow.kind === 'needs-restart' && !updateBannerDismissed)
+  );
+  let showVersionSkew = $derived(versionSkew && !updateFlowBlocksSkew);
+  let showVersionBanner = $derived(showVersionSkew || (updateBanner.visible && !updateBannerDismissed));
 
   $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
@@ -556,6 +660,16 @@
   });
 
   onMount(() => {
+    justUpdatedVersion = localStorage.getItem('workman.just-updated-to');
+    void invoke<{ supported: boolean; app_bundle: string | null }>('desktop_relaunch_capability')
+      .then((capability) => {
+        nativeRelaunchAvailable = capability.supported;
+        nativeRelaunchAppBundle = capability.app_bundle;
+      })
+      .catch(() => {
+        nativeRelaunchAvailable = false;
+        nativeRelaunchAppBundle = null;
+      });
     const projectPreference = loadPanelPreference(
       'project-rail',
       { collapsed: false, width: projectRailWidth },
@@ -601,6 +715,7 @@
     };
     updateDocumentVisibility();
     document.addEventListener('visibilitychange', updateDocumentVisibility);
+    window.addEventListener('pagehide', flushCreationDraftPersistence);
     let stopWindowResize = (): void => {};
     void getCurrentWindow().onResized(updateDocumentVisibility).then((stop) => {
       if (active) stopWindowResize = stop;
@@ -681,12 +796,16 @@
     return () => {
       active = false;
       document.removeEventListener('visibilitychange', updateDocumentVisibility);
+      window.removeEventListener('pagehide', flushCreationDraftPersistence);
+      flushCreationDraftPersistence();
       stopWindowResize();
       stopWindowFocus();
       document.documentElement.classList.remove('workman-document-hidden');
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
       clearInterval(notificationTimer);
+      if (updateProgressTimer) clearTimeout(updateProgressTimer);
+      if (updateRestartTimer) clearTimeout(updateRestartTimer);
       stopStatuses();
       stopNavigation();
       stopNativeMenu();
@@ -721,7 +840,22 @@
         `workman daemon: ${status.daemon_version ?? 'legacy'} ` +
           `(build ${status.daemon_build_id ?? 'unknown'}, protocol ${status.daemon_control_protocol_version ?? 'unknown'})`
       );
-      if (status.version_compatible) versionRestarting = false;
+      if (status.version_compatible && updateFlow.kind !== 'running' && updateFlow.kind !== 'restarting') {
+        versionRestarting = false;
+      }
+      if (status.version_compatible && daemonOnlyRestartPending && reconnected) {
+        daemonOnlyRestartPending = false;
+        clearUpdateRestartWatchdog();
+        updateFlow = idleUpdateFlow;
+        startupUpdate = null;
+        versionRestarting = false;
+      }
+      if (justUpdatedVersion && status.app_version === justUpdatedVersion) {
+        updatedVersionNotice = justUpdatedVersion;
+        justUpdatedVersion = null;
+        localStorage.removeItem('workman.just-updated-to');
+        setTimeout(() => (updatedVersionNotice = null), 8_000);
+      }
       if (status.version_compatible && status.port !== startupUpdatePort) {
         startupUpdatePort = status.port;
         void startupUpdateCheck();
@@ -803,6 +937,15 @@
     if (event.key === 'Escape' && (treeMultiSelection?.ids.length ?? 0) > 0) {
       event.preventDefault();
       treeMultiSelection = null;
+      return;
+    }
+    const draftForm = target?.closest('[data-creation-draft]') ?? null;
+    const draftCycleDirection = draftForm
+      ? processCycleDirection(event)
+      : null;
+    if (draftCycleDirection !== null) {
+      event.preventDefault();
+      cycleProcess(draftCycleDirection, 'main');
       return;
     }
     if (isTextEditingTarget(target)) return;
@@ -927,16 +1070,17 @@
   }
 
   function cycleProcess(direction: -1 | 1, returnPanel: ReturnType<typeof panelForTarget>): void {
-    if (treeProcesses.length === 0) return;
-    const current = selectedProcess
-      ? treeProcesses.findIndex((process) => process.id === selectedProcess?.id)
+    if (treeCycleSelections.length === 0) return;
+    const current = selection
+      ? treeCycleSelections.findIndex((candidate) => candidate.key === selection?.key)
       : -1;
     const next = current < 0
-      ? direction > 0 ? 0 : treeProcesses.length - 1
-      : (current + direction + treeProcesses.length) % treeProcesses.length;
-    const process = treeProcesses[next];
-    if (!process) return;
-    selectProcessById(process.id);
+      ? direction > 0 ? 0 : treeCycleSelections.length - 1
+      : (current + direction + treeCycleSelections.length) % treeCycleSelections.length;
+    const nextSelection = treeCycleSelections[next];
+    if (!nextSelection) return;
+    draftFocusRequestId = null;
+    void selectTreeItem(nextSelection);
     if (returnPanel === 'projects' || returnPanel === 'tree') {
       void tick().then(() => focusPanel(returnPanel));
     } else if (returnPanel === 'main') {
@@ -990,6 +1134,117 @@
     );
   }
 
+  function clearProjectUnreadLocally(projectId: number): void {
+    const clear = (process: ProcessView): ProcessView =>
+      process.project_id === projectId && process.kind === 'agent' && process.agent_state.unread
+        ? { ...process, agent_state: { ...process.agent_state, unread: false } }
+        : process;
+    const knownProcesses = [
+      ...processes,
+      ...(navigationIndex[projectId]?.processes ?? [])
+    ];
+    for (const process of knownProcesses) {
+      if (process.project_id === projectId) notifiedUnreadProcessIds.delete(process.id);
+    }
+    processes = processes.map(clear);
+    const snapshot = navigationIndex[projectId];
+    if (snapshot) {
+      navigationIndex = {
+        ...navigationIndex,
+        [projectId]: { ...snapshot, processes: snapshot.processes.map(clear) }
+      };
+    }
+    agentDoneNotices = agentDoneNotices.filter((notice) => notice.projectId !== projectId);
+    const readAt = Date.now();
+    notifications = notifications.map((notification) =>
+      notification.project_id === projectId && notification.read_at === null
+        ? { ...notification, read_at: readAt }
+        : notification
+    );
+  }
+
+  function setNotificationBusy(busy: boolean): void {
+    notificationBusy = busy;
+    if (busy) return;
+    for (const resolve of notificationIdleWaiters) resolve();
+    notificationIdleWaiters.clear();
+  }
+
+  async function waitForNotificationIdle(): Promise<void> {
+    while (notificationBusy) {
+      await new Promise<void>((resolve) => notificationIdleWaiters.add(resolve));
+    }
+  }
+
+  async function markProjectRead(projectId: number): Promise<void> {
+    await waitForNotificationIdle();
+    const projectAgents = new Map<number, ProcessView>();
+    for (const process of [...processes, ...(navigationIndex[projectId]?.processes ?? [])]) {
+      if (process.project_id === projectId && process.kind === 'agent') {
+        projectAgents.set(process.id, process);
+      }
+    }
+    const pendingProcessIds = new Set(projectAgents.keys());
+    const unreadProcessIds = new Set(
+      [...projectAgents.values()]
+        .filter((process) => process.agent_state.unread)
+        .map((process) => process.id)
+    );
+    const unreadNotificationIds = new Set(
+      notifications
+        .filter((notification) =>
+          notification.project_id === projectId && notification.read_at === null
+        )
+        .map((notification) => notification.id)
+    );
+    const removedNotices = agentDoneNotices.filter((notice) => notice.projectId === projectId);
+    const removedNotifiedIds = new Set(
+      [...pendingProcessIds].filter((processId) => notifiedUnreadProcessIds.has(processId))
+    );
+    for (const processId of pendingProcessIds) markReadPending.add(processId);
+    setNotificationBusy(true);
+    clearProjectUnreadLocally(projectId);
+    let succeeded = false;
+    try {
+      await client.markProjectRead(projectId);
+      succeeded = true;
+    } catch (cause) {
+      const restore = (process: ProcessView): ProcessView =>
+        process.project_id === projectId && unreadProcessIds.has(process.id)
+          ? { ...process, agent_state: { ...process.agent_state, unread: true } }
+          : process;
+      processes = processes.map(restore);
+      const snapshot = navigationIndex[projectId];
+      if (snapshot) {
+        navigationIndex = {
+          ...navigationIndex,
+          [projectId]: { ...snapshot, processes: snapshot.processes.map(restore) }
+        };
+      }
+      notifications = notifications.map((notification) =>
+        notification.project_id === projectId && unreadNotificationIds.has(notification.id)
+          ? { ...notification, read_at: null }
+          : notification
+      );
+      for (const processId of removedNotifiedIds) notifiedUnreadProcessIds.add(processId);
+      const currentNoticeIds = new Set(agentDoneNotices.map((notice) => notice.id));
+      agentDoneNotices = [
+        ...removedNotices.filter((notice) => !currentNoticeIds.has(notice.id)),
+        ...agentDoneNotices
+      ].slice(-4);
+      reportError(cause);
+    } finally {
+      for (const processId of pendingProcessIds) markReadPending.delete(processId);
+    }
+    try {
+      if (succeeded) {
+        await Promise.all([refreshNotifications(), refreshProcesses(projectId)]);
+      }
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
   async function refreshNotifications(): Promise<void> {
     if (connection.status !== 'connected' || !connection.version_compatible) return;
     const request = ++notificationRequest;
@@ -1019,7 +1274,7 @@
   async function markCenterNotificationRead(notification: Notification): Promise<void> {
     if (notificationBusy || notification.read_at !== null) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     notifications = notifications.map((candidate) => candidate.id === notification.id
       ? { ...candidate, read_at: Date.now() }
       : candidate);
@@ -1031,14 +1286,14 @@
       reportError(cause);
       if (notification.project_id !== null) await refreshProcesses(notification.project_id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 
   async function markAllNotificationsRead(): Promise<void> {
     if (notificationBusy || notifications.every((notification) => notification.read_at !== null)) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     const readAt = Date.now();
     const processIds = new Set(
       notifications
@@ -1056,7 +1311,7 @@
       reportError(cause);
       if (selectedProject) await refreshProcesses(selectedProject.id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 
@@ -1196,24 +1451,49 @@
       .length;
   }
 
-  function projectRailActivity(project: Project): ProjectActivityRollup {
-    const projectProcesses = navigationIndex[project.id]?.processes
-      ?? (selectedProject?.id === project.id ? processes : []);
-    const rollup = projectActivityRollup(projectProcesses, $liveStats.processes);
-    if (projectProcesses.length === 0 && project.status === 'error') {
-      return { ...rollup, state: 'crashed', crashed: 1 };
-    }
-    return rollup;
+  function projectHasUnread(projectId: number): boolean {
+    return projectUnreadAgentCount(projectId) > 0
+      || notifications.some(
+        (notification) => notification.project_id === projectId && notification.read_at === null
+      );
   }
 
-  function projectRailActivityLabel(project: Project, rollup: ProjectActivityRollup): string {
-    const title = projectTitle(project);
-    const active = rollup.active > 0 ? ` · ${rollup.active} actively working` : '';
-    if (rollup.state === 'needs_input') return `${title} · needs input${active}`;
-    if (rollup.state === 'crashed') return `${title} · process error${active}`;
-    if (rollup.state === 'working') return `${title}${active}`;
-    if (rollup.state === 'waiting') return `${title} · waiting`;
-    return `${title} · no active work`;
+  function projectRailProcesses(project: Project): ProcessView[] {
+    return navigationIndex[project.id]?.processes
+      ?? (selectedProject?.id === project.id ? processes : []);
+  }
+
+  function projectRailActivityLabel(
+    project: Project,
+    activity: ProjectKindActivityRollup
+  ): string {
+    const running = (['agent', 'terminal', 'command'] as const)
+      .filter((kind) => activity[kind].active > 0)
+      .map((kind) => activity[kind].activeLabel);
+    const activitySummary = running.length > 0 ? running.join(' · ') : 'no processes running';
+    return project.status === 'error' ? `project error · ${activitySummary}` : activitySummary;
+  }
+
+  function openProjectRailProcess(project: Project, process: ProcessView): void {
+    appNavigation.navigate(
+      {
+        type: 'item',
+        selection: projectTreeSelection(
+          process.kind,
+          process.id,
+          project.id,
+          processLabel(process)
+        )
+      },
+      'project-rail'
+    );
+  }
+
+  function openProjectRailOverview(project: Project, kind: ProcessKind): void {
+    appNavigation.navigate(
+      { type: 'processes', projectId: project.id, kind },
+      'project-rail'
+    );
   }
 
   function cacheProjectProcesses(projectId: number, next: ProcessView[]): void {
@@ -1277,8 +1557,10 @@
       const switchingProjects = projectId !== null && selectedProject?.id !== projectId;
       if (projectId !== null && !activateProject(projectId)) return;
 
-      recordRecentNavigation(target);
-      quickJumpRecentKeys = readRecentNavigationKeys();
+      if (target.type !== 'item' || target.selection.kind !== 'draft') {
+        recordRecentNavigation(target);
+        quickJumpRecentKeys = readRecentNavigationKeys();
+      }
       dialog = null;
 
       switch (target.type) {
@@ -1288,6 +1570,9 @@
             clearSelection();
           }
           if (selectedProject) void refreshWorktreeRepository(selectedProject, false);
+          return;
+        case 'processes':
+          openProcessOverview(target.kind);
           return;
         case 'item':
           await selectTreeItem(target.selection);
@@ -1310,7 +1595,7 @@
           await spawnTerminal();
           return;
         case 'new-agent':
-          await openAgentDialog();
+          await openAgentDraft();
           return;
         case 'spawn-agent': {
           let tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
@@ -1321,17 +1606,16 @@
             tool = agentTools.find((candidate) => candidate.id === target.agentToolId);
           }
           if (!tool) throw new Error(`Agent tool ${target.agentToolName} is no longer enabled`);
-          await openAgentDialog(tool.id);
+          await openAgentDraft(tool.id);
           return;
         }
         case 'add-command':
           settingsOpen = false;
-          openAddCommand();
+          openCommandDraft();
           return;
         case 'new-todo':
           settingsOpen = false;
-          resetTodoForm();
-          dialog = 'todo';
+          openTodoDraft();
           return;
         case 'new-scratchpad':
           settingsOpen = false;
@@ -1413,7 +1697,10 @@
       scratchpadIds: new Set([
         ...(snapshot?.coordination?.scratchpads ?? []),
         ...(snapshot?.coordination?.archived_scratchpads ?? [])
-      ].map((scratchpad) => scratchpad.id))
+      ].map((scratchpad) => scratchpad.id)),
+      draftIds: new Set(
+        creationDrafts.filter((draft) => draft.projectId === projectId).map((draft) => draft.id)
+      )
     });
     if (!exists) {
       if (selection?.projectId === projectId && selection.key === pane.selection.key) {
@@ -1576,7 +1863,10 @@
     const activationAtStart = projectActivationRequest;
     busy = true;
     try {
-      const snapshot = await loadProjectRail(client);
+      const scopedSnapshot = await loadStableProfileProjectRail();
+      if (!scopedSnapshot) return;
+      const { snapshot, profileId } = scopedSnapshot;
+      activateCreationDraftProfile(profileId);
       const nextProjects = snapshot.projects;
       const currentSelectionId = pendingProjectSelectionId ?? selectedProject?.id ?? null;
       const preserveLocalSelection = pendingProjectSelectionId !== null
@@ -1586,6 +1876,11 @@
         && nextProjects.some((project) => project.id === currentSelectionId)
         ? selectProjectOptimistically(nextProjects, currentSelectionId)
         : nextProjects;
+      if (creationDraftsLoaded && activeProfileId === profileId) {
+        const projectIds = new Set(nextProjects.map((project) => project.id));
+        const nextDrafts = pruneCreationDraftsToProjects(creationDrafts, projectIds);
+        if (nextDrafts !== creationDrafts) replaceCreationDrafts([...nextDrafts]);
+      }
       projectFolders = snapshot.folders;
       void refreshWorktreeMetadata(projects);
       void refreshQuickJumpIndex(false);
@@ -1594,6 +1889,35 @@
     } finally {
       busy = false;
     }
+  }
+
+  async function loadStableProfileProjectRail(): Promise<{
+    snapshot: ProjectRailSnapshot;
+    profileId: number;
+  } | null> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const profileIdBefore = await resolveActiveProfileId();
+      if (profileIdBefore === null) return null;
+      const snapshot = await loadProjectRail(client);
+      const profileIdAfter = await resolveActiveProfileId();
+      if (profileIdBefore === profileIdAfter) {
+        return { snapshot, profileId: profileIdAfter };
+      }
+    }
+    console.warn('workman project rail changed profiles while refreshing; skipping stale snapshot');
+    return null;
+  }
+
+  async function resolveActiveProfileId(): Promise<number | null> {
+    return (await client.profiles()).find((profile) => profile.active)?.id ?? null;
+  }
+
+  function activateCreationDraftProfile(profileId: number): void {
+    if (creationDraftsLoaded && activeProfileId === profileId) return;
+    flushCreationDraftPersistence();
+    activeProfileId = profileId;
+    creationDrafts = loadCreationDrafts(profileId);
+    creationDraftsLoaded = true;
   }
 
   async function refreshProcesses(projectId: number): Promise<void> {
@@ -1625,7 +1949,11 @@
         coordination = next;
         if (selection?.kind === 'scratchpad') {
           const summary = next.scratchpads.find((scratchpad) => scratchpad.id === selection?.id);
-          if (summary && summary.revision !== scratchpadRead?.scratchpad.revision) {
+          if (
+            summary &&
+            (summary.revision !== scratchpadRead?.scratchpad.revision ||
+              summary.comments_revision !== scratchpadRead?.comments_revision)
+          ) {
             void loadScratchpad(selection.id, false);
           }
         }
@@ -1645,8 +1973,10 @@
       : null;
     pendingTodoCommentFocus = null;
     scratchpadFocusRequest = 0;
-    recordRecentNavigation({ type: 'item', selection: next });
-    quickJumpRecentKeys = readRecentNavigationKeys();
+    if (next.kind !== 'draft') {
+      recordRecentNavigation({ type: 'item', selection: next });
+      quickJumpRecentKeys = readRecentNavigationKeys();
+    }
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
@@ -2083,7 +2413,7 @@
     project_id: number;
     name: string;
     command: string;
-  }): number | null {
+  }, commandDraft: CommandCreationDraft | null = null): number | null {
     const project = selectedProject;
     if (!project || project.id !== input.project_id) return null;
     const id = nextOptimisticProcessId--;
@@ -2095,7 +2425,8 @@
         kind: 'command',
         name: input.name,
         command: input.command,
-        retry: 'command'
+        retry: 'command',
+        commandDraft
       })
     ];
     dialog = null;
@@ -2108,9 +2439,126 @@
     return id;
   }
 
-  function openAddCommand(): void {
-    commandDialogProcess = null;
-    dialog = 'command';
+  function replaceCreationDrafts(next: CreationDraft[]): void {
+    creationDrafts = next;
+    if (!creationDraftsLoaded || activeProfileId === null) return;
+    pendingCreationDraftSave = { profileId: activeProfileId, drafts: next };
+    if (creationDraftSaveTimer !== null) clearTimeout(creationDraftSaveTimer);
+    creationDraftSaveTimer = setTimeout(flushCreationDraftPersistence, 400);
+  }
+
+  function flushCreationDraftPersistence(): void {
+    if (creationDraftSaveTimer !== null) {
+      clearTimeout(creationDraftSaveTimer);
+      creationDraftSaveTimer = null;
+    }
+    const pending = pendingCreationDraftSave;
+    pendingCreationDraftSave = null;
+    if (pending) saveCreationDrafts(pending.profileId, pending.drafts);
+  }
+
+  function openCreationDraft(kind: CreationDraftKind): CreationDraft | null {
+    const project = selectedProject;
+    if (!project) return null;
+    const existing = findUntouchedCreationDraft(creationDrafts, project.id, kind);
+    const draft = existing ?? createCreationDraft(
+      kind,
+      project.id,
+      nextCreationDraftId(creationDrafts)
+    );
+    if (!existing) {
+      replaceCreationDrafts([...creationDrafts, draft]);
+    }
+    draftFocusRequestId = draft.id;
+    void selectTreeItem(
+      projectTreeSelection('draft', draft.id, project.id, creationDraftLabel(draft))
+    );
+    return draft;
+  }
+
+  function openCommandDraft(): void {
+    openCreationDraft('command');
+  }
+
+  function openTodoDraft(): void {
+    openCreationDraft('todo');
+  }
+
+  function patchCreationDraft(
+    draftId: number,
+    patch: Partial<AgentCreationDraft> | Partial<CommandCreationDraft> | Partial<TodoCreationDraft>,
+    markTouched = true
+  ): void {
+    const nextDrafts = creationDrafts.map((draft) => {
+      if (draft.id !== draftId) return draft;
+      const next = {
+        ...draft,
+        ...patch,
+        touched: markTouched ? true : draft.touched
+      } as CreationDraft;
+      if (next.kind === 'todo') next.blockerIds = [...next.blockerIds];
+      return next;
+    });
+    replaceCreationDrafts(nextDrafts);
+    const updatedDraft = nextDrafts.find((draft) => draft.id === draftId) ?? null;
+    if (updatedDraft && selection?.kind === 'draft' && selection.id === draftId) {
+      selection = projectTreeSelection(
+        'draft',
+        updatedDraft.id,
+        updatedDraft.projectId,
+        creationDraftLabel(updatedDraft)
+      );
+    }
+  }
+
+  function removeCreationDraft(draftId: number): void {
+    replaceCreationDrafts(creationDrafts.filter((draft) => draft.id !== draftId));
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
+    if (selection?.kind === 'draft' && selection.id === draftId) clearSelection();
+  }
+
+  async function requestDiscardCreationDraft(draftId: number): Promise<void> {
+    const draft = creationDrafts.find((candidate) => candidate.id === draftId);
+    if (!draft) return;
+    if (creationDraftHasContent(draft) && !(await confirmInApp({
+      title: `Discard ${creationDraftLabel(draft)}?`,
+      description: 'The content in this draft will be lost.',
+      confirmLabel: 'Discard draft'
+    }))) return;
+    removeCreationDraft(draftId);
+  }
+
+  function beginOptimisticCommandDraft(
+    draft: CommandCreationDraft,
+    input: CommandInput
+  ): number | null {
+    const optimisticId = beginOptimisticCommand(input, draft);
+    if (optimisticId !== null) removeCreationDraft(draft.id);
+    return optimisticId;
+  }
+
+  function createAgentFromDraft(
+    draft: AgentCreationDraft,
+    submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
+  ): void {
+    if (spawnAgent(
+      submission.tool,
+      submission.input,
+      submission.template,
+      () => restoreAgentCreationDraft(draft)
+    )) {
+      removeCreationDraft(draft.id);
+    }
+  }
+
+  function restoreAgentCreationDraft(draft: AgentCreationDraft): void {
+    if (
+      !projects.some((project) => project.id === draft.projectId)
+      || creationDrafts.some((candidate) =>
+        candidate.id === draft.id && candidate.projectId === draft.projectId
+      )
+    ) return;
+    replaceCreationDrafts([...creationDrafts, { ...draft }]);
   }
 
   function openEditCommand(process: ProcessView): void {
@@ -2171,36 +2619,64 @@
     if (retry === 'agent' && tool && optimistic.agentSpawnInput) {
       void spawnAgent(tool, optimistic.agentSpawnInput);
     }
-    else if (retry === 'command') openAddCommand();
-    else if (retry === 'agent') void openAgentDialog();
-  }
-
-  async function openAgentDialog(preferredToolId: number | null = null): Promise<void> {
-    preferredAgentToolId = preferredToolId;
-    dialog = 'agent';
-    agentToolsLoading = true;
-    try {
-      const [tools, templates] = await Promise.all([
-        agentToolsStore.refresh(true),
-        agentTemplatesStore.refresh(true)
-      ]);
-      registeredAgentTools = tools;
-      agentTools = registeredAgentTools.filter((tool) => tool.enabled);
-      agentTemplates = templates;
-    } catch (cause) {
-      reportError(cause);
-    } finally {
-      agentToolsLoading = false;
+    else if (retry === 'command' && optimistic.commandDraft) {
+      const restored = {
+        ...optimistic.commandDraft,
+        id: nextCreationDraftId(creationDrafts),
+        createdAt: Date.now(),
+        touched: true
+      };
+      replaceCreationDrafts([...creationDrafts, restored]);
+      void selectTreeItem(projectTreeSelection(
+        'draft', restored.id, restored.projectId, creationDraftLabel(restored)
+      ));
     }
+    else if (retry === 'command') openCommandDraft();
+    else if (retry === 'agent') void openAgentDraft();
   }
 
-  async function spawnAgent(
+  async function openAgentDraft(preferredToolId: number | null = null): Promise<void> {
+    const draft = openCreationDraft('agent');
+    if (draft?.kind === 'agent' && preferredToolId !== null) {
+      patchCreationDraft(draft.id, { templateId: null, agentToolId: preferredToolId });
+    }
+    await ensureAgentDraftMetadata();
+  }
+
+  function ensureAgentDraftMetadata(): Promise<void> {
+    if (agentDraftMetadataLoaded) return Promise.resolve();
+    if (agentDraftMetadataPromise) return agentDraftMetadataPromise;
+    agentToolsLoading = true;
+    const request = Promise.all([
+      agentToolsStore.refresh(true),
+      agentTemplatesStore.refresh(true)
+    ]).then(([tools, templates]) => {
+      registeredAgentTools = tools;
+      agentTools = tools.filter((tool) => tool.enabled);
+      agentTemplates = templates;
+      agentDraftMetadataLoaded = true;
+    }).catch((cause) => {
+      reportError(cause);
+    }).finally(() => {
+      agentToolsLoading = false;
+      if (agentDraftMetadataPromise === request) agentDraftMetadataPromise = null;
+    });
+    agentDraftMetadataPromise = request;
+    return request;
+  }
+
+  function consumeDraftInitialFocus(draftId: number): void {
+    if (draftFocusRequestId === draftId) draftFocusRequestId = null;
+  }
+
+  function spawnAgent(
     tool: AgentTool,
-    requestedInput?: NewAgentSubmission['input'],
-    template: AgentTemplate | null = null
-  ): Promise<void> {
+    requestedInput?: SpawnAgentInput,
+    template: AgentTemplate | null = null,
+    onFailure?: () => void
+  ): boolean {
     const currentProject = selectedProject;
-    if (!currentProject) return;
+    if (!currentProject) return false;
     const requested = requestedInput ?? {
       project_id: currentProject.id,
       agent_tool_id: tool.id,
@@ -2209,7 +2685,7 @@
     const project = requested.project_id === currentProject.id
       ? currentProject
       : projects.find((candidate) => candidate.id === requested.project_id) ?? null;
-    if (!project) return;
+    if (!project) return false;
     const input = { ...requested, extra_args: [...requested.extra_args] };
     const optimisticName = input.name || template?.name || tool.name;
     const optimisticId = nextOptimisticProcessId--;
@@ -2231,6 +2707,16 @@
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
+    void finishAgentSpawn(project, input, optimisticId, onFailure);
+    return true;
+  }
+
+  async function finishAgentSpawn(
+    project: Project,
+    input: SpawnAgentInput,
+    optimisticId: number,
+    onFailure?: () => void
+  ): Promise<void> {
     await tick();
     try {
       const result = await client.spawnAgent(input);
@@ -2244,24 +2730,25 @@
       }
     } catch (cause) {
       failPendingProcess(cause, optimisticId);
+      onFailure?.();
     }
   }
 
-  async function createTodo(): Promise<void> {
-    if (!selectedProject || !todoTitle.trim()) return;
+  async function createTodo(draft: TodoCreationDraft): Promise<void> {
+    const project = projects.find((candidate) => candidate.id === draft.projectId) ?? null;
+    if (!project || selectedProject?.id !== project.id || !draft.title.trim()) return;
     detailBusy = true;
     const input: NewTodoInput = {
-      title: todoTitle.trim(),
-      body: todoBody.trim(),
-      priority: todoPriority,
-      tags: todoTags.split(',').map((tag) => tag.trim()).filter(Boolean),
-      blocker_ids: todoBlockerIds
+      title: draft.title.trim(),
+      body: draft.body.trim(),
+      priority: draft.priority,
+      tags: draft.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      blocker_ids: draft.blockerIds
     };
     try {
-      const todo = await client.coordinationTodoCreate(selectedProject.id, input);
-      resetTodoForm();
-      dialog = null;
-      await refreshCoordination(selectedProject.id, false);
+      const todo = await client.coordinationTodoCreate(project.id, input);
+      removeCreationDraft(draft.id);
+      await refreshCoordination(project.id, false);
       await selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
     } catch (cause) {
       reportError(cause);
@@ -2447,12 +2934,61 @@
     }
   }
 
-  function resetTodoForm(): void {
-    todoTitle = '';
-    todoBody = '';
-    todoPriority = 'medium';
-    todoTags = '';
-    todoBlockerIds = [];
+  async function createScratchpadComment(input: NewScratchpadCommentInput): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    const projectId = selectedProject.id;
+    const scratchpadId = selection.id;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentCreate(projectId, scratchpadId, input);
+      await refreshCoordination(projectId, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function updateScratchpadComment(commentId: number, body: string): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentUpdate(selectedProject.id, commentId, body);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function resolveScratchpadComment(commentId: number, resolved: boolean): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentResolve(selectedProject.id, commentId, resolved);
+      await refreshCoordination(selectedProject.id, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
+  }
+
+  async function deleteScratchpadComment(commentId: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'scratchpad') return;
+    detailBusy = true;
+    try {
+      await client.coordinationScratchpadCommentDelete(selectedProject.id, commentId);
+      await refreshCoordination(selectedProject.id, false);
+    } catch (cause) {
+      reportError(cause);
+      throw cause;
+    } finally {
+      detailBusy = false;
+    }
   }
 
   function currentProjectPane(): ProjectPane | null {
@@ -2462,7 +2998,7 @@
     if (scratchpadBrowserOpen) return { type: 'scratchpads' };
     if (processOverviewKind) return { type: 'processes', kind: processOverviewKind };
     if (selection) {
-      if (selection.id <= 0) return null;
+      if (selection.id <= 0 && selection.kind !== 'draft') return null;
       return { type: 'selection', selection: { ...selection } };
     }
     return { type: 'overview' };
@@ -2559,11 +3095,11 @@
 
   function createFromProcessOverview(kind: ProcessKind): void {
     if (kind === 'agent') {
-      void openAgentDialog();
+      void openAgentDraft();
     } else if (kind === 'terminal') {
       void spawnTerminal();
     } else {
-      openAddCommand();
+      openCommandDraft();
     }
   }
 
@@ -2721,17 +3257,55 @@
     }
   }
 
-  async function registerProject(): Promise<void> {
+  async function chooseRegisterProjectFolder(): Promise<string | null> {
     const path = await open({ directory: true, multiple: false, title: 'Register a project folder' });
-    if (typeof path !== 'string') return;
-    busy = true;
+    return typeof path === 'string' ? path : null;
+  }
+
+  function showRegisterProjectTitle(path: string): void {
+    registerProjectError = null;
+    registerProjectDialog = {
+      path,
+      defaultTitle: registrationTitleForPath(path, projects)
+    };
+  }
+
+  async function registerProject(): Promise<void> {
+    const path = await chooseRegisterProjectFolder();
+    if (path) showRegisterProjectTitle(path);
+  }
+
+  async function changeRegisterProjectFolder(): Promise<void> {
+    const previous = registerProjectDialog;
+    const previousError = registerProjectError;
+    if (!previous || registerProjectBusy) return;
+    registerProjectDialog = null;
+    registerProjectError = null;
+    const path = await chooseRegisterProjectFolder();
+    if (path) {
+      showRegisterProjectTitle(path);
+    } else {
+      registerProjectDialog = previous;
+      registerProjectError = previousError;
+    }
+  }
+
+  async function submitRegisterProject(title: string): Promise<void> {
+    const state = registerProjectDialog;
+    if (!state || registerProjectBusy) return;
+    registerProjectBusy = true;
+    registerProjectError = null;
     try {
-      projects = await client.register(path);
+      projects = await client.register(
+        state.path,
+        resolvedProjectTitle(title, state.defaultTitle)
+      );
+      registerProjectDialog = null;
       await refreshWorktreeMetadata(projects, false, true);
     } catch (cause) {
-      reportError(cause);
+      registerProjectError = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      busy = false;
+      registerProjectBusy = false;
     }
   }
 
@@ -2834,6 +3408,7 @@
         await client.createWorktreeAsync(operationId, {
             project_id: state.sourceProject.id,
             branch: submission.branch,
+            display_name: submission.title,
             from_ref: submission.fromRef,
             env_policy: submission.envPolicy,
             remember_env_policy: submission.rememberEnvPolicy
@@ -2842,11 +3417,12 @@
         await client.forkWorktreeAsync(operationId, {
               project_id: state.sourceProject.id,
               branch: submission.branch,
+              display_name: submission.title,
               env_policy: submission.envPolicy,
               remember_env_policy: submission.rememberEnvPolicy
         });
       } else {
-        await client.adoptWorktreeAsync(operationId, submission.path);
+        await client.adoptWorktreeAsync(operationId, submission.path, submission.title);
       }
     } catch (cause) {
       failWorktreeOperation(
@@ -3311,6 +3887,7 @@
   function showContextMenu(request: ContextMenuRequest): void {
     folderMenuRequest = null;
     treeRenameTarget = null;
+    projectRailPopoverKey = null;
     contextRequest = request;
   }
 
@@ -3331,6 +3908,7 @@
       project,
       repository: worktreeRepositoryFor(project),
       worktree,
+      hasUnread: projectHasUnread(project.id),
       importableWorktreeCount: worktree?.kind === 'main'
         ? worktreeListFor(project)?.worktrees.filter((entry) => entry.can_adopt).length ?? 0
         : 0
@@ -3358,6 +3936,9 @@
 
   function selectedContextTarget(): ContextMenuTarget | null {
     if (!selection) return null;
+    if (selectedDraft) {
+      return { kind: 'draft', draft: selectedDraft, selection };
+    }
     if (selectedProcess) {
       return { kind: 'process', process: selectedProcess, selection };
     }
@@ -3395,6 +3976,8 @@
         dispatchTerminalContextAction(action, target);
       } else if (target.kind === 'todo') {
         await runTodoContextAction(action, target);
+      } else if (target.kind === 'draft') {
+        if (action === 'discard-draft') await requestDiscardCreationDraft(target.draft.id);
       } else {
         await runScratchpadContextAction(action, target);
       }
@@ -3412,6 +3995,9 @@
       case 'select':
         appNavigation.navigate({ type: 'project', projectId: project.id }, 'context-menu');
         return;
+      case 'mark-read':
+        await markProjectRead(project.id);
+        return;
       case 'project-settings':
         openProjectSettings(project);
         return;
@@ -3420,7 +4006,7 @@
         return;
       case 'new-agent':
         if (!(await activateProject(project.id))) return;
-        await openAgentDialog();
+        await openAgentDraft();
         return;
       case 'new-terminal':
         if (!(await activateProject(project.id))) return;
@@ -3429,13 +4015,12 @@
       case 'add-command':
         if (!(await activateProject(project.id))) return;
         settingsOpen = false;
-        openAddCommand();
+        openCommandDraft();
         return;
       case 'new-todo':
         if (!(await activateProject(project.id))) return;
         settingsOpen = false;
-        resetTodoForm();
-        dialog = 'todo';
+        openTodoDraft();
         return;
       case 'new-scratchpad':
         if (!(await activateProject(project.id))) return;
@@ -3684,10 +4269,6 @@
     queueMicrotask(() => { node.focus(); node.select(); });
   }
 
-  function focusDialogInput(node: HTMLInputElement): void {
-    queueMicrotask(() => node.focus());
-  }
-
   function projectLabel(project: Project): string {
     return projectDisplayName(project);
   }
@@ -3806,15 +4387,275 @@
       description: copy.dialogDescription,
       confirmLabel: copy.confirmLabel
     }))) return;
+    await performAvailableUpdate();
+  }
+
+  async function performAvailableUpdate(update: UpdateStatus | null = startupUpdate): Promise<void> {
+    if (update) startupUpdate = update;
+    if (
+      !update
+      || !updateActionAvailable(update)
+      || updateInstallActive
+      || updateFlow.kind === 'running'
+      || updateFlow.kind === 'restarting'
+    ) return;
+    updateInstallActive = true;
+    updateBannerDismissed = false;
     versionRestarting = true;
+    installedUpdateReport = null;
+    resetUpdateProgressPresentation();
+    updateFlow = {
+      kind: 'running',
+      progress: updateProgress('checking', 'Checking for the latest Workman release')
+    };
+    updateProgressPresentedAt = Date.now();
     try {
-      const report = await applyUpdate(client);
-      startupUpdate = null;
-      if (report.desktop_instruction) error = report.desktop_instruction;
+      const report = await applyUpdate(client, (progress) => {
+        if (canPresentUpdateProgress(updateFlow, updateInstallActive)) {
+          presentUpdateProgress(progress);
+        }
+      });
+      installedUpdateReport = report;
+      presentUpdateProgress(
+        updateProgress('restarting', `Installed Workman ${report.latest} — restarting…`)
+      );
+      await waitForUpdateProgressPresentation();
+      await completeInstalledUpdate(report);
     } catch (cause) {
+      resetUpdateProgressPresentation();
+      const stage = failedUpdateStage(updateFlow);
+      updateFlow = {
+        kind: 'failed',
+        stage,
+        message: cause instanceof Error ? cause.message : String(cause)
+      };
       versionRestarting = false;
-      reportError(cause);
+    } finally {
+      updateInstallActive = false;
     }
+  }
+
+  async function completeInstalledUpdate(report: UpdateInstallReport): Promise<void> {
+    const action = updateCompletionAction(report, {
+      nativeRelaunchAvailable,
+      appVersion: connection.app_version,
+      appBundle: nativeRelaunchAppBundle
+    });
+    if (action === 'manual-restart') {
+      const canRetryNativeRestart = report.restart_plan?.app === true
+        && report.installed_app_bundle !== undefined
+        && report.installed_app_bundle !== null
+        && report.installed_app_bundle.replace(/\/+$/, '') === nativeRelaunchAppBundle?.replace(/\/+$/, '');
+      updateFlow = manualUpdateFlow(report, null, canRetryNativeRestart ? 'app' : null);
+      startupUpdate = null;
+      versionRestarting = false;
+      return;
+    }
+
+    const restartTarget = action === 'relaunch' ? 'app' : 'daemon';
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartTarget };
+    await delay(1_000);
+    if (action === 'restart-daemon-only') {
+      daemonOnlyRestartPending = true;
+      armUpdateRestartWatchdog(report, 'daemon');
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
+      return;
+    }
+
+    localStorage.setItem('workman.just-updated-to', report.latest);
+    armUpdateRestartWatchdog(report, 'app');
+    try {
+      await invoke('desktop_restart_after_update', {
+        confirmProcessesStopped: true,
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
+      });
+    } catch (cause) {
+      showUpdateRestartFallback(report, cause, 'app');
+    }
+  }
+
+  async function restartInstalledUpdate(): Promise<void> {
+    const report = installedUpdateReport;
+    if (!report || updateFlow.kind !== 'needs-restart') return;
+    const restartAction = updateFlow.restartAction;
+    if (!restartAction) return;
+    updateBannerDismissed = false;
+    updateFlow = { kind: 'restarting', version: report.latest, target: restartAction };
+    versionRestarting = true;
+    armUpdateRestartWatchdog(report, restartAction);
+    if (restartAction === 'daemon') {
+      daemonOnlyRestartPending = true;
+      try {
+        await client.restartDaemon();
+      } catch (cause) {
+        daemonOnlyRestartPending = false;
+        showUpdateRestartFallback(report, cause, 'daemon');
+      }
+      return;
+    }
+    localStorage.setItem('workman.just-updated-to', report.latest);
+    try {
+      await invoke('desktop_restart_after_update', {
+        confirmProcessesStopped: true,
+        restartDaemon: report.restart_plan?.daemon ?? true,
+        installedAppBundle: report.installed_app_bundle
+      });
+    } catch (cause) {
+      showUpdateRestartFallback(report, cause, 'app');
+    }
+  }
+
+  function dismissInstalledUpdate(): void {
+    if (updateFlow.kind === 'needs-restart') {
+      updateBannerDismissed = true;
+      startupUpdate = null;
+      versionRestarting = false;
+      return;
+    }
+    resetUpdateProgressPresentation();
+    clearUpdateRestartWatchdog();
+    updateFlow = idleUpdateFlow;
+    installedUpdateReport = null;
+    startupUpdate = null;
+    versionRestarting = false;
+  }
+
+  function showUpdateRestartFallback(
+    report: UpdateInstallReport,
+    cause: unknown,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    localStorage.removeItem('workman.just-updated-to');
+    const message = cause instanceof Error ? cause.message : String(cause);
+    updateFlow = manualUpdateFlow(
+      report,
+      `The update is installed, but automatic restart was unavailable: ${message}`,
+      restartAction
+    );
+    updateBannerDismissed = false;
+    versionRestarting = false;
+  }
+
+  function armUpdateRestartWatchdog(
+    report: UpdateInstallReport,
+    restartAction: 'app' | 'daemon'
+  ): void {
+    clearUpdateRestartWatchdog();
+    updateRestartTimer = setTimeout(() => {
+      updateRestartTimer = null;
+      if (updateFlow.kind !== 'restarting') return;
+      daemonOnlyRestartPending = false;
+      showUpdateRestartFallback(
+        report,
+        restartAction === 'app'
+          ? 'the desktop process did not relaunch within 20 seconds'
+          : 'the updated daemon did not reconnect within 20 seconds',
+        restartAction
+      );
+    }, updateRestartTimeoutMs);
+  }
+
+  function clearUpdateRestartWatchdog(): void {
+    if (updateRestartTimer) clearTimeout(updateRestartTimer);
+    updateRestartTimer = null;
+  }
+
+  function updateProgress(stage: UpdateStage, message: string): UpdateProgress {
+    return {
+      stage,
+      message,
+      bytes_done: null,
+      bytes_total: null,
+      percent: null,
+      failed: false
+    };
+  }
+
+  function presentUpdateProgress(progress: UpdateProgress): void {
+    if (!canPresentUpdateProgress(updateFlow, updateInstallActive)) return;
+    if (progress.failed) {
+      resetUpdateProgressPresentation();
+      updateFlow = { kind: 'failed', stage: progress.stage, message: progress.message };
+      versionRestarting = false;
+      return;
+    }
+    versionRestarting = true;
+    if (
+      updateProgressQueue.length === 0
+      && updateFlow.kind === 'running'
+      && updateFlow.progress.stage === progress.stage
+    ) {
+      updateFlow = { kind: 'running', progress };
+      return;
+    }
+    const queued = updateProgressQueue.at(-1);
+    if (queued?.stage === progress.stage) updateProgressQueue[updateProgressQueue.length - 1] = progress;
+    else updateProgressQueue.push(progress);
+    scheduleUpdateProgressDrain();
+  }
+
+  function scheduleUpdateProgressDrain(): void {
+    if (updateProgressTimer) return;
+    const elapsed = Date.now() - updateProgressPresentedAt;
+    const wait = Math.max(0, updateStageMinimumMs - elapsed);
+    updateProgressTimer = setTimeout(drainUpdateProgress, wait);
+  }
+
+  function drainUpdateProgress(): void {
+    updateProgressTimer = null;
+    const next = updateProgressQueue.shift();
+    if (next && canPresentUpdateProgress(updateFlow, updateInstallActive)) {
+      updateFlow = { kind: 'running', progress: next };
+      updateProgressPresentedAt = Date.now();
+    }
+    if (
+      updateProgressQueue.length > 0
+      || (next && updateProgressWaiters.length > 0)
+    ) {
+      scheduleUpdateProgressDrain();
+      return;
+    }
+    settleUpdateProgressWaiters();
+  }
+
+  function waitForUpdateProgressPresentation(): Promise<void> {
+    const elapsed = Date.now() - updateProgressPresentedAt;
+    if (updateProgressQueue.length === 0 && elapsed >= updateStageMinimumMs) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      updateProgressWaiters.push(resolve);
+      scheduleUpdateProgressDrain();
+    });
+  }
+
+  function resetUpdateProgressPresentation(): void {
+    if (updateProgressTimer) clearTimeout(updateProgressTimer);
+    updateProgressTimer = null;
+    updateProgressQueue = [];
+    settleUpdateProgressWaiters();
+  }
+
+  function settleUpdateProgressWaiters(): void {
+    const waiters = updateProgressWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
+  function failedUpdateStage(flow: UpdateFlow): UpdateStage {
+    if (flow.kind === 'running') return flow.progress.stage;
+    if (flow.kind === 'failed') return flow.stage;
+    return 'restarting';
+  }
+
+  function delay(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 </script>
 
@@ -3825,16 +4666,54 @@
 </svelte:head>
 
 {#if showVersionBanner}
-  <section class="version-banner" aria-live="assertive">
+  <section class="version-banner" aria-live={updateBanner.mode === 'failed' ? 'assertive' : 'polite'}>
     <div>
-      <strong>{versionSkew ? 'Workman daemon is running an older version' : startupUpdateCopy?.bannerTitle}</strong>
-      <span>{versionSkew ? 'Restarting loads this app’s control protocol and agent config.' : startupUpdateCopy?.bannerDescription} All running project processes will stop.</span>
+      <strong>{showVersionSkew ? 'Workman daemon is running an older version' : updateBanner.title}</strong>
+      <span>{showVersionSkew ? 'Restarting loads this app’s control protocol and agent config.' : updateBanner.description}</span>
     </div>
-    <small>{versionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : cliRecoveryRequired && !updateAvailable ? `Workman ${startupUpdate?.check.current}` : `current ${startupUpdate?.check.current} · latest ${startupUpdate?.check.latest}`}</small>
-    <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void (versionSkew ? restartOutdatedDaemon() : applyAvailableUpdate())}>
-      {versionRestarting ? (versionSkew ? 'Restarting daemon…' : startupUpdateCopy?.busyLabel) : versionSkew ? 'Restart daemon' : startupUpdateCopy?.buttonLabel}
-    </Button>
+    {#if !showVersionSkew && (updateBanner.mode === 'running' || updateBanner.mode === 'restarting')}
+      <div
+        class:indeterminate={updateBanner.indeterminate}
+        class="update-progress"
+        role="progressbar"
+        aria-label={updateBanner.title}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={updateBanner.percent ?? undefined}
+      >
+        <span style={`width: ${updateBanner.percent ?? 32}%`}></span>
+      </div>
+    {:else}
+      <small>{showVersionSkew ? `app ${connection.app_build_id || 'current'} · daemon ${connection.daemon_build_id ?? 'legacy'}` : cliRecoveryRequired && !updateAvailable ? `Workman ${startupUpdate?.check.current}` : startupUpdate ? `current ${startupUpdate.check.current} · latest ${startupUpdate.check.latest}` : ''}</small>
+    {/if}
+    <div class="version-banner-actions">
+      {#if showVersionSkew}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void restartOutdatedDaemon()}>
+          {versionRestarting ? 'Restarting daemon…' : 'Restart daemon'}
+        </Button>
+      {:else if updateBanner.mode === 'available'}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void applyAvailableUpdate()}>
+          {startupUpdateCopy?.buttonLabel}
+        </Button>
+      {:else if updateBanner.retry}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void performAvailableUpdate()}>Retry</Button>
+        {#if updateBanner.dismiss}
+          <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+        {/if}
+      {:else if updateBanner.restart}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void restartInstalledUpdate()}>{updateBanner.restartLabel}</Button>
+        <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+      {:else if updateBanner.dismiss}
+        <Button size="sm" variant="ghost" onclick={dismissInstalledUpdate}>Later</Button>
+      {/if}
+    </div>
   </section>
+{/if}
+
+{#if updatedVersionNotice}
+  <button class:with-version-banner={showVersionBanner} class="updated-version-notice" type="button" onclick={() => (updatedVersionNotice = null)}>
+    Updated to Workman {updatedVersionNotice}
+  </button>
 {/if}
 
 <AgentDoneToasts
@@ -3850,11 +4729,14 @@
   {@const fullTitle = projectTitle(project)}
   {@const parentLabel = worktreeParentLabel(project, projects, repository?.name)}
   {@const projectKind = parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+  {@const tooltipLabel = `${fullTitle} · ${project.path}${parentLabel !== null ? ` · Worktree of ${parentLabel}` : ''}`}
   {@const unreadAgentCount = projectUnreadAgentCount(project.id)}
-  {@const activity = projectRailActivity(project)}
+  {@const projectProcesses = projectRailProcesses(project)}
+  {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
   {@const activityLabel = projectRailActivityLabel(project, activity)}
   <article
     class:active={project.selected}
+    class:has-unread={unreadAgentCount > 0}
     class:nested
     class="project-row group/project group/repository"
   >
@@ -3864,73 +4746,114 @@
         <Button size="sm" type="submit">Save</Button>
       </form>
     {:else}
-      <TooltipLabel label={fullTitle} side={projectRailCollapsed ? 'right' : 'top'}>
+      <span class="project-content">
         <button
-          class="project-select"
-          type="button"
-          aria-current={project.selected ? 'page' : undefined}
-          aria-label={`${activityLabel} · ${projectKind}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
-          use:reorderItem={{
-            id: project.id,
-            group: 'projects',
-            disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
-            label: fullTitle,
-            onDrop: handleProjectDrop,
-            onKeyboardMove: moveProjectRailFromKeyboard
-          }}
-          onclick={() => selectProject(project)}
-          oncontextmenu={(event) => showProjectPointerMenu(event, project)}
-          onkeydown={(event) => showProjectKeyboardMenu(event, project)}
-          data-context-kind="project"
-          data-context-id={project.id}
-        >
-          <StatusIndicator
-            class={projectRailCollapsed ? 'project-status-badge' : ''}
-            tone={processActivityTone(activity.state)}
-            label={activityLabel}
-          />
-          <span class="project-icon-anchor">
-            <span class="project-kind-icon" aria-hidden="true">
-              <ProjectIcon
-                icon={project.icon}
-                color={project.icon_color}
-                image={project.icon_image?.data_url}
-                fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-                size={15}
-              />
-            </span>
-          </span>
-          <span class="project-copy">
-            <strong>{rowLabel}</strong>
-            {#if parentLabel !== null}
-              <small
-                class="worktree-parent"
-                title={`Worktree of ${parentLabel}`}
-                aria-label={`Worktree of ${parentLabel}`}
-              >
-                <GitBranchIcon size={11} strokeWidth={1.8} aria-hidden="true" />
-                <span>Worktree of {parentLabel}</span>
-              </small>
-            {:else}
-              <small>{project.path}</small>
-            {/if}
-          </span>
-          {#if unreadAgentCount > 0}
-            <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
-              <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-                <span aria-hidden="true"></span>{unreadAgentCount}
+              class="project-select"
+              type="button"
+              aria-current={project.selected ? 'page' : undefined}
+              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+              use:reorderItem={{
+                id: project.id,
+                group: 'projects',
+                disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
+                label: fullTitle,
+                onDrop: handleProjectDrop,
+                onKeyboardMove: moveProjectRailFromKeyboard
+              }}
+              onclick={() => selectProject(project)}
+              oncontextmenu={(event) => showProjectPointerMenu(event, project)}
+              onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+              data-context-kind="project"
+              data-context-id={project.id}
+            >
+              <span class="project-icon-anchor">
+                <TooltipLabel
+                  label={tooltipLabel}
+                  side={projectRailCollapsed ? 'right' : 'top'}
+                  sideOffset={8}
+                  delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
+                  disableHoverableContent={true}
+                  skipDelayDuration={0}
+                  contentClass="project-rail-tooltip"
+                  tabindex={-1}
+                >
+                  {#snippet children()}
+                    <span class="project-kind-icon" aria-hidden="true">
+                      <ProjectIcon
+                        icon={project.icon}
+                        color={project.icon_color}
+                        image={project.icon_image?.data_url}
+                        fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                        worktree={parentLabel !== null}
+                        worktreeTooltip={false}
+                        size={15}
+                      />
+                    </span>
+                  {/snippet}
+                  {#snippet content()}
+                    <span class="project-tooltip-copy">
+                      <strong>{fullTitle}</strong>
+                      <span>{project.path}</span>
+                      {#if parentLabel !== null}
+                        <span class="project-tooltip-parent">
+                          <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                          Worktree of {parentLabel}
+                        </span>
+                      {/if}
+                    </span>
+                  {/snippet}
+                </TooltipLabel>
               </span>
-            </TooltipLabel>
-          {/if}
+              <span class="project-copy"><strong>{rowLabel}</strong></span>
+              {#if unreadAgentCount > 0}
+                <TooltipLabel
+                  label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}
+                  tabindex={-1}
+                >
+                  <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                    <span aria-hidden="true"></span>{unreadAgentCount}
+                  </span>
+                </TooltipLabel>
+              {/if}
         </button>
-      </TooltipLabel>
-      {#if repository && !projectRailCollapsed}
-        <WorktreeRowMeta
-          entry={worktree}
-          pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
-          repositoryName={repository.name}
-          refreshing={worktreeRefreshingRepositoryId === repository.id}
-          onRefresh={() => void refreshWorktreeRepository(project, true)}
+      </span>
+      {#if !projectRailCollapsed}
+        <span class="project-meta-strip" data-project-meta-strip>
+          {#if repository}
+            <WorktreeRowMeta
+              entry={worktree}
+              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              projectId={project.id}
+              repositoryName={repository.name}
+              openPopoverKey={projectRailPopoverKey}
+              onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+              refreshing={worktreeRefreshingRepositoryId === repository.id}
+              showNoPullRequest={false}
+              onRefresh={() => void refreshWorktreeRepository(project, true)}
+            />
+          {/if}
+          <ProjectKindIndicators
+            {activity}
+            processes={projectProcesses}
+            projectId={project.id}
+            projectTitle={fullTitle}
+            openPopoverKey={projectRailPopoverKey}
+            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+            onSelect={(process) => openProjectRailProcess(project, process)}
+            onShowAll={(kind) => openProjectRailOverview(project, kind)}
+          />
+        </span>
+      {:else}
+        <ProjectKindIndicators
+          {activity}
+          processes={projectProcesses}
+          projectId={project.id}
+          projectTitle={fullTitle}
+          openPopoverKey={projectRailPopoverKey}
+          onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+          compact
+          onSelect={(process) => openProjectRailProcess(project, process)}
+          onShowAll={(kind) => openProjectRailOverview(project, kind)}
         />
       {/if}
       <IconButton
@@ -4006,6 +4929,7 @@
           processes={profileProcesses}
           {projects}
           connectionStatus={connection.status}
+          visible={documentVisible}
           bind:open={keepAwakeOpen}
           bind:armed={keepAwakeArmed}
           bind:supported={keepAwakeSupported}
@@ -4014,6 +4938,7 @@
       <div class="notification-slot">
         <NotificationsCenter
           {notifications}
+          {projects}
           busy={notificationBusy}
           onRefresh={() => void refreshNotifications()}
           onOpen={openNotification}
@@ -4107,6 +5032,7 @@
         agentTools={registeredAgentTools}
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
+        drafts={creationDrafts.filter((draft) => draft.projectId === selectedProject.id)}
         {selection}
         multiSelection={treeMultiSelection}
         collapsed={treeRailCollapsed}
@@ -4114,13 +5040,13 @@
         onMultiSelectionChange={(next) => (treeMultiSelection = next)}
         onBulkAction={(action) => void runTreeBulkAction(action)}
         bulkBusy={treeBulkBusy || agentCascadeBusy}
-        onCreateTodo={() => (dialog = 'todo')}
+        onCreateTodo={openTodoDraft}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
         onBrowseProcesses={openProcessOverview}
-        onAddAgent={() => void openAgentDialog()}
+        onAddAgent={() => void openAgentDraft()}
         onAddTerminal={() => void spawnTerminal()}
-        onAddCommand={openAddCommand}
+        onAddCommand={openCommandDraft}
         onAddScratchpad={() => void createScratchpad()}
         {processBusyId}
         onStartProcess={(process) => void startOrReviewProcess(process)}
@@ -4169,6 +5095,10 @@
           {client}
           project={selectedProject}
           {connection}
+          {updateFlow}
+          onApplyUpdate={performAvailableUpdate}
+          onRestartUpdate={restartInstalledUpdate}
+          onDismissUpdate={dismissInstalledUpdate}
           onError={reportError}
           onProfileSwitched={() => window.location.reload()}
         />
@@ -4189,6 +5119,60 @@
             onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
             onDismiss={dismissActiveWorktreeOperation}
           />
+        {:else if selectedDraft}
+          {#key selectedDraft.id}
+            {@const draft = selectedDraft}
+            {#if draft.kind === 'agent'}
+              <NewAgentDraftPanel
+                {draft}
+                projectName={projectDisplayName(selectedProject)}
+                tools={registeredAgentTools}
+                templates={agentTemplates}
+                loading={agentToolsLoading}
+                metadataLoaded={agentDraftMetadataLoaded}
+                focusOnMount={draftFocusRequestId === draft.id}
+                busy={detailBusy}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onInitialize={(patch) => patchCreationDraft(draft.id, patch, false)}
+                onCreate={(submission) => createAgentFromDraft(draft, submission)}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+                onOpenSettings={() => {
+                  todoBrowserOpen = false;
+                  scratchpadBrowserOpen = false;
+                  processOverviewKind = null;
+                  selectSettingsSection('templates');
+                  settingsOpen = true;
+                }}
+                onError={(message) => reportError(new Error(message))}
+              />
+            {:else if draft.kind === 'command'}
+              <NewCommandDraftPanel
+                {client}
+                project={selectedProject}
+                {draft}
+                focusOnMount={draftFocusRequestId === draft.id}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onPending={(input) => beginOptimisticCommandDraft(draft, input)}
+                onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
+                onFailed={failPendingProcess}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+              />
+            {:else}
+              <NewTodoDraftPanel
+                {draft}
+                projectName={projectDisplayName(selectedProject)}
+                todos={coordination?.todos ?? []}
+                focusOnMount={draftFocusRequestId === draft.id}
+                busy={detailBusy}
+                onChange={(patch) => patchCreationDraft(draft.id, patch)}
+                onCreate={() => void createTodo(draft)}
+                onDiscard={() => void requestDiscardCreationDraft(draft.id)}
+                onInitialFocusHandled={() => consumeDraftInitialFocus(draft.id)}
+              />
+            {/if}
+          {/key}
         {:else if selectedOptimisticProcess}
           <OptimisticProcessPanel
             kind={selectedOptimisticProcess.process.kind}
@@ -4234,7 +5218,7 @@
               todoNavigationIds = navigationIds;
               void selectTreeItem(projectTreeSelection('todo', todo.id, todo.project_id, todo.title));
             }}
-            onCreate={() => (dialog = 'todo')}
+            onCreate={openTodoDraft}
           />
         {:else if scratchpadBrowserOpen}
           <ScratchpadBrowser
@@ -4301,6 +5285,10 @@
             onSetTags={setSelectedScratchpadTags}
             onArchive={archiveSelectedScratchpad}
             onDelete={deleteSelectedScratchpad}
+            onCreateComment={createScratchpadComment}
+            onUpdateComment={updateScratchpadComment}
+            onResolveComment={resolveScratchpadComment}
+            onDeleteComment={deleteScratchpadComment}
           />
         {:else}
           <ProjectOverview
@@ -4400,6 +5388,23 @@
   />
 {/if}
 
+{#if registerProjectDialog}
+  <RegisterProjectDialog
+    path={registerProjectDialog.path}
+    defaultTitle={registerProjectDialog.defaultTitle}
+    busy={registerProjectBusy}
+    error={registerProjectError}
+    onSubmit={(title) => void submitRegisterProject(title)}
+    onBack={() => void changeRegisterProjectFolder()}
+    onClose={() => {
+      if (!registerProjectBusy) {
+        registerProjectDialog = null;
+        registerProjectError = null;
+      }
+    }}
+  />
+{/if}
+
 {#if projectSettingsProject}
   <ProjectSettingsDialog
     project={projectSettingsProject}
@@ -4482,65 +5487,12 @@
   />
 {/if}
 
-{#if dialog === 'todo'}
-  <Dialog.Root open onOpenChange={(open) => { if (!open) dialog = null; }}>
-    <Dialog.Content class="max-w-[500px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-2xl" showCloseButton={false} aria-label="Create todo">
-      <form class="dialog-surface" onsubmit={(event) => { event.preventDefault(); void createTodo(); }}>
-        <header>
-          <div><span>New todo</span><h2>Add work to the tree</h2></div>
-          <IconButton label="Close new todo" onclick={() => (dialog = null)}>{#snippet icon()}<XIcon size={14} />{/snippet}</IconButton>
-        </header>
-        <div class="dialog-body">
-          <label><span>Title</span><input bind:value={todoTitle} placeholder="What needs to happen?" use:focusDialogInput /></label>
-          <label><span>Notes <small>optional</small></span><textarea bind:value={todoBody} rows="4" placeholder="Outcome, constraints, or context" use:submitOnEnter></textarea></label>
-          <div class="dialog-row"><label><span>Priority</span><select bind:value={todoPriority}><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Tags</span><input bind:value={todoTags} placeholder="ui, follow-up" /></label></div>
-          <div class="todo-blockers-field">
-            <TodoBlockerPicker
-              todos={coordination?.todos ?? []}
-              selectedIds={todoBlockerIds}
-              label="Blocked by · optional"
-              description="Create this todo with its prerequisites already linked."
-              compact
-              onChange={(blockerIds) => { todoBlockerIds = blockerIds; }}
-            />
-          </div>
-        </div>
-        <footer><Button variant="outline" type="button" onclick={() => (dialog = null)}>Cancel</Button><Button type="submit" disabled={detailBusy || !todoTitle.trim()}>Create todo</Button></footer>
-      </form>
-    </Dialog.Content>
-  </Dialog.Root>
-{/if}
-
-{#if dialog === 'agent' && selectedProject}
-  <NewAgentDialog
-    projectId={selectedProject.id}
-    tools={registeredAgentTools}
-    templates={agentTemplates}
-    initialChoice={preferredAgentToolId === null ? null : { kind: 'tool', id: preferredAgentToolId }}
-    loading={agentToolsLoading}
-    busy={detailBusy}
-    onSpawn={(submission) => spawnAgent(submission.tool, submission.input, submission.template)}
-    onClose={() => (dialog = null)}
-    onOpenSettings={() => {
-      dialog = null;
-      todoBrowserOpen = false;
-      scratchpadBrowserOpen = false;
-      processOverviewKind = null;
-      selectSettingsSection('templates');
-      settingsOpen = true;
-    }}
-    onError={(message) => reportError(new Error(message))}
-  />
-{/if}
-
-{#if dialog === 'command' && selectedProject}
+{#if dialog === 'command' && selectedProject && commandDialogProcess}
   <AddCommandDialog
     {client}
     project={selectedProject}
     initialProcess={commandDialogProcess}
-    onPending={beginOptimisticCommand}
-    onAdded={(process, optimisticId) => void commandAdded(process, optimisticId)}
-    onFailed={failPendingProcess}
+    onAdded={(process) => void commandAdded(process)}
     onClose={() => { dialog = null; commandDialogProcess = null; }}
   />
 {/if}
@@ -4551,14 +5503,29 @@
 
 <style>
   .app-shell { display: grid; width: 100%; height: 100%; min-height: 0; max-height: 100%; grid-template-columns: var(--project-rail-width) var(--tree-rail-width) minmax(0, 1fr); overflow: hidden; background: var(--night); }
-  .app-shell.with-version-banner { height: calc(100% - 38px); }
+  .app-shell.with-version-banner { height: calc(100% - 42px); }
   .app-shell.no-project { grid-template-columns: var(--project-rail-width) minmax(0, 1fr); }
-  .version-banner { display: grid; width: 100%; height: 38px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, var(--card)); color: var(--text); }
-  .version-banner div { min-width: 0; }
-  .version-banner strong, .version-banner span { display: block; }
-  .version-banner strong { color: #f2d69a; font-size: var(--font-size-sm); }
-  .version-banner span { overflow: hidden; margin-top: 2px; color: #b3a382; font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
-  .version-banner small { color: #91866f; font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .version-banner { display: grid; width: 100%; height: 42px; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); padding: 5px 8px 5px 11px; background: color-mix(in srgb, var(--warning) 9%, var(--card)); color: var(--text); }
+  .version-banner > div:first-child { min-width: 0; }
+  .version-banner > div:first-child strong, .version-banner > div:first-child span { display: block; }
+  .version-banner strong { color: color-mix(in srgb, var(--warning) 78%, var(--foreground)); font-size: var(--font-size-sm); }
+  .version-banner > div:first-child span { overflow: hidden; margin-top: 2px; color: color-mix(in srgb, var(--warning) 44%, var(--muted-foreground)); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .version-banner small { color: color-mix(in srgb, var(--warning) 35%, var(--muted-foreground)); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; white-space: nowrap; }
+  .version-banner-actions { display: flex; align-items: center; gap: var(--space-1); }
+  .update-progress { position: relative; width: 150px; height: 3px; overflow: hidden; border-radius: 1px; background: color-mix(in srgb, var(--warning) 18%, var(--border)); }
+  .update-progress span { display: block; height: 100%; background: var(--warning); transition: width 120ms linear; }
+  .update-progress.indeterminate span { width: 38% !important; animation: update-progress-scan 900ms ease-in-out infinite; }
+  .updated-version-notice { position: fixed; z-index: 80; top: 12px; right: 12px; min-height: 32px; border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border)); border-radius: var(--radius); padding: 6px 10px; background: color-mix(in srgb, var(--success) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); }
+  .updated-version-notice.with-version-banner { top: 54px; }
+
+  @keyframes update-progress-scan {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(270%); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .update-progress.indeterminate span { animation: none; transform: none; }
+  }
   .project-rail, .tree-rail, .main-frame { min-width: 0; min-height: 0; }
   [data-app-panel] { isolation: isolate; outline: 0; }
   [data-app-panel]:focus-within, [data-app-panel]:focus { box-shadow: inset 0 0 0 1px var(--muted-foreground); }
@@ -4577,31 +5544,38 @@
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
-  .project-row { position: relative; display: flex; min-height: 40px; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
-  .project-row.nested { min-height: 36px; }
-  .project-row:hover { background: var(--popover); }
-  .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
-  .project-row > :global(.tooltip-anchor) { min-width: 0; flex: 1; align-self: stretch; }
-  .project-select { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; flex: 1; align-items: center; gap: 7px; border: 0; padding: 5px 7px; background: transparent; text-align: left; cursor: pointer; }
-  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
+  .project-row { --project-icon-badge-background: var(--card); position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row.nested { min-height: 42px; }
+  .project-row:hover { --project-icon-badge-background: var(--popover); background: var(--popover); }
+  .project-row.active { --project-icon-badge-background: var(--accent); border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; grid-column: 1; grid-row: 1; align-self: stretch; }
+  .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
+  .project-select:focus-visible { --project-icon-badge-background: var(--border); outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
   .app-shell :global(.project-select[data-reorder-drop='before']::after) { top: -2px; }
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
-  .project-icon-anchor { display: inline-flex; flex: none; }
+  .project-icon-anchor { display: inline-flex; grid-row: 1 / 3; flex: none; align-self: center; }
+  .project-icon-anchor > :global(.tooltip-anchor) { display: inline-grid; width: 20px; height: 20px; place-items: center; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
-  .project-copy { min-width: 0; }
-  .project-copy strong, .project-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
+  .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .project-copy small { margin-top: 1px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .project-copy .worktree-parent { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
-  .worktree-parent :global(svg) { flex: none; }
-  .worktree-parent span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
+  .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
+  .project-tooltip-copy { display: contents; }
+  .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
+  .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }
+  .project-tooltip-copy > span { color: inherit; font-family: var(--terminal-font-family); font-size: var(--font-size-xs); opacity: .78; }
+  .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
+  .project-tooltip-parent :global(svg) { flex: none; }
+  :global(.project-rail-tooltip) { pointer-events: none; }
+  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
-  .rename-form { display: flex; width: 100%; align-items: center; gap: 4px; padding: 4px; }
+  .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
   .project-empty { margin: 5px; border: 1px dashed var(--border-strong); padding: 10px; }
   .project-empty strong { color: var(--foreground); font-size: var(--font-size-sm); } .project-empty p { margin: 3px 0 8px; color: var(--muted); font-size: var(--font-size-sm); }
@@ -4623,11 +5597,10 @@
   .project-rail.collapsed .folder-children { display: contents; }
   .project-rail.collapsed :global(.folder-row) { width: 100%; height: 36px; min-height: 36px; flex: 0 0 36px; margin: 0; }
   .project-rail.collapsed .project-row { width: 100%; height: 40px; min-height: 40px; flex: 0 0 40px; margin: 0; }
-  .project-rail.collapsed .project-select { position: relative; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
+  .project-rail.collapsed .project-content { min-height: 40px; }
+  .project-rail.collapsed .project-select { position: relative; inset: auto; display: flex; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }
-  .project-rail.collapsed :global(.project-status-badge) { position: absolute; z-index: 2; right: 2px; bottom: 2px; width: 12px; height: 12px; border: 1px solid var(--card); border-radius: 999px; background: var(--card); }
-  .project-rail.collapsed :global(.project-status-badge > span) { width: 6px; height: 6px; }
   .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
@@ -4651,20 +5624,4 @@
   .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
   .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
-  .dialog-surface { display: grid; width: 100%; min-height: 0; max-height: calc(100dvh - 2rem); grid-template-rows: auto minmax(0, 1fr) auto; color: var(--foreground); }
-  .dialog-surface > header { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 11px 13px 9px; }
-  .dialog-surface > header span, .dialog-surface label > span { color: var(--muted-foreground); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; text-transform: uppercase; }
-  .dialog-surface h2 { margin: 3px 0 0; color: var(--foreground); font-size: 17px; }
-  .dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 13px 12px; }
-  .dialog-body > label + label, .dialog-row { margin-top: 10px; }
-  .dialog-surface label { display: grid; gap: 4px; }
-  .dialog-surface label small { color: var(--muted-foreground); font: inherit; }
-  .dialog-surface input, .dialog-surface textarea, .dialog-surface select { width: 100%; border: 1px solid var(--input); border-radius: var(--radius); outline: 0; padding: 7px 8px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
-  .dialog-surface textarea { max-height: 192px; resize: none; line-height: 1.4; }
-  .dialog-row { display: grid; grid-template-columns: 0.45fr 1fr; gap: 8px; }
-  .todo-blockers-field { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .dialog-surface > footer { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid var(--border); padding: 8px 13px; }
-  @media (max-width: 760px) {
-    .project-copy small { display: none; }
-  }
 </style>

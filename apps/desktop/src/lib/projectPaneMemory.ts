@@ -15,6 +15,7 @@ export interface ProjectPaneInventory {
   processIds: ReadonlySet<number>;
   todoIds: ReadonlySet<number>;
   scratchpadIds: ReadonlySet<number>;
+  draftIds: ReadonlySet<number>;
 }
 
 interface PaneStorage {
@@ -28,7 +29,8 @@ const selectionKinds = new Set<ProjectTreeItemKind>([
   'agent',
   'terminal',
   'command',
-  'scratchpad'
+  'scratchpad',
+  'draft'
 ]);
 const processKinds = new Set<ProcessKind>(['agent', 'terminal', 'command']);
 
@@ -87,6 +89,7 @@ export function projectPaneSelectionExists(
     || pane.selection.kind === 'command'
   ) return inventory.processIds.has(pane.selection.id);
   if (pane.selection.kind === 'todo') return inventory.todoIds.has(pane.selection.id);
+  if (pane.selection.kind === 'draft') return inventory.draftIds.has(pane.selection.id);
   return inventory.scratchpadIds.has(pane.selection.id);
 }
 
@@ -109,7 +112,7 @@ function parseProjectPane(value: unknown, projectId: number): ProjectPane | null
     typeof kind !== 'string'
     || !selectionKinds.has(kind as ProjectTreeItemKind)
     || !Number.isSafeInteger(id)
-    || (id as number) <= 0
+    || (kind === 'draft' ? (id as number) >= 0 : (id as number) <= 0)
     || typeof label !== 'string'
   ) return null;
   return {

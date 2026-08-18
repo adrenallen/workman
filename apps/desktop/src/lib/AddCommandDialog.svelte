@@ -13,69 +13,49 @@
     type ProcessView,
     type Project
   } from './daemon';
+  import {
+    CommandEnvironmentError,
+    formatCommandEnvironment,
+    parseCommandEnvironment,
+    type CommandInput,
+    type CommandProcessReceipt
+  } from './commandCreation';
   import { projectDisplayName } from './worktrees';
-
-  export interface CommandInput {
-    project_id: number;
-    name: string;
-    command: string;
-    working_dir: string;
-    env: Record<string, string>;
-    auto_start: boolean;
-    auto_restart: boolean;
-    restart_when_changed: string[];
-  }
-
-  interface ConfigStatus {
-    project_id: number;
-    path: string;
-    exists: boolean;
-  }
 
   interface ValidatedWorkingDirectory {
     absolute: string;
     relative: string;
   }
 
-  export type CommandProcessReceipt = Pick<ProcessView, 'id' | 'project_id' | 'name'>;
-
   interface Props {
     client: DaemonClient;
     project: Project;
-    initialProcess?: ProcessView | null;
-    onPending?: (input: CommandInput) => number | null;
-    onAdded: (process: CommandProcessReceipt, optimisticId: number | null) => void;
-    onFailed?: (cause: unknown, optimisticId: number) => void;
+    initialProcess: ProcessView;
+    onAdded: (process: CommandProcessReceipt) => void;
     onClose: () => void;
   }
 
   let {
     client,
     project,
-    initialProcess = null,
-    onPending,
+    initialProcess,
     onAdded,
-    onFailed,
     onClose
   }: Props = $props();
 
-  let editing = $derived(initialProcess !== null);
   let running = $derived(
-    initialProcess?.status === 'running' || initialProcess?.status === 'starting'
+    initialProcess.status === 'running' || initialProcess.status === 'starting'
   );
-  let name = $state(untrack(() => initialProcess?.name ?? ''));
-  let command = $state(untrack(() => initialProcess?.command ?? ''));
-  let workingDir = $state(untrack(() => initialProcess?.working_dir ?? ''));
-  let environment = $state(untrack(() => formatEnvironment(initialProcess?.env ?? {})));
+  let name = $state(untrack(() => initialProcess.name));
+  let command = $state(untrack(() => initialProcess.command ?? ''));
+  let workingDir = $state(untrack(() => initialProcess.working_dir));
+  let environment = $state(untrack(() => formatCommandEnvironment(initialProcess.env)));
   let restartWhenChanged = $state(
-    untrack(() => (initialProcess?.restart_when_changed ?? []).join('\n'))
+    untrack(() => initialProcess.restart_when_changed.join('\n'))
   );
-  let autoStart = $state(untrack(() => initialProcess?.auto_start ?? true));
-  let autoRestart = $state(untrack(() => initialProcess?.auto_restart ?? false));
-  let saveMode = $state<'yml' | 'local'>(
-    untrack(() => initialProcess?.source ?? 'yml')
-  );
-  let configExists = $state<boolean | null>(null);
+  let autoStart = $state(untrack(() => initialProcess.auto_start));
+  let autoRestart = $state(untrack(() => initialProcess.auto_restart));
+  const saveMode = untrack(() => initialProcess.source);
   let busy = $state(false);
   let attempted = $state(false);
   let workingDirError = $state<string | null>(null);
@@ -84,68 +64,8 @@
   let nameInput: HTMLInputElement;
 
   onMount(() => {
-    if (!editing) void loadConfigStatus();
     requestAnimationFrame(() => nameInput?.focus());
   });
-
-  function formatEnvironment(env: Record<string, string>): string {
-    return Object.entries(env)
-      .map(([key, value]) => `${key}=${escapeEnvironmentValue(value)}`)
-      .join('\n');
-  }
-
-  function escapeEnvironmentValue(value: string): string {
-    return value
-      .replaceAll('\\', '\\\\')
-      .replaceAll('\n', '\\n')
-      .replaceAll('\r', '\\r')
-      .replaceAll('\t', '\\t');
-  }
-
-  function unescapeEnvironmentValue(value: string): string {
-    let result = '';
-    for (let index = 0; index < value.length; index += 1) {
-      const character = value[index];
-      if (character !== '\\' || index + 1 >= value.length) {
-        result += character;
-        continue;
-      }
-      const escaped = value[index + 1];
-      if (escaped === 'n') result += '\n';
-      else if (escaped === 'r') result += '\r';
-      else if (escaped === 't') result += '\t';
-      else if (escaped === '\\') result += '\\';
-      else result += `\\${escaped}`;
-      index += 1;
-    }
-    return result;
-  }
-
-  function parseEnvironment(value: string): Record<string, string> | null {
-    const env: Record<string, string> = {};
-    for (const [index, rawLine] of value.split('\n').entries()) {
-      if (!rawLine.trim()) continue;
-      const separator = rawLine.indexOf('=');
-      const key = separator < 0 ? '' : rawLine.slice(0, separator).trim();
-      if (!key) {
-        environmentError = `Line ${index + 1} must use KEY=value.`;
-        return null;
-      }
-      env[key] = unescapeEnvironmentValue(rawLine.slice(separator + 1));
-    }
-    return env;
-  }
-
-  async function loadConfigStatus(): Promise<void> {
-    try {
-      const status = await client.control<ConfigStatus>('config.status', {
-        project_id: project.id
-      });
-      configExists = status.exists;
-    } catch {
-      configExists = null;
-    }
-  }
 
   async function browse(): Promise<void> {
     if (busy) return;
@@ -167,8 +87,15 @@
     workingDirError = null;
     environmentError = null;
     if (!name.trim() || !command.trim()) return;
-    const env = parseEnvironment(environment);
-    if (!env) return;
+    let env: Record<string, string>;
+    try {
+      env = parseCommandEnvironment(environment);
+    } catch (cause) {
+      environmentError = cause instanceof CommandEnvironmentError
+        ? cause.message
+        : 'Environment values could not be parsed.';
+      return;
+    }
 
     busy = true;
     const pendingInput: CommandInput = {
@@ -184,7 +111,6 @@
         .map((pattern) => pattern.trim())
         .filter(Boolean)
     };
-    const optimisticId = editing ? null : onPending?.(pendingInput) ?? null;
     try {
       const validated = await client.control<ValidatedWorkingDirectory>(
         'config.validate_working_dir',
@@ -200,19 +126,13 @@
         auto_restart: autoRestart,
         restart_when_changed: pendingInput.restart_when_changed
       };
-      const process = editing
-        ? await client.control<CommandProcessReceipt>('config.command_update', {
-            process_id: initialProcess!.id,
-            ...input
-          })
-        : saveMode === 'yml'
-          ? await client.control<CommandProcessReceipt>('config.command_save', { ...input })
-          : await createLocalCommand(input);
-      onAdded(process, optimisticId);
+      const process = await client.control<CommandProcessReceipt>('config.command_update', {
+        process_id: initialProcess.id,
+        ...input
+      });
+      onAdded(process);
     } catch (cause) {
-      if (optimisticId !== null && onFailed) {
-        onFailed(cause, optimisticId);
-      } else if (cause instanceof DaemonRequestError && cause.code === 'invalid_working_directory') {
+      if (cause instanceof DaemonRequestError && cause.code === 'invalid_working_directory') {
         workingDirError = `Choose an existing folder inside ${project.path}.`;
       } else {
         formError = cause instanceof Error ? cause.message : String(cause);
@@ -222,39 +142,13 @@
     }
   }
 
-  async function createLocalCommand(input: CommandInput): Promise<CommandProcessReceipt> {
-    const process = await client.control<CommandProcessReceipt>('process.create', {
-      process: {
-        id: 0,
-        project_id: input.project_id,
-        kind: 'command',
-        name: input.name,
-        command: input.command,
-        working_dir: input.working_dir,
-        env: input.env,
-        auto_start: input.auto_start,
-        auto_restart: input.auto_restart,
-        restart_when_changed: input.restart_when_changed,
-        source: 'local',
-        trust_hash: null,
-        status: 'stopped',
-        pid: null,
-        exit_code: null,
-        exit_signal: null,
-        exited_at: null,
-        agent_tool_id: null
-      }
-    });
-    return input.auto_start ? client.startProcess(process.id) : process;
-  }
-
 </script>
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <Dialog.Content
     class="command-dialog w-[min(560px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0 shadow-2xl"
     showCloseButton={false}
-    aria-label={editing ? 'Edit command' : 'Add command'}
+    aria-label="Edit command"
     aria-describedby="command-dialog-description"
   >
     <form
@@ -266,16 +160,16 @@
     <header>
       <div>
         <span>Project command</span>
-        <h2>{editing ? 'Edit command' : 'Add command'}</h2>
+        <h2>Edit command</h2>
       </div>
-      <IconButton label={editing ? 'Close edit command' : 'Close add command'} disabled={busy} onclick={onClose}>
+      <IconButton label="Close edit command" disabled={busy} onclick={onClose}>
         {#snippet icon()}<XIcon size={15} />{/snippet}
       </IconButton>
     </header>
 
     <div class="command-body">
       <p id="command-dialog-description" class="description">
-        {editing ? 'Update' : 'Add'} a repeatable process {editing ? 'in' : 'to'} <strong>{projectDisplayName(project)}</strong>.
+        Update a repeatable process in <strong>{projectDisplayName(project)}</strong>.
       </p>
 
       {#if running}
@@ -370,23 +264,9 @@
         <label class="check"><input type="checkbox" bind:checked={autoRestart} disabled={busy} /><span>Auto-restart if command exits</span></label>
       </div>
 
-      {#if !editing}<fieldset>
-        <legend>Where to save this command</legend>
-        <label class:chosen={saveMode === 'yml'} class="save-choice">
-          <input type="radio" bind:group={saveMode} value="yml" disabled={busy} />
-          <span><strong>Save to workman.yml</strong>
-            {#if configExists === false}<small>No workman.yml found — we'll create one for you</small>{:else}<small>Share this command with the project</small>{/if}
-          </span>
-        </label>
-        <label class:chosen={saveMode === 'local'} class="save-choice">
-          <input type="radio" bind:group={saveMode} value="local" disabled={busy} />
-          <span><strong>Store locally only</strong><small>Keep this command just for yourself on this machine</small></span>
-        </label>
-      </fieldset>{:else}
-        <p class="storage-note">
-          Stored {saveMode === 'yml' ? 'in workman.yml' : 'locally on this machine'}.
-        </p>
-      {/if}
+      <p class="storage-note">
+        Stored {saveMode === 'yml' ? 'in workman.yml' : 'locally on this machine'}.
+      </p>
 
       {#if formError}<p class="form-error" role="alert">{formError}</p>{/if}
       </div>
@@ -395,7 +275,7 @@
       <footer>
         <Button variant="outline" type="button" disabled={busy} onclick={onClose}>Cancel</Button>
         <Button type="submit" disabled={busy}>
-          {busy ? (editing ? 'Saving…' : 'Adding…') : (editing ? 'Save changes' : 'Add command')}
+          {busy ? 'Saving…' : 'Save changes'}
         </Button>
       </footer>
     </form>
@@ -417,14 +297,12 @@
 
   header span,
   label > span,
-  legend,
   small {
     font-family: 'JetBrains Mono Variable', monospace;
   }
 
   header span,
-  label > span,
-  legend {
+  label > span {
     color: #78909a;
     font-size: var(--font-size-xs);
     font-weight: 650;
@@ -457,26 +335,8 @@
   .browse-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
   .switches { display: flex; gap: 20px; padding: 1px 0; }
   .check { display: flex; align-items: center; gap: 7px; }
-  .check input, .save-choice input { accent-color: #61a0ae; }
+  .check input { accent-color: #61a0ae; }
   .check span { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 540; letter-spacing: 0; text-transform: none; }
-  fieldset { display: grid; gap: 7px; margin: 0; border: 0; padding: 0; }
-  legend { margin-bottom: 7px; padding: 0; }
-  .save-choice {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-    gap: 10px;
-    border: 1px solid #2f4650;
-    border-radius: 3px;
-    padding: 10px 11px;
-    background: #0c1920;
-    cursor: pointer;
-  }
-  .save-choice.chosen { border-color: #537783; background: #10232b; }
-  .save-choice input { margin: 2px 0 0; }
-  .save-choice span { display: grid; gap: 4px; }
-  .save-choice strong { color: #c4d0d4; font-size: var(--font-size-sm); font-weight: 610; }
-  .save-choice small { color: #718891; font-size: var(--font-size-xs); }
   .form-error { margin: 0; border-left: 2px solid #b96c62; padding: 7px 9px; background: rgb(185 108 98 / 9%); color: #e2a097; font-size: var(--font-size-sm); line-height: 1.4; }
   .running-note, .storage-note { margin: 12px 19px 0; border-left: 2px solid #b99758; padding: 8px 10px; background: rgb(185 151 88 / 8%); color: #b9aa89; font-size: var(--font-size-sm); line-height: 1.45; }
   .storage-note { margin: 0; border-left-color: #537783; background: #10232b; color: #80949d; }

@@ -129,6 +129,9 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -138,10 +141,9 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     let endpoint = format!("http://127.0.0.1:{}/mcp", discovery.port);
     let root_transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
-            .auth_header(discovery.token.clone()),
+            .auth_header("root-process-token".to_owned()),
     );
     let root = ClientInfo::default().serve(root_transport).await?;
-    call(&root, "identify_session", json!({ "process_id": 1 })).await;
 
     let parent_context = temp.path().join("parent-context.txt");
     let parent_spawn = call(

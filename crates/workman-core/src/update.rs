@@ -193,6 +193,59 @@ pub struct UpdateCheck {
     pub checksums_asset: Option<ReleaseAsset>,
 }
 
+/// Ordered stages emitted while a verified release is installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateStage {
+    Checking,
+    Downloading,
+    Verifying,
+    Installing,
+    Restarting,
+}
+
+/// User-facing progress for one update install.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateProgress {
+    pub stage: UpdateStage,
+    pub message: String,
+    pub bytes_done: Option<u64>,
+    pub bytes_total: Option<u64>,
+    pub percent: Option<u8>,
+    #[serde(default)]
+    pub failed: bool,
+}
+
+impl UpdateProgress {
+    pub fn stage(stage: UpdateStage, message: impl Into<String>) -> Self {
+        Self {
+            stage,
+            message: message.into(),
+            bytes_done: None,
+            bytes_total: None,
+            percent: None,
+            failed: false,
+        }
+    }
+
+    fn download(message: impl Into<String>, bytes_done: u64, bytes_total: u64) -> Self {
+        Self {
+            stage: UpdateStage::Downloading,
+            message: message.into(),
+            bytes_done: Some(bytes_done),
+            bytes_total: Some(bytes_total),
+            percent: Some(download_percent(bytes_done, bytes_total)),
+            failed: false,
+        }
+    }
+
+    pub fn failed(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self.failed = true;
+        self
+    }
+}
+
 impl UpdateCheck {
     pub fn current(current: impl Into<String>) -> Self {
         Self::current_for(current, UpdateChannel::Stable)
@@ -416,6 +469,17 @@ impl UpdateClient {
         check: &UpdateCheck,
         install_dir: impl AsRef<Path>,
     ) -> UpdateResult<UpdateInstallReport> {
+        let ignore_progress = |_: UpdateProgress| {};
+        self.install_with_progress(check, install_dir, &ignore_progress)
+            .await
+    }
+
+    async fn install_with_progress(
+        &self,
+        check: &UpdateCheck,
+        install_dir: impl AsRef<Path>,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
+    ) -> UpdateResult<UpdateInstallReport> {
         if !check.available {
             return Err(UpdateError::InvalidRelease(format!(
                 "{} is already current",
@@ -431,7 +495,11 @@ impl UpdateClient {
         remove_retired_binaries(&[&wrk_target, &workmand_target]);
 
         let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset).await?;
+        let archive = self.download(binary_asset, on_progress).await?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Verifying,
+            format!("Verifying {}", binary_asset.name),
+        ));
         if archive.len() as u64 != binary_asset.size {
             return Err(UpdateError::InvalidRelease(format!(
                 "{} size mismatch: expected {} bytes, got {}",
@@ -450,6 +518,10 @@ impl UpdateClient {
         }
 
         let staging = unique_staging_dir(&install_dir)?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Installing,
+            "Installing command-line tools and daemon",
+        ));
         let result = (|| -> UpdateResult<UpdateInstallReport> {
             extract_release_archive(&archive, &binary_asset.name, &staging)?;
             let wrk_source = staged_binary(&staging, "wrk")?;
@@ -473,17 +545,22 @@ impl UpdateClient {
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
                     if asset.name == binary_asset.name {
                         format!(
-                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     } else {
                         format!(
-                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     }
                 }),
+                installed_app_bundle: None,
                 quarantine_cleared,
+                restart_plan: UpdateRestartPlan {
+                    daemon: true,
+                    app: false,
+                },
             })
         })();
         let _ = fs::remove_dir_all(&staging);
@@ -496,13 +573,30 @@ impl UpdateClient {
         check: &UpdateCheck,
         target: &UpdateInstallTarget,
     ) -> UpdateResult<UpdateInstallReport> {
+        let ignore_progress = |_: UpdateProgress| {};
+        self.install_target_with_progress(check, target, &ignore_progress)
+            .await
+    }
+
+    /// Install a release while synchronously publishing each semantic progress transition.
+    pub async fn install_target_with_progress(
+        &self,
+        check: &UpdateCheck,
+        target: &UpdateInstallTarget,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
+    ) -> UpdateResult<UpdateInstallReport> {
         match target {
-            UpdateInstallTarget::BinaryDirectory(directory) => self.install(check, directory).await,
+            UpdateInstallTarget::BinaryDirectory(directory) => {
+                self.install_with_progress(check, directory, on_progress)
+                    .await
+            }
             UpdateInstallTarget::VersionedBinary(target) => {
-                self.install_versioned_binary(check, target).await
+                self.install_versioned_binary(check, target, on_progress)
+                    .await
             }
             UpdateInstallTarget::Application(application) => {
-                self.install_application(check, application).await
+                self.install_application(check, application, on_progress)
+                    .await
             }
         }
     }
@@ -511,6 +605,7 @@ impl UpdateClient {
         &self,
         check: &UpdateCheck,
         target: &VersionedBinaryInstallTarget,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
     ) -> UpdateResult<UpdateInstallReport> {
         if !check.available {
             return Err(UpdateError::InvalidRelease(format!(
@@ -525,7 +620,11 @@ impl UpdateClient {
             .as_ref()
             .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
         let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset).await?;
+        let archive = self.download(binary_asset, on_progress).await?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Verifying,
+            format!("Verifying {}", binary_asset.name),
+        ));
         if archive.len() as u64 != binary_asset.size {
             return Err(UpdateError::InvalidRelease(format!(
                 "{} size mismatch: expected {} bytes, got {}",
@@ -546,6 +645,10 @@ impl UpdateClient {
         let inventory = discover_versioned_binary_inventory(target);
         fs::create_dir_all(&target.versioned_root)?;
         let staging = unique_staging_dir(&target.versioned_root)?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Installing,
+            "Installing command-line tools and daemon",
+        ));
         let result = (|| -> UpdateResult<UpdateInstallReport> {
             extract_release_archive(&archive, &binary_asset.name, &staging)?;
             let wrk_source = staged_binary(&staging, "wrk")?;
@@ -599,17 +702,22 @@ impl UpdateClient {
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
                     if asset.name == binary_asset.name {
                         format!(
-                            "Desktop app: close Workman, open the platform bundle {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     } else {
                         format!(
-                            "Desktop app: close Workman, download {} from {}, and replace the installed app. The running app is not replaced in place.",
-                            asset.name, asset.url
+                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
+                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
                         )
                     }
                 }),
+                installed_app_bundle: None,
                 quarantine_cleared,
+                restart_plan: UpdateRestartPlan {
+                    daemon: true,
+                    app: false,
+                },
             })
         })();
         let _ = fs::remove_dir_all(&staging);
@@ -620,6 +728,7 @@ impl UpdateClient {
         &self,
         check: &UpdateCheck,
         target: &ApplicationInstallTarget,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
     ) -> UpdateResult<UpdateInstallReport> {
         let inventory = discover_application_inventory(target);
         let cli_recovery_required = install_inventory_requires_cli_recovery(&inventory);
@@ -637,7 +746,11 @@ impl UpdateClient {
             .as_ref()
             .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
         let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset).await?;
+        let archive = self.download(binary_asset, on_progress).await?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Verifying,
+            format!("Verifying {}", binary_asset.name),
+        ));
         if archive.len() as u64 != binary_asset.size {
             return Err(UpdateError::InvalidRelease(format!(
                 "{} size mismatch: expected {} bytes, got {}",
@@ -657,6 +770,10 @@ impl UpdateClient {
 
         fs::create_dir_all(&target.versioned_root)?;
         let staging = unique_staging_dir(&target.versioned_root)?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Installing,
+            "Installing command-line tools, daemon, and desktop app",
+        ));
         let result = (|| -> UpdateResult<UpdateInstallReport> {
             extract_release_archive(&archive, &binary_asset.name, &staging)?;
             let wrk_source = staged_binary(&staging, "wrk")?;
@@ -779,26 +896,74 @@ impl UpdateClient {
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect(),
                 desktop_instruction: Some(format!(
-                    "Updated the Workman app at {}. Close and reopen Workman to run {}. {launcher_note}{incomplete_note}",
+                    "Updated the Workman app bundle at {} to {}. The running app must restart to use the replaced bundle. {launcher_note}{incomplete_note}",
                     target.app_bundle.display(),
                     check.latest
                 )),
+                installed_app_bundle: Some(target.app_bundle.to_string_lossy().into_owned()),
                 quarantine_cleared,
+                restart_plan: UpdateRestartPlan {
+                    daemon: true,
+                    app: true,
+                },
             })
         })();
         let _ = fs::remove_dir_all(&staging);
         result
     }
 
-    async fn download(&self, asset: &ReleaseAsset) -> UpdateResult<Vec<u8>> {
-        let response = self.successful_response(
+    async fn download(
+        &self,
+        asset: &ReleaseAsset,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
+    ) -> UpdateResult<Vec<u8>> {
+        on_progress(UpdateProgress::download(
+            format!("Downloading {}", asset.name),
+            0,
+            asset.size,
+        ));
+        let mut response = self.successful_response(
             self.http
                 .get(&asset.url)
                 .bearer_auth(&self.key)
                 .send()
                 .await?,
         )?;
-        limited_body(response).await
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)
+        {
+            return Err(UpdateError::InvalidRelease(format!(
+                "asset exceeds the {} MiB update limit",
+                MAX_DOWNLOAD_BYTES / (1024 * 1024)
+            )));
+        }
+        let mut body = Vec::new();
+        let mut last_percent = 0;
+        while let Some(chunk) = response.chunk().await? {
+            let next_len = body.len().saturating_add(chunk.len());
+            if next_len as u64 > MAX_DOWNLOAD_BYTES {
+                return Err(UpdateError::InvalidRelease(format!(
+                    "asset exceeds the {} MiB update limit",
+                    MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                )));
+            }
+            body.extend_from_slice(&chunk);
+            let progress = UpdateProgress::download(
+                format!("Downloading {}", asset.name),
+                body.len() as u64,
+                asset.size,
+            );
+            let percent = progress.percent.unwrap_or_default();
+            // Body chunks are an implementation detail and can number in the thousands. One
+            // event per meaningful percentage change keeps the UI fluid without flooding every
+            // subscribed transport, while preserving the initial 0% and final 100% events.
+            if percent > last_percent {
+                last_percent = percent;
+                on_progress(progress);
+            }
+        }
+        Ok(body)
     }
 
     fn successful_response(&self, response: Response) -> UpdateResult<Response> {
@@ -816,7 +981,30 @@ pub struct UpdateInstallReport {
     pub install_dir: String,
     pub updated_files: Vec<String>,
     pub desktop_instruction: Option<String>,
+    /// The application bundle replaced by this install, if any.
+    #[serde(default)]
+    pub installed_app_bundle: Option<String>,
     pub quarantine_cleared: bool,
+    #[serde(default)]
+    pub restart_plan: UpdateRestartPlan,
+}
+
+/// Explicit post-install ownership: the caller restarts only the surfaces that were replaced.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateRestartPlan {
+    pub daemon: bool,
+    pub app: bool,
+}
+
+impl Default for UpdateRestartPlan {
+    fn default() -> Self {
+        // Reports from legacy daemons did not carry a restart plan. Treat those installs as
+        // requiring a daemon restart, but never claim that the desktop bundle was replaced.
+        Self {
+            daemon: true,
+            app: false,
+        }
+    }
 }
 
 /// Destination selected for an update. Installed CLI binaries hop to a new durable versioned
@@ -1672,24 +1860,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
-async fn limited_body(response: Response) -> UpdateResult<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)
-    {
-        return Err(UpdateError::InvalidRelease(format!(
-            "asset exceeds the {} MiB update limit",
-            MAX_DOWNLOAD_BYTES / (1024 * 1024)
-        )));
+fn download_percent(bytes_done: u64, bytes_total: u64) -> u8 {
+    if bytes_total == 0 {
+        return 0;
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err(UpdateError::InvalidRelease(format!(
-            "asset exceeds the {} MiB update limit",
-            MAX_DOWNLOAD_BYTES / (1024 * 1024)
-        )));
-    }
-    Ok(bytes.to_vec())
+    bytes_done
+        .saturating_mul(100)
+        .checked_div(bytes_total)
+        .unwrap_or_default()
+        .min(100) as u8
 }
 
 fn unix_timestamp() -> i64 {

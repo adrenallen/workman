@@ -258,6 +258,9 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
         registry
             .store()
             .put_process(&root_process(7, &project_dir))?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -269,10 +272,9 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             "http://127.0.0.1:{}/mcp",
             discovery.port
         ))
-        .auth_header(discovery.token),
+        .auth_header("root-process-token".to_owned()),
     );
     let client = ClientInfo::default().serve(transport).await?;
-    call(&client, "identify_session", json!({ "process_id": 1 })).await;
 
     let spawned = call(
         &client,
@@ -463,6 +465,9 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
         registry
             .store()
             .put_process(&root_process(8, &project_dir))?;
+        registry
+            .store()
+            .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -474,10 +479,9 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
             "http://127.0.0.1:{}/mcp",
             discovery.port
         ))
-        .auth_header(discovery.token),
+        .auth_header("root-process-token".to_owned()),
     );
     let client = ClientInfo::default().serve(transport).await?;
-    call(&client, "identify_session", json!({ "process_id": 1 })).await;
     let spawned = call(
         &client,
         "spawn_agent",

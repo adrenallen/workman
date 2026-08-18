@@ -48,6 +48,7 @@ mod process_registry;
 pub mod process_stats;
 mod process_tree;
 mod profiles;
+mod project_titles;
 pub mod readiness;
 pub mod runtime_doctor;
 mod settings;
@@ -115,6 +116,7 @@ const TERMINAL_INPUT_HEADER_LEN: usize = 12;
 const TERMINAL_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const TERMINAL_STREAM_CHUNKS_PER_TICK: usize = 4;
 const PROCESS_STATUS_STREAM_TICK: Duration = Duration::from_millis(500);
+const UPDATE_RESTART_BACKSTOP: Duration = Duration::from_secs(120);
 
 /// The name of the secure daemon discovery file in the workman data directory.
 pub const DISCOVERY_FILE: &str = "daemon.json";
@@ -471,12 +473,19 @@ fn router(state: AppState) -> Router {
     let (mcp_service, mcp_sessions) = mcp::streamable_http_service(
         state.registry.clone(),
         state.input_router.clone(),
+        mcp_url.clone(),
+        state.timer_events.clone(),
+    );
+    let stateless_mcp_service = mcp::stateless_http_service(
+        state.registry.clone(),
+        state.input_router.clone(),
         mcp_url,
         state.timer_events.clone(),
     );
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_upgrade))
+        .nest_service("/mcp-stateless", stateless_mcp_service)
         .nest_service("/mcp", mcp_service)
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(
@@ -538,6 +547,8 @@ async fn control_session(
     let concurrent_invalidations = status_invalidations.clone();
     let mut status_subscription =
         ProcessStatusSubscription::new(live_stats.clone(), status_invalidations);
+    let mut update_progress_subscription = UpdateProgressSubscription::default();
+    let mut update_progress = settings.updates().subscribe_progress();
     let (control_request_tx, mut control_request_rx) = mpsc::unbounded_channel::<String>();
     let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel::<String>();
     let control_registry = registry.clone();
@@ -556,6 +567,7 @@ async fn control_session(
         let mut detached_terminal = TerminalSubscription::default();
         let mut detached_status =
             ProcessStatusSubscription::new(control_live_stats, control_invalidations.clone());
+        let mut detached_update_progress = UpdateProgressSubscription::default();
         while let Some(text) = control_request_rx.recv().await {
             let response = match handle_session_control(
                 &text,
@@ -565,6 +577,7 @@ async fn control_session(
                 &control_shutdown_request,
                 &mut detached_terminal,
                 &mut detached_status,
+                &mut detached_update_progress,
                 &control_worktree_operations,
             )
             .await
@@ -626,6 +639,7 @@ async fn control_session(
                                 &shutdown_request,
                                 &mut terminal,
                                 &mut status_subscription,
+                                &mut update_progress_subscription,
                                 &worktree_operations,
                             ).await {
                                 Some(response) => response,
@@ -686,6 +700,23 @@ async fn control_session(
             Some(response) = control_response_rx.recv() => {
                 if socket.send(Message::Text(response.into())).await.is_err() {
                     break;
+                }
+            }
+            progress = update_progress.recv() => {
+                match progress {
+                    Ok(progress) if update_progress_subscription.accepts(&progress) => {
+                        let event = json!({
+                            "event": "daemon.update_progress",
+                            "request_id": progress.request_id,
+                            "progress": progress.progress,
+                        });
+                        if socket.send(Message::Text(event.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             _ = &mut output_ready => {
@@ -778,6 +809,8 @@ fn request_requires_session_state(text: &str) -> bool {
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
+            | "daemon.update_progress_subscribe"
+            | "daemon.update_progress_unsubscribe"
     )
 }
 
@@ -826,6 +859,17 @@ struct ProcessStatusSubscription {
     last_event: Option<String>,
 }
 
+#[derive(Default)]
+struct UpdateProgressSubscription {
+    request_id: Option<String>,
+}
+
+impl UpdateProgressSubscription {
+    fn accepts(&self, progress: &updates::UpdateProgressEvent) -> bool {
+        self.request_id.as_deref() == Some(progress.request_id.as_str())
+    }
+}
+
 impl ProcessStatusSubscription {
     fn new(
         live_stats: process_stats::LiveStatsHub,
@@ -870,6 +914,7 @@ async fn handle_session_control(
     shutdown_request: &watch::Sender<bool>,
     terminal: &mut TerminalSubscription,
     status_subscription: &mut ProcessStatusSubscription,
+    update_progress_subscription: &mut UpdateProgressSubscription,
     worktree_operations: &worktree_operations::WorktreeOperationHub,
 ) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -886,6 +931,8 @@ async fn handle_session_control(
             | "terminal.detach"
             | "process.status_subscribe"
             | "process.status_unsubscribe"
+            | "daemon.update_progress_subscribe"
+            | "daemon.update_progress_unsubscribe"
             | "worktree.create_async"
             | "worktree.fork_async"
             | "worktree.adopt_async"
@@ -1006,6 +1053,34 @@ async fn handle_session_control(
             },
         );
     }
+    if method == "daemon.update_progress_subscribe" {
+        let request_id = request
+            .get("params")
+            .and_then(|params| params.get("request_id"))
+            .and_then(serde_json::Value::as_str);
+        let Some(request_id) = request_id.filter(|value| !value.is_empty() && value.len() <= 128)
+        else {
+            return Some(
+                json!({
+                    "id": id,
+                    "ok": false,
+                    "error": {
+                        "code": "invalid_params",
+                        "message": "request_id must be a non-empty string of at most 128 bytes"
+                    }
+                })
+                .to_string(),
+            );
+        };
+        update_progress_subscription.request_id = Some(request_id.to_owned());
+        return Some(json!({ "id": id, "ok": true, "result": { "subscribed": true } }).to_string());
+    }
+    if method == "daemon.update_progress_unsubscribe" {
+        update_progress_subscription.request_id = None;
+        return Some(
+            json!({ "id": id, "ok": true, "result": { "subscribed": false } }).to_string(),
+        );
+    }
     if method == "daemon.update_apply" {
         let params = request.get("params").cloned().unwrap_or_default();
         let key =
@@ -1021,17 +1096,50 @@ async fn handle_session_control(
                 },
                 None => None,
             };
-        let result = match key {
-            Some(key) => settings.updates().install_with_key(Some(key)).await,
-            None => settings.updates().install().await,
+        let request_id = match params.get("request_id") {
+            Some(value) => match value.as_str() {
+                Some(value) if !value.is_empty() && value.len() <= 128 => Some(value.to_owned()),
+                _ => {
+                    return Some(
+                        json!({
+                            "id": id,
+                            "ok": false,
+                            "error": {
+                                "code": "invalid_params",
+                                "message": "request_id must be a non-empty string of at most 128 bytes"
+                            }
+                        })
+                        .to_string(),
+                    );
+                }
+            },
+            None => None,
+        };
+        let result = match (key, request_id) {
+            (Some(key), Some(request_id)) => {
+                settings
+                    .updates()
+                    .install_with_key_for(Some(key), Some(request_id))
+                    .await
+            }
+            (None, Some(request_id)) => {
+                settings
+                    .updates()
+                    .install_with_key_for(None, Some(request_id))
+                    .await
+            }
+            (Some(key), None) => settings.updates().install_with_key(Some(key)).await,
+            (None, None) => settings.updates().install().await,
         };
         return Some(match result {
             Ok(result) => {
-                let shutdown_request = shutdown_request.clone();
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(150)).await;
-                    let _ = shutdown_request.send(true);
-                });
+                // Installation no longer races a fixed reply-then-shutdown timer. The report's
+                // restart plan transfers ownership to the caller: desktop first presents the
+                // installed state, then its native bridge stops the daemon and relaunches the
+                // refreshed bundle; `wrk update` explicitly requests daemon.restart.
+                // If that ownership transfer is interrupted, the old daemon still exits within
+                // a bounded window instead of running forever against replaced binaries.
+                schedule_update_restart_backstop(shutdown_request.clone());
                 json!({ "id": id, "ok": true, "result": result }).to_string()
             }
             Err(error) => update_error_reply(id, error),
@@ -1210,6 +1318,17 @@ async fn handle_session_control(
     )
 }
 
+fn schedule_update_restart_backstop(shutdown_request: watch::Sender<bool>) {
+    schedule_update_restart_backstop_after(shutdown_request, UPDATE_RESTART_BACKSTOP);
+}
+
+fn schedule_update_restart_backstop_after(shutdown_request: watch::Sender<bool>, delay: Duration) {
+    tokio::spawn(async move {
+        sleep(delay).await;
+        let _ = shutdown_request.send(true);
+    });
+}
+
 fn status_event_if_changed(
     previous: &mut Option<String>,
     event: serde_json::Value,
@@ -1314,7 +1433,7 @@ async fn authorize_local_request(
     next: Next,
 ) -> Response {
     let bearer_is_valid = valid_bearer(request.headers(), &state.token);
-    let process_token_is_valid = request.uri().path().starts_with("/mcp")
+    let process_token_is_valid = is_mcp_request_path(request.uri().path())
         && valid_process_token(request.headers(), &state.registry).await;
     if !bearer_is_valid && !process_token_is_valid {
         return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
@@ -1332,8 +1451,8 @@ async fn invalidate_status_after_mcp_request(
     request: Request,
     next: Next,
 ) -> Response {
-    let invalidates = request.method() == axum::http::Method::POST
-        && (request.uri().path() == "/mcp" || request.uri().path().starts_with("/mcp/"));
+    let invalidates =
+        request.method() == axum::http::Method::POST && is_mcp_request_path(request.uri().path());
     let response = next.run(request).await;
     if invalidates {
         // MCP tools mutate several status-adjacent store tables directly. Conservatively
@@ -1343,11 +1462,24 @@ async fn invalidate_status_after_mcp_request(
     response
 }
 
+fn is_mcp_request_path(path: &str) -> bool {
+    path == "/mcp"
+        || path.starts_with("/mcp/")
+        || path == "/mcp-stateless"
+        || path.starts_with("/mcp-stateless/")
+}
+
 async fn valid_process_token(headers: &HeaderMap, registry: &SharedProcessRegistry) -> bool {
-    let Some(token) = headers
+    let token = headers
         .get(WORKMAN_MCP_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
-    else {
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        });
+    let Some(token) = token else {
         return false;
     };
     registry
@@ -1734,6 +1866,8 @@ mod tests {
             "terminal.detach",
             "process.status_subscribe",
             "process.status_unsubscribe",
+            "daemon.update_progress_subscribe",
+            "daemon.update_progress_unsubscribe",
         ] {
             assert!(request_requires_session_state(
                 &json!({ "id": 1, "method": method, "params": {} }).to_string()
@@ -1765,6 +1899,37 @@ mod tests {
             })
             .to_string()
         ));
+    }
+
+    #[test]
+    fn update_progress_subscription_accepts_only_its_correlated_request() {
+        let subscription = UpdateProgressSubscription {
+            request_id: Some("desktop-update-1".to_owned()),
+        };
+        let matching = updates::UpdateProgressEvent {
+            request_id: "desktop-update-1".to_owned(),
+            progress: workman_core::UpdateProgress::stage(
+                workman_core::UpdateStage::Downloading,
+                "Downloading",
+            ),
+        };
+        let foreign = updates::UpdateProgressEvent {
+            request_id: "cli-update-2".to_owned(),
+            progress: matching.progress.clone(),
+        };
+        assert!(subscription.accepts(&matching));
+        assert!(!subscription.accepts(&foreign));
+    }
+
+    #[tokio::test]
+    async fn successful_update_restart_backstop_eventually_requests_shutdown() {
+        let (shutdown, mut requested) = watch::channel(false);
+        schedule_update_restart_backstop_after(shutdown, Duration::from_millis(10));
+        timeout(Duration::from_secs(1), requested.changed())
+            .await
+            .expect("backstop fired")
+            .expect("shutdown sender remained alive");
+        assert!(*requested.borrow());
     }
 
     #[test]
@@ -2137,7 +2302,10 @@ mod tests {
                 json!({
                     "id": "register-first",
                     "method": "projects.register",
-                    "params": { "path": first_path }
+                    "params": {
+                        "path": first_path,
+                        "display_name": "  First workspace  "
+                    }
                 })
                 .to_string()
                 .into(),
@@ -2148,6 +2316,7 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["selected"], true);
         assert_eq!(response["result"][0]["status"], "idle");
+        assert_eq!(response["result"][0]["display_name"], "First workspace");
         let first_id = response["result"][0]["id"].as_i64().unwrap();
 
         socket
@@ -2163,6 +2332,25 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        assert_eq!(response["result"][0]["display_name"], "Frontend lab");
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": "register-first-again",
+                    "method": "projects.register",
+                    "params": {
+                        "path": first_path,
+                        "display_name": "Folder default must not replace a rename"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response = receive_json(&mut socket).await;
+        assert_eq!(response["ok"], true);
         assert_eq!(response["result"][0]["display_name"], "Frontend lab");
 
         socket
@@ -2200,6 +2388,13 @@ mod tests {
             .await
             .unwrap();
         let response = receive_json(&mut socket).await;
+        let second = response["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == "second-project")
+            .unwrap();
+        assert!(second["display_name"].is_null());
         let second_id = response["result"]
             .as_array()
             .unwrap()

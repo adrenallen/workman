@@ -52,9 +52,19 @@ test('terminal routes process cycling before user-key tracking and terminal enco
 });
 
 test('app reuses the cycle predicate and wires terminal cycling back to the main frame', async () => {
-  const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  const [app, keyboard] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/keyboardNavigation.ts', import.meta.url), 'utf8')
+  ]);
 
   assert.match(app, /const cycleDirection = processCycleDirection\(event\);/);
   assert.match(app, /onCycleProcess=\{\(direction\) => cycleProcess\(direction, 'main'\)\}/);
   assert.match(app, /returnPanel === 'main'[\s\S]*tick\(\)\.then[\s\S]*focusPanel\('main'\)[\s\S]*terminalView\?\.focusInput\(\)/);
+  const draftCycle = app.indexOf("target?.closest('[data-creation-draft]')");
+  const editingBail = app.indexOf('if (isTextEditingTarget(target)) return;');
+  assert.ok(draftCycle >= 0 && editingBail > draftCycle);
+  assert.doesNotMatch(app.slice(draftCycle, editingBail), /ArrowLeft'[\s\S]*ArrowRight'/);
+  assert.match(app.slice(editingBail), /ArrowLeft'[\s\S]*ArrowRight'[\s\S]*focusAdjacentPanel/);
+  assert.match(app, /draftFocusRequestId = null;[\s\S]*selectTreeItem\(nextSelection\)/);
+  assert.match(keyboard, /'\.draft-row\.selected, \.tree-row\.selected'/);
 });

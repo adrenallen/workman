@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import type { ScratchpadSummary, TodoSummary } from './coordination';
 import type { ProcessView, Project } from './daemon';
+import type { CreationDraft } from './creationDrafts';
 import {
   customActionLabel,
   editorActionLabel,
@@ -43,6 +44,7 @@ export type ContextMenuTarget =
       repository?: WorktreeRepository | null;
       worktree?: WorktreeEntry | null;
       importableWorktreeCount?: number;
+      hasUnread?: boolean;
     }
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
   | {
@@ -53,6 +55,7 @@ export type ContextMenuTarget =
       pasteEnabled: boolean;
     }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
+  | { kind: 'draft'; draft: CreationDraft; selection: ProjectTreeSelection }
   | { kind: 'scratchpad'; scratchpad: ContextScratchpad; selection: ProjectTreeSelection };
 
 export interface ContextMenuRequest {
@@ -183,6 +186,18 @@ export function describeContextMenu(
           { id: 'copy-title', label: 'Copy title', separatorBefore: true }
         ]
       };
+    case 'draft':
+      return {
+        title: target.selection.label,
+        subtitle: `${target.draft.kind.toUpperCase()} DRAFT`,
+        items: [
+          {
+            id: 'discard-draft',
+            label: 'Discard draft…',
+            destructive: true
+          }
+        ]
+      };
     case 'scratchpad':
       return {
         title: target.scratchpad.name,
@@ -262,6 +277,12 @@ function projectItems(
   return [
     ...frequentItems,
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected, separatorBefore: true },
+    {
+      id: 'mark-read',
+      label: 'Mark as read',
+      detail: 'Clears notifications for this project',
+      disabled: !target.hasUnread
+    },
     { id: 'project-settings', label: 'Project settings…' },
     { id: 'rename', label: 'Rename' },
     { id: 'new-agent', label: 'New agent…', separatorBefore: true },

@@ -22,8 +22,8 @@ use workman_core::{
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
-        PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification, RawOutput,
-        WORKMAN_PTY_PROFILE_ENV,
+        PtySize, PtySpawnOptions, PtySubmissionEventKind, PtySubmissionVerification,
+        PtySubmissionVerificationMode, RawOutput, WORKMAN_PTY_PROFILE_ENV, is_kimi_tool_type,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
 };
@@ -35,6 +35,10 @@ const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(5);
 const SUBMIT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Initial Enter plus two bounded bare-CR recovery attempts.
 const SUBMIT_MAX_ATTEMPTS: usize = 3;
+/// Kimi needs a longer redraw boundary before Enter and exactly one recovery keypress.
+const KIMI_INITIAL_PROMPT_KEY_DELAY: Duration = Duration::from_millis(150);
+const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
+const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
 
 use crate::agent_sessions::SessionCapture;
 use crate::config::{
@@ -258,6 +262,42 @@ impl ProcessInputRouter {
         content: &[u8],
         key_delay: Duration,
     ) -> RegistryResult<Process> {
+        self.submit_input_with_verification(process_id, content, key_delay, None)
+    }
+
+    fn submit_initial_prompt(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        let target = self.target(process_id)?;
+        let kimi = target
+            .attention
+            .snapshot()
+            .tool_type
+            .as_deref()
+            .is_some_and(is_kimi_tool_type);
+        drop(target);
+        let verification = kimi.then_some(PtySubmissionVerification {
+            timeout: KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT,
+            max_attempts: KIMI_INITIAL_PROMPT_MAX_ATTEMPTS,
+            mode: PtySubmissionVerificationMode::KimiSessionStart,
+        });
+        let key_delay = if kimi {
+            KIMI_INITIAL_PROMPT_KEY_DELAY
+        } else {
+            SUBMIT_KEY_DELAY
+        };
+        self.submit_input_with_verification(process_id, content, key_delay, verification)
+    }
+
+    fn submit_input_with_verification(
+        &self,
+        process_id: ProcessId,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+    ) -> RegistryResult<Process> {
         let target = self.target(process_id)?;
         let active = target
             .active
@@ -270,10 +310,11 @@ impl ProcessInputRouter {
             target.input.submit_input_verified(
                 content,
                 key_delay,
-                PtySubmissionVerification {
+                verification.unwrap_or(PtySubmissionVerification {
                     timeout: SUBMIT_VERIFY_TIMEOUT,
                     max_attempts: SUBMIT_MAX_ATTEMPTS,
-                },
+                    mode: PtySubmissionVerificationMode::TurnStart,
+                }),
             )
         } else {
             target.input.submit_input(content, key_delay)
@@ -991,11 +1032,12 @@ impl ProcessRegistry {
             .with_env("TERM", "xterm-256color")
             .with_env("COLORTERM", "truecolor")
             .with_env("SHELL", user_environment.active_shell());
-        // Current agent TUIs gate standards-based modified-key negotiation on a known terminal
-        // program identity. Workman's agent PTYs implement the CSI-u subset used by WezTerm and
-        // advertised at runtime. Avoid the literal `kitty` identity: Bun takes that as permission
-        // to run Kitty-specific probes beyond the keyboard protocol. Ordinary terminals and
-        // commands keep their exact existing environment and input behavior.
+        // Agent TUIs use the terminal product identity for both color-depth detection and
+        // standards-based modified-key negotiation. Workman's PTY implements the CSI-u subset
+        // advertised by WezTerm, and Node/Bun honor COLORTERM=truecolor under that identity.
+        // Avoid Apple_Terminal: Node hard-caps it at 256 colors before checking COLORTERM, and
+        // some TUIs skip kitty/modifyOtherKeys negotiation for that less-capable identity.
+        // Appearance parity comes from the imported native profile, not from reducing capability.
         if process.kind == ProcessKind::Agent {
             options = options.with_env("TERM_PROGRAM", "WezTerm");
         }
@@ -1793,6 +1835,16 @@ impl ProcessRegistry {
         self.submit_input_with_delay(process_id, content, SUBMIT_KEY_DELAY)
     }
 
+    /// Queue a launch-time prompt with tool-specific submission verification.
+    pub(crate) fn submit_initial_prompt(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        self.input_router.submit_initial_prompt(process_id, content)
+    }
+
     fn submit_input_with_delay(
         &mut self,
         process_id: ProcessId,
@@ -2013,6 +2065,12 @@ impl ProcessRegistry {
     fn reconcile_stale_processes(&mut self) -> RegistryResult<()> {
         for mut process in self.store.list_processes(None)? {
             let _ = self.store.clear_process_mcp_token(process.id);
+            if let Err(error) = cleanup_ephemeral_agent_home(&process) {
+                eprintln!(
+                    "process {}: could not clean stale private agent config home: {error}",
+                    process.id
+                );
+            }
             if matches!(
                 process.status,
                 ProcessStatus::Starting | ProcessStatus::Running
@@ -2223,6 +2281,11 @@ impl Drop for ProcessRegistry {
                     .set_agent_session_id(process_id, &session_id, now_millis());
             }
             if let Ok(Some(mut process)) = self.store.get_process(process_id) {
+                if let Err(error) = cleanup_ephemeral_agent_home(&process) {
+                    eprintln!(
+                        "process {process_id}: could not clean private agent config home during shutdown: {error}"
+                    );
+                }
                 if let Some(status) = status {
                     apply_exit_info(&mut process, &status);
                 } else {
@@ -2655,6 +2718,48 @@ mod tests {
         assert_eq!(fs::read_to_string(auth).unwrap(), "fixture-auth");
     }
 
+    #[test]
+    fn daemon_startup_removes_private_homes_left_by_persisted_processes() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/repo".into(),
+                name: "repo".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 0,
+            })
+            .unwrap();
+        let home = std::env::temp_dir().join(format!(
+            "workman-kimi-mcp.test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("credential-copy"), "secret fixture").unwrap();
+        let mut process = output_test_process("/tmp/repo");
+        process.status = ProcessStatus::Running;
+        process.env.insert(
+            WORKMAN_EPHEMERAL_AGENT_HOME_ENV.into(),
+            home.to_string_lossy().into_owned(),
+        );
+        store.put_process(&process).unwrap();
+
+        let registry = ProcessRegistry::new(store).unwrap();
+
+        assert!(!home.exists());
+        assert_eq!(
+            registry
+                .store()
+                .get_process(process.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProcessStatus::Crashed
+        );
+    }
+
     fn wait_for_persisted_output(registry: &mut ProcessRegistry) {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -2982,6 +3087,104 @@ mod tests {
         // process-local worker waits to write Enter.
         assert_eq!(registry.get(20).unwrap().status, ProcessStatus::Running);
         registry.stop(20).unwrap();
+    }
+
+    #[test]
+    fn kimi_initial_prompt_retries_until_the_tui_creates_a_session() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: "/tmp/kimi-submit-registry-test".into(),
+                name: "kimi-submit".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 0,
+            })
+            .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 91,
+                name: "Scripted Kimi".into(),
+                command: "scripted-kimi".into(),
+                tool_type: "kimi".into(),
+                enabled: true,
+                source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
+            .expect("create process registry");
+        registry
+            .create(Process {
+                id: 21,
+                project_id: 1,
+                kind: ProcessKind::Agent,
+                name: "kimi-input-target".into(),
+                command: Some(
+                    r#"stty raw -echo; exec perl -e '$|=1; print "│  Session:                       │\r\n│  Model: K3                      │\r\nNo session yet - one will be created on your first message.\r\n│ >                              │\r\n"; my $draft=""; my $enters=0; while (1) { my $n=sysread(STDIN,my $chunk,4096); exit 2 unless defined($n) && $n>0; for my $character (split //,$chunk) { if ($character eq "\r") { $enters++; if ($enters == 1) { print "\r\nMCP: 1 failed - closed unexpectedly\r\n│ > $draft │\r\n"; next; } print "\033[2J\033[H│  Session: session_fixture      │\r\n│  Model: K3                      │\r\nSUBMITTED:$draft\r\n"; sleep 5; exit 0; } $draft .= $character; } print "\r\n│ > $draft │\r\n"; }'"#
+                        .into(),
+                ),
+                working_dir: "/tmp".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: Some(91),
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        registry.start(21).unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rendered = registry.rendered_output(21).unwrap().text;
+            if rendered.contains("No session yet") {
+                break;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "Kimi fixture did not render"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        registry
+            .submit_initial_prompt(21, b"Call whoami once.\nSession: review-pr16")
+            .unwrap();
+        let submitted_deadline = Instant::now() + Duration::from_secs(7);
+        loop {
+            let output = registry.raw_output(21, None, usize::MAX).unwrap();
+            if String::from_utf8_lossy(&output.data)
+                .contains("SUBMITTED:Call whoami once.\nSession: review-pr16")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < submitted_deadline,
+                "Kimi prompt remained in the fixture composer"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let status = registry.get_status(21).unwrap();
+        assert!(status.events.iter().any(|event| {
+            event.kind == "submit_retry" && event.message.contains("retried Enter (2/2)")
+        }));
+        let rendered = registry.rendered_output(21).unwrap().text;
+        assert!(
+            workman_core::pty::kimi_session_started(&rendered),
+            "Kimi session banner was not recognized: {rendered:?}"
+        );
+        registry.stop(21).unwrap();
     }
 
     #[test]
