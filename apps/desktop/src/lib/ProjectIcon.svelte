@@ -66,6 +66,6 @@
 <style>
   .project-icon { position: relative; display: inline-grid; width: 1em; height: 1em; flex: none; overflow: visible; place-items: center; }
   .project-icon img { display: block; max-width: none; border-radius: 3px; object-fit: contain; image-rendering: auto; }
-  .project-icon > :global(.tooltip-anchor) { position: absolute; z-index: 2; bottom: -4px; left: -4px; overflow: visible; }
+  .project-icon > :global(.tooltip-anchor) { position: absolute; z-index: 2; top: -4px; left: -4px; overflow: visible; }
   .worktree-badge { display: grid; width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 3px; color: var(--muted-foreground); background: var(--card); }
 </style>

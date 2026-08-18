@@ -1,20 +1,20 @@
 <script lang="ts">
   import BellIcon from '@lucide/svelte/icons/bell';
-  import AtSignIcon from '@lucide/svelte/icons/at-sign';
   import CheckIcon from '@lucide/svelte/icons/check';
-  import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
-  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as Popover from '$lib/components/ui/popover';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import * as Tabs from '$lib/components/ui/tabs';
-  import type { Notification } from '$lib/daemon';
+  import ProjectIcon from '$lib/ProjectIcon.svelte';
+  import type { Notification, Project } from '$lib/daemon';
 
   interface Props {
     notifications: Notification[];
+    projects: Project[];
     busy?: boolean;
     onRefresh: () => void;
     onOpen: (notification: Notification) => void;
@@ -24,6 +24,7 @@
 
   let {
     notifications,
+    projects,
     busy = false,
     onRefresh,
     onOpen,
@@ -63,6 +64,20 @@
       case 'mentioned_in_comment': return 'Mentioned in a comment';
       default: return 'Agent finished';
     }
+  }
+
+  function notificationProject(notification: Notification): Project | null {
+    if (notification.project_id === null) return null;
+    return projects.find((project) => project.id === notification.project_id) ?? null;
+  }
+
+  function projectName(project: Project): string {
+    return project.display_name?.trim() || project.name.trim() || project.path;
+  }
+
+  function notificationProjectName(notification: Notification, project: Project | null): string {
+    if (project) return projectName(project);
+    return notification.project_id === null ? 'No project' : 'Project no longer registered';
   }
 
   function timeLabel(timestamp: number): string {
@@ -137,27 +152,39 @@
       <ScrollArea class="notification-scroll">
         <div class="notification-list" aria-live="polite">
           {#each visible as notification (notification.id)}
+            {@const project = notificationProject(notification)}
+            {@const attachedProjectName = notificationProjectName(notification, project)}
             <article class:read={notification.read_at !== null}>
-              <button type="button" class="notification-open" onclick={() => choose(notification)}>
-                <span class="type-icon" aria-hidden="true">
-                  {#if notification.type === 'needs_input'}
-                    <CircleHelpIcon size={16} strokeWidth={1.8} />
-                  {:else if notification.type === 'todo_assigned_to_you'}
-                    <UserRoundCheckIcon size={16} strokeWidth={1.8} />
-                  {:else if notification.type === 'mentioned_in_comment'}
-                    <AtSignIcon size={16} strokeWidth={1.8} />
-                  {:else}
-                    <CircleCheckIcon size={16} strokeWidth={1.8} />
-                  {/if}
-                </span>
-                <span class="notification-copy">
-                  <span class="notification-meta">
-                    <strong>{notificationTypeLabel(notification)}</strong>
-                    <time datetime={new Date(notification.created_at).toISOString()}>{timeLabel(notification.created_at)}</time>
+              <TooltipLabel label={`${attachedProjectName} · ${notification.body}`} side="left">
+                <button
+                  type="button"
+                  class="notification-open"
+                  aria-label={`${notificationTypeLabel(notification)} · ${attachedProjectName} · ${notification.body}`}
+                  onclick={() => choose(notification)}
+                >
+                  <span class="notification-project-icon">
+                    {#if project}
+                      <ProjectIcon
+                        icon={project.icon}
+                        color={project.icon_color}
+                        image={project.icon_image?.data_url}
+                        fallback={project.repository_id !== null ? 'repository' : 'project'}
+                        worktree={project.parent_project_id !== null}
+                        size={16}
+                      />
+                    {:else}
+                      <BellIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+                    {/if}
                   </span>
-                  <span class="notification-body">{notification.body}</span>
-                </span>
-              </button>
+                  <span class="notification-copy">
+                    <span class="notification-meta">
+                      <strong>{notificationTypeLabel(notification)}</strong>
+                      <time datetime={new Date(notification.created_at).toISOString()}>{timeLabel(notification.created_at)}</time>
+                    </span>
+                    <span class="notification-body">{notification.body}</span>
+                  </span>
+                </button>
+              </TooltipLabel>
               {#if notification.read_at === null}
                 <IconButton
                   class="mark-one size-7"
@@ -202,12 +229,13 @@
   :global(.notification-scroll) { max-height: min(360px, calc(100vh - 150px)); }
   .notification-list { display: grid; padding: var(--space-1); }
   .notification-list article { display: flex; min-height: 58px; align-items: center; border-bottom: 1px solid var(--border); }
+  .notification-list article > :global(.tooltip-anchor) { min-width: 0; flex: 1; }
   .notification-list article:last-child { border-bottom: 0; }
   .notification-list article.read { opacity: 0.72; }
-  .notification-open { display: flex; min-width: 0; flex: 1; align-items: start; gap: var(--space-2); border: 0; border-radius: var(--radius); padding: var(--space-2); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .notification-open { display: flex; width: 100%; min-width: 0; flex: 1; align-items: start; gap: var(--space-2); border: 0; border-radius: var(--radius); padding: var(--space-2); background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .notification-open:hover { background: var(--accent); }
   .notification-open:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
-  .type-icon { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--muted-foreground); }
+  .notification-project-icon { display: grid; width: 24px; height: 24px; flex: none; overflow: visible; place-items: center; border: 1px solid var(--border); border-radius: var(--radius); color: var(--muted-foreground); background: var(--card); }
   .notification-copy { min-width: 0; flex: 1; }
   .notification-meta { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
   .notification-meta strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }

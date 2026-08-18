@@ -414,6 +414,7 @@
   let agentCascadeError = $state<string | null>(null);
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
+  let projectRailPopoverKey = $state<string | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
@@ -1130,6 +1131,60 @@
     );
   }
 
+  function clearProjectUnreadLocally(projectId: number): void {
+    const clear = (process: ProcessView): ProcessView =>
+      process.project_id === projectId && process.kind === 'agent' && process.agent_state.unread
+        ? { ...process, agent_state: { ...process.agent_state, unread: false } }
+        : process;
+    const knownProcesses = [
+      ...processes,
+      ...(navigationIndex[projectId]?.processes ?? [])
+    ];
+    for (const process of knownProcesses) {
+      if (process.project_id === projectId) notifiedUnreadProcessIds.delete(process.id);
+    }
+    processes = processes.map(clear);
+    const snapshot = navigationIndex[projectId];
+    if (snapshot) {
+      navigationIndex = {
+        ...navigationIndex,
+        [projectId]: { ...snapshot, processes: snapshot.processes.map(clear) }
+      };
+    }
+    agentDoneNotices = agentDoneNotices.filter((notice) => notice.projectId !== projectId);
+    const readAt = Date.now();
+    notifications = notifications.map((notification) =>
+      notification.project_id === projectId && notification.read_at === null
+        ? { ...notification, read_at: readAt }
+        : notification
+    );
+  }
+
+  async function markProjectRead(projectId: number): Promise<void> {
+    if (notificationBusy) return;
+    const previousNotifications = notifications;
+    const previousProcesses = processes;
+    const previousNavigationIndex = navigationIndex;
+    const previousAgentDoneNotices = agentDoneNotices;
+    const previousNotifiedIds = new Set(notifiedUnreadProcessIds);
+    notificationBusy = true;
+    clearProjectUnreadLocally(projectId);
+    try {
+      await client.markProjectRead(projectId);
+      await Promise.all([refreshNotifications(), refreshProcesses(projectId)]);
+    } catch (cause) {
+      notifications = previousNotifications;
+      processes = previousProcesses;
+      navigationIndex = previousNavigationIndex;
+      agentDoneNotices = previousAgentDoneNotices;
+      notifiedUnreadProcessIds.clear();
+      for (const processId of previousNotifiedIds) notifiedUnreadProcessIds.add(processId);
+      reportError(cause);
+    } finally {
+      notificationBusy = false;
+    }
+  }
+
   async function refreshNotifications(): Promise<void> {
     if (connection.status !== 'connected' || !connection.version_compatible) return;
     const request = ++notificationRequest;
@@ -1334,6 +1389,13 @@
     return (navigationIndex[projectId]?.processes ?? [])
       .filter((process) => process.kind === 'agent' && process.agent_state.unread)
       .length;
+  }
+
+  function projectHasUnread(projectId: number): boolean {
+    return projectUnreadAgentCount(projectId) > 0
+      || notifications.some(
+        (notification) => notification.project_id === projectId && notification.read_at === null
+      );
   }
 
   function projectRailProcesses(project: Project): ProcessView[] {
@@ -3765,6 +3827,7 @@
   function showContextMenu(request: ContextMenuRequest): void {
     folderMenuRequest = null;
     treeRenameTarget = null;
+    projectRailPopoverKey = null;
     contextRequest = request;
   }
 
@@ -3785,6 +3848,7 @@
       project,
       repository: worktreeRepositoryFor(project),
       worktree,
+      hasUnread: projectHasUnread(project.id),
       importableWorktreeCount: worktree?.kind === 'main'
         ? worktreeListFor(project)?.worktrees.filter((entry) => entry.can_adopt).length ?? 0
         : 0
@@ -3870,6 +3934,9 @@
     switch (action) {
       case 'select':
         appNavigation.navigate({ type: 'project', projectId: project.id }, 'context-menu');
+        return;
+      case 'mark-read':
+        await markProjectRead(project.id);
         return;
       case 'project-settings':
         openProjectSettings(project);
@@ -4683,7 +4750,10 @@
             <WorktreeRowMeta
               entry={worktree}
               pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              projectId={project.id}
               repositoryName={repository.name}
+              openPopoverKey={projectRailPopoverKey}
+              onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
               refreshing={worktreeRefreshingRepositoryId === repository.id}
               showNoPullRequest={false}
               onRefresh={() => void refreshWorktreeRepository(project, true)}
@@ -4692,7 +4762,10 @@
           <ProjectKindIndicators
             {activity}
             processes={projectProcesses}
+            projectId={project.id}
             projectTitle={fullTitle}
+            openPopoverKey={projectRailPopoverKey}
+            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
             onSelect={(process) => openProjectRailProcess(project, process)}
             onShowAll={(kind) => openProjectRailOverview(project, kind)}
           />
@@ -4701,7 +4774,10 @@
         <ProjectKindIndicators
           {activity}
           processes={projectProcesses}
+          projectId={project.id}
           projectTitle={fullTitle}
+          openPopoverKey={projectRailPopoverKey}
+          onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
           compact
           onSelect={(process) => openProjectRailProcess(project, process)}
           onShowAll={(kind) => openProjectRailOverview(project, kind)}
@@ -4789,6 +4865,7 @@
       <div class="notification-slot">
         <NotificationsCenter
           {notifications}
+          {projects}
           busy={notificationBusy}
           onRefresh={() => void refreshNotifications()}
           onOpen={openNotification}

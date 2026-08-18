@@ -44,6 +44,7 @@ export type ContextMenuTarget =
       repository?: WorktreeRepository | null;
       worktree?: WorktreeEntry | null;
       importableWorktreeCount?: number;
+      hasUnread?: boolean;
     }
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
   | {
@@ -276,6 +277,12 @@ function projectItems(
   return [
     ...frequentItems,
     { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected, separatorBefore: true },
+    {
+      id: 'mark-read',
+      label: 'Mark as read',
+      detail: 'Clears notifications for this project',
+      disabled: !target.hasUnread
+    },
     { id: 'project-settings', label: 'Project settings…' },
     { id: 'rename', label: 'Rename' },
     { id: 'new-agent', label: 'New agent…', separatorBefore: true },

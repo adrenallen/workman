@@ -159,7 +159,7 @@ test('per-kind activity keeps agent, terminal, and command counts separate', () 
   assert.equal(activity.command.activeLabel, 'command-10 running');
 });
 
-test('per-kind tones prioritize input and live work before inactive errors', () => {
+test('per-kind tones use idle grey whenever a kind has no active work', () => {
   const needsInput = process(1, 'agent', 'running', 'needs_input');
   const crashed = process(2, 'agent', 'crashed', 'exited');
   const working = process(3, 'agent', 'running', 'working');
@@ -168,10 +168,10 @@ test('per-kind tones prioritize input and live work before inactive errors', () 
 
   assert.equal(projectKindActivity([needsInput, crashed, working, waiting], {}).agent.tone, 'needs-input');
   assert.equal(projectKindActivity([crashed, working, waiting], {}).agent.tone, 'success');
-  assert.equal(projectKindActivity([crashed, waiting], {}).agent.tone, 'danger');
-  assert.equal(projectKindActivity([waiting], {}).agent.tone, 'waiting');
-  assert.equal(projectKindActivity([idle], {}).agent.tone, 'neutral');
-  assert.equal(projectKindActivity([], {}).agent.tone, 'neutral');
+  assert.equal(projectKindActivity([crashed, waiting], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([waiting], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([idle], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([], {}).agent.tone, 'idle');
 });
 
 test('non-zero and signaled exits are errors while clean exits are stopped', () => {
@@ -216,6 +216,7 @@ test('jump targets prefer input and foreground work, then output or process star
   assert.deepEqual(activity.agent.activeProcessIds, [3, 2, 1]);
   assert.deepEqual(activity.terminal.activeProcessIds, [5]);
   assert.deepEqual(activity.command.activeProcessIds, [7, 6]);
+  assert.deepEqual(activity.agent.processIds, [3, 2, 1]);
   assert.equal(projectKindActivity([agents[0]], {}).agent.targetProcessId, 1);
   assert.equal(projectKindActivity([process(8, 'terminal', 'stopped')], {}).terminal.targetProcessId, null);
 });
@@ -262,4 +263,6 @@ test('per-kind labels cover empty, plural, and quiet states', () => {
   ], {});
   assert.equal(quiet.agent.label, '2 agents idle');
   assert.equal(quiet.terminal.label, '2 terminals stopped');
+  assert.deepEqual(quiet.agent.processIds, [2, 1]);
+  assert.deepEqual(quiet.terminal.processIds, [4, 3]);
 });

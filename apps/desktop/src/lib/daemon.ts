@@ -652,6 +652,13 @@ export class DaemonClient
     return this.request('notifications.mark_read', { all: true });
   }
 
+  markProjectRead(projectId: number): Promise<{
+    notifications_updated: number;
+    processes_updated: number;
+  }> {
+    return this.request('projects.mark_read', { project_id: projectId });
+  }
+
   restartProcess(processId: number): Promise<ProcessView> {
     return this.request('process.restart', { process_id: processId });
   }

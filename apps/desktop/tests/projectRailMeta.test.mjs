@@ -29,6 +29,8 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.notEqual(processKindsIndex, -1);
   assert.ok(pullRequestIndex < processKindsIndex);
   assert.match(strip, /showNoPullRequest=\{false\}/);
+  assert.match(strip, /openPopoverKey=\{projectRailPopoverKey\}/);
+  assert.match(strip, /onOpenPopoverChange=\{\(key\) => \(projectRailPopoverKey = key\)\}/);
   assert.match(strip, /onSelect=\{\(process\) => openProjectRailProcess\(project, process\)\}/);
   assert.match(strip, /onShowAll=\{\(kind\) => openProjectRailOverview\(project, kind\)\}/);
   assert.doesNotMatch(row, /project-row-meta/);
@@ -69,17 +71,35 @@ test('show-all process navigation is serialized and contributes the project to r
   assert.match(app, /case 'processes':\s*openProcessOverview\(target\.kind\);/);
 });
 
-test('kind indicators consume helper tones, bound counts, and restore row focus', async () => {
+test('kind indicators always expose all kinds, idle rosters, and shared popover state', async () => {
   const indicators = await readFile(
     new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url),
     'utf8'
   );
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
+  assert.match(indicators, /\{#each kinds as kind \(kind\)\}/);
+  assert.match(indicators, /activity\[kind\]\.processIds/);
+  assert.match(indicators, /No \{kindTitle\(kind\)\.toLocaleLowerCase\(\)\} in this project/);
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);
-  assert.match(indicators, /querySelector<HTMLButtonElement>\('\.project-select'\)/);
-  assert.match(indicators, /tick\(\)\.then\(\(\) => projectButton\.focus\(\)\)/);
+  assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
+  assert.match(indicators, /hoverOpenedKinds\.has\(kind\)\) event\.preventDefault\(\)/);
+  assert.match(indicators, /onpointerenter=\{\(\) => enterTrigger\(kind\)\}/);
+  assert.match(indicators, /onclick=\{\(event\) => togglePinned\(kind, event\)\}/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
+});
+
+test('pull request hover uses the same coordinated popover without changing direct clicks', async () => {
+  const pullRequests = await readFile(
+    new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(pullRequests, /open=\{popoverOpen\} onOpenChange=\{changeOpen\}/);
+  assert.match(pullRequests, /onpointerenter=\{enterTrigger\}/);
+  assert.match(pullRequests, /onpointerleave=\{leaveTrigger\}/);
+  assert.match(pullRequests, /pullRequestMode === 'direct'[\s\S]*void openPullRequest\(pullRequest\)/);
+  assert.match(pullRequests, /hoverOpened\.has\(popoverKey\)\) event\.preventDefault\(\)/);
 });
 
 test('rail badges overflow upward and worktrees mark the project icon corner', async () => {
@@ -95,7 +115,7 @@ test('rail badges overflow upward and worktrees mark the project icon corner', a
   assert.match(icon, /worktree\?: boolean/);
   assert.match(icon, /data-project-worktree-badge/);
   assert.match(icon, /label="Worktree"/);
-  assert.match(icon, /\.project-icon > :global\(\.tooltip-anchor\) \{[^}]*bottom: -4px;[^}]*left: -4px;/);
+  assert.match(icon, /\.project-icon > :global\(\.tooltip-anchor\) \{[^}]*top: -4px;[^}]*left: -4px;/);
   assert.match(indicators, /\.kind-glyph small \{[^}]*top: -5px;[^}]*right: -5px;/);
   assert.doesNotMatch(indicators, /\.kind-glyph small \{[^}]*bottom:/);
   assert.match(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*top: -6px;[^}]*right: -7px;/);
