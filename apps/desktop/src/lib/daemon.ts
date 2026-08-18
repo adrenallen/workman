@@ -701,8 +701,8 @@ export class DaemonClient
 
   checkWorktreeCreate(
     input: Pick<CreateWorktreeInput, 'project_id' | 'branch' | 'from_ref' | 'resolution'>
-  ): Promise<WorktreeCreateCheck> {
-    return this.request('worktree.create_check', { ...input });
+  ): Promise<WorktreeCreateCheck | null> {
+    return this.requestOptional('worktree.create_check', { ...input }, null);
   }
 
   createWorktreeAsync(

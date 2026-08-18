@@ -82,7 +82,7 @@ test('existing branch and worktree conflicts stay in-dialog with explicit action
   const daemon = await readFile(daemonUrl, 'utf8');
 
   assert.match(app, /client\.checkWorktreeCreate\(/);
-  assert.match(app, /if \(check\.conflict\)/);
+  assert.match(app, /if \(check\?\.conflict\)/);
   assert.ok(
     app.indexOf('client.checkWorktreeCreate(') < app.indexOf('beginWorktreeOperation({'),
     'preflight must finish before an operation is created or the dialog closes'
@@ -101,6 +101,18 @@ test('existing branch and worktree conflicts stay in-dialog with explicit action
   assert.match(dialog, /conflictPanel\?\.querySelector<HTMLButtonElement>\('button'\)\?\.focus\(\)/);
   assert.match(dialog, /type="button" size="sm"/);
   assert.match(dialog, /!busy && !conflict/);
+});
+
+test('an older daemon without create preflight falls back to direct creation', async () => {
+  const app = await readFile(appUrl, 'utf8');
+  const daemon = await readFile(daemonUrl, 'utf8');
+
+  assert.match(daemon, /checkWorktreeCreate\([\s\S]*?requestOptional\('worktree\.create_check', \{ \.\.\.input \}, null\)/);
+  assert.match(app, /if \(check\?\.conflict\)/);
+  assert.ok(
+    app.indexOf('if (check?.conflict)') < app.indexOf('beginWorktreeOperation({'),
+    'a null legacy-daemon check must fall through to the direct operation path'
+  );
 });
 
 test('adopt starts at the required path and does not select a user-authored title', async () => {

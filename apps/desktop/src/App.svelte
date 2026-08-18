@@ -3402,7 +3402,7 @@
           from_ref: submission.mode === 'create' ? submission.fromRef : undefined,
           resolution: submission.resolution
         });
-        if (check.conflict) {
+        if (check?.conflict) {
           worktreeDialogConflict = check.conflict;
           return;
         }
