@@ -51,13 +51,36 @@ async fn creation_conflicts_offer_explicit_local_remote_import_and_open_actions(
     assert_eq!(conflict.kind, "local_branch");
     assert!(conflict.actions.contains(&"use_existing_branch"));
 
-    let local_created = worktrees::create(
+    let incompatible_local = worktrees::create(
         &fixture.registry,
         CreateWorktree {
             source_project_id: 1,
             branch: "feature/local-existing".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: Some(WorktreeCreateResolution::UseExistingBranch),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("an existing-branch resolution cannot silently discard from_ref");
+    assert_eq!(incompatible_local.code(), "worktree_conflict");
+    assert!(
+        incompatible_local
+            .to_string()
+            .contains("omit the starting ref")
+    );
+
+    let local_created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/local-existing".into(),
+            display_name: None,
+            from_ref: None,
             resolution: Some(WorktreeCreateResolution::UseExistingBranch),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
@@ -83,13 +106,31 @@ async fn creation_conflicts_offer_explicit_local_remote_import_and_open_actions(
     assert_eq!(conflict.kind, "remote_branch");
     assert!(conflict.actions.contains(&"load_from_remote"));
 
-    let remote_created = worktrees::create(
+    let incompatible_remote = worktrees::create(
         &fixture.registry,
         CreateWorktree {
             source_project_id: 1,
             branch: "remote-only".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: Some(WorktreeCreateResolution::LoadFromRemote),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("a remote resolution cannot silently discard from_ref");
+    assert_eq!(incompatible_remote.code(), "worktree_conflict");
+
+    let remote_created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "remote-only".into(),
+            display_name: None,
+            from_ref: None,
             resolution: Some(WorktreeCreateResolution::LoadFromRemote),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),

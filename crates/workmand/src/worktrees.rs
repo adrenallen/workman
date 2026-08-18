@@ -888,11 +888,17 @@ async fn inspect_create_snapshot(
     snapshot: &RepositorySnapshot,
     projects: &[Project],
     branch: &str,
-    _from_ref: Option<&str>,
+    from_ref: Option<&str>,
     managed_root: &Path,
     resolution: Option<WorktreeCreateResolution>,
     command_environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<WorktreeCreateCheck> {
+    if let (Some(from_ref), Some(resolution)) = (from_ref, resolution) {
+        return Err(WorktreeError::Conflict(format!(
+            "branch {branch:?} cannot use {} while also being created from {from_ref:?}; omit the starting ref to choose the existing branch",
+            resolution.action()
+        )));
+    }
     let slug = site_slug(branch);
     if slug.is_empty() {
         return Err(WorktreeError::InvalidBranch(format!(
@@ -1467,7 +1473,7 @@ pub(crate) async fn fork_with_progress(
             source_project_id: request.source_project_id,
             branch: request.branch,
             display_name: request.display_name,
-            from_ref: Some(record.head.clone()),
+            from_ref: request.resolution.is_none().then(|| record.head.clone()),
             resolution: request.resolution,
             managed_root: request.managed_root,
             preferences: request.preferences,

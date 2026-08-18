@@ -96,6 +96,7 @@ test('existing branch and worktree conflicts stay in-dialog with explicit action
   assert.match(dialog, /Choose a different name/);
   assert.match(dialog, /mode: 'adopt',[\s\S]*?path: conflict\.path/);
   assert.match(dialog, /onOpenProject\(conflict\.project_id\)/);
+  assert.match(dialog, /fromRef: resolution === undefined/);
   assert.match(dialog, /type="button" size="sm"/);
   assert.match(dialog, /!busy && !conflict/);
 });

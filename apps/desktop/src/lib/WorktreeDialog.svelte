@@ -326,7 +326,9 @@
       mode,
       branch: nextBranch,
       title,
-      fromRef: createKind === 'new' && baseRef.trim() ? baseRef.trim() : undefined,
+      fromRef: resolution === undefined && createKind === 'new' && baseRef.trim()
+        ? baseRef.trim()
+        : undefined,
       resolution: resolution ?? (createKind === 'origin'
         ? effectiveBranchOptions.find((option) => option.name === nextBranch)?.source === 'local'
           ? 'use_existing_branch'
