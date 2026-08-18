@@ -3,7 +3,8 @@
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
   import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
-  import { onDestroy } from 'svelte';
+  import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
+  import { onDestroy, onMount } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
   import { resolveAgentDraftChoice } from './agentDraftChoices';
@@ -22,6 +23,7 @@
   import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
   import { primaryModifier, primaryModifierLabel } from './primaryModifier';
+  import { pointIsInsideRect } from './terminalInput';
 
   interface AgentDraftSubmission {
     input: SpawnAgentInput;
@@ -68,9 +70,12 @@
   let advancedOpen = $state(false);
   let previewOpen = $state(true);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
+  let promptField = $state<HTMLDivElement | null>(null);
   let attachmentSaving = $state(false);
   let attachmentDropActive = $state(false);
   let attachmentPreviews = $state<Record<string, string>>({});
+  let removeNativeDropListener: (() => void) | null = null;
+  let destroyed = false;
 
   const choice = $derived(resolveAgentDraftChoice(
     draft,
@@ -240,6 +245,39 @@
     void attachImages(files);
   }
 
+  function attachImagePaths(paths: string[]): void {
+    const available = Math.max(0, 8 - draft.attachments.length);
+    const existing = new Set(draft.attachments);
+    const images = paths
+      .filter((path) => /\.(?:png|jpe?g|gif|webp|bmp|tiff?)$/iu.test(path))
+      .filter((path) => !existing.has(path))
+      .slice(0, available);
+    if (images.length === 0) {
+      if (available === 0) onError('A new-agent draft can have at most 8 image attachments.');
+      return;
+    }
+    onChange({ attachments: [...draft.attachments, ...images] });
+  }
+
+  function handleNativePromptDrop(payload: DragDropEvent): void {
+    if (payload.type === 'leave') {
+      attachmentDropActive = false;
+      return;
+    }
+    if (!promptField) return;
+    const inside = pointIsInsideRect(
+      payload.position,
+      promptField.getBoundingClientRect(),
+      window.devicePixelRatio
+    );
+    if (payload.type === 'enter' || payload.type === 'over') {
+      attachmentDropActive = inside;
+      return;
+    }
+    attachmentDropActive = false;
+    if (inside) attachImagePaths(payload.paths);
+  }
+
   function removeAttachment(path: string): void {
     const preview = attachmentPreviews[path];
     if (preview) URL.revokeObjectURL(preview);
@@ -256,7 +294,22 @@
     return attachmentPreviews[path] ?? (isTauri() ? convertFileSrc(path) : '');
   }
 
+  onMount(() => {
+    if (!isTauri()) return;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => handleNativePromptDrop(event.payload))
+      .then((unlisten) => {
+        if (destroyed) unlisten();
+        else removeNativeDropListener = unlisten;
+      })
+      .catch((cause) => {
+        if (!destroyed) onError(`Could not listen for image drops: ${cause instanceof Error ? cause.message : String(cause)}`);
+      });
+  });
+
   onDestroy(() => {
+    destroyed = true;
+    removeNativeDropListener?.();
     for (const preview of Object.values(attachmentPreviews)) URL.revokeObjectURL(preview);
   });
 </script>
@@ -342,6 +395,7 @@
     {/if}
 
     <div
+      bind:this={promptField}
       class="prompt-field"
       role="group"
       aria-label="Prompt and image attachments"
