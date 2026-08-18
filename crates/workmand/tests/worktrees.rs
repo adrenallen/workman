@@ -453,6 +453,7 @@ enum GitRemoveFixture {
     SwapPathOnce,
     RecreateOnPrune,
     FailListAfterAdd,
+    BranchAppearsBeforeAdd,
 }
 
 impl GitFixture {
@@ -474,6 +475,10 @@ impl GitFixture {
 
     fn new_with_post_create_list_failure() -> Result<Self, Box<dyn Error>> {
         Self::new_with_remove_fixture(Some(GitRemoveFixture::FailListAfterAdd))
+    }
+
+    fn new_with_branch_race() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::BranchAppearsBeforeAdd))
     }
 
     fn new_with_remove_fixture(
@@ -556,7 +561,9 @@ impl GitFixture {
                     git = git_executable.display(),
                     marker = temp.path().join("removed-worktree-path").display(),
                 ),
-                GitRemoveFixture::FailListAfterAdd => ":".to_owned(),
+                GitRemoveFixture::FailListAfterAdd | GitRemoveFixture::BranchAppearsBeforeAdd => {
+                    ":".to_owned()
+                }
             };
             let prune_script = match remove_fixture {
                 GitRemoveFixture::RecreateOnPrune => format!(
@@ -565,13 +572,20 @@ impl GitFixture {
                 ),
                 GitRemoveFixture::AlwaysFail
                 | GitRemoveFixture::SwapPathOnce
-                | GitRemoveFixture::FailListAfterAdd => ":".to_owned(),
+                | GitRemoveFixture::FailListAfterAdd
+                | GitRemoveFixture::BranchAppearsBeforeAdd => ":".to_owned(),
             };
             let operation_script = match remove_fixture {
                 GitRemoveFixture::FailListAfterAdd => format!(
-                    "if [ \"$3\" = worktree ] && [ \"$4\" = add ]; then\n  '{git}' \"$@\"\n  status=$?\n  if [ \"$status\" -eq 0 ]; then : > '{marker}'; fi\n  exit \"$status\"\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = list ] && [ -e '{marker}' ]; then\n  echo 'error: simulated post-registration worktree listing failure' >&2\n  exit 255\nfi",
+                    "if [ \"$3\" = worktree ] && [ \"$4\" = add ]; then\n  '{git}' \"$@\"\n  status=$?\n  if [ \"$status\" -eq 0 ]; then : > '{marker}'; /bin/rm -f '{counter}'; fi\n  exit \"$status\"\nfi\nif [ \"$3\" = worktree ] && [ \"$4\" = list ] && [ -e '{marker}' ]; then\n  count=$(/bin/cat '{counter}' 2>/dev/null || echo 0)\n  count=$((count + 1))\n  echo \"$count\" > '{counter}'\n  if [ \"$count\" -ge 2 ]; then\n    echo 'error: simulated post-registration worktree listing failure' >&2\n    exit 255\n  fi\nfi",
                     git = git_executable.display(),
                     marker = temp.path().join("fail-list-after-add").display(),
+                    counter = temp.path().join("post-add-list-count").display(),
+                ),
+                GitRemoveFixture::BranchAppearsBeforeAdd => format!(
+                    "if [ \"$3\" = worktree ] && [ \"$4\" = list ]; then\n  count=$(/bin/cat '{counter}' 2>/dev/null || echo 0)\n  count=$((count + 1))\n  echo \"$count\" > '{counter}'\n  '{git}' \"$@\"\n  status=$?\n  if [ \"$status\" -eq 0 ] && [ \"$count\" -eq 2 ]; then\n    '{git}' -C \"$2\" branch feature/toctou main\n  fi\n  exit \"$status\"\nfi",
+                    git = git_executable.display(),
+                    counter = temp.path().join("pre-add-list-count").display(),
                 ),
                 GitRemoveFixture::AlwaysFail
                 | GitRemoveFixture::SwapPathOnce
@@ -663,6 +677,38 @@ async fn post_registration_assembly_failure_keeps_checkout_branch_and_project()
             .is_some(),
         "the committed project registration remains"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn branch_created_between_preflight_and_add_is_never_rolled_back()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_branch_race()?;
+    let branch = "feature/toctou";
+    let failure = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: branch.into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("the concurrent branch makes git worktree add reject -b");
+    assert!(failure.to_string().contains("already exists"));
+    assert!(
+        !git(&fixture.main, &["branch", "--list", branch])?
+            .trim()
+            .is_empty(),
+        "rollback must not delete a branch the operation did not create"
+    );
+    assert!(!fixture.managed.join(worktrees::site_slug(branch)).exists());
     Ok(())
 }
 

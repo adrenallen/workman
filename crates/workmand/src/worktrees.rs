@@ -430,6 +430,18 @@ struct RegistrationIssue {
     message: String,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CreatedCheckout {
+    worktree: bool,
+    branch: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CheckoutObservation {
+    worktree: bool,
+    branch: bool,
+}
+
 impl RegistrationIssue {
     fn remove_everywhere(&self) -> bool {
         matches!(
@@ -1212,21 +1224,16 @@ pub(crate) async fn create_with_progress(
         );
     }
 
-    match branch_state {
-        BranchState::Local => {
-            git_required(
-                &snapshot.root_path,
-                [
-                    "worktree",
-                    "add",
-                    destination.to_str().unwrap_or_default(),
-                    &request.branch,
-                ],
-                "check out existing local branch",
-                &command_environment,
-            )
-            .await?;
-        }
+    let (add_args, add_operation) = match branch_state {
+        BranchState::Local => (
+            vec![
+                OsString::from("worktree"),
+                OsString::from("add"),
+                destination.as_os_str().to_owned(),
+                OsString::from(&request.branch),
+            ],
+            "check out existing local branch",
+        ),
         BranchState::Remote | BranchState::RemoteUnfetched => {
             if branch_state == BranchState::RemoteUnfetched {
                 let refspec = format!("refs/heads/{0}:refs/remotes/origin/{0}", request.branch);
@@ -1248,21 +1255,18 @@ pub(crate) async fn create_with_progress(
                 .await;
             }
             let remote = format!("origin/{}", request.branch);
-            git_required(
-                &snapshot.root_path,
-                [
-                    "worktree",
-                    "add",
-                    "--track",
-                    "-b",
-                    request.branch.as_str(),
-                    destination.to_str().unwrap_or_default(),
-                    remote.as_str(),
+            (
+                vec![
+                    OsString::from("worktree"),
+                    OsString::from("add"),
+                    OsString::from("--track"),
+                    OsString::from("-b"),
+                    OsString::from(&request.branch),
+                    destination.as_os_str().to_owned(),
+                    OsString::from(remote),
                 ],
                 "check out remote branch",
-                &command_environment,
             )
-            .await?;
         }
         BranchState::Missing => {
             let start = resolve_start_point(
@@ -1271,22 +1275,44 @@ pub(crate) async fn create_with_progress(
                 &command_environment,
             )
             .await?;
-            git_required(
-                &snapshot.root_path,
-                [
-                    "worktree",
-                    "add",
-                    "-b",
-                    request.branch.as_str(),
-                    destination.to_str().unwrap_or_default(),
-                    start.as_str(),
+            (
+                vec![
+                    OsString::from("worktree"),
+                    OsString::from("add"),
+                    OsString::from("-b"),
+                    OsString::from(&request.branch),
+                    destination.as_os_str().to_owned(),
+                    OsString::from(start),
                 ],
                 "create worktree branch",
-                &command_environment,
             )
-            .await?;
         }
-    }
+    };
+    let before_add = checkout_observation(
+        &snapshot.root_path,
+        &destination,
+        &request.branch,
+        &command_environment,
+    )
+    .await?;
+    git_required(
+        &snapshot.root_path,
+        add_args.iter(),
+        add_operation,
+        &command_environment,
+    )
+    .await?;
+    let after_add = checkout_observation(
+        &snapshot.root_path,
+        &destination,
+        &request.branch,
+        &command_environment,
+    )
+    .await?;
+    let created_checkout = CreatedCheckout {
+        worktree: !before_add.worktree && after_add.worktree,
+        branch: !before_add.branch && after_add.branch,
+    };
 
     if let Some(progress) = progress {
         progress.completed(
@@ -1310,7 +1336,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     &destination,
                     &request.branch,
-                    branch_state != BranchState::Local,
+                    created_checkout,
                     &command_environment,
                 )
                 .await;
@@ -1323,7 +1349,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     &destination,
                     &request.branch,
-                    branch_state != BranchState::Local,
+                    created_checkout,
                     &command_environment,
                 )
                 .await;
@@ -1345,7 +1371,7 @@ pub(crate) async fn create_with_progress(
                 &snapshot.root_path,
                 &destination,
                 &request.branch,
-                branch_state != BranchState::Local,
+                created_checkout,
                 &command_environment,
             )
             .await;
@@ -1422,7 +1448,7 @@ pub(crate) async fn create_with_progress(
                 &snapshot.root_path,
                 &destination,
                 &request.branch,
-                branch_state != BranchState::Local,
+                created_checkout,
                 &command_environment,
             )
             .await;
@@ -2115,18 +2141,20 @@ async fn rollback_created_worktree(
     repository: &Path,
     destination: &Path,
     branch: &str,
-    branch_was_created: bool,
+    created: CreatedCheckout,
     environment: &BTreeMap<OsString, OsString>,
 ) {
-    let destination = destination.to_string_lossy().into_owned();
-    let _ = git_output(
-        repository,
-        ["worktree", "remove", "--force", destination.as_str()],
-        GIT_NETWORK_TIMEOUT,
-        environment,
-    )
-    .await;
-    if branch_was_created {
+    if created.worktree {
+        let destination = destination.to_string_lossy().into_owned();
+        let _ = git_output(
+            repository,
+            ["worktree", "remove", "--force", destination.as_str()],
+            GIT_NETWORK_TIMEOUT,
+            environment,
+        )
+        .await;
+    }
+    if created.branch {
         let _ = git_output(
             repository,
             ["branch", "-D", branch],
@@ -2135,6 +2163,36 @@ async fn rollback_created_worktree(
         )
         .await;
     }
+}
+
+async fn checkout_observation(
+    repository: &Path,
+    destination: &Path,
+    branch: &str,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<CheckoutObservation> {
+    let branch = git_success(
+        repository,
+        [
+            "show-ref",
+            "--verify",
+            "--quiet",
+            format!("refs/heads/{branch}").as_str(),
+        ],
+        environment,
+    )
+    .await?;
+    let porcelain = git_required_bytes(
+        repository,
+        ["worktree", "list", "--porcelain", "-z"],
+        "capture worktrees around creation",
+        environment,
+    )
+    .await?;
+    let worktree = parse_porcelain(&porcelain)?
+        .iter()
+        .any(|record| same_path(&record.path, destination));
+    Ok(CheckoutObservation { worktree, branch })
 }
 
 pub fn set_preference(
