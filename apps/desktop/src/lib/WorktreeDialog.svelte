@@ -110,6 +110,7 @@
   let baseRefInput = $state<HTMLInputElement | null>(null);
   let projectTitleInput = $state<HTMLInputElement | null>(null);
   let baseRefPicker = $state<HTMLDivElement | null>(null);
+  let conflictPanel = $state<HTMLElement | null>(null);
   let refValidationTimer: ReturnType<typeof setTimeout> | null = null;
   let refValidationSequence = 0;
   let appliedDefaultRef = false;
@@ -166,6 +167,11 @@
     appliedDefaultRef = true;
     baseRef = defaultRef;
     queueMicrotask(() => scheduleRefValidation(0));
+  });
+
+  $effect(() => {
+    if (!conflict || !conflictPanel) return;
+    queueMicrotask(() => conflictPanel?.querySelector<HTMLButtonElement>('button')?.focus());
   });
 
   onMount(() => {
@@ -686,7 +692,7 @@
         {/if}
 
         {#if conflict}
-          <section class="grid gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-3" role="alert" aria-live="assertive">
+          <section bind:this={conflictPanel} class="grid gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-3" role="alert" aria-live="assertive">
             <div class="grid gap-1">
               <strong class="text-sm">This branch needs a choice</strong>
               <span class="text-xs leading-relaxed text-muted-foreground">{conflict.message}</span>
