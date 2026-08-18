@@ -1225,13 +1225,6 @@ impl Store {
              ON CONFLICT(profile_id, project_id) DO NOTHING",
             params![profile_id, project.id, sort_order],
         )?;
-        if project.selected {
-            transaction.execute(
-                "UPDATE profile_projects SET selected = CASE WHEN project_id = ?2 THEN 1 ELSE 0 END
-                 WHERE profile_id = ?1",
-                params![profile_id, project.id],
-            )?;
-        }
         transaction.execute(
             "INSERT INTO project_worktrees
                 (project_id, repository_id, parent_project_id, branch, managed)
