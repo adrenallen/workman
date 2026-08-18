@@ -38,7 +38,18 @@
   <Tooltip.Root>
     <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
-        <span {...props} {onpointerleave} {onpointerdown} class="tooltip-anchor">{@render children()}</span>
+        <span
+          {...props}
+          class="tooltip-anchor"
+          onpointerleave={(event) => {
+            (props.onpointerleave as ((event: PointerEvent) => void) | undefined)?.(event);
+            onpointerleave?.(event);
+          }}
+          onpointerdown={(event) => {
+            (props.onpointerdown as ((event: PointerEvent) => void) | undefined)?.(event);
+            onpointerdown?.(event);
+          }}
+        >{@render children()}</span>
       {/snippet}
     </Tooltip.Trigger>
     <Tooltip.Content {side} {sideOffset} class={contentClass}>

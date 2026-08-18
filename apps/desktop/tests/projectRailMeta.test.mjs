@@ -78,6 +78,8 @@ test('project tooltip is the sole row tooltip and closes on every stale-hover pa
   assert.match(tooltip, /tabindex\?: number/);
   assert.match(tooltip, /onpointerleave\?: \(event: PointerEvent\) => void/);
   assert.match(tooltip, /onpointerdown\?: \(event: PointerEvent\) => void/);
+  assert.match(tooltip, /onpointerleave=\{\(event\) => \{\s*\(props\.onpointerleave as [^;]+\)\?\.\(event\);\s*onpointerleave\?\.\(event\);\s*\}\}/);
+  assert.match(tooltip, /onpointerdown=\{\(event\) => \{\s*\(props\.onpointerdown as [^;]+\)\?\.\(event\);\s*onpointerdown\?\.\(event\);\s*\}\}/);
   assert.match(tooltip, /<Tooltip\.Provider \{delayDuration\} \{disableHoverableContent\} \{skipDelayDuration\}>/);
   assert.match(tooltip, /<Tooltip\.Trigger \{tabindex\}>/);
   assert.match(timing, /PROJECT_RAIL_TOOLTIP_DELAY_MS = 1_000/);
