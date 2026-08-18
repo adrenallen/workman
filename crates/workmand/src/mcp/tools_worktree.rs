@@ -153,29 +153,12 @@ impl WorkmanMcp {
             Ok(project_id) => project_id,
             Err(result) => return result,
         };
-        match worktrees::inspect_create(
-            &self.registry,
-            worktrees::InspectWorktreeCreate {
-                source_project_id: project_id,
-                branch: args.branch,
-                from_ref: args.from_ref,
-                managed_root: args.managed_root.map(Into::into),
-                resolution: args.resolution,
-            },
-        )
-        .await
-        {
-            Ok(worktrees::WorktreeCreateCheck {
-                conflict: Some(conflict),
-                ..
-            }) => worktree_failure(WorktreeError::CreateConflict(Box::new(conflict))),
-            Ok(_) | Err(_) => failure(
-                "project_scope_error",
-                format!(
-                    "agent identities are scoped to project {project_id}; creating a worktree project is outside that scope"
-                ),
+        failure(
+            "project_scope_error",
+            format!(
+                "agent identities are scoped to project {project_id}; creating a worktree project is outside that scope"
             ),
-        }
+        )
     }
 
     #[tool(
@@ -190,29 +173,12 @@ impl WorkmanMcp {
             Ok(project_id) => project_id,
             Err(result) => return result,
         };
-        match worktrees::inspect_create(
-            &self.registry,
-            worktrees::InspectWorktreeCreate {
-                source_project_id: project_id,
-                branch: args.branch,
-                from_ref: None,
-                managed_root: args.managed_root.map(Into::into),
-                resolution: args.resolution,
-            },
-        )
-        .await
-        {
-            Ok(worktrees::WorktreeCreateCheck {
-                conflict: Some(conflict),
-                ..
-            }) => worktree_failure(WorktreeError::CreateConflict(Box::new(conflict))),
-            Ok(_) | Err(_) => failure(
-                "project_scope_error",
-                format!(
-                    "agent identities are scoped to project {project_id}; forking a worktree project is outside that scope"
-                ),
+        failure(
+            "project_scope_error",
+            format!(
+                "agent identities are scoped to project {project_id}; forking a worktree project is outside that scope"
             ),
-        }
+        )
     }
 
     #[tool(

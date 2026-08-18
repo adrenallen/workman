@@ -225,19 +225,38 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
         check["detail"].is_string() && check["fix_hint"].is_string() || check["fix_hint"].is_null()
     }));
 
-    git(&main, &["branch", "mcp-existing-local"])?;
-    let conflict = call_failure(
+    let denied_root = temp.path().join("agent-controlled-root");
+    let foreign_path = denied_root.join("mcp-existing-local");
+    {
+        let registry = registry.lock().await;
+        registry.store().put_project(&Project {
+            id: 2,
+            path: foreign_path.to_string_lossy().into_owned(),
+            name: "foreign-registration".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 1,
+        })?;
+    }
+    let denied = call_failure(
         &client,
         "worktree_create",
-        json!({ "project_id": 1, "branch": "mcp-existing-local" }),
+        json!({
+            "project_id": 1,
+            "branch": "mcp-existing-local",
+            "managed_root": denied_root,
+        }),
     )
     .await;
-    assert_eq!(conflict["code"], "worktree_create_conflict");
-    assert_eq!(conflict["conflict"]["kind"], "local_branch");
+    assert_eq!(denied["code"], "project_scope_error");
+    let denied_text = denied.to_string();
+    assert!(!denied_text.contains(&foreign_path.to_string_lossy().into_owned()));
+    assert!(!denied_text.contains("foreign-registration"));
+    assert!(!denied_text.contains("\"project_id\":2"));
     assert!(
-        conflict["conflict"]["actions"]
-            .as_array()
-            .is_some_and(|actions| actions.iter().any(|action| action == "use_existing_branch"))
+        !foreign_path.exists(),
+        "denied preflight has no filesystem effects"
     );
 
     for (tool, args) in [
