@@ -271,6 +271,8 @@ struct WorktreeCreateParams {
     #[serde(default)]
     from_ref: Option<String>,
     #[serde(default)]
+    resolution: Option<crate::worktrees::WorktreeCreateResolution>,
+    #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
@@ -287,6 +289,8 @@ struct WorktreeForkParams {
     branch: String,
     #[serde(default)]
     display_name: Option<String>,
+    #[serde(default)]
+    resolution: Option<crate::worktrees::WorktreeCreateResolution>,
     #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
@@ -681,10 +685,28 @@ async fn dispatch(
                     branch: params.branch,
                     display_name: params.display_name,
                     from_ref: params.from_ref,
+                    resolution: params.resolution,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
                     env_policy: params.env_policy,
                     remember_env_policy: params.remember_env_policy,
+                },
+            )
+            .await
+            .map(json_value)
+            .map_err(worktree_error);
+        }
+        "worktree.create_check" | "worktree_create_check" => {
+            let params: WorktreeCreateParams = params_as(params)?;
+            let project_id = control_worktree_project_id(registry, params.project_id).await?;
+            return crate::worktrees::inspect_create(
+                registry,
+                crate::worktrees::InspectWorktreeCreate {
+                    source_project_id: project_id,
+                    branch: params.branch,
+                    from_ref: params.from_ref,
+                    managed_root: params.managed_root.map(PathBuf::from),
+                    resolution: params.resolution,
                 },
             )
             .await
@@ -700,6 +722,7 @@ async fn dispatch(
                     source_project_id: project_id,
                     branch: params.branch,
                     display_name: params.display_name,
+                    resolution: params.resolution,
                     managed_root: params.managed_root.map(PathBuf::from),
                     preferences: params.preferences,
                     env_policy: params.env_policy,

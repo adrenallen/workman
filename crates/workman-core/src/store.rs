@@ -1183,6 +1183,69 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a project, its active-profile membership, and its Git-worktree
+    /// link as one registration boundary.
+    pub fn put_project_with_worktree(
+        &self,
+        project: &Project,
+        link: &ProjectWorktree,
+    ) -> StoreResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO projects (id, path, name, display_name, icon, selected, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                path = excluded.path,
+                name = excluded.name,
+                display_name = excluded.display_name,
+                icon = COALESCE(excluded.icon, projects.icon),
+                selected = excluded.selected,
+                sort_order = excluded.sort_order",
+            params![
+                project.id,
+                project.path,
+                project.name,
+                project.display_name,
+                project.icon,
+                project.selected,
+                project.sort_order,
+            ],
+        )?;
+        let profile_id: ProfileId =
+            transaction.query_row("SELECT id FROM profiles WHERE active = 1", [], |row| {
+                row.get(0)
+            })?;
+        let sort_order =
+            crate::project_folders::next_project_top_level_order(&transaction, profile_id)?;
+        transaction.execute(
+            "INSERT INTO profile_projects (profile_id, project_id, sort_order, selected)
+             SELECT ?1, ?2, ?3,
+                    CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
+             FROM profile_projects WHERE profile_id = ?1
+             ON CONFLICT(profile_id, project_id) DO NOTHING",
+            params![profile_id, project.id, sort_order],
+        )?;
+        transaction.execute(
+            "INSERT INTO project_worktrees
+                (project_id, repository_id, parent_project_id, branch, managed)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(project_id) DO UPDATE SET
+                repository_id = excluded.repository_id,
+                parent_project_id = excluded.parent_project_id,
+                branch = excluded.branch,
+                managed = excluded.managed",
+            params![
+                link.project_id,
+                link.repository_id,
+                link.parent_project_id,
+                link.branch,
+                link.managed,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn get_project_worktree(
         &self,
         project_id: ProjectId,

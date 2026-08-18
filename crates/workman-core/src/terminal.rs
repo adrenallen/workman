@@ -371,8 +371,9 @@ impl TerminalEmulator {
     }
 
     fn feed_with_replies(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        #[allow(unused_mut)]
-        let mut replies = self.keyboard_protocol.feed(bytes);
+        let replies = self.keyboard_protocol.feed(bytes);
+        #[cfg(windows)]
+        let mut replies = replies;
         self.parser.advance(&mut self.terminal, bytes);
         // ConPTY withholds all child output until its startup `CSI 6 n` probe is
         // answered, and a headless daemon PTY has no live xterm frontend to answer

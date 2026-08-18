@@ -11,6 +11,11 @@ export type PullRequestIconName =
   | 'git-pull-request-closed'
   | 'git-pull-request-draft';
 export type EnvironmentPolicy = 'copy' | 'skip';
+export type WorktreeCreateResolution = 'use_existing_branch' | 'load_from_remote';
+export type WorktreeCreateConflictAction = WorktreeCreateResolution
+  | 'import_existing_worktree'
+  | 'open_registered_project'
+  | 'choose_different_name';
 
 export interface PullRequestVisual {
   icon: PullRequestIconName;
@@ -117,6 +122,22 @@ export interface WorktreeRefValidation {
   commit: string;
 }
 
+export interface WorktreeCreateConflict {
+  kind: 'local_branch' | 'remote_branch' | 'existing_worktree' | 'registered_project' | 'existing_path';
+  branch: string;
+  path: string;
+  project_id: number | null;
+  message: string;
+  actions: WorktreeCreateConflictAction[];
+}
+
+export interface WorktreeCreateCheck {
+  status: 'ready' | 'conflict';
+  branch: string;
+  destination: string;
+  conflict: WorktreeCreateConflict | null;
+}
+
 export interface WorktreeMutation {
   repository: WorktreeRepository;
   project: Project;
@@ -139,6 +160,9 @@ export interface WorktreeRemoval {
   deleted_from_disk: boolean;
   metadata_pruned: boolean;
   branch_kept: boolean;
+  files_removed?: boolean;
+  files_untouched?: boolean;
+  registration_issue?: string | null;
 }
 
 export interface CreateWorktreeInput {
@@ -146,6 +170,7 @@ export interface CreateWorktreeInput {
   branch: string;
   display_name?: string;
   from_ref?: string;
+  resolution?: WorktreeCreateResolution;
   env_policy: EnvironmentPolicy;
   remember_env_policy: boolean;
 }
@@ -154,6 +179,7 @@ export interface ForkWorktreeInput {
   project_id: number;
   branch: string;
   display_name?: string;
+  resolution?: WorktreeCreateResolution;
   env_policy: EnvironmentPolicy;
   remember_env_policy: boolean;
 }
@@ -172,6 +198,7 @@ export type WorktreeDialogSubmission =
       branch: string;
       title: string;
       fromRef?: string;
+      resolution?: WorktreeCreateResolution;
       envPolicy: EnvironmentPolicy;
       rememberEnvPolicy: boolean;
     }
@@ -179,6 +206,7 @@ export type WorktreeDialogSubmission =
       mode: 'fork';
       branch: string;
       title: string;
+      resolution?: WorktreeCreateResolution;
       envPolicy: EnvironmentPolicy;
       rememberEnvPolicy: boolean;
     }
