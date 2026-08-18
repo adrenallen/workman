@@ -1,0 +1,1 @@
+export const PROJECT_RAIL_TOOLTIP_DELAY_MS = 800;

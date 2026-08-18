@@ -32,6 +32,7 @@
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import { PROJECT_RAIL_TOOLTIP_DELAY_MS } from './lib/projectRailTooltip';
   import ProjectKindIndicators from './lib/ProjectKindIndicators.svelte';
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
@@ -4686,10 +4687,8 @@
         <Button size="sm" type="submit">Save</Button>
       </form>
     {:else}
-      <TooltipLabel label={tooltipLabel} side={projectRailCollapsed ? 'right' : 'top'}>
-        {#snippet children()}
-          <span class="project-content">
-            <button
+      <span class="project-content">
+        <button
               class="project-select"
               type="button"
               aria-current={project.selected ? 'page' : undefined}
@@ -4709,16 +4708,41 @@
               data-context-id={project.id}
             >
               <span class="project-icon-anchor">
-                <span class="project-kind-icon" aria-hidden="true">
-                  <ProjectIcon
-                    icon={project.icon}
-                    color={project.icon_color}
-                    image={project.icon_image?.data_url}
-                    fallback={project.repository_id !== null ? 'repository' : 'project'}
-                    worktree={parentLabel !== null}
-                    size={15}
-                  />
-                </span>
+                <TooltipLabel
+                  label={tooltipLabel}
+                  side={projectRailCollapsed ? 'right' : 'top'}
+                  sideOffset={8}
+                  delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
+                  disableHoverableContent={true}
+                  skipDelayDuration={0}
+                  contentClass="project-rail-tooltip"
+                >
+                  {#snippet children()}
+                    <span class="project-kind-icon" aria-hidden="true">
+                      <ProjectIcon
+                        icon={project.icon}
+                        color={project.icon_color}
+                        image={project.icon_image?.data_url}
+                        fallback={project.repository_id !== null ? 'repository' : 'project'}
+                        worktree={parentLabel !== null}
+                        worktreeTooltip={false}
+                        size={15}
+                      />
+                    </span>
+                  {/snippet}
+                  {#snippet content()}
+                    <span class="project-tooltip-copy">
+                      <strong>{fullTitle}</strong>
+                      <span>{project.path}</span>
+                      {#if parentLabel !== null}
+                        <span class="project-tooltip-parent">
+                          <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                          Worktree of {parentLabel}
+                        </span>
+                      {/if}
+                    </span>
+                  {/snippet}
+                </TooltipLabel>
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}
@@ -4728,22 +4752,8 @@
                   </span>
                 </TooltipLabel>
               {/if}
-            </button>
-          </span>
-        {/snippet}
-        {#snippet content()}
-          <span class="project-tooltip-copy">
-            <strong>{fullTitle}</strong>
-            <span>{project.path}</span>
-            {#if parentLabel !== null}
-              <span class="project-tooltip-parent">
-                <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
-                Worktree of {parentLabel}
-              </span>
-            {/if}
-          </span>
-        {/snippet}
-      </TooltipLabel>
+        </button>
+      </span>
       {#if !projectRailCollapsed}
         <span class="project-meta-strip" data-project-meta-strip>
           {#if repository}
@@ -5475,8 +5485,7 @@
   .project-row.nested { min-height: 42px; }
   .project-row:hover { background: var(--popover); }
   .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
-  .project-row > :global(.tooltip-anchor) { min-width: 0; grid-column: 1; grid-row: 1; align-self: stretch; }
-  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; align-self: stretch; }
+  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; grid-column: 1; grid-row: 1; align-self: stretch; }
   .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
@@ -5486,6 +5495,7 @@
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
   .project-icon-anchor { display: inline-flex; grid-row: 1 / 3; flex: none; align-self: center; }
+  .project-icon-anchor > :global(.tooltip-anchor) { display: inline-grid; width: 20px; height: 20px; place-items: center; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
   .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
   .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5498,6 +5508,7 @@
   .project-tooltip-copy > span { color: inherit; font-family: var(--terminal-font-family); font-size: var(--font-size-xs); opacity: .78; }
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
+  :global(.project-rail-tooltip) { pointer-events: none; }
   .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
