@@ -159,7 +159,7 @@ test('per-kind activity keeps agent, terminal, and command counts separate', () 
   assert.equal(activity.command.activeLabel, 'command-10 running');
 });
 
-test('per-kind tones prioritize input and live work before inactive errors', () => {
+test('per-kind tones prioritize input and live work before crashes and idle states', () => {
   const needsInput = process(1, 'agent', 'running', 'needs_input');
   const crashed = process(2, 'agent', 'crashed', 'exited');
   const working = process(3, 'agent', 'running', 'working');
@@ -169,9 +169,9 @@ test('per-kind tones prioritize input and live work before inactive errors', () 
   assert.equal(projectKindActivity([needsInput, crashed, working, waiting], {}).agent.tone, 'needs-input');
   assert.equal(projectKindActivity([crashed, working, waiting], {}).agent.tone, 'success');
   assert.equal(projectKindActivity([crashed, waiting], {}).agent.tone, 'danger');
-  assert.equal(projectKindActivity([waiting], {}).agent.tone, 'waiting');
-  assert.equal(projectKindActivity([idle], {}).agent.tone, 'neutral');
-  assert.equal(projectKindActivity([], {}).agent.tone, 'neutral');
+  assert.equal(projectKindActivity([waiting], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([idle], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([], {}).agent.tone, 'idle');
 });
 
 test('non-zero and signaled exits are errors while clean exits are stopped', () => {
@@ -187,6 +187,9 @@ test('non-zero and signaled exits are errors while clean exits are stopped', () 
   assert.equal(activity.terminal.crashed, 1);
   assert.equal(activity.command.crashed, 0);
   assert.equal(activity.command.stopped, 1);
+  assert.equal(activity.agent.tone, 'danger');
+  assert.equal(activity.terminal.tone, 'danger');
+  assert.equal(activity.command.tone, 'idle');
 });
 
 test('jump targets prefer input and foreground work, then output or process start recency', () => {
@@ -216,8 +219,32 @@ test('jump targets prefer input and foreground work, then output or process star
   assert.deepEqual(activity.agent.activeProcessIds, [3, 2, 1]);
   assert.deepEqual(activity.terminal.activeProcessIds, [5]);
   assert.deepEqual(activity.command.activeProcessIds, [7, 6]);
+  assert.deepEqual(activity.agent.processIds, [3, 2, 1]);
   assert.equal(projectKindActivity([agents[0]], {}).agent.targetProcessId, 1);
   assert.equal(projectKindActivity([process(8, 'terminal', 'stopped')], {}).terminal.targetProcessId, null);
+});
+
+test('mixed rosters keep live terminals, commands, and fresh agents above exited processes', () => {
+  const now = Date.now();
+  const activity = projectKindActivity([
+    process(1, 'agent', 'running', 'working'),
+    process(2, 'agent', 'exited', 'exited', {
+      exited_at: now,
+      agent_state: { last_output_at: now }
+    }),
+    process(3, 'terminal', 'running'),
+    process(4, 'terminal', 'exited', 'idle', { exited_at: now }),
+    process(5, 'command', 'running'),
+    process(6, 'command', 'exited', 'idle', { exited_at: now })
+  ], {
+    1: { uptime_seconds: 1 },
+    3: { foreground_active: true, uptime_seconds: 2 },
+    5: { uptime_seconds: 3 }
+  });
+
+  assert.deepEqual(activity.agent.processIds, [1, 2]);
+  assert.deepEqual(activity.terminal.processIds, [3, 4]);
+  assert.deepEqual(activity.command.processIds, [5, 6]);
 });
 
 test('per-kind activity hides idle shells and includes agent and command startup', () => {
@@ -262,4 +289,6 @@ test('per-kind labels cover empty, plural, and quiet states', () => {
   ], {});
   assert.equal(quiet.agent.label, '2 agents idle');
   assert.equal(quiet.terminal.label, '2 terminals stopped');
+  assert.deepEqual(quiet.agent.processIds, [2, 1]);
+  assert.deepEqual(quiet.terminal.processIds, [4, 3]);
 });

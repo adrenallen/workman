@@ -8,19 +8,36 @@
     children: Snippet;
     content?: Snippet;
     side?: 'top' | 'right' | 'bottom' | 'left';
+    sideOffset?: number;
+    delayDuration?: number;
+    disableHoverableContent?: boolean;
+    skipDelayDuration?: number;
+    contentClass?: string;
+    tabindex?: number;
   }
 
-  let { label, children, content, side = 'top' }: Props = $props();
+  let {
+    label,
+    children,
+    content,
+    side = 'top',
+    sideOffset = 6,
+    delayDuration = 350,
+    disableHoverableContent = false,
+    skipDelayDuration = 300,
+    contentClass,
+    tabindex = 0
+  }: Props = $props();
 </script>
 
-<Tooltip.Provider delayDuration={350}>
+<Tooltip.Provider {delayDuration} {disableHoverableContent} {skipDelayDuration}>
   <Tooltip.Root>
-    <Tooltip.Trigger>
+    <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
         <span {...props} class="tooltip-anchor">{@render children()}</span>
       {/snippet}
     </Tooltip.Trigger>
-    <Tooltip.Content {side} sideOffset={6}>
+    <Tooltip.Content {side} {sideOffset} class={contentClass}>
       {#if content}
         <span class="tooltip-detail">{@render content()}</span>
       {:else}

@@ -56,6 +56,12 @@ pub struct Notification {
     pub read_at: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectMarkReadResult {
+    pub notifications_updated: usize,
+    pub processes_updated: usize,
+}
+
 impl Store {
     pub(crate) fn create_agent_done_notification(
         &self,
@@ -190,5 +196,127 @@ impl Store {
             [],
         )?;
         Ok(updated)
+    }
+
+    /// Mark notifications and durable per-process attention for exactly one project read.
+    pub fn mark_project_read(
+        &self,
+        project_id: ProjectId,
+        read_at: i64,
+    ) -> StoreResult<ProjectMarkReadResult> {
+        let transaction = self.connection().unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE agent_notifications
+             SET last_viewed_at = ?2
+             WHERE unread = 1
+               AND process_id IN (
+                   SELECT id FROM processes WHERE project_id = ?1
+               )",
+            params![project_id, read_at],
+        )?;
+        let notifications_updated = transaction.execute(
+            "UPDATE notifications
+             SET read_at = ?2
+             WHERE project_id = ?1 AND read_at IS NULL",
+            params![project_id, read_at],
+        )?;
+        let processes_updated = transaction.execute(
+            "UPDATE agent_notifications
+             SET unread = 0, unread_at = NULL
+             WHERE unread = 1
+               AND process_id IN (
+                   SELECT id FROM processes WHERE project_id = ?1
+               )",
+            [project_id],
+        )?;
+        transaction.commit()?;
+        Ok(ProjectMarkReadResult {
+            notifications_updated,
+            processes_updated,
+        })
+    }
+}
+
+#[cfg(test)]
+mod project_mark_read_tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        Process, ProcessKind, ProcessSource, ProcessStatus, Project, Store,
+        attention::AttentionState,
+    };
+
+    fn put_project_agent(store: &Store, project_id: i64, process_id: i64) {
+        store
+            .put_project(&Project {
+                id: project_id,
+                path: format!("/tmp/project-{project_id}"),
+                name: format!("project-{project_id}"),
+                display_name: None,
+                icon: None,
+                selected: project_id == 1,
+                sort_order: project_id,
+            })
+            .unwrap();
+        store
+            .put_process(&Process {
+                id: process_id,
+                project_id,
+                kind: ProcessKind::Agent,
+                name: format!("agent-{process_id}"),
+                command: Some("true".into()),
+                working_dir: "/tmp".into(),
+                env: BTreeMap::new(),
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        store
+            .observe_agent_attention(process_id, AttentionState::Working, false, true, 10)
+            .unwrap();
+        assert!(
+            store
+                .observe_agent_attention(process_id, AttentionState::Idle, false, true, 20)
+                .unwrap()
+                .unread
+        );
+    }
+
+    #[test]
+    fn project_mark_read_clears_only_that_projects_notifications_and_process_markers() {
+        let store = Store::open_in_memory().unwrap();
+        put_project_agent(&store, 1, 11);
+        put_project_agent(&store, 2, 22);
+
+        let result = store.mark_project_read(1, 100).unwrap();
+
+        assert_eq!(result.notifications_updated, 1);
+        assert_eq!(result.processes_updated, 1);
+        let unread = store.list_notifications(Some(false), 10).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].project_id, Some(2));
+        let marker = |process_id| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT unread FROM agent_notifications WHERE process_id = ?1",
+                    [process_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap()
+        };
+        assert!(!marker(11));
+        assert!(marker(22));
     }
 }

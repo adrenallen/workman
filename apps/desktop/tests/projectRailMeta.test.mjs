@@ -29,24 +29,48 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.notEqual(processKindsIndex, -1);
   assert.ok(pullRequestIndex < processKindsIndex);
   assert.match(strip, /showNoPullRequest=\{false\}/);
+  assert.match(strip, /openPopoverKey=\{projectRailPopoverKey\}/);
+  assert.match(strip, /onOpenPopoverChange=\{\(key\) => \(projectRailPopoverKey = key\)\}/);
   assert.match(strip, /onSelect=\{\(process\) => openProjectRailProcess\(project, process\)\}/);
   assert.match(strip, /onShowAll=\{\(kind\) => openProjectRailOverview\(project, kind\)\}/);
   assert.doesNotMatch(row, /project-row-meta/);
   assert.match(app, /\.project-row \{[^}]*min-height: 44px;/);
+  assert.match(app, /\.project-content \{[^}]*grid-column: 1;[^}]*grid-row: 1;/);
   assert.match(app, /\.project-meta-strip \{[^}]*height: 20px;/);
   assert.match(app, /\.project-select \{[^}]*position: relative;[^}]*grid-template-rows: minmax\(20px, auto\) 20px;/);
-  assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: hidden;[^}]*pointer-events: none;/);
+  assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
+  assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--accent\);/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
 
-test('project row tooltip owns the path and keeps worktree branch context', async () => {
-  const row = await projectRowSource();
+test('project tooltip is icon-only, delayed, non-blocking, and keeps worktree context', async () => {
+  const [row, app, tooltip, timing] = await Promise.all([
+    projectRowSource(),
+    readFile(appUrl, 'utf8'),
+    readFile(new URL('../src/lib/components/ds/TooltipLabel.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/projectRailTooltip.ts', import.meta.url), 'utf8')
+  ]);
 
   assert.match(row, /\{@const tooltipLabel = `\$\{fullTitle\} · \$\{project\.path\}/);
   assert.match(row, /aria-label=\{`\$\{tooltipLabel\} · \$\{projectKind\} · \$\{activityLabel\}/);
+  assert.match(row, /\{:else\}\s*<span class="project-content">\s*<button/);
+  assert.match(row, /<span class="project-icon-anchor">\s*<TooltipLabel/);
+  assert.match(row, /delayDuration=\{PROJECT_RAIL_TOOLTIP_DELAY_MS\}/);
+  assert.match(row, /side=\{projectRailCollapsed \? 'right' : 'top'\}/);
+  assert.match(row, /disableHoverableContent=\{true\}/);
+  assert.match(row, /skipDelayDuration=\{0\}/);
+  assert.match(row, /contentClass="project-rail-tooltip"/);
+  assert.match(row, /contentClass="project-rail-tooltip"\s*tabindex=\{-1\}/);
+  assert.match(row, /worktreeTooltip=\{false\}/);
   assert.match(row, /\{#snippet content\(\)\}[\s\S]*<strong>\{fullTitle\}<\/strong>[\s\S]*<span>\{project\.path\}<\/span>/);
   assert.match(row, /<GitBranchIcon[^>]*>[\s\S]*Worktree of \{parentLabel\}/);
+  assert.match(app, /:global\(\.project-rail-tooltip\) \{ pointer-events: none; \}/);
+  assert.match(tooltip, /delayDuration\?: number/);
+  assert.match(tooltip, /tabindex\?: number/);
+  assert.match(tooltip, /<Tooltip\.Provider \{delayDuration\} \{disableHoverableContent\} \{skipDelayDuration\}>/);
+  assert.match(tooltip, /<Tooltip\.Trigger \{tabindex\}>/);
+  assert.match(timing, /PROJECT_RAIL_TOOLTIP_DELAY_MS = 800/);
   assert.doesNotMatch(row, /<small>\{project\.path\}<\/small>/);
   assert.doesNotMatch(row, /class="worktree-parent"/);
 });
@@ -69,17 +93,63 @@ test('show-all process navigation is serialized and contributes the project to r
   assert.match(app, /case 'processes':\s*openProcessOverview\(target\.kind\);/);
 });
 
-test('kind indicators consume helper tones, bound counts, and restore row focus', async () => {
+test('kind indicators expose click-only idle rosters and shared popover state', async () => {
   const indicators = await readFile(
     new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url),
     'utf8'
   );
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
+  assert.match(indicators, /\.project-kind-indicator\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
+  assert.match(indicators, /\.kind-popover-header > span:first-child\[data-tone='idle'\][^{]*\{[^}]*var\(--muted-foreground\)/);
+  assert.match(indicators, /\.kind-popover-header > span:first-child\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
+  assert.match(indicators, /compact \? kinds\.filter\(\(kind\) => activity\[kind\]\.active > 0\) : kinds/);
+  assert.match(indicators, /\{#each visibleKinds as kind \(kind\)\}/);
+  assert.match(indicators, /activity\[kind\]\.processIds/);
+  assert.match(indicators, /No \{kindTitle\(kind\)\.toLocaleLowerCase\(\)\} in this project/);
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);
-  assert.match(indicators, /querySelector<HTMLButtonElement>\('\.project-select'\)/);
-  assert.match(indicators, /tick\(\)\.then\(\(\) => projectButton\.focus\(\)\)/);
+  assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
+  assert.match(indicators, /onclick=\{\(event\) => togglePopover\(kind, event\)\}/);
+  assert.doesNotMatch(indicators, /onpointer(?:enter|leave)/);
+  assert.doesNotMatch(indicators, /PopoverHoverIntent/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
+});
+
+test('pull request icons always open a coordinated click-only list popover', async () => {
+  const pullRequests = await readFile(
+    new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(pullRequests, /open=\{popoverOpen\} onOpenChange=\{changeOpen\}/);
+  assert.match(pullRequests, /onclick=\{togglePopover\}/);
+  assert.match(pullRequests, /Show \$\{pullRequests\.length\} pull request/);
+  assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
+  assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);
+  assert.doesNotMatch(pullRequests, /pullRequestMode|PopoverHoverIntent/);
+});
+
+test('rail badges overflow upward and worktrees mark the project icon corner', async () => {
+  const [row, icon, indicators, pullRequests] = await Promise.all([
+    projectRowSource(),
+    readFile(new URL('../src/lib/ProjectIcon.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(row, /fallback=\{parentLabel !== null \? 'worktree' : project\.repository_id !== null \? 'repository' : 'project'\}/);
+  assert.match(row, /worktree=\{parentLabel !== null\}/);
+  assert.match(icon, /worktree\?: boolean/);
+  assert.match(icon, /worktreeTooltip\?: boolean/);
+  assert.match(icon, /data-project-worktree-badge/);
+  assert.match(icon, /label="Worktree"/);
+  assert.match(icon, /\.project-icon > :global\(\.tooltip-anchor\) \{[^}]*top: -4px;[^}]*left: -4px;/);
+  assert.match(icon, /\.project-icon > \.worktree-badge \{[^}]*top: -4px;[^}]*left: -4px;/);
+  assert.match(icon, /background: var\(--project-icon-badge-background, var\(--card\)\)/);
+  assert.match(indicators, /\.kind-glyph small \{[^}]*top: -5px;[^}]*right: -5px;/);
+  assert.doesNotMatch(indicators, /\.kind-glyph small \{[^}]*bottom:/);
+  assert.match(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*top: -6px;[^}]*right: -7px;/);
+  assert.doesNotMatch(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*bottom:/);
 });
 
 test('path remains visible in project overview and project settings', async () => {

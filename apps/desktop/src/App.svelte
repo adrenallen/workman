@@ -32,6 +32,7 @@
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import { PROJECT_RAIL_TOOLTIP_DELAY_MS } from './lib/projectRailTooltip';
   import ProjectKindIndicators from './lib/ProjectKindIndicators.svelte';
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
@@ -414,6 +415,7 @@
   let agentCascadeError = $state<string | null>(null);
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
+  let projectRailPopoverKey = $state<string | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
@@ -437,6 +439,7 @@
   let agentDoneNoticeSequence = 0;
   let notifications = $state<Notification[]>([]);
   let notificationBusy = $state(false);
+  const notificationIdleWaiters = new Set<() => void>();
   let notificationRequest = 0;
   let notificationUnreadSignature: string | null = null;
   let nativeNotificationBaselineReady = false;
@@ -1130,6 +1133,117 @@
     );
   }
 
+  function clearProjectUnreadLocally(projectId: number): void {
+    const clear = (process: ProcessView): ProcessView =>
+      process.project_id === projectId && process.kind === 'agent' && process.agent_state.unread
+        ? { ...process, agent_state: { ...process.agent_state, unread: false } }
+        : process;
+    const knownProcesses = [
+      ...processes,
+      ...(navigationIndex[projectId]?.processes ?? [])
+    ];
+    for (const process of knownProcesses) {
+      if (process.project_id === projectId) notifiedUnreadProcessIds.delete(process.id);
+    }
+    processes = processes.map(clear);
+    const snapshot = navigationIndex[projectId];
+    if (snapshot) {
+      navigationIndex = {
+        ...navigationIndex,
+        [projectId]: { ...snapshot, processes: snapshot.processes.map(clear) }
+      };
+    }
+    agentDoneNotices = agentDoneNotices.filter((notice) => notice.projectId !== projectId);
+    const readAt = Date.now();
+    notifications = notifications.map((notification) =>
+      notification.project_id === projectId && notification.read_at === null
+        ? { ...notification, read_at: readAt }
+        : notification
+    );
+  }
+
+  function setNotificationBusy(busy: boolean): void {
+    notificationBusy = busy;
+    if (busy) return;
+    for (const resolve of notificationIdleWaiters) resolve();
+    notificationIdleWaiters.clear();
+  }
+
+  async function waitForNotificationIdle(): Promise<void> {
+    while (notificationBusy) {
+      await new Promise<void>((resolve) => notificationIdleWaiters.add(resolve));
+    }
+  }
+
+  async function markProjectRead(projectId: number): Promise<void> {
+    await waitForNotificationIdle();
+    const projectAgents = new Map<number, ProcessView>();
+    for (const process of [...processes, ...(navigationIndex[projectId]?.processes ?? [])]) {
+      if (process.project_id === projectId && process.kind === 'agent') {
+        projectAgents.set(process.id, process);
+      }
+    }
+    const pendingProcessIds = new Set(projectAgents.keys());
+    const unreadProcessIds = new Set(
+      [...projectAgents.values()]
+        .filter((process) => process.agent_state.unread)
+        .map((process) => process.id)
+    );
+    const unreadNotificationIds = new Set(
+      notifications
+        .filter((notification) =>
+          notification.project_id === projectId && notification.read_at === null
+        )
+        .map((notification) => notification.id)
+    );
+    const removedNotices = agentDoneNotices.filter((notice) => notice.projectId === projectId);
+    const removedNotifiedIds = new Set(
+      [...pendingProcessIds].filter((processId) => notifiedUnreadProcessIds.has(processId))
+    );
+    for (const processId of pendingProcessIds) markReadPending.add(processId);
+    setNotificationBusy(true);
+    clearProjectUnreadLocally(projectId);
+    let succeeded = false;
+    try {
+      await client.markProjectRead(projectId);
+      succeeded = true;
+    } catch (cause) {
+      const restore = (process: ProcessView): ProcessView =>
+        process.project_id === projectId && unreadProcessIds.has(process.id)
+          ? { ...process, agent_state: { ...process.agent_state, unread: true } }
+          : process;
+      processes = processes.map(restore);
+      const snapshot = navigationIndex[projectId];
+      if (snapshot) {
+        navigationIndex = {
+          ...navigationIndex,
+          [projectId]: { ...snapshot, processes: snapshot.processes.map(restore) }
+        };
+      }
+      notifications = notifications.map((notification) =>
+        notification.project_id === projectId && unreadNotificationIds.has(notification.id)
+          ? { ...notification, read_at: null }
+          : notification
+      );
+      for (const processId of removedNotifiedIds) notifiedUnreadProcessIds.add(processId);
+      const currentNoticeIds = new Set(agentDoneNotices.map((notice) => notice.id));
+      agentDoneNotices = [
+        ...removedNotices.filter((notice) => !currentNoticeIds.has(notice.id)),
+        ...agentDoneNotices
+      ].slice(-4);
+      reportError(cause);
+    } finally {
+      for (const processId of pendingProcessIds) markReadPending.delete(processId);
+    }
+    try {
+      if (succeeded) {
+        await Promise.all([refreshNotifications(), refreshProcesses(projectId)]);
+      }
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
   async function refreshNotifications(): Promise<void> {
     if (connection.status !== 'connected' || !connection.version_compatible) return;
     const request = ++notificationRequest;
@@ -1159,7 +1273,7 @@
   async function markCenterNotificationRead(notification: Notification): Promise<void> {
     if (notificationBusy || notification.read_at !== null) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     notifications = notifications.map((candidate) => candidate.id === notification.id
       ? { ...candidate, read_at: Date.now() }
       : candidate);
@@ -1171,14 +1285,14 @@
       reportError(cause);
       if (notification.project_id !== null) await refreshProcesses(notification.project_id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 
   async function markAllNotificationsRead(): Promise<void> {
     if (notificationBusy || notifications.every((notification) => notification.read_at !== null)) return;
     const previous = notifications;
-    notificationBusy = true;
+    setNotificationBusy(true);
     const readAt = Date.now();
     const processIds = new Set(
       notifications
@@ -1196,7 +1310,7 @@
       reportError(cause);
       if (selectedProject) await refreshProcesses(selectedProject.id);
     } finally {
-      notificationBusy = false;
+      setNotificationBusy(false);
     }
   }
 
@@ -1334,6 +1448,13 @@
     return (navigationIndex[projectId]?.processes ?? [])
       .filter((process) => process.kind === 'agent' && process.agent_state.unread)
       .length;
+  }
+
+  function projectHasUnread(projectId: number): boolean {
+    return projectUnreadAgentCount(projectId) > 0
+      || notifications.some(
+        (notification) => notification.project_id === projectId && notification.read_at === null
+      );
   }
 
   function projectRailProcesses(project: Project): ProcessView[] {
@@ -3765,6 +3886,7 @@
   function showContextMenu(request: ContextMenuRequest): void {
     folderMenuRequest = null;
     treeRenameTarget = null;
+    projectRailPopoverKey = null;
     contextRequest = request;
   }
 
@@ -3785,6 +3907,7 @@
       project,
       repository: worktreeRepositoryFor(project),
       worktree,
+      hasUnread: projectHasUnread(project.id),
       importableWorktreeCount: worktree?.kind === 'main'
         ? worktreeListFor(project)?.worktrees.filter((entry) => entry.can_adopt).length ?? 0
         : 0
@@ -3870,6 +3993,9 @@
     switch (action) {
       case 'select':
         appNavigation.navigate({ type: 'project', projectId: project.id }, 'context-menu');
+        return;
+      case 'mark-read':
+        await markProjectRead(project.id);
         return;
       case 'project-settings':
         openProjectSettings(project);
@@ -4619,10 +4745,8 @@
         <Button size="sm" type="submit">Save</Button>
       </form>
     {:else}
-      <TooltipLabel label={tooltipLabel} side={projectRailCollapsed ? 'right' : 'top'}>
-        {#snippet children()}
-          <span class="project-content">
-            <button
+      <span class="project-content">
+        <button
               class="project-select"
               type="button"
               aria-current={project.selected ? 'page' : undefined}
@@ -4642,47 +4766,66 @@
               data-context-id={project.id}
             >
               <span class="project-icon-anchor">
-                <span class="project-kind-icon" aria-hidden="true">
-                  <ProjectIcon
-                    icon={project.icon}
-                    color={project.icon_color}
-                    image={project.icon_image?.data_url}
-                    fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-                    size={15}
-                  />
-                </span>
+                <TooltipLabel
+                  label={tooltipLabel}
+                  side={projectRailCollapsed ? 'right' : 'top'}
+                  sideOffset={8}
+                  delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
+                  disableHoverableContent={true}
+                  skipDelayDuration={0}
+                  contentClass="project-rail-tooltip"
+                  tabindex={-1}
+                >
+                  {#snippet children()}
+                    <span class="project-kind-icon" aria-hidden="true">
+                      <ProjectIcon
+                        icon={project.icon}
+                        color={project.icon_color}
+                        image={project.icon_image?.data_url}
+                        fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                        worktree={parentLabel !== null}
+                        worktreeTooltip={false}
+                        size={15}
+                      />
+                    </span>
+                  {/snippet}
+                  {#snippet content()}
+                    <span class="project-tooltip-copy">
+                      <strong>{fullTitle}</strong>
+                      <span>{project.path}</span>
+                      {#if parentLabel !== null}
+                        <span class="project-tooltip-parent">
+                          <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                          Worktree of {parentLabel}
+                        </span>
+                      {/if}
+                    </span>
+                  {/snippet}
+                </TooltipLabel>
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}
-                <TooltipLabel label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}>
+                <TooltipLabel
+                  label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}
+                  tabindex={-1}
+                >
                   <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
                     <span aria-hidden="true"></span>{unreadAgentCount}
                   </span>
                 </TooltipLabel>
               {/if}
-            </button>
-          </span>
-        {/snippet}
-        {#snippet content()}
-          <span class="project-tooltip-copy">
-            <strong>{fullTitle}</strong>
-            <span>{project.path}</span>
-            {#if parentLabel !== null}
-              <span class="project-tooltip-parent">
-                <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
-                Worktree of {parentLabel}
-              </span>
-            {/if}
-          </span>
-        {/snippet}
-      </TooltipLabel>
+        </button>
+      </span>
       {#if !projectRailCollapsed}
         <span class="project-meta-strip" data-project-meta-strip>
           {#if repository}
             <WorktreeRowMeta
               entry={worktree}
               pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              projectId={project.id}
               repositoryName={repository.name}
+              openPopoverKey={projectRailPopoverKey}
+              onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
               refreshing={worktreeRefreshingRepositoryId === repository.id}
               showNoPullRequest={false}
               onRefresh={() => void refreshWorktreeRepository(project, true)}
@@ -4691,7 +4834,10 @@
           <ProjectKindIndicators
             {activity}
             processes={projectProcesses}
+            projectId={project.id}
             projectTitle={fullTitle}
+            openPopoverKey={projectRailPopoverKey}
+            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
             onSelect={(process) => openProjectRailProcess(project, process)}
             onShowAll={(kind) => openProjectRailOverview(project, kind)}
           />
@@ -4700,7 +4846,10 @@
         <ProjectKindIndicators
           {activity}
           processes={projectProcesses}
+          projectId={project.id}
           projectTitle={fullTitle}
+          openPopoverKey={projectRailPopoverKey}
+          onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
           compact
           onSelect={(process) => openProjectRailProcess(project, process)}
           onShowAll={(kind) => openProjectRailOverview(project, kind)}
@@ -4788,6 +4937,7 @@
       <div class="notification-slot">
         <NotificationsCenter
           {notifications}
+          {projects}
           busy={notificationBusy}
           onRefresh={() => void refreshNotifications()}
           onOpen={openNotification}
@@ -5393,14 +5543,13 @@
   .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
-  .project-row { position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
+  .project-row { --project-icon-badge-background: var(--card); position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row.nested { min-height: 42px; }
-  .project-row:hover { background: var(--popover); }
-  .project-row.active { border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
-  .project-row > :global(.tooltip-anchor) { min-width: 0; grid-column: 1; grid-row: 1; align-self: stretch; }
-  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; align-self: stretch; }
+  .project-row:hover { --project-icon-badge-background: var(--popover); background: var(--popover); }
+  .project-row.active { --project-icon-badge-background: var(--accent); border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; grid-column: 1; grid-row: 1; align-self: stretch; }
   .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
-  .project-select:focus-visible { outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
+  .project-select:focus-visible { --project-icon-badge-background: var(--border); outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
   .app-shell :global(.project-select[data-reorderable='true']) { cursor: grab; }
   .app-shell :global(.project-select[data-reorder-dragging='true']) { opacity: 0.42; cursor: grabbing; }
   .app-shell :global(.project-select[data-reorder-drop]::after) { position: absolute; z-index: 3; right: 6px; left: 6px; height: 2px; background: var(--ring); content: ''; pointer-events: none; }
@@ -5408,11 +5557,12 @@
   .app-shell :global(.project-select[data-reorder-drop='after']::after) { bottom: -2px; }
   .project-kind-icon { display: grid; width: 20px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); }
   .project-icon-anchor { display: inline-flex; grid-row: 1 / 3; flex: none; align-self: center; }
+  .project-icon-anchor > :global(.tooltip-anchor) { display: inline-grid; width: 20px; height: 20px; place-items: center; }
   .project-row.active .project-kind-icon { color: var(--foreground); }
   .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
   .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: hidden; margin: 0 3px 3px 34px; pointer-events: none; }
+  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
   .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
@@ -5420,6 +5570,7 @@
   .project-tooltip-copy > span { color: inherit; font-family: var(--terminal-font-family); font-size: var(--font-size-xs); opacity: .78; }
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
+  :global(.project-rail-tooltip) { pointer-events: none; }
   .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }

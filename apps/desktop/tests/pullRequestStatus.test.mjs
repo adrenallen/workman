@@ -107,8 +107,10 @@ test('every PR status surface uses the shared state icon treatment', async () =>
   const list = await readFile(new URL('../src/lib/PullRequestList.svelte', import.meta.url), 'utf8');
 
   assert.match(row, /\{#if pullRequest\}/);
-  assert.match(row, /pullRequestInteraction\(pullRequests\)/);
-  assert.match(row, /\{#if pullRequestMode === 'direct'\}[\s\S]*openPullRequest\(pullRequest\)[\s\S]*\{:else\}[\s\S]*<PullRequestList/);
+  assert.doesNotMatch(row, /pullRequestInteraction\(pullRequests\)/);
+  assert.match(row, /onclick=\{togglePopover\}[\s\S]*<PullRequestList/);
+  assert.match(row, /\{#if pullRequests\.length === 1\}/);
+  assert.doesNotMatch(row, /onpointer(?:enter|leave)/);
   assert.match(row, /openBrowserUrl\(target\.url\)/);
   assert.match(row, /<PullRequestStateIcon state=\{pullRequest\.state\}/);
   assert.match(overview, /if pullRequest/);

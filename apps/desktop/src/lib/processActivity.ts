@@ -10,6 +10,7 @@ export type ProcessActivityState =
   | 'crashed';
 
 export type ProcessActivityTone = 'success' | 'needs-input' | 'waiting' | 'danger' | 'neutral';
+export type ProjectKindActivityTone = ProcessActivityTone | 'idle';
 
 export interface ProcessActivityPresentation {
   state: ProcessActivityState;
@@ -28,7 +29,7 @@ export interface ProjectActivityRollup {
 }
 
 export interface ProjectKindActivityDetail {
-  tone: ProcessActivityTone;
+  tone: ProjectKindActivityTone;
   active: number;
   running: number;
   starting: number;
@@ -41,6 +42,7 @@ export interface ProjectKindActivityDetail {
   label: string;
   activeLabel: string;
   activeProcessIds: number[];
+  processIds: number[];
   targetProcessId: number | null;
 }
 
@@ -183,12 +185,18 @@ export function projectKindActivity(
     terminal: [],
     command: []
   };
+  const rosters: Record<ProcessKind, KindTargetCandidate[]> = {
+    agent: [],
+    terminal: [],
+    command: []
+  };
 
   for (const process of processes) {
     const detail = rollup[process.kind];
     const stats = statsByProcess[process.id];
     const state = processKindActivityState(process, stats);
     detail.total += 1;
+    rosters[process.kind].push(rosterCandidate(process, state, stats));
 
     if (state === 'running') detail.running += 1;
     if (state === 'starting') detail.starting += 1;
@@ -217,6 +225,9 @@ export function projectKindActivity(
     detail.activeProcessIds = candidates[kind]
       .sort(compareTargets)
       .map((candidate) => candidate.id);
+    detail.processIds = rosters[kind]
+      .sort(compareTargets)
+      .map((candidate) => candidate.id);
     detail.activeLabel = kindActiveLabel(kind, detail, processes);
     detail.targetProcessId = targets[kind]?.id ?? null;
   }
@@ -239,6 +250,7 @@ function emptyKindActivity(kind: ProcessKind): ProjectKindActivityDetail {
     label: `no ${kindPlural(kind)}`,
     activeLabel: `no ${kindPlural(kind)} running`,
     activeProcessIds: [],
+    processIds: [],
     targetProcessId: null
   };
 }
@@ -285,12 +297,11 @@ function processHasError(process: ProcessView): boolean {
     && (process.exit_signal != null || (process.exit_code != null && process.exit_code !== 0));
 }
 
-function kindActivityTone(detail: ProjectKindActivityDetail): ProcessActivityTone {
+function kindActivityTone(detail: ProjectKindActivityDetail): ProjectKindActivityTone {
   if (detail.needsInput > 0) return 'needs-input';
   if (detail.running > 0 || detail.starting > 0) return 'success';
   if (detail.crashed > 0) return 'danger';
-  if (detail.waiting > 0) return 'waiting';
-  return 'neutral';
+  return 'idle';
 }
 
 function kindActiveLabel(
@@ -375,18 +386,37 @@ function targetCandidate(
   };
 }
 
+function rosterCandidate(
+  process: ProcessView,
+  state: KindActivityState,
+  stats: ProcessRuntimeStats | undefined
+): KindTargetCandidate {
+  return {
+    id: process.id,
+    priority: state === 'needs_input'
+      ? 3
+      : process.status === 'running' || process.status === 'starting'
+        ? 2
+        : 1,
+    recency: process.kind === 'agent'
+      ? agentRecency(process, stats)
+      : process.exited_at ?? runtimeRecency(stats)
+  };
+}
+
 function agentRecency(
   process: ProcessView,
   stats: ProcessRuntimeStats | undefined
 ): number {
   return process.agent_state.last_content_change_at
     ?? process.agent_state.last_output_at
+    ?? process.exited_at
     ?? runtimeRecency(stats);
 }
 
 function runtimeRecency(stats: ProcessRuntimeStats | undefined): number {
   return stats && Number.isFinite(stats.uptime_seconds)
-    ? -stats.uptime_seconds
+    ? Date.now() - stats.uptime_seconds * 1_000
     : Number.NEGATIVE_INFINITY;
 }
 
