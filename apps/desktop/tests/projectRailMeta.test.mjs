@@ -98,6 +98,22 @@ test('project tooltip is the sole row tooltip and closes on every stale-hover pa
   assert.doesNotMatch(row, /class="worktree-parent"/);
 });
 
+test('project, folder, and tree rows expose no native title hover hints', async () => {
+  const [row, tree, folder, reorder] = await Promise.all([
+    projectRowSource(),
+    readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectFolderHeader.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/reorder.ts', import.meta.url), 'utf8')
+  ]);
+
+  const nativeTitle = /<(?:button|span)\b[^>]*\stitle=/;
+  assert.doesNotMatch(row, nativeTitle);
+  assert.doesNotMatch(tree, nativeTitle);
+  assert.doesNotMatch(folder, nativeTitle);
+  assert.doesNotMatch(reorder, /node\.title\s*=/);
+  assert.match(reorder, /node\.removeAttribute\('title'\)/);
+});
+
 test('project errors stay in the accessible row summary without adding an idle indicator', async () => {
   const app = await readFile(appUrl, 'utf8');
 
