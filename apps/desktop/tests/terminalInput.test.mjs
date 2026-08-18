@@ -6,38 +6,78 @@ import {
   AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
   clipboardImagePasteRoute,
   localPathsFromUriList,
+  performClipboardImagePaste,
   pointIsInsideRect,
   shellEscapePath,
   shellEscapePaths,
+  shouldUseNativeClipboardFallback,
   shouldForwardTerminalInput
 } from '../src/lib/terminalInput.ts';
+import { normalizeAgentToolType } from '../src/lib/agentToolType.ts';
 
-test('routes image paste by process kind without changing text paste behavior', () => {
-  assert.equal(clipboardImagePasteRoute('agent'), 'agent-tui');
+test('normalizes tool types like workmand and routes image paste by normalized tool', () => {
+  assert.equal(normalizeAgentToolType(' claude-code '), 'claude_code');
+  assert.equal(normalizeAgentToolType('Claude Code'), 'claude_code');
+  assert.equal(normalizeAgentToolType('CLAUDE'), 'claude');
+  assert.equal(clipboardImagePasteRoute('agent', 'claude_code'), 'agent-native-normalized');
+  assert.equal(clipboardImagePasteRoute('agent', 'claude'), 'agent-native-normalized');
+  assert.equal(clipboardImagePasteRoute('agent', 'claude-code'), 'agent-native-normalized');
+  assert.equal(clipboardImagePasteRoute('agent', 'Claude Code'), 'agent-native-normalized');
+  assert.equal(clipboardImagePasteRoute('agent', ' claude_code '), 'agent-native-normalized');
+  assert.equal(clipboardImagePasteRoute('agent', 'codex'), 'agent-tui');
+  assert.equal(clipboardImagePasteRoute('agent', 'future_agent'), 'agent-tui');
   assert.equal(clipboardImagePasteRoute('terminal'), 'shell-path');
   assert.equal(clipboardImagePasteRoute('command'), 'shell-path');
   assert.deepEqual(Array.from(new TextEncoder().encode(AGENT_TUI_CLIPBOARD_IMAGE_PASTE)), [0x16]);
 });
 
-test('agent image paste forwards the TUI shortcut while plain shells keep saved paths', async () => {
+test('normalizes Claude clipboard before forwarding and falls back to a saved PNG on failure', async () => {
+  const calls = [];
+  const actions = {
+    forwardNativePaste: () => calls.push('forward'),
+    normalizeSystemClipboard: async () => { calls.push('normalize'); },
+    insertSavedPngFallback: async () => { calls.push('fallback'); }
+  };
+  await performClipboardImagePaste('agent-native-normalized', actions);
+  assert.deepEqual(calls, ['normalize', 'forward']);
+
+  calls.length = 0;
+  await performClipboardImagePaste('agent-native-normalized', {
+    ...actions,
+    normalizeSystemClipboard: async () => {
+      calls.push('normalize');
+      throw new Error('clipboard unavailable');
+    }
+  });
+  assert.deepEqual(calls, ['normalize', 'fallback']);
+
+  calls.length = 0;
+  await performClipboardImagePaste('agent-tui', actions);
+  assert.deepEqual(calls, ['forward']);
+
+  calls.length = 0;
+  await performClipboardImagePaste('shell-path', actions);
+  assert.deepEqual(calls, ['fallback']);
+});
+
+test('uses the native reader only for Claude pasteboards that expose no DOM image', () => {
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 0, true), true);
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 1, true), false);
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 0, false), false);
+  assert.equal(shouldUseNativeClipboardFallback('agent-tui', 0, true), false);
+  assert.equal(shouldUseNativeClipboardFallback('shell-path', 0, true), false);
+});
+
+test('terminal transfer wiring uses normalized image paste and the native no-blob fallback', async () => {
   const transfers = await readFile(
     new URL('../src/lib/terminalTransfers.ts', import.meta.url),
     'utf8'
   );
   const terminal = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
-  const noImages = transfers.indexOf('if (images.length === 0) return;');
-  const preventDefault = transfers.indexOf('event.preventDefault();', noImages);
-  const sharedPaste = transfers.indexOf('pasteImages(images)', preventDefault);
-  const agentRoute = transfers.indexOf("options.imagePasteRoute() === 'agent-tui'");
-  const shellSave = transfers.indexOf('saveClipboardImages(images)', agentRoute);
-
-  assert.ok(noImages >= 0 && preventDefault > noImages, 'text-only paste must reach xterm unchanged');
-  assert.ok(sharedPaste > preventDefault && agentRoute >= 0 && shellSave > agentRoute);
-  assert.match(transfers, /options\.forwardAgentImagePaste\(\);/);
-  assert.doesNotMatch(
-    transfers.slice(transfers.indexOf('export function installTerminalTransfers')),
-    /navigator\.clipboard\.(write|writeText)/
-  );
+  assert.match(transfers, /terminal_write_clipboard_image/);
+  assert.match(transfers, /performClipboardImagePaste\(route/);
+  assert.match(transfers, /shouldUseNativeClipboardFallback\(route, images\.length, isTauri\(\)\)/);
+  assert.match(transfers, /void pasteNativeClipboard\(\)/);
   assert.match(terminal, /queueInput\(encoder\.encode\(AGENT_TUI_CLIPBOARD_IMAGE_PASTE\), true\)/);
 });
 
@@ -59,10 +99,6 @@ test('context-menu paste reuses image routing and xterm bracketed text paste', a
   assert.ok(nativeWrite >= 0 && nativeRead > nativeWrite);
   assert.ok(nativeRead >= 0 && nativeAgentChord > nativeRead && nativeShellPath > nativeAgentChord);
   assert.ok(clipboardRead > nativeShellPath && sharedPaste > clipboardRead && textPaste > sharedPaste);
-  assert.doesNotMatch(
-    transfers.slice(transfers.indexOf('export function installTerminalTransfers')),
-    /navigator\.clipboard\.(write|writeText)/
-  );
   assert.match(terminal, /pasteText: \(text\) => \{[\s\S]*pendingUserKeyTokens\.push\(\+\+nextUserKeyToken\);[\s\S]*instance\.paste\(text\);/);
   assert.match(terminal, /writeTerminalClipboardText\(selection\)/);
   assert.match(terminal, /writeTerminalClipboardText\(detail\.link\)/);

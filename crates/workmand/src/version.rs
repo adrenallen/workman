@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Protocol revision for the authenticated WebSocket control channel.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 3;
 
 /// Cargo package version of this build.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");

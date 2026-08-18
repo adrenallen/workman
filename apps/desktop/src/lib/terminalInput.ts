@@ -1,15 +1,70 @@
 import type { ProcessKind } from './daemon';
+import { normalizeAgentToolType } from './agentToolType.ts';
 
 const safePathCharacter = /^[\p{L}\p{N}_./-]$/u;
 
-export type ClipboardImagePasteRoute = 'agent-tui' | 'shell-path';
+export type ClipboardImagePasteRoute = 'agent-tui' | 'agent-native-normalized' | 'shell-path';
+
+export interface ClipboardImagePasteActions {
+  forwardNativePaste: () => void;
+  normalizeSystemClipboard: () => Promise<void>;
+  insertSavedPngFallback: () => Promise<void>;
+}
 
 /**
  * Agent TUIs own clipboard-image import, so forward their Ctrl+V signal and let them read the
  * unchanged system clipboard. Plain terminals retain Workman's saved-file + escaped-path paste.
  */
-export function clipboardImagePasteRoute(processKind: ProcessKind): ClipboardImagePasteRoute {
-  return processKind === 'agent' ? 'agent-tui' : 'shell-path';
+export function clipboardImagePasteRoute(
+  processKind: ProcessKind,
+  agentToolType: string | null = null
+): ClipboardImagePasteRoute {
+  if (processKind !== 'agent') return 'shell-path';
+  switch (normalizeAgentToolType(agentToolType)) {
+    case 'claude':
+    case 'claude_code':
+      // Claude reads PNGf through AppleScript. Normalize the pasteboard before forwarding Ctrl+V
+      // so TIFF and file-URL sources do not depend on an implicit AppKit conversion.
+      return 'agent-native-normalized';
+    case 'codex':
+    default:
+      // Codex owns image import and keeps the pre-existing immediate Ctrl+V behavior. Unknown
+      // agent TUIs retain that same compatible fallback.
+      return 'agent-tui';
+  }
+}
+
+/** Execute the selected image-paste strategy without coupling tests to DOM or Tauri globals. */
+export async function performClipboardImagePaste(
+  route: ClipboardImagePasteRoute,
+  actions: ClipboardImagePasteActions
+): Promise<void> {
+  if (route === 'agent-tui') {
+    actions.forwardNativePaste();
+    return;
+  }
+  if (route === 'shell-path') {
+    await actions.insertSavedPngFallback();
+    return;
+  }
+  try {
+    await actions.normalizeSystemClipboard();
+  } catch {
+    await actions.insertSavedPngFallback();
+    return;
+  }
+  actions.forwardNativePaste();
+}
+
+/** File-URL-only pasteboards may not expose a DOM image item in WKWebView. */
+export function shouldUseNativeClipboardFallback(
+  route: ClipboardImagePasteRoute,
+  domImageCount: number,
+  nativeClipboardAvailable: boolean
+): boolean {
+  return nativeClipboardAvailable
+    && route === 'agent-native-normalized'
+    && domImageCount === 0;
 }
 
 /** Ctrl+V as a PTY byte; Claude Code and Codex use it to import an image from the clipboard. */

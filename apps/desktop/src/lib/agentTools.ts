@@ -1,5 +1,6 @@
 import type { ProcessView } from './daemon';
 export { formatExtraArgs, parseExtraArgs } from './extraArgs';
+export { normalizeAgentToolType } from './agentToolType.ts';
 
 export interface AgentTool {
   id: number;
@@ -83,6 +84,7 @@ export interface SpawnAgentInput {
   name?: string;
   extra_args: string[];
   prompt?: string;
+  attachments?: string[];
 }
 
 export interface SpawnAgentResult {
