@@ -396,7 +396,9 @@
     },
     '.cm-line': { padding: '0 2px' },
     '.cm-cursor': { borderLeftColor: 'var(--ring)' },
-    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'color-mix(in srgb, var(--ring) 22%, transparent)' },
+    '.cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+      backgroundColor: 'color-mix(in srgb, var(--ring) 22%, transparent) !important'
+    },
     '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent) 55%, transparent)' },
     '.cm-live-heading': {
       color: 'var(--foreground)',
@@ -443,16 +445,17 @@
     '.cm-comment-highlight': {
       borderBottom: '1px solid var(--notification-unread)',
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, transparent)',
+      color: 'var(--foreground)',
       cursor: 'pointer'
     },
     '.cm-comment-highlight:hover': {
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 19%, transparent)'
     },
-    '.cm-comment-focused': {
+    '.cm-comment-highlight.cm-comment-focused': {
       borderBottomWidth: '2px',
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 27%, transparent)'
     },
-    '.cm-comment-resolved': {
+    '.cm-comment-highlight.cm-comment-resolved': {
       borderBottomColor: 'var(--border-strong)',
       backgroundColor: 'color-mix(in srgb, var(--muted-foreground) 8%, transparent)'
     },
