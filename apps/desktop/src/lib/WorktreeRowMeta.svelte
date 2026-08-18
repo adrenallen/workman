@@ -130,7 +130,7 @@
     </IconButton>
   {:else if showNoPullRequest && entry && pullRequestCache?.available === true}
     {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
-    <span class="no-pull-request" aria-label={noPullRequestLabel}>
+    <span class="no-pull-request" role="img" aria-label={noPullRequestLabel}>
       <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
     </span>
   {/if}

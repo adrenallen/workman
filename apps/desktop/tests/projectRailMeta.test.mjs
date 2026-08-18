@@ -154,7 +154,7 @@ test('pull request icons always open a coordinated click-only list popover', asy
   assert.match(pullRequests, /label=\{`Show \$\{pullRequests\.length\} pull request[\s\S]*tooltip=\{false\}/);
   assert.match(pullRequests, /label=\{pullRequestUnavailableLabel\}\s*tooltip=\{false\}/);
   assert.match(pullRequests, /label=\{`Refresh pull request status for \$\{repositoryName\}`\}\s*tooltip=\{false\}/);
-  assert.match(pullRequests, /<span class="no-pull-request" aria-label=\{noPullRequestLabel\}>/);
+  assert.match(pullRequests, /<span class="no-pull-request" role="img" aria-label=\{noPullRequestLabel\}>/);
   assert.doesNotMatch(pullRequests, /TooltipLabel|<Tooltip\./);
   assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
   assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);
