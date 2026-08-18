@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
     io::Write,
     sync::Arc,
     time::{Duration, Instant},

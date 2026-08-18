@@ -5,7 +5,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::Output,

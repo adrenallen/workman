@@ -9,6 +9,7 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
+use serde_json::json;
 use workman_core::ProjectId;
 
 use super::{WorkmanMcp, ensure_actor, failure, process_project_id, scoped_project, success};
@@ -35,6 +36,9 @@ struct WorktreeCreateArgs {
     /// Starting ref for a new branch. Omit when checking out an existing branch.
     #[serde(default)]
     from_ref: Option<String>,
+    /// Required after a conflict response to use an existing local branch or load origin.
+    #[serde(default)]
+    resolution: Option<worktrees::WorktreeCreateResolution>,
     /// Optional repository-specific managed root override.
     #[serde(default)]
     managed_root: Option<String>,
@@ -57,6 +61,9 @@ struct WorktreeForkArgs {
     project_id: Option<ProjectId>,
     /// Exact new branch name.
     branch: String,
+    /// Required after a conflict response to use an existing local branch or load origin.
+    #[serde(default)]
+    resolution: Option<worktrees::WorktreeCreateResolution>,
     /// Optional repository-specific managed root override.
     #[serde(default)]
     managed_root: Option<String>,
@@ -270,5 +277,12 @@ async fn scoped_project_id(
 }
 
 fn worktree_failure(error: WorktreeError) -> CallToolResult {
-    failure(error.code(), error.to_string())
+    match error {
+        WorktreeError::CreateConflict(conflict) => CallToolResult::structured_error(json!({
+            "code": "worktree_create_conflict",
+            "message": conflict.to_string(),
+            "conflict": conflict,
+        })),
+        error => failure(error.code(), error.to_string()),
+    }
 }

@@ -251,9 +251,11 @@
     pullRequestsForWorktree,
     worktreeParentLabel,
     type WorktreeBranchOption,
+    type WorktreeCreateConflict,
     type WorktreeDialogSubmission,
     type WorktreeEntry,
     type WorktreeList,
+    type WorktreeRemoval,
     type WorktreeRefOption,
     type WorktreeRefValidation,
     type WorktreeRepository
@@ -432,6 +434,7 @@
   } | null>(null);
   let worktreeDialogBusy = $state(false);
   let worktreeDialogError = $state<string | null>(null);
+  let worktreeDialogConflict = $state<WorktreeCreateConflict | null>(null);
   let branchOptions = $state<WorktreeBranchOption[]>([]);
   let worktreeRefOptions = $state<WorktreeRefOption[]>([]);
   let worktreeDefaultRef = $state<string | null>(null);
@@ -459,6 +462,7 @@
   let removeWorktreeBusy = $state(false);
   let removeWorktreeError = $state<string | null>(null);
   let removeWorktreeForceRequired = $state(false);
+  let removeWorktreeNotice = $state<string | null>(null);
   let terminalView = $state<{
     insertQuickPrompt: (text: string, submit?: boolean) => boolean;
     focusInput: () => void;
@@ -1762,38 +1766,26 @@
 
   async function reconcileCompletedWorktree(operation: WorktreeOperation): Promise<void> {
     if (!operation.project) return;
-    const optimisticProject: Project = {
-      ...operation.project,
-      status: operation.project.status ?? 'idle'
-    };
-    if (!projects.some((project) => project.id === optimisticProject.id)) {
-      projects = [...projects, optimisticProject].sort(
-        (left, right) => left.sort_order - right.sort_order || left.id - right.id
-      );
-    }
-    if (operation.mode === 'adopt' && operation.repository_id !== null && operation.path) {
-      const currentList = worktreeLists[operation.repository_id];
-      if (currentList) {
-        worktreeLists = {
-          ...worktreeLists,
-          [operation.repository_id]: {
-            ...currentList,
-            worktrees: currentList.worktrees.map((entry) => entry.path === operation.path
-              ? {
-                  ...entry,
-                  project_id: optimisticProject.id,
-                  parent_project_id: optimisticProject.parent_project_id,
-                  kind: 'adopted',
-                  registered: true,
-                  can_adopt: false
-                }
-              : entry)
-          }
-        };
+    try {
+      const refreshedProjects = await client.projects();
+      projects = refreshedProjects;
+      const project = refreshedProjects.find((candidate) => candidate.id === operation.project?.id);
+      if (!project) {
+        dismissTrackedWorktreeOperation(operation.id);
+        if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+        return;
       }
+      if (operation.repository_id !== null) {
+        await refreshWorktreeMetadata(projects, true, true, operation.repository_id);
+      }
+      await tick();
+      dismissTrackedWorktreeOperation(operation.id);
+      if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+      appNavigation.navigate({ type: 'project', projectId: project.id }, 'api');
+    } catch (cause) {
+      reconciledWorktreeOperations.delete(operation.id);
+      reportError(cause);
     }
-    await tick();
-    appNavigation.navigate({ type: 'project', projectId: optimisticProject.id }, 'api');
   }
 
   function showWorktreeOperation(operation: WorktreeOperation): void {
@@ -1805,8 +1797,15 @@
     selection = null;
   }
 
+  function dismissTrackedWorktreeOperation(operationId: string): void {
+    dismissWorktreeOperation(
+      operationId,
+      (id) => client.dismissWorktreeOperation(id)
+    );
+  }
+
   function dismissActiveWorktreeOperation(): void {
-    if (activeWorktreeOperationId) dismissWorktreeOperation(activeWorktreeOperationId);
+    if (activeWorktreeOperationId) dismissTrackedWorktreeOperation(activeWorktreeOperationId);
     activeWorktreeOperationId = null;
   }
 
@@ -1816,7 +1815,7 @@
           project.repository_id === operation.repository_id && project.parent_project_id === null
         )
       : projects.find((project) => project.id === operation.source_project_id);
-    dismissWorktreeOperation(operation.id);
+    dismissTrackedWorktreeOperation(operation.id);
     activeWorktreeOperationId = null;
     if (!source) {
       reportError(new Error('The source project is no longer available'));
@@ -3328,6 +3327,7 @@
       return;
     }
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
     branchOptions = [];
     worktreeRefOptions = [];
     worktreeDefaultRef = null;
@@ -3355,6 +3355,7 @@
     if (worktreeDialogBusy) return;
     worktreeDialog = null;
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
     branchOptions = [];
     worktreeRefOptions = [];
     worktreeDefaultRef = null;
@@ -3389,6 +3390,26 @@
     if (!state || worktreeDialogBusy) return;
     worktreeDialogBusy = true;
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
+    if (submission.mode !== 'adopt') {
+      try {
+        const check = await client.checkWorktreeCreate({
+          project_id: state.sourceProject.id,
+          branch: submission.branch,
+          from_ref: submission.mode === 'create' ? submission.fromRef : undefined,
+          resolution: submission.resolution
+        });
+        if (check?.conflict) {
+          worktreeDialogConflict = check.conflict;
+          return;
+        }
+      } catch (cause) {
+        worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
+        return;
+      } finally {
+        if (worktreeDialog) worktreeDialogBusy = false;
+      }
+    }
     const operationId = crypto.randomUUID();
     const operation = beginWorktreeOperation({
       id: operationId,
@@ -3411,6 +3432,7 @@
             branch: submission.branch,
             display_name: submission.title,
             from_ref: submission.fromRef,
+            resolution: submission.resolution,
             env_policy: submission.envPolicy,
             remember_env_policy: submission.rememberEnvPolicy
         });
@@ -3419,6 +3441,7 @@
               project_id: state.sourceProject.id,
               branch: submission.branch,
               display_name: submission.title,
+              resolution: submission.resolution,
               env_policy: submission.envPolicy,
               remember_env_policy: submission.rememberEnvPolicy
         });
@@ -3433,6 +3456,16 @@
     } finally {
       worktreeDialogBusy = false;
     }
+  }
+
+  function openRegisteredConflictProject(projectId: number): void {
+    const project = projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      worktreeDialogError = `Project ${projectId} is registered in another profile and cannot be opened here.`;
+      return;
+    }
+    closeWorktreeDialog();
+    selectProject(project);
   }
 
   function openRemoveWorktree(project: Project): void {
@@ -3452,7 +3485,7 @@
     removeWorktreeBusy = true;
     removeWorktreeError = null;
     try {
-      await client.control('projects.remove', {
+      const removal = await client.control<WorktreeRemoval>('projects.remove', {
         project_id: state.project.id,
         confirm_remove: true,
         confirm_stop_running: true,
@@ -3460,6 +3493,15 @@
         force_dirty: forceDirty
       });
       removeWorktreeDialog = null;
+      if (removal.registration_issue || (deleteFromDisk && removal.files_untouched)) {
+        removeWorktreeNotice = `Files left untouched at ${removal.path}.${removal.registration_issue ? ` ${removal.registration_issue}` : ''}`;
+      }
+      for (const operation of $worktreeOperations) {
+        if (operation.project?.id === state.project.id || operation.path === state.project.path) {
+          dismissTrackedWorktreeOperation(operation.id);
+          if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+        }
+      }
       projects = await client.projects();
       if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {
         await refreshWorktreeMetadata(projects, true, true, state.repository.id);
@@ -4738,6 +4780,12 @@
   </button>
 {/if}
 
+{#if removeWorktreeNotice}
+  <button class:with-version-banner={showVersionBanner} class="remove-worktree-notice" type="button" aria-live="polite" onclick={() => (removeWorktreeNotice = null)}>
+    {removeWorktreeNotice}
+  </button>
+{/if}
+
 <AgentDoneToasts
   notices={agentDoneNotices}
   onOpen={openAgentDoneNotice}
@@ -5483,9 +5531,12 @@
     branchesLoading={originBranchesLoading}
     busy={worktreeDialogBusy}
     error={worktreeDialogError}
+    conflict={worktreeDialogConflict}
     onLoadBranches={() => void loadOriginBranches()}
     onValidateRef={validateWorktreeRef}
     onSubmit={(submission) => void submitWorktreeDialog(submission)}
+    onOpenProject={openRegisteredConflictProject}
+    onClearConflict={() => { worktreeDialogConflict = null; worktreeDialogError = null; }}
     onClose={closeWorktreeDialog}
   />
 {/if}
@@ -5556,6 +5607,7 @@
   .update-progress.indeterminate span { width: 38% !important; animation: update-progress-scan 900ms ease-in-out infinite; }
   .updated-version-notice { position: fixed; z-index: 80; top: 12px; right: 12px; min-height: 32px; border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border)); border-radius: var(--radius); padding: 6px 10px; background: color-mix(in srgb, var(--success) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); }
   .updated-version-notice.with-version-banner { top: 54px; }
+  .remove-worktree-notice { position: fixed; z-index: 80; right: 12px; bottom: 12px; max-width: min(560px, calc(100vw - 24px)); border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border)); border-radius: var(--radius); padding: 8px 10px; background: color-mix(in srgb, var(--warning) 12%, var(--popover)); color: var(--foreground); box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 35%, transparent); font-size: var(--font-size-sm); text-align: left; }
 
   @keyframes update-progress-scan {
     from { transform: translateX(-110%); }

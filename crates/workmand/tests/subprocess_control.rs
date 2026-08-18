@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{fs, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};

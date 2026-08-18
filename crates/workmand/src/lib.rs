@@ -748,7 +748,7 @@ async fn control_session(
                 else {
                     continue;
                 };
-                let (statuses, timers) = {
+                let (statuses, timers, projects) = {
                     // Status telemetry is best-effort. Never make the terminal socket wait for
                     // an unrelated lifecycle mutation that currently owns the registry.
                     let Ok(mut registry) = registry.try_lock() else {
@@ -757,15 +757,16 @@ async fn control_session(
                     let statuses = registry.list_statuses(None);
                     let timers = timers::TimerService::new(&mut registry)
                         .list_active(timers::now_millis());
-                    (statuses, timers)
+                    let projects = registry.store().list_projects();
+                    (statuses, timers, projects)
                 };
-                if let (Ok(processes), Ok(timers)) = (statuses, timers) {
+                if let (Ok(processes), Ok(timers), Ok(projects)) = (statuses, timers, projects) {
                     status_subscription.last_version = Some(status_version);
                     let stats = live_stats.snapshot().await;
                     let (latest_timer_event, lifecycle_events) =
                         timer_events.events_since(timer_event_cursor);
                     timer_event_cursor = latest_timer_event;
-                    let worktree_operations = worktree_operations.snapshot();
+                    let worktree_operations = worktree_operations.snapshot_reconciled(&projects);
                     let event = json!({
                         "event": "process.statuses",
                         "processes": processes,
@@ -936,11 +937,26 @@ async fn handle_session_control(
             | "worktree.create_async"
             | "worktree.fork_async"
             | "worktree.adopt_async"
+            | "worktree.operation_dismiss"
     ) {
         return None;
     }
 
     let id = request.get("id").cloned().unwrap_or_default();
+    if method == "worktree.operation_dismiss" {
+        let params = request.get("params").cloned().unwrap_or_default();
+        return Some(
+            match worktree_operations::dismiss(params, worktree_operations) {
+                Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
+                Err(error) => json!({
+                    "id": id,
+                    "ok": false,
+                    "error": { "code": error.code, "message": error.message }
+                })
+                .to_string(),
+            },
+        );
+    }
     if matches!(
         method,
         "worktree.create_async" | "worktree.fork_async" | "worktree.adopt_async"

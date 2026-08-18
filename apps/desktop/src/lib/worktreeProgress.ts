@@ -45,6 +45,11 @@ export interface WorktreeOperationAck {
   accepted: boolean;
 }
 
+export interface WorktreeOperationDismissal {
+  operation_id: string;
+  dismissed: boolean;
+}
+
 const labels: Record<WorktreeStepId, string> = {
   branch: 'Branch created',
   worktree: 'Worktree added',
@@ -119,9 +124,13 @@ export function failWorktreeOperation(id: string, message: string): void {
   }));
 }
 
-export function dismissWorktreeOperation(id: string): void {
+export function dismissWorktreeOperation(
+  id: string,
+  dismissRemote?: (operationId: string) => Promise<unknown>
+): void {
   dismissedOperationIds.add(id);
   store.update((operations) => operations.filter((operation) => operation.id !== id));
+  void dismissRemote?.(id).catch(() => undefined);
 }
 
 export function resetWorktreeOperations(): void {

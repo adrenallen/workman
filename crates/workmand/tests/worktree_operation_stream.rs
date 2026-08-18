@@ -181,10 +181,52 @@ async fn async_worktree_rpc_streams_success_and_bad_branch_failure() -> Result<(
             .as_str()
             .is_some_and(|error| !error.is_empty())
     );
+    let dismissed = rpc(
+        &mut socket,
+        "dismiss-failure",
+        "worktree.operation_dismiss",
+        json!({ "operation_id": "fixture-failure" }),
+    )
+    .await?;
+    assert_eq!(dismissed["operation_id"], "fixture-failure");
+    assert_eq!(dismissed["dismissed"], true);
+    next_snapshot_without(&mut socket, "fixture-failure").await?;
 
     socket.close(None).await?;
     server.stop().await?;
     Ok(())
+}
+
+async fn next_snapshot_without(
+    socket: &mut Socket,
+    operation_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("timed out waiting for dismissal of {operation_id}").into());
+        }
+        let message = tokio::time::timeout(remaining, socket.next())
+            .await?
+            .ok_or("websocket closed")??;
+        let Message::Text(message) = message else {
+            continue;
+        };
+        let event: Value = serde_json::from_str(&message)?;
+        if event["event"] != "process.statuses" {
+            continue;
+        }
+        let operations = event["worktree_operations"]
+            .as_array()
+            .ok_or("worktree operation snapshot missing")?;
+        if operations
+            .iter()
+            .all(|operation| operation["id"] != operation_id)
+        {
+            return Ok(());
+        }
+    }
 }
 
 async fn rpc(
