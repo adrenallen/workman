@@ -71,7 +71,7 @@ test('show-all process navigation is serialized and contributes the project to r
   assert.match(app, /case 'processes':\s*openProcessOverview\(target\.kind\);/);
 });
 
-test('kind indicators always expose all kinds, idle rosters, and shared popover state', async () => {
+test('kind indicators expose click-only idle rosters and shared popover state', async () => {
   const indicators = await readFile(
     new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url),
     'utf8'
@@ -83,23 +83,24 @@ test('kind indicators always expose all kinds, idle rosters, and shared popover 
   assert.match(indicators, /No \{kindTitle\(kind\)\.toLocaleLowerCase\(\)\} in this project/);
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);
   assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
-  assert.match(indicators, /hoverOpenedKinds\.has\(kind\)\) event\.preventDefault\(\)/);
-  assert.match(indicators, /onpointerenter=\{\(\) => enterTrigger\(kind\)\}/);
-  assert.match(indicators, /onclick=\{\(event\) => togglePinned\(kind, event\)\}/);
+  assert.match(indicators, /onclick=\{\(event\) => togglePopover\(kind, event\)\}/);
+  assert.doesNotMatch(indicators, /onpointer(?:enter|leave)/);
+  assert.doesNotMatch(indicators, /PopoverHoverIntent/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
 });
 
-test('pull request hover uses the same coordinated popover without changing direct clicks', async () => {
+test('pull request icons always open a coordinated click-only list popover', async () => {
   const pullRequests = await readFile(
     new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url),
     'utf8'
   );
 
   assert.match(pullRequests, /open=\{popoverOpen\} onOpenChange=\{changeOpen\}/);
-  assert.match(pullRequests, /onpointerenter=\{enterTrigger\}/);
-  assert.match(pullRequests, /onpointerleave=\{leaveTrigger\}/);
-  assert.match(pullRequests, /pullRequestMode === 'direct'[\s\S]*void openPullRequest\(pullRequest\)/);
-  assert.match(pullRequests, /hoverOpened\.has\(popoverKey\)\) event\.preventDefault\(\)/);
+  assert.match(pullRequests, /onclick=\{togglePopover\}/);
+  assert.match(pullRequests, /Show \$\{pullRequests\.length\} pull request/);
+  assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
+  assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);
+  assert.doesNotMatch(pullRequests, /pullRequestMode|PopoverHoverIntent/);
 });
 
 test('rail badges overflow upward and worktrees mark the project icon corner', async () => {

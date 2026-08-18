@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import BotIcon from '@lucide/svelte/icons/bot';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
@@ -7,7 +6,6 @@
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import * as Popover from '$lib/components/ui/popover';
   import type { ProcessKind, ProcessView } from './daemon';
-  import { PopoverHoverIntent } from './popoverHoverIntent';
   import type { ProjectKindActivityRollup } from './processActivity';
 
   interface Props {
@@ -35,11 +33,6 @@
   }: Props = $props();
 
   const kinds = ['agent', 'terminal', 'command'] as const;
-  const hoverIntents = new Map<ProcessKind, PopoverHoverIntent>(
-    kinds.map((kind) => [kind, new PopoverHoverIntent()])
-  );
-  let pinnedKind = $state<ProcessKind | null>(null);
-  const hoverOpenedKinds = new Set<ProcessKind>();
 
   function popoverKey(kind: ProcessKind): string {
     return `${projectId}:process:${kind}`;
@@ -48,19 +41,6 @@
   function kindIsOpen(kind: ProcessKind): boolean {
     return openPopoverKey === popoverKey(kind);
   }
-
-  $effect(() => {
-    const currentKey = openPopoverKey;
-    for (const kind of kinds) {
-      if (currentKey === popoverKey(kind)) continue;
-      hoverIntents.get(kind)?.cancel();
-      if (pinnedKind === kind) pinnedKind = null;
-    }
-  });
-
-  onDestroy(() => {
-    for (const intent of hoverIntents.values()) intent.cancel();
-  });
 
   function kindProcesses(kind: ProcessKind): ProcessView[] {
     const byId = new Map(processes.map((process) => [process.id, process]));
@@ -71,53 +51,15 @@
 
   function changeOpen(kind: ProcessKind, open: boolean): void {
     if (open) {
-      pinnedKind = kind;
-      hoverOpenedKinds.delete(kind);
       onOpenPopoverChange(popoverKey(kind));
     } else if (kindIsOpen(kind)) {
-      hoverIntents.get(kind)?.cancel();
-      pinnedKind = null;
       onOpenPopoverChange(null);
     }
   }
 
-  function enterTrigger(kind: ProcessKind): void {
-    hoverIntents.get(kind)?.enterTrigger(() => {
-      if (kindIsOpen(kind) && pinnedKind === kind) return;
-      pinnedKind = null;
-      hoverOpenedKinds.add(kind);
-      onOpenPopoverChange(popoverKey(kind));
-    });
-  }
-
-  function leaveTrigger(kind: ProcessKind): void {
-    hoverIntents.get(kind)?.leaveTrigger(() => closeHoverPopover(kind));
-  }
-
-  function enterContent(kind: ProcessKind): void {
-    hoverIntents.get(kind)?.enterContent();
-  }
-
-  function leaveContent(kind: ProcessKind): void {
-    hoverIntents.get(kind)?.leaveContent(() => closeHoverPopover(kind));
-  }
-
-  function closeHoverPopover(kind: ProcessKind): void {
-    if (pinnedKind === kind || !kindIsOpen(kind)) return;
-    onOpenPopoverChange(null);
-  }
-
-  function togglePinned(kind: ProcessKind, event: MouseEvent): void {
+  function togglePopover(kind: ProcessKind, event: MouseEvent): void {
     event.stopPropagation();
-    hoverIntents.get(kind)?.cancel();
-    if (kindIsOpen(kind) && pinnedKind === kind) {
-      pinnedKind = null;
-      onOpenPopoverChange(null);
-      return;
-    }
-    pinnedKind = kind;
-    hoverOpenedKinds.delete(kind);
-    onOpenPopoverChange(popoverKey(kind));
+    onOpenPopoverChange(kindIsOpen(kind) ? null : popoverKey(kind));
   }
 
   function chooseProcess(process: ProcessView): void {
@@ -184,9 +126,7 @@
                 data-project-kind={kind}
                 data-project-kind-compact={compact ? 'true' : 'false'}
                 aria-expanded={kindIsOpen(kind)}
-                onpointerenter={() => enterTrigger(kind)}
-                onpointerleave={() => leaveTrigger(kind)}
-                onclick={(event) => togglePinned(kind, event)}
+                onclick={(event) => togglePopover(kind, event)}
               >
                 {#snippet icon()}
                   {#if compact}
@@ -214,15 +154,6 @@
             class="w-64 gap-0 p-1.5"
             aria-label={`${kindTitle(kind)} in ${projectTitle}`}
             data-project-kind-popover={kind}
-            onpointerenter={() => enterContent(kind)}
-            onpointerleave={() => leaveContent(kind)}
-            onOpenAutoFocus={(event) => {
-              if (hoverOpenedKinds.has(kind)) event.preventDefault();
-            }}
-            onCloseAutoFocus={(event) => {
-              if (!hoverOpenedKinds.delete(kind)) return;
-              event.preventDefault();
-            }}
           >
             <header class="kind-popover-header">
               <span data-tone={detail.tone} aria-hidden="true">

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
   import GitPullRequestIcon from '@lucide/svelte/icons/git-pull-request';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
@@ -8,11 +7,10 @@
   import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import * as Popover from '$lib/components/ui/popover';
   import { openBrowserUrl } from './openers';
-  import { PopoverHoverIntent } from './popoverHoverIntent';
   import PullRequestList from './PullRequestList.svelte';
   import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import type { PullRequestCache, PullRequestStatus, WorktreeEntry } from './worktrees';
-  import { pullRequestInteraction, pullRequestLabel, pullRequestsForWorktree } from './worktrees';
+  import { pullRequestsForWorktree } from './worktrees';
 
   interface Props {
     entry: WorktreeEntry | null;
@@ -42,25 +40,13 @@
 
   let pullRequests = $derived(pullRequestsForWorktree(entry));
   let pullRequest = $derived(pullRequests[0] ?? null);
-  let pullRequestMode = $derived(pullRequestInteraction(pullRequests));
   let pullRequestUnavailable = $derived(entry !== null && pullRequestCache?.available === false);
   let pullRequestUnavailableLabel = $derived(
     `PR status unavailable — ${pullRequestCache?.error?.trim() || 'lookup failed without a reason'}`
   );
-  const hoverIntent = new PopoverHoverIntent();
-  const hoverOpened = new Set<string>();
   let openingPullRequest = $state(false);
-  let pinned = $state(false);
   let popoverKey = $derived(`${projectId}:pull-request`);
   let popoverOpen = $derived(openPopoverKey === popoverKey);
-
-  $effect(() => {
-    if (popoverOpen) return;
-    hoverIntent.cancel();
-    pinned = false;
-  });
-
-  onDestroy(() => hoverIntent.cancel());
 
   async function openPullRequest(target: PullRequestStatus): Promise<void> {
     if (openingPullRequest) return;
@@ -77,63 +63,15 @@
 
   function changeOpen(open: boolean): void {
     if (open) {
-      pinned = true;
-      hoverOpened.delete(popoverKey);
       onOpenPopoverChange(popoverKey);
     } else if (popoverOpen) {
-      hoverIntent.cancel();
-      pinned = false;
       onOpenPopoverChange(null);
     }
   }
 
-  function enterTrigger(): void {
-    hoverIntent.enterTrigger(() => {
-      if (popoverOpen && pinned) return;
-      pinned = false;
-      hoverOpened.add(popoverKey);
-      onOpenPopoverChange(popoverKey);
-    });
-  }
-
-  function leaveTrigger(): void {
-    hoverIntent.leaveTrigger(closeHoverPopover);
-  }
-
-  function enterContent(): void {
-    hoverIntent.enterContent();
-  }
-
-  function leaveContent(): void {
-    hoverIntent.leaveContent(closeHoverPopover);
-  }
-
-  function closeHoverPopover(): void {
-    if (pinned || !popoverOpen) return;
-    onOpenPopoverChange(null);
-  }
-
-  function togglePinned(event: MouseEvent): void {
+  function togglePopover(event: MouseEvent): void {
     event.stopPropagation();
-    hoverIntent.cancel();
-    if (popoverOpen && pinned) {
-      pinned = false;
-      onOpenPopoverChange(null);
-      return;
-    }
-    pinned = true;
-    hoverOpened.delete(popoverKey);
-    onOpenPopoverChange(popoverKey);
-  }
-
-  function handleTriggerClick(event: MouseEvent): void {
-    if (pullRequestMode === 'direct' && pullRequest) {
-      event.stopPropagation();
-      hoverIntent.cancel();
-      void openPullRequest(pullRequest);
-      return;
-    }
-    togglePinned(event);
+    onOpenPopoverChange(popoverOpen ? null : popoverKey);
   }
 </script>
 
@@ -146,18 +84,14 @@
             <IconButton
               {...props}
               class="size-5 border border-border bg-card"
-              label={pullRequestMode === 'direct'
-                ? `Open ${pullRequestLabel(pullRequest)}`
-                : `Show ${pullRequests.length} pull requests for ${entry?.branch ?? 'this branch'}`}
+              label={`Show ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} for ${entry?.branch ?? 'this branch'}`}
               disabled={openingPullRequest}
               aria-expanded={popoverOpen}
               data-project-pr-trigger
-              onpointerenter={enterTrigger}
-              onpointerleave={leaveTrigger}
-              onclick={handleTriggerClick}
+              onclick={togglePopover}
             >
               {#snippet icon()}
-                {#if pullRequestMode === 'direct'}
+                {#if pullRequests.length === 1}
                   <PullRequestStateIcon state={pullRequest.state} size={13} strokeWidth={1.9} />
                 {:else}
                   <span class="multi-pr-icon">
@@ -175,15 +109,6 @@
           sideOffset={6}
           class="w-80 gap-0 p-2"
           data-project-pr-popover
-          onpointerenter={enterContent}
-          onpointerleave={leaveContent}
-          onOpenAutoFocus={(event) => {
-            if (hoverOpened.has(popoverKey)) event.preventDefault();
-          }}
-          onCloseAutoFocus={(event) => {
-            if (!hoverOpened.delete(popoverKey)) return;
-            event.preventDefault();
-          }}
         >
           <PullRequestList
             branch={entry?.branch ?? ''}
