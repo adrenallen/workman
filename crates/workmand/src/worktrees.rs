@@ -48,6 +48,7 @@ pub enum WorktreeError {
     InvalidPath(String),
     InvalidBranch(String),
     Git { operation: String, message: String },
+    CreateConflict(Box<WorktreeCreateConflict>),
     Conflict(String),
     Confirmation(String),
     Dirty(String),
@@ -67,6 +68,7 @@ impl WorktreeError {
             Self::InvalidPath(_) => "invalid_worktree_path",
             Self::InvalidBranch(_) => "invalid_branch",
             Self::Git { .. } => "git_error",
+            Self::CreateConflict(_) => "worktree_create_conflict",
             Self::Conflict(_) => "worktree_conflict",
             Self::Confirmation(_) => "confirmation_required",
             Self::Dirty(_) => "dirty_worktree",
@@ -94,6 +96,7 @@ impl fmt::Display for WorktreeError {
             | Self::EnvPreference(message)
             | Self::UnsafeEnvironment(message) => formatter.write_str(message),
             Self::Git { operation, message } => write!(formatter, "{operation}: {message}"),
+            Self::CreateConflict(conflict) => conflict.fmt(formatter),
             Self::Integration { message, .. } => formatter.write_str(message),
         }
     }
@@ -217,6 +220,61 @@ pub struct WorktreeRefValidation {
     pub commit: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeCreateResolution {
+    UseExistingBranch,
+    LoadFromRemote,
+}
+
+impl WorktreeCreateResolution {
+    fn action(self) -> &'static str {
+        match self {
+            Self::UseExistingBranch => "use_existing_branch",
+            Self::LoadFromRemote => "load_from_remote",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeCreateConflict {
+    pub kind: &'static str,
+    pub branch: String,
+    pub path: String,
+    pub project_id: Option<ProjectId>,
+    pub message: String,
+    pub actions: Vec<&'static str>,
+}
+
+impl fmt::Display for WorktreeCreateConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} Available actions: {}.",
+            self.message,
+            self.actions.join(", ")
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorktreeCreateCheck {
+    pub status: &'static str,
+    pub branch: String,
+    pub destination: String,
+    pub conflict: Option<WorktreeCreateConflict>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InspectWorktreeCreate {
+    pub source_project_id: ProjectId,
+    pub branch: String,
+    pub from_ref: Option<String>,
+    pub managed_root: Option<PathBuf>,
+    pub resolution: Option<WorktreeCreateResolution>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeMutation {
     pub repository: RepositoryView,
@@ -236,6 +294,8 @@ pub struct WorktreeRemoval {
     pub metadata_pruned: bool,
     pub branch_kept: bool,
     pub files_removed: bool,
+    pub files_untouched: bool,
+    pub registration_issue: Option<String>,
     pub selected_project_id: Option<ProjectId>,
 }
 
@@ -252,6 +312,7 @@ pub struct CreateWorktree {
     pub branch: String,
     pub display_name: Option<String>,
     pub from_ref: Option<String>,
+    pub resolution: Option<WorktreeCreateResolution>,
     pub managed_root: Option<PathBuf>,
     pub preferences: BTreeMap<String, String>,
     pub env_policy: Option<EnvPortPolicy>,
@@ -297,6 +358,7 @@ pub struct ForkWorktree {
     pub source_project_id: ProjectId,
     pub branch: String,
     pub display_name: Option<String>,
+    pub resolution: Option<WorktreeCreateResolution>,
     pub managed_root: Option<PathBuf>,
     pub preferences: BTreeMap<String, String>,
     pub env_policy: Option<EnvPortPolicy>,
@@ -777,6 +839,219 @@ pub async fn create(
     create_with_progress(registry, request, None).await
 }
 
+pub async fn inspect_create(
+    registry: &SharedProcessRegistry,
+    request: InspectWorktreeCreate,
+) -> WorktreeResult<WorktreeCreateCheck> {
+    let command_environment = command_environment(registry).await;
+    validate_branch(&request.branch, &command_environment).await?;
+    let source_project = {
+        let registry = registry.lock().await;
+        registry
+            .store()
+            .get_project(request.source_project_id)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidProject(format!(
+                    "project {} was not found",
+                    request.source_project_id
+                ))
+            })?
+    };
+    let snapshot = snapshot_async(Path::new(&source_project.path), &command_environment).await?;
+    let managed_root = if let Some(managed_root) = request.managed_root {
+        absolute_path(managed_root)
+    } else {
+        let registry = registry.lock().await;
+        registry
+            .store()
+            .get_worktree_repository_by_root(&canonical_display(&snapshot.root_path))?
+            .map(|repository| PathBuf::from(repository.managed_root))
+            .unwrap_or_else(default_worktree_root)
+    };
+    let projects = {
+        let registry = registry.lock().await;
+        registry.store().list_all_projects()?
+    };
+    inspect_create_snapshot(
+        &snapshot,
+        &projects,
+        &request.branch,
+        request.from_ref.as_deref(),
+        &managed_root,
+        request.resolution,
+        &command_environment,
+    )
+    .await
+}
+
+async fn inspect_create_snapshot(
+    snapshot: &RepositorySnapshot,
+    projects: &[Project],
+    branch: &str,
+    _from_ref: Option<&str>,
+    managed_root: &Path,
+    resolution: Option<WorktreeCreateResolution>,
+    command_environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<WorktreeCreateCheck> {
+    let slug = site_slug(branch);
+    if slug.is_empty() {
+        return Err(WorktreeError::InvalidBranch(format!(
+            "branch {branch:?} has no characters usable in a folder name"
+        )));
+    }
+    let destination = absolute_path(managed_root.to_path_buf()).join(&slug);
+    let destination_text = canonical_display(&destination);
+    let registered_at = |path: &Path| {
+        projects
+            .iter()
+            .find(|project| project.path == canonical_display(path))
+            .or_else(|| {
+                projects
+                    .iter()
+                    .find(|project| same_path(Path::new(&project.path), path))
+            })
+    };
+
+    if let Some(project) = registered_at(&destination) {
+        return Ok(create_conflict_check(
+            "registered_project",
+            branch,
+            &destination,
+            Some(project.id),
+            format!(
+                "{} is already registered as project {}. Open that project or choose a different branch name.",
+                destination.display(),
+                project.id
+            ),
+            vec!["open_registered_project", "choose_different_name"],
+        ));
+    }
+    if let Some(record) = snapshot
+        .worktrees
+        .iter()
+        .find(|record| same_path(&record.path, &destination))
+    {
+        return Ok(create_conflict_check(
+            "existing_worktree",
+            branch,
+            &record.path,
+            None,
+            format!(
+                "A Git worktree already exists at {}. Import it or choose a different branch name.",
+                record.path.display()
+            ),
+            vec!["import_existing_worktree", "choose_different_name"],
+        ));
+    }
+    if let Some(record) = snapshot
+        .worktrees
+        .iter()
+        .find(|record| record.branch.as_deref() == Some(branch))
+    {
+        if let Some(project) = registered_at(&record.path) {
+            return Ok(create_conflict_check(
+                "registered_project",
+                branch,
+                &record.path,
+                Some(project.id),
+                format!(
+                    "Branch {branch:?} is already open in registered project {} at {}.",
+                    project.id,
+                    record.path.display()
+                ),
+                vec!["open_registered_project", "choose_different_name"],
+            ));
+        }
+        return Ok(create_conflict_check(
+            "existing_worktree",
+            branch,
+            &record.path,
+            None,
+            format!(
+                "Branch {branch:?} is already checked out at {}. Import that worktree or choose a different branch name.",
+                record.path.display()
+            ),
+            vec!["import_existing_worktree", "choose_different_name"],
+        ));
+    }
+    if destination.exists() {
+        return Ok(create_conflict_check(
+            "existing_path",
+            branch,
+            &destination,
+            None,
+            format!(
+                "Destination {} already exists but is not a Git worktree for this repository. Choose a different branch name.",
+                destination.display()
+            ),
+            vec!["choose_different_name"],
+        ));
+    }
+
+    let state = branch_state(snapshot, branch, command_environment).await?;
+    let conflict = match state {
+        BranchState::Local if resolution != Some(WorktreeCreateResolution::UseExistingBranch) => {
+            Some(create_conflict_check(
+                "local_branch",
+                branch,
+                &destination,
+                None,
+                format!("Branch {branch:?} already exists locally."),
+                vec!["use_existing_branch", "choose_different_name"],
+            ))
+        }
+        BranchState::Remote | BranchState::RemoteUnfetched
+            if resolution != Some(WorktreeCreateResolution::LoadFromRemote) =>
+        {
+            Some(create_conflict_check(
+                "remote_branch",
+                branch,
+                &destination,
+                None,
+                format!("Branch {branch:?} exists on origin but not locally."),
+                vec!["load_from_remote", "choose_different_name"],
+            ))
+        }
+        BranchState::Missing if resolution.is_some() => {
+            return Err(WorktreeError::Conflict(format!(
+                "the requested {} action is no longer available because branch {branch:?} no longer exists there",
+                resolution.expect("checked above").action()
+            )));
+        }
+        _ => None,
+    };
+    Ok(conflict.unwrap_or(WorktreeCreateCheck {
+        status: "ready",
+        branch: branch.to_owned(),
+        destination: destination_text,
+        conflict: None,
+    }))
+}
+
+fn create_conflict_check(
+    kind: &'static str,
+    branch: &str,
+    path: &Path,
+    project_id: Option<ProjectId>,
+    message: String,
+    actions: Vec<&'static str>,
+) -> WorktreeCreateCheck {
+    let conflict = WorktreeCreateConflict {
+        kind,
+        branch: branch.to_owned(),
+        path: canonical_display(path),
+        project_id,
+        message,
+        actions,
+    };
+    WorktreeCreateCheck {
+        status: "conflict",
+        branch: branch.to_owned(),
+        destination: canonical_display(path),
+        conflict: Some(conflict),
+    }
+}
+
 pub(crate) async fn create_with_progress(
     registry: &SharedProcessRegistry,
     request: CreateWorktree,
@@ -833,43 +1108,31 @@ pub(crate) async fn create_with_progress(
     let managed_root = request
         .managed_root
         .unwrap_or_else(|| PathBuf::from(&repository.managed_root));
+    let projects = {
+        let registry = registry.lock().await;
+        registry.store().list_all_projects()?
+    };
+    let check = inspect_create_snapshot(
+        &snapshot,
+        &projects,
+        &request.branch,
+        request.from_ref.as_deref(),
+        &managed_root,
+        request.resolution,
+        &command_environment,
+    )
+    .await?;
+    if let Some(conflict) = check.conflict {
+        return Err(WorktreeError::CreateConflict(Box::new(conflict)));
+    }
     std::fs::create_dir_all(&managed_root)?;
     let managed_root = workman_core::canonical_path(&managed_root)?;
     repository.managed_root = managed_root.to_string_lossy().into_owned();
 
     let slug = site_slug(&request.branch);
-    if slug.is_empty() {
-        return Err(WorktreeError::InvalidBranch(format!(
-            "branch {:?} has no characters usable in a folder name",
-            request.branch
-        )));
-    }
     let destination = managed_root.join(&slug);
-    if destination.exists() {
-        return Err(WorktreeError::Conflict(format!(
-            "destination already exists: {}",
-            destination.display()
-        )));
-    }
 
     let branch_state = branch_state(&snapshot, &request.branch, &command_environment).await?;
-    if branch_state != BranchState::Missing && request.from_ref.is_some() {
-        return Err(WorktreeError::Conflict(format!(
-            "branch {:?} already exists and cannot also be created from another ref",
-            request.branch
-        )));
-    }
-    if let Some(existing) = snapshot
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(request.branch.as_str()))
-    {
-        return Err(WorktreeError::Conflict(format!(
-            "branch {:?} is already checked out at {}",
-            request.branch,
-            existing.path.display()
-        )));
-    }
 
     if let Some(progress) = progress {
         let detail = match branch_state {
@@ -1018,7 +1281,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     &destination,
                     &request.branch,
-                    branch_state == BranchState::Missing,
+                    branch_state != BranchState::Local,
                     &command_environment,
                 )
                 .await;
@@ -1031,7 +1294,7 @@ pub(crate) async fn create_with_progress(
                     &snapshot.root_path,
                     &destination,
                     &request.branch,
-                    branch_state == BranchState::Missing,
+                    branch_state != BranchState::Local,
                     &command_environment,
                 )
                 .await;
@@ -1053,7 +1316,7 @@ pub(crate) async fn create_with_progress(
                 &snapshot.root_path,
                 &destination,
                 &request.branch,
-                branch_state == BranchState::Missing,
+                branch_state != BranchState::Local,
                 &command_environment,
             )
             .await;
@@ -1093,32 +1356,53 @@ pub(crate) async fn create_with_progress(
         progress.running(WorktreeStepId::Registered, None);
     }
 
-    let project = {
+    let registration = {
         let registry = registry.lock().await;
-        registry.store().put_worktree_repository(&repository)?;
-        for (key, value) in &request.preferences {
-            validate_preference_key(key)?;
-            registry
+        (|| -> WorktreeResult<(Project, bool)> {
+            registry.store().put_worktree_repository(&repository)?;
+            for (key, value) in &request.preferences {
+                validate_preference_key(key)?;
+                registry
+                    .store()
+                    .set_worktree_preference(repository.id, key, Some(value))?;
+            }
+            if request.remember_env_policy
+                && let Some(policy) = env_plan.policy
+            {
+                registry.store().set_worktree_preference(
+                    repository.id,
+                    "copy_env",
+                    Some(policy.preference()),
+                )?;
+            }
+            let was_new = registry
                 .store()
-                .set_worktree_preference(repository.id, key, Some(value))?;
-        }
-        if request.remember_env_policy
-            && let Some(policy) = env_plan.policy
-        {
-            registry.store().set_worktree_preference(
-                repository.id,
-                "copy_env",
-                Some(policy.preference()),
+                .get_project_by_path_any(&canonical_display(&destination))?
+                .is_none();
+            let project = register_project(
+                registry.store(),
+                &repository,
+                &destination,
+                &request.branch,
+                request.display_name.as_deref(),
+                true,
             )?;
+            Ok((project, was_new))
+        })()
+    };
+    let (project, project_was_created) = match registration {
+        Ok(registration) => registration,
+        Err(error) => {
+            rollback_created_worktree(
+                &snapshot.root_path,
+                &destination,
+                &request.branch,
+                branch_state != BranchState::Local,
+                &command_environment,
+            )
+            .await;
+            return Err(error);
         }
-        register_project(
-            registry.store(),
-            &repository,
-            &destination,
-            &request.branch,
-            request.display_name.as_deref(),
-            true,
-        )?
     };
     if let Some(progress) = progress {
         progress.completed(
@@ -1126,7 +1410,24 @@ pub(crate) async fn create_with_progress(
             Some(format!("Project {} registered", project.id)),
         );
     }
-    mutation_for_project(registry, project.id, Some(environment)).await
+    match mutation_for_project(registry, project.id, Some(environment)).await {
+        Ok(mutation) => Ok(mutation),
+        Err(error) => {
+            if project_was_created {
+                let registry = registry.lock().await;
+                let _ = registry.store().delete_project_everywhere(project.id);
+            }
+            rollback_created_worktree(
+                &snapshot.root_path,
+                &destination,
+                &request.branch,
+                branch_state != BranchState::Local,
+                &command_environment,
+            )
+            .await;
+            Err(error)
+        }
+    }
 }
 
 /// SWM's "fork again": create from the selected worktree's exact HEAD, not
@@ -1167,6 +1468,7 @@ pub(crate) async fn fork_with_progress(
             branch: request.branch,
             display_name: request.display_name,
             from_ref: Some(record.head.clone()),
+            resolution: request.resolution,
             managed_root: request.managed_root,
             preferences: request.preferences,
             env_policy: request.env_policy,
@@ -1319,15 +1621,22 @@ pub async fn remove(
     }
 
     let path = absolute_path(PathBuf::from(&project.path));
+    let registration_issue = broken_registration_issue(
+        &project,
+        &all_projects,
+        recovery_hint.as_ref(),
+        &command_environment,
+    )
+    .await;
     let mut branch = project
         .display_name
         .clone()
         .unwrap_or_else(|| project.name.clone());
     let mut deleted_from_disk = false;
-    let mut metadata_pruned = false;
+    let mut metadata_pruned = registration_issue.is_some();
     let mut branch_kept = true;
     let mut post_delete_issue = None;
-    if request.delete_from_disk {
+    if request.delete_from_disk && registration_issue.is_none() {
         let verified = verify_project_delete_target(
             &project,
             &all_projects,
@@ -1458,7 +1767,7 @@ pub async fn remove(
     // already finished the Git operation before its process can disappear.
     let (project_unregistered, selected_project_id) = {
         let registry = registry.lock().await;
-        let project_unregistered = if deleted_from_disk {
+        let project_unregistered = if deleted_from_disk || registration_issue.is_some() {
             registry.store().delete_project_everywhere(project.id)?
         } else {
             registry.store().delete_project(project.id)?
@@ -1492,8 +1801,56 @@ pub async fn remove(
         metadata_pruned,
         branch_kept,
         files_removed: deleted_from_disk,
+        files_untouched: !deleted_from_disk,
+        registration_issue,
         selected_project_id,
     })
+}
+
+async fn broken_registration_issue(
+    project: &Project,
+    all_projects: &[Project],
+    recovery_hint: Option<&DeleteRecoveryHint>,
+    command_environment: &BTreeMap<OsString, OsString>,
+) -> Option<String> {
+    let path = Path::new(&project.path);
+    let canonical = canonical_display(path);
+    let duplicate_owner = all_projects
+        .iter()
+        .filter(|candidate| {
+            candidate.id != project.id && same_path(Path::new(&candidate.path), path)
+        })
+        .min_by_key(|candidate| (candidate.path != canonical, candidate.id));
+    if let Some(owner) = duplicate_owner.filter(|owner| {
+        project.path != canonical || (owner.path != canonical && owner.id < project.id)
+    }) {
+        return Some(format!(
+            "duplicate registration: project {} owns the same canonical path; files were left untouched",
+            owner.id
+        ));
+    }
+    if !path.exists() {
+        return Some(
+            "broken registration: the project path is missing; files were left untouched".into(),
+        );
+    }
+    let recovery_hint = recovery_hint?;
+    let snapshot = match snapshot_async(&recovery_hint.repository_root, command_environment).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return Some(
+                "broken registration: the parent Git repository is unavailable; files were left untouched"
+                    .into(),
+            );
+        }
+    };
+    if matching_record(&snapshot, path).is_none() {
+        return Some(
+            "broken registration: the path is not a worktree of its recorded parent; files were left untouched"
+                .into(),
+        );
+    }
+    None
 }
 
 pub async fn forget_env_preference(
@@ -1963,10 +2320,9 @@ fn register_project(
     let existing = store.get_project_by_path_any(&canonical_string)?;
     let display_name = normalized_optional_project_title(display_name);
     let project = if let Some(project) = existing {
-        store.attach_project_to_active_profile(project.id)?;
         project
     } else {
-        let project = Project {
+        Project {
             id: store.next_project_id()?,
             path: canonical_string,
             name: format!("{}: {branch}", repository.name),
@@ -1974,15 +2330,13 @@ fn register_project(
             icon: None,
             selected: false,
             sort_order: store.next_project_sort_order()?,
-        };
-        store.put_project(&project)?;
-        project
+        }
     };
     let root_project_id = store
         .get_project_by_path_any(&repository.root_path)?
         .map(|candidate| candidate.id);
     let existing_link = store.get_project_worktree(project.id)?;
-    store.put_project_worktree(&ProjectWorktree {
+    let link = ProjectWorktree {
         project_id: project.id,
         repository_id: repository.id,
         parent_project_id: (!same_path(&canonical, Path::new(&repository.root_path)))
@@ -1990,7 +2344,8 @@ fn register_project(
             .flatten(),
         branch: branch.to_owned(),
         managed: existing_link.map(|link| link.managed).unwrap_or(managed),
-    })?;
+    };
+    store.put_project_with_worktree(&project, &link)?;
     Ok(project)
 }
 

@@ -251,6 +251,7 @@
     pullRequestsForWorktree,
     worktreeParentLabel,
     type WorktreeBranchOption,
+    type WorktreeCreateConflict,
     type WorktreeDialogSubmission,
     type WorktreeEntry,
     type WorktreeList,
@@ -432,6 +433,7 @@
   } | null>(null);
   let worktreeDialogBusy = $state(false);
   let worktreeDialogError = $state<string | null>(null);
+  let worktreeDialogConflict = $state<WorktreeCreateConflict | null>(null);
   let branchOptions = $state<WorktreeBranchOption[]>([]);
   let worktreeRefOptions = $state<WorktreeRefOption[]>([]);
   let worktreeDefaultRef = $state<string | null>(null);
@@ -3328,6 +3330,7 @@
       return;
     }
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
     branchOptions = [];
     worktreeRefOptions = [];
     worktreeDefaultRef = null;
@@ -3355,6 +3358,7 @@
     if (worktreeDialogBusy) return;
     worktreeDialog = null;
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
     branchOptions = [];
     worktreeRefOptions = [];
     worktreeDefaultRef = null;
@@ -3389,6 +3393,26 @@
     if (!state || worktreeDialogBusy) return;
     worktreeDialogBusy = true;
     worktreeDialogError = null;
+    worktreeDialogConflict = null;
+    if (submission.mode !== 'adopt') {
+      try {
+        const check = await client.checkWorktreeCreate({
+          project_id: state.sourceProject.id,
+          branch: submission.branch,
+          from_ref: submission.mode === 'create' ? submission.fromRef : undefined,
+          resolution: submission.resolution
+        });
+        if (check.conflict) {
+          worktreeDialogConflict = check.conflict;
+          return;
+        }
+      } catch (cause) {
+        worktreeDialogError = cause instanceof Error ? cause.message : String(cause);
+        return;
+      } finally {
+        if (worktreeDialog) worktreeDialogBusy = false;
+      }
+    }
     const operationId = crypto.randomUUID();
     const operation = beginWorktreeOperation({
       id: operationId,
@@ -3411,6 +3435,7 @@
             branch: submission.branch,
             display_name: submission.title,
             from_ref: submission.fromRef,
+            resolution: submission.resolution,
             env_policy: submission.envPolicy,
             remember_env_policy: submission.rememberEnvPolicy
         });
@@ -3419,6 +3444,7 @@
               project_id: state.sourceProject.id,
               branch: submission.branch,
               display_name: submission.title,
+              resolution: submission.resolution,
               env_policy: submission.envPolicy,
               remember_env_policy: submission.rememberEnvPolicy
         });
@@ -3433,6 +3459,16 @@
     } finally {
       worktreeDialogBusy = false;
     }
+  }
+
+  function openRegisteredConflictProject(projectId: number): void {
+    const project = projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      worktreeDialogError = `Project ${projectId} is registered in another profile and cannot be opened here.`;
+      return;
+    }
+    closeWorktreeDialog();
+    selectProject(project);
   }
 
   function openRemoveWorktree(project: Project): void {
@@ -5483,9 +5519,12 @@
     branchesLoading={originBranchesLoading}
     busy={worktreeDialogBusy}
     error={worktreeDialogError}
+    conflict={worktreeDialogConflict}
     onLoadBranches={() => void loadOriginBranches()}
     onValidateRef={validateWorktreeRef}
     onSubmit={(submission) => void submitWorktreeDialog(submission)}
+    onOpenProject={openRegisteredConflictProject}
+    onClearConflict={() => { worktreeDialogConflict = null; worktreeDialogError = null; }}
     onClose={closeWorktreeDialog}
   />
 {/if}

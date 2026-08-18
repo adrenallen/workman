@@ -55,6 +55,7 @@ import type {
   OriginBranchList,
   RemoveWorktreeInput,
   WorktreeList,
+  WorktreeCreateCheck,
   WorktreeMutation,
   WorktreeRemoval,
   WorktreeRefValidation
@@ -696,6 +697,12 @@ export class DaemonClient
 
   createWorktree(input: CreateWorktreeInput): Promise<WorktreeMutation> {
     return this.request('worktree.create', { ...input });
+  }
+
+  checkWorktreeCreate(
+    input: Pick<CreateWorktreeInput, 'project_id' | 'branch' | 'from_ref' | 'resolution'>
+  ): Promise<WorktreeCreateCheck> {
+    return this.request('worktree.create_check', { ...input });
   }
 
   createWorktreeAsync(

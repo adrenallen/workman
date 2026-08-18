@@ -34,6 +34,9 @@
     EnvironmentPolicy,
     WorktreeDialogSubmission,
     WorktreeBranchOption,
+    WorktreeCreateConflict,
+    WorktreeCreateConflictAction,
+    WorktreeCreateResolution,
     WorktreeEntry,
     WorktreeRefOption,
     WorktreeRefValidation,
@@ -52,9 +55,12 @@
     branchesLoading?: boolean;
     busy?: boolean;
     error?: string | null;
+    conflict?: WorktreeCreateConflict | null;
     onLoadBranches: () => void;
     onValidateRef: (ref: string) => Promise<WorktreeRefValidation>;
     onSubmit: (submission: WorktreeDialogSubmission) => void;
+    onOpenProject: (projectId: number) => void;
+    onClearConflict: () => void;
     onClose: () => void;
   }
 
@@ -70,9 +76,12 @@
     branchesLoading = false,
     busy = false,
     error = null,
+    conflict = null,
     onLoadBranches,
     onValidateRef,
     onSubmit,
+    onOpenProject,
+    onClearConflict,
     onClose
   }: Props = $props();
 
@@ -127,7 +136,7 @@
   let actionLabel = $derived(busy
     ? mode === 'adopt' ? 'Adopting…' : mode === 'fork' ? 'Forking…' : 'Creating…'
     : mode === 'adopt' ? 'Adopt worktree' : mode === 'fork' ? 'Fork again' : 'Create worktree');
-  let canSubmit = $derived(!busy && (
+  let canSubmit = $derived(!busy && !conflict && (
     mode === 'adopt'
       ? adoptPath.trim().length > 0
       : mode === 'create' && createKind === 'origin'
@@ -297,8 +306,8 @@
     projectTitle = input.value;
   }
 
-  async function submit(): Promise<void> {
-    if (!canSubmit) return;
+  async function submit(resolution?: WorktreeCreateResolution): Promise<void> {
+    if (busy) return;
     const title = resolvedProjectTitle(projectTitle, defaultProjectTitle);
     if (mode === 'adopt') {
       onSubmit({ mode, path: adoptPath.trim(), title });
@@ -309,7 +318,7 @@
       : branch.trim();
     if (!nextBranch) return;
     if (mode === 'fork') {
-      onSubmit({ mode, branch: nextBranch, title, envPolicy, rememberEnvPolicy });
+      onSubmit({ mode, branch: nextBranch, title, resolution, envPolicy, rememberEnvPolicy });
       return;
     }
     if (createKind === 'new' && !(await validateBaseRef())) return;
@@ -318,9 +327,47 @@
       branch: nextBranch,
       title,
       fromRef: createKind === 'new' && baseRef.trim() ? baseRef.trim() : undefined,
+      resolution: resolution ?? (createKind === 'origin'
+        ? effectiveBranchOptions.find((option) => option.name === nextBranch)?.source === 'local'
+          ? 'use_existing_branch'
+          : 'load_from_remote'
+        : undefined),
       envPolicy,
       rememberEnvPolicy
     });
+  }
+
+  function conflictActionLabel(action: WorktreeCreateConflictAction): string {
+    if (action === 'use_existing_branch') return 'Use existing branch';
+    if (action === 'load_from_remote') return 'Load from remote';
+    if (action === 'import_existing_worktree') return 'Import existing worktree';
+    if (action === 'open_registered_project') return 'Open registered project';
+    return 'Choose a different name';
+  }
+
+  function chooseConflictAction(action: WorktreeCreateConflictAction): void {
+    if (!conflict || busy) return;
+    if (action === 'use_existing_branch' || action === 'load_from_remote') {
+      void submit(action);
+      return;
+    }
+    if (action === 'import_existing_worktree') {
+      onSubmit({
+        mode: 'adopt',
+        path: conflict.path,
+        title: resolvedProjectTitle(projectTitle, defaultProjectTitleFromPath(conflict.path, conflict.branch))
+      });
+      return;
+    }
+    if (action === 'open_registered_project' && conflict.project_id !== null) {
+      onOpenProject(conflict.project_id);
+      return;
+    }
+    onClearConflict();
+    branch = '';
+    existingBranch = '';
+    branchQuery = '';
+    queueMicrotask(() => branchInput?.focus());
   }
 
   async function chooseDirectory(): Promise<void> {
@@ -636,6 +683,22 @@
           </Collapsible.Root>
         {/if}
 
+        {#if conflict}
+          <section class="grid gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-3" role="alert" aria-live="assertive">
+            <div class="grid gap-1">
+              <strong class="text-sm">This branch needs a choice</strong>
+              <span class="text-xs leading-relaxed text-muted-foreground">{conflict.message}</span>
+              <code class="break-all text-xs">{conflict.path}</code>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              {#each conflict.actions as action}
+                <Button type="button" size="sm" variant={action === 'choose_different_name' ? 'ghost' : 'outline'} onclick={() => chooseConflictAction(action)}>
+                  {conflictActionLabel(action)}
+                </Button>
+              {/each}
+            </div>
+          </section>
+        {/if}
         {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
       </section>
 

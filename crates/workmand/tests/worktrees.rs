@@ -12,10 +12,13 @@ use std::{
 
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use workman_core::{Project, Store};
+use workman_core::{Project, ProjectWorktree, Store};
 use workmand::{
     ProcessRegistry, SharedProcessRegistry, UserEnvironmentResolver,
-    worktrees::{self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, RemoveWorktree},
+    worktrees::{
+        self, AdoptWorktree, CreateWorktree, EnvPortPolicy, ForkWorktree, InspectWorktreeCreate,
+        RemoveWorktree, WorktreeCreateResolution,
+    },
 };
 
 struct GitFixture {
@@ -25,6 +28,288 @@ struct GitFixture {
     managed: PathBuf,
     external: PathBuf,
     registry: SharedProcessRegistry,
+}
+
+#[tokio::test]
+async fn creation_conflicts_offer_explicit_local_remote_import_and_open_actions()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    git(&fixture.main, &["branch", "feature/local-existing"])?;
+
+    let local = worktrees::inspect_create(
+        &fixture.registry,
+        InspectWorktreeCreate {
+            source_project_id: 1,
+            branch: "feature/local-existing".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            resolution: None,
+        },
+    )
+    .await?;
+    let conflict = local.conflict.expect("local branch requires a choice");
+    assert_eq!(conflict.kind, "local_branch");
+    assert!(conflict.actions.contains(&"use_existing_branch"));
+
+    let local_created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/local-existing".into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: Some(WorktreeCreateResolution::UseExistingBranch),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(local_created.worktree.branch, "feature/local-existing");
+
+    let remote = worktrees::inspect_create(
+        &fixture.registry,
+        InspectWorktreeCreate {
+            source_project_id: 1,
+            branch: "remote-only".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            resolution: None,
+        },
+    )
+    .await?;
+    let conflict = remote.conflict.expect("remote branch requires a choice");
+    assert_eq!(conflict.kind, "remote_branch");
+    assert!(conflict.actions.contains(&"load_from_remote"));
+
+    let remote_created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "remote-only".into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: Some(WorktreeCreateResolution::LoadFromRemote),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(remote_created.worktree.branch, "remote-only");
+
+    let existing_path = fixture.managed.join("existing-path");
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "existing-path",
+            existing_path.to_str().unwrap(),
+            "main",
+        ],
+    )?;
+    let existing = worktrees::inspect_create(
+        &fixture.registry,
+        InspectWorktreeCreate {
+            source_project_id: 1,
+            branch: "existing-path".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            resolution: None,
+        },
+    )
+    .await?;
+    let conflict = existing.conflict.expect("existing path is importable");
+    assert_eq!(conflict.kind, "existing_worktree");
+    assert!(conflict.actions.contains(&"import_existing_worktree"));
+
+    let adopted = worktrees::adopt(
+        &fixture.registry,
+        AdoptWorktree {
+            path: existing_path.clone(),
+            display_name: None,
+            preferences: BTreeMap::new(),
+        },
+    )
+    .await?;
+    let registered = worktrees::inspect_create(
+        &fixture.registry,
+        InspectWorktreeCreate {
+            source_project_id: 1,
+            branch: "existing-path".into(),
+            from_ref: Some("main".into()),
+            managed_root: Some(fixture.managed.clone()),
+            resolution: None,
+        },
+    )
+    .await?;
+    let conflict = registered.conflict.expect("registered path opens in place");
+    assert_eq!(conflict.kind, "registered_project");
+    assert_eq!(conflict.project_id, Some(adopted.project.project.id));
+    assert!(conflict.actions.contains(&"open_registered_project"));
+
+    git(&fixture.main, &["branch", "fork-existing"])?;
+    let fork_conflict = worktrees::fork(
+        &fixture.registry,
+        ForkWorktree {
+            source_project_id: 1,
+            branch: "fork-existing".into(),
+            display_name: None,
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await
+    .expect_err("forking onto a local branch requires an explicit action");
+    assert_eq!(fork_conflict.code(), "worktree_create_conflict");
+    assert!(fork_conflict.to_string().contains("use_existing_branch"));
+
+    let forked = worktrees::fork(
+        &fixture.registry,
+        ForkWorktree {
+            source_project_id: 1,
+            branch: "fork-existing".into(),
+            display_name: None,
+            resolution: Some(WorktreeCreateResolution::UseExistingBranch),
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(forked.worktree.branch, "fork-existing");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn broken_and_duplicate_registrations_unregister_without_touching_files()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "missing-registration".into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let missing_path = PathBuf::from(&created.worktree.path);
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            missing_path.to_str().unwrap(),
+        ],
+    )?;
+    let removed_missing = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed_missing.project_unregistered && removed_missing.files_untouched);
+    assert!(!removed_missing.deleted_from_disk);
+    assert!(
+        removed_missing
+            .registration_issue
+            .as_deref()
+            .is_some_and(|issue| issue.contains("path is missing"))
+    );
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project_any(created.project.project.id)?
+            .is_none()
+    );
+
+    let alias = fixture._temp.path().join("duplicate-main-alias");
+    symlink(&fixture.main, &alias)?;
+    let duplicate_id = {
+        let registry = fixture.registry.lock().await;
+        let repository = registry
+            .store()
+            .get_project_worktree(1)?
+            .expect("root project is linked");
+        let duplicate_id = registry.store().next_project_id()?;
+        let duplicate = Project {
+            id: duplicate_id,
+            path: alias.to_string_lossy().into_owned(),
+            name: "duplicate root".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: registry.store().next_project_sort_order()?,
+        };
+        registry.store().put_project_with_worktree(
+            &duplicate,
+            &ProjectWorktree {
+                project_id: duplicate_id,
+                repository_id: repository.repository_id,
+                parent_project_id: None,
+                branch: "main".into(),
+                managed: false,
+            },
+        )?;
+        duplicate_id
+    };
+    let removed_duplicate = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: duplicate_id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: true,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+    assert!(removed_duplicate.project_unregistered && removed_duplicate.files_untouched);
+    assert!(
+        removed_duplicate
+            .registration_issue
+            .as_deref()
+            .is_some_and(|issue| issue.contains("duplicate registration"))
+    );
+    assert!(fixture.main.exists());
+    assert!(alias.exists());
+    assert!(
+        fixture
+            .registry
+            .lock()
+            .await
+            .store()
+            .get_project_any(duplicate_id)?
+            .is_none()
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -269,6 +554,7 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
             branch: "qa/no-local-main".into(),
             display_name: Some("   ".into()),
             from_ref: Some("origin/main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: None,
@@ -325,6 +611,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             branch: "feature/new-ui".into(),
             display_name: Some("New UI checkout".into()),
             from_ref: Some("origin/main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -371,6 +658,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             source_project_id: created.project.project.id,
             branch: "feature/fork-again".into(),
             display_name: Some("Fork follow-up".into()),
+            resolution: None,
             managed_root: None,
             preferences: BTreeMap::new(),
             env_policy: None,
@@ -436,6 +724,7 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             branch: "remote-only".into(),
             display_name: Some("Remote checkout".into()),
             from_ref: None,
+            resolution: Some(WorktreeCreateResolution::LoadFromRemote),
             managed_root: None,
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: None,
@@ -689,6 +978,7 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
             branch: "feature/merged-cleanly".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1133,6 +1423,7 @@ async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<d
             branch: "ignored-local".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1202,6 +1493,7 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
             branch: "feature/vendor-junk".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1277,7 +1569,7 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
 }
 
 #[tokio::test]
-async fn path_recreated_during_git_cleanup_fails_loudly_and_keeps_registration_for_retry()
+async fn path_recreated_during_git_cleanup_is_unregistered_without_deleting_replacement_on_retry()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new_with_path_recreated_during_prune()?;
     let created = worktrees::create(
@@ -1287,6 +1579,7 @@ async fn path_recreated_during_git_cleanup_fails_loudly_and_keeps_registration_f
             branch: "feature/reappearing-path".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1363,8 +1656,19 @@ async fn path_recreated_during_git_cleanup_fails_loudly_and_keeps_registration_f
         },
     )
     .await?;
-    assert!(retried.deleted_from_disk && retried.project_unregistered);
-    assert!(!path.exists());
+    assert!(retried.project_unregistered && retried.files_untouched);
+    assert!(!retried.deleted_from_disk);
+    assert!(
+        retried
+            .registration_issue
+            .as_deref()
+            .is_some_and(|issue| issue.contains("not a worktree of its recorded parent"))
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("reappeared.txt"))?,
+        "replacement created after initial verification\n",
+        "a replacement that is no longer the recorded worktree must be left untouched"
+    );
     assert_eq!(
         git(
             &fixture.origin,
@@ -1391,6 +1695,7 @@ async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
             branch: "feature/retry-removal".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1451,7 +1756,7 @@ async fn failed_verified_deletion_keeps_registration_and_retries_cleanly()
 }
 
 #[tokio::test]
-async fn retry_recovers_after_git_already_dropped_linked_worktree_metadata()
+async fn pruned_git_metadata_unregisters_without_deleting_remaining_folder()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
     let created = worktrees::create(
@@ -1461,6 +1766,7 @@ async fn retry_recovers_after_git_already_dropped_linked_worktree_metadata()
             branch: "feature/metadata-retry".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([
                 ("copy_env".into(), "no".into()),
@@ -1498,9 +1804,20 @@ async fn retry_recovers_after_git_already_dropped_linked_worktree_metadata()
         },
     )
     .await?;
-    assert!(removed.deleted_from_disk && removed.metadata_pruned);
+    assert!(removed.project_unregistered && removed.metadata_pruned);
+    assert!(removed.files_untouched && !removed.deleted_from_disk);
     assert!(removed.branch_kept && removed.project_unregistered);
-    assert!(!path.exists());
+    assert!(
+        removed
+            .registration_issue
+            .as_deref()
+            .is_some_and(|issue| issue.contains("not a worktree of its recorded parent"))
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("remaining.tmp"))?,
+        "left after partial deletion\n",
+        "an unverified remaining folder must never be removed"
+    );
     Ok(())
 }
 
@@ -1524,6 +1841,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
             branch: "env/needs-choice".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: None,
@@ -1547,6 +1865,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
             branch: "env-target-does-not-ignore".into(),
             display_name: None,
             from_ref: None,
+            resolution: Some(WorktreeCreateResolution::UseExistingBranch),
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: Some(EnvPortPolicy::Copy),
@@ -1566,6 +1885,7 @@ async fn ignored_environment_is_asked_once_copied_and_rewritten_safely()
             branch: "env/copied".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: Some(EnvPortPolicy::Copy),
@@ -1599,6 +1919,7 @@ async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<()
             branch: "env/nonignored".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: Some(EnvPortPolicy::Copy),
@@ -1619,6 +1940,7 @@ async fn environment_porting_refuses_nonignored_and_tracked_files() -> Result<()
             branch: "env/tracked".into(),
             display_name: None,
             from_ref: Some("main".into()),
+            resolution: None,
             managed_root: Some(fixture.managed.clone()),
             preferences: BTreeMap::from([("herd_enabled".into(), "no".into())]),
             env_policy: Some(EnvPortPolicy::Copy),

@@ -249,6 +249,8 @@ struct CreateParams {
     #[serde(default)]
     from_ref: Option<String>,
     #[serde(default)]
+    resolution: Option<worktrees::WorktreeCreateResolution>,
+    #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
@@ -265,6 +267,8 @@ struct ForkParams {
     branch: String,
     #[serde(default)]
     display_name: Option<String>,
+    #[serde(default)]
+    resolution: Option<worktrees::WorktreeCreateResolution>,
     #[serde(default)]
     managed_root: Option<String>,
     #[serde(default)]
@@ -318,6 +322,7 @@ pub(crate) async fn start(
                         branch: params.branch,
                         display_name: params.display_name,
                         from_ref: params.from_ref,
+                        resolution: params.resolution,
                         managed_root: params.managed_root.map(PathBuf::from),
                         preferences: params.preferences,
                         env_policy: params.env_policy,
@@ -358,6 +363,7 @@ pub(crate) async fn start(
                         source_project_id: params.project_id,
                         branch: params.branch,
                         display_name: params.display_name,
+                        resolution: params.resolution,
                         managed_root: params.managed_root.map(PathBuf::from),
                         preferences: params.preferences,
                         env_policy: params.env_policy,

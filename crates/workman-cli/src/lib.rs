@@ -1373,6 +1373,10 @@ struct WorktreeRemovalResponse {
     deleted_from_disk: bool,
     metadata_pruned: bool,
     branch_kept: bool,
+    #[serde(default)]
+    files_untouched: bool,
+    #[serde(default)]
+    registration_issue: Option<String>,
 }
 
 async fn profile(client: &mut Client, command: ProfileCommand) -> Result<()> {
@@ -1506,7 +1510,12 @@ async fn project_remove(client: &mut Client, command: WorktreeCommand) -> Result
                 )));
             }
             println!("Removed {} from Workman.", response.branch);
-            if response.deleted_from_disk {
+            if let Some(issue) = &response.registration_issue {
+                println!("{issue}");
+                if response.files_untouched {
+                    println!("Local files were left untouched at {}.", response.path);
+                }
+            } else if response.deleted_from_disk {
                 println!("Deleted local project at {}.", response.path);
                 if response.metadata_pruned {
                     println!("Pruned Git worktree metadata.");

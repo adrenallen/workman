@@ -70,10 +70,34 @@ test('worktree title follows the branch default until edited and is sent with ev
   assert.equal(dialog.match(/value=\{projectTitle\}/g)?.length, 2);
   assert.equal(dialog.match(/oninput=\{updateProjectTitle\}/g)?.length, 2);
   assert.match(dialog, /onSubmit\(\{ mode, path: adoptPath\.trim\(\), title \}\)/);
-  assert.match(dialog, /onSubmit\(\{ mode, branch: nextBranch, title, envPolicy, rememberEnvPolicy \}\)/);
+  assert.match(dialog, /onSubmit\(\{ mode, branch: nextBranch, title, resolution, envPolicy, rememberEnvPolicy \}\)/);
   assert.equal(app.match(/display_name: submission\.title/g)?.length, 2);
   assert.match(app, /adoptWorktreeAsync\(operationId, submission\.path, submission\.title\)/);
   assert.match(daemon, /display_name: displayName/);
+});
+
+test('existing branch and worktree conflicts stay in-dialog with explicit actions', async () => {
+  const dialog = await readFile(dialogUrl, 'utf8');
+  const app = await readFile(appUrl, 'utf8');
+  const daemon = await readFile(daemonUrl, 'utf8');
+
+  assert.match(app, /client\.checkWorktreeCreate\(/);
+  assert.match(app, /if \(check\.conflict\)/);
+  assert.ok(
+    app.indexOf('client.checkWorktreeCreate(') < app.indexOf('beginWorktreeOperation({'),
+    'preflight must finish before an operation is created or the dialog closes'
+  );
+  assert.match(daemon, /worktree\.create_check/);
+  assert.match(dialog, /This branch needs a choice/);
+  assert.match(dialog, /Use existing branch/);
+  assert.match(dialog, /Load from remote/);
+  assert.match(dialog, /Import existing worktree/);
+  assert.match(dialog, /Open registered project/);
+  assert.match(dialog, /Choose a different name/);
+  assert.match(dialog, /mode: 'adopt',[\s\S]*?path: conflict\.path/);
+  assert.match(dialog, /onOpenProject\(conflict\.project_id\)/);
+  assert.match(dialog, /type="button" size="sm"/);
+  assert.match(dialog, /!busy && !conflict/);
 });
 
 test('adopt starts at the required path and does not select a user-authored title', async () => {

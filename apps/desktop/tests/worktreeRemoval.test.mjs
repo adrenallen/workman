@@ -44,6 +44,21 @@ test('pending local work is listed and requires one explicit Delete anyway click
   assert.doesNotMatch(app, /confirm_branch: confirmBranch/);
 });
 
+test('broken or duplicate registrations are unregistered with files untouched', async () => {
+  const dialog = await readFile(
+    new URL('../src/lib/WorktreeRemoveDialog.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(dialog, /project\.repository_id !== null && entry === null/);
+  assert.match(dialog, /This entry is broken or duplicates another project/);
+  assert.match(dialog, /Registration cleanup only/);
+  assert.match(dialog, /Git worktree removal will not run/);
+  assert.match(dialog, /disabled=\{brokenRegistration\}/);
+  assert.match(dialog, /if \(brokenRegistration\) deleteFromDisk = false/);
+  assert.match(dialog, /files stay untouched/);
+});
+
 test('project removal RPC is reachable only from the explicit in-app dialog confirmation', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   const menuAction = app.match(/case 'remove-project':([\s\S]*?)case 'open-in-editor':/)?.[1] ?? '';

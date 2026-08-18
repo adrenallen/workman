@@ -160,6 +160,16 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
             .is_none(),
         "force deletion no longer asks agents to type a branch name"
     );
+    let create_tool = tools
+        .iter()
+        .find(|tool| tool.name == "worktree_create")
+        .expect("worktree_create tool is present");
+    assert!(
+        create_tool.input_schema["properties"]
+            .get("resolution")
+            .is_some(),
+        "worktree_create advertises explicit conflict resolutions"
+    );
     let delete_project_tool = tools
         .iter()
         .find(|tool| tool.name == "delete_project")
@@ -214,6 +224,21 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
     assert!(health["checks"].as_array().unwrap().iter().all(|check| {
         check["detail"].is_string() && check["fix_hint"].is_string() || check["fix_hint"].is_null()
     }));
+
+    git(&main, &["branch", "mcp-existing-local"])?;
+    let conflict = call_failure(
+        &client,
+        "worktree_create",
+        json!({ "project_id": 1, "branch": "mcp-existing-local" }),
+    )
+    .await;
+    assert_eq!(conflict["code"], "worktree_create_conflict");
+    assert_eq!(conflict["conflict"]["kind"], "local_branch");
+    assert!(
+        conflict["conflict"]["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "use_existing_branch"))
+    );
 
     for (tool, args) in [
         (

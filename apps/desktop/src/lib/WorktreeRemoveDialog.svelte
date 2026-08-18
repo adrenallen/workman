@@ -33,6 +33,7 @@
     onClose
   }: Props = $props();
   let deleteFromDisk = $state(false);
+  let brokenRegistration = $derived(project.repository_id !== null && entry === null);
   let path = $derived(entry?.path ?? project.path);
   let confirmationText = $derived(entry?.branch ?? projectDisplayName(project));
   let safety = $derived(entry?.delete_safety ?? null);
@@ -40,6 +41,10 @@
     deleteFromDisk && (serverForceRequired || safety?.requires_force === true)
   );
   let canRemove = $derived(!busy);
+
+  $effect(() => {
+    if (brokenRegistration) deleteFromDisk = false;
+  });
 </script>
 
 <AlertDialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
@@ -47,7 +52,7 @@
     <AlertDialog.Header class="gap-2 border-b border-border px-4 py-4 text-left">
       <span class="flex items-center gap-2 text-destructive"><Trash2Icon size={16} /><AlertDialog.Title>Remove {projectDisplayName(project)}?</AlertDialog.Title></span>
       <AlertDialog.Description class="text-sm leading-relaxed">
-        Workman will unregister this project. Its folder stays on your computer unless you explicitly choose local deletion below.
+        {#if brokenRegistration}This entry is broken or duplicates another project. Workman will unregister it; files stay untouched.{:else}Workman will unregister this project. Its folder stays on your computer unless you explicitly choose local deletion below.{/if}
       </AlertDialog.Description>
     </AlertDialog.Header>
 
@@ -62,12 +67,19 @@
 
       <p class="text-sm text-muted-foreground">Any running processes in this project will stop before removal.</p>
 
+      {#if brokenRegistration}
+        <div class="grid gap-1 rounded border border-warning/40 bg-warning/10 px-3 py-3 text-sm">
+          <strong>Registration cleanup only</strong>
+          <span class="text-xs leading-relaxed text-muted-foreground">The folder is missing, belongs to another registered project, or is no longer a worktree of its recorded parent. Git worktree removal will not run.</span>
+        </div>
+      {/if}
+
       <label class="flex items-start gap-2 rounded border border-destructive/40 bg-destructive/5 px-3 py-3 text-sm">
-        <Checkbox bind:checked={deleteFromDisk} aria-label="Also delete this project from my computer" />
+        <Checkbox bind:checked={deleteFromDisk} disabled={brokenRegistration} aria-label="Also delete this project from my computer" />
         <span class="grid gap-1">
           <strong>Also delete from my computer</strong>
           <span class="text-xs leading-relaxed text-muted-foreground">
-            {#if entry && entry.kind !== 'main'}Runs local Git worktree removal and pruning. The branch is kept in {repository?.name ?? 'the repository'}.{:else if entry}Deletes this primary checkout. Remote Git branches are never changed.{:else}Permanently deletes this local folder.{/if}
+            {#if brokenRegistration}Unavailable for a broken or duplicate registration; files stay untouched.{:else if entry && entry.kind !== 'main'}Runs local Git worktree removal and pruning. The branch is kept in {repository?.name ?? 'the repository'}.{:else if entry}Deletes this primary checkout. Remote Git branches are never changed.{:else}Permanently deletes this local folder.{/if}
           </span>
         </span>
       </label>
