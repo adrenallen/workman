@@ -52,9 +52,14 @@ use crate::user_config::user_config_path;
 use crate::user_environment::{ResolvedUserEnvironment, UserEnvironmentResolver};
 
 const DEFAULT_STOP_GRACE: Duration = Duration::from_millis(500);
+const MAX_AGENT_ATTACHMENTS: usize = 8;
+const MAX_AGENT_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Directory below the daemon data root containing bounded raw-output tails.
 pub const OUTPUT_DIRECTORY: &str = "output";
+
+/// Per-process image copies referenced by initial agent prompts.
+pub const AGENT_ATTACHMENTS_DIRECTORY: &str = "agent-attachments";
 
 /// Optional byte-cap override for per-process raw-output spill files.
 pub const WORKMAN_OUTPUT_CAPACITY_ENV: &str = "WORKMAN_OUTPUT_CAPACITY_BYTES";
@@ -482,6 +487,7 @@ pub struct ProcessRegistry {
     trust_snapshots: HashMap<ProcessId, TrustFields>,
     stop_grace: Duration,
     output_persistence: Option<OutputPersistence>,
+    agent_attachments_directory: Option<PathBuf>,
     user_environment: UserEnvironmentResolver,
     agent_session_captures: HashMap<ProcessId, PendingSessionCapture>,
     raw_output_profiles: Option<HashMap<ProcessId, RawOutputProfile>>,
@@ -587,6 +593,12 @@ impl ProcessRegistry {
         output_persistence: Option<OutputPersistence>,
         user_environment: UserEnvironmentResolver,
     ) -> RegistryResult<Self> {
+        let agent_attachments_directory = output_persistence.as_ref().and_then(|persistence| {
+            persistence
+                .directory
+                .parent()
+                .map(|data_dir| data_dir.join(AGENT_ATTACHMENTS_DIRECTORY))
+        });
         let trust_snapshots = store
             .list_processes(None)?
             .into_iter()
@@ -604,6 +616,7 @@ impl ProcessRegistry {
             trust_snapshots,
             stop_grace,
             output_persistence,
+            agent_attachments_directory,
             user_environment,
             agent_session_captures: HashMap::new(),
             raw_output_profiles: profile_enabled().then(HashMap::new),
@@ -635,6 +648,48 @@ impl ProcessRegistry {
 
     pub fn user_environment_resolver(&self) -> &UserEnvironmentResolver {
         &self.user_environment
+    }
+
+    /// Copy user-selected image files into daemon-owned storage before their paths enter a prompt.
+    pub(crate) fn save_agent_attachments(
+        &self,
+        process_id: ProcessId,
+        sources: &[String],
+    ) -> io::Result<Vec<PathBuf>> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        if sources.len() > MAX_AGENT_ATTACHMENTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("at most {MAX_AGENT_ATTACHMENTS} image attachments are allowed"),
+            ));
+        }
+        let root = self
+            .agent_attachments_directory
+            .as_ref()
+            .ok_or_else(|| io::Error::other("agent attachment storage is unavailable"))?;
+        fs::create_dir_all(root)?;
+        let root_metadata = fs::symlink_metadata(root)?;
+        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+            return Err(io::Error::other(format!(
+                "agent attachment root is not a private directory: {}",
+                root.display()
+            )));
+        }
+        set_private_directory_permissions(root)?;
+        let destination = root.join(process_id.to_string());
+        fs::create_dir(&destination)?;
+        set_private_directory_permissions(&destination)?;
+        let copied = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| copy_agent_attachment(source, &destination, index + 1))
+            .collect::<io::Result<Vec<_>>>();
+        if copied.is_err() {
+            let _ = fs::remove_dir_all(&destination);
+        }
+        copied
     }
 
     /// Insert a new stopped process. An ID <= 0 is replaced with the next database ID.
@@ -1386,6 +1441,11 @@ impl ProcessRegistry {
             process_id,
             message: format!("clean private agent config home: {error}"),
         })?;
+        self.remove_agent_attachments(process_id)
+            .map_err(|error| RegistryError::Pty {
+                process_id,
+                message: format!("clean agent attachments: {error}"),
+            })?;
         self.store.delete_process(process_id)?;
         self.outputs.remove(&process_id);
         self.pty_sizes.remove(&process_id);
@@ -2132,6 +2192,17 @@ impl ProcessRegistry {
         }
     }
 
+    fn remove_agent_attachments(&self, process_id: ProcessId) -> io::Result<()> {
+        let Some(root) = &self.agent_attachments_directory else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(root.join(process_id.to_string())) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn require(&self, process_id: ProcessId) -> RegistryResult<Process> {
         self.store
             .get_process(process_id)?
@@ -2182,6 +2253,81 @@ impl ProcessRegistry {
             Ok(Some(process.kind.as_str().into()))
         }
     }
+}
+
+fn copy_agent_attachment(source: &str, destination: &Path, index: usize) -> io::Result<PathBuf> {
+    if source.len() > 4_096 || source.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "attachment path is invalid",
+        ));
+    }
+    let source = Path::new(source);
+    if !source.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "attachment paths must be absolute",
+        ));
+    }
+    let metadata = fs::metadata(source)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("attachment is not a regular file: {}", source.display()),
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_AGENT_ATTACHMENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "attachment must be between 1 byte and {} MiB: {}",
+                MAX_AGENT_ATTACHMENT_BYTES / 1024 / 1024,
+                source.display()
+            ),
+        ));
+    }
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|extension| {
+            matches!(
+                extension.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+            )
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("attachment is not a supported image: {}", source.display()),
+            )
+        })?;
+    let target = destination.join(format!("{index:02}.{extension}"));
+    fs::copy(source, &target)?;
+    set_private_file_permissions(&target)?;
+    Ok(target)
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn cleanup_ephemeral_agent_home(process: &Process) -> io::Result<()> {
@@ -2556,6 +2702,49 @@ mod tests {
     }
 
     #[test]
+    fn agent_attachments_are_copied_privately_and_removed_with_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("clipboard image.png");
+        fs::write(&source, b"not-a-real-png-but-bounded-fixture").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "attachment-fixture".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::with_output_persistence(
+            store,
+            temp.path().join(OUTPUT_DIRECTORY),
+            1024,
+        )
+        .unwrap();
+        let mut process = output_test_process(temp.path().to_str().unwrap());
+        process.kind = ProcessKind::Agent;
+        process.command = Some("true".into());
+        registry.create(process).unwrap();
+
+        let saved = registry
+            .save_agent_attachments(31, &[source.to_string_lossy().into_owned()])
+            .unwrap();
+        assert_eq!(saved, vec![temp.path().join("agent-attachments/31/01.png")]);
+        assert_eq!(fs::read(&saved[0]).unwrap(), fs::read(&source).unwrap());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&saved[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        registry.close(31).unwrap();
+        assert!(!temp.path().join("agent-attachments/31").exists());
+    }
+
+    #[test]
     fn dead_agent_start_prefers_exact_then_latest_then_fresh_without_losing_flags() {
         let mut process = output_test_process("/tmp/repo");
         process.kind = ProcessKind::Agent;
@@ -2841,7 +3030,11 @@ mod tests {
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             temp.path().join(".profile"),
-            "export PROFILE_VALUE='from login profile'\n",
+            concat!(
+                "export PROFILE_VALUE='from login profile'\n",
+                "export PATH='/opt/homebrew/bin:/usr/bin:/bin'\n",
+                "export TMPDIR='/tmp/workman-env-fixture'\n",
+            ),
         )
         .unwrap();
         let config = temp.path().join("config.yml");
@@ -2922,7 +3115,9 @@ mod tests {
                 project_id: 1,
                 kind: ProcessKind::Agent,
                 name: "agent terminal capability".into(),
-                command: Some(r#"printf 'AGENT_TERM_PROGRAM:%s\n' "$TERM_PROGRAM""#.into()),
+                command: Some(
+                    r#"printf 'AGENT_ENV:%s|%s|%s|%s|%s\n' "$TERM_PROGRAM" "$PATH" "$HOME" "$TMPDIR" "$LANG""#.into(),
+                ),
                 working_dir: temp.path().to_string_lossy().into_owned(),
                 env: environment,
                 auto_start: false,
@@ -2946,15 +3141,18 @@ mod tests {
         let output = loop {
             let output = registry.raw_output(42, None, usize::MAX).unwrap().data;
             if output
-                .windows(b"AGENT_TERM_PROGRAM:WezTerm".len())
-                .any(|window| window == b"AGENT_TERM_PROGRAM:WezTerm")
+                .windows(b"AGENT_ENV:WezTerm".len())
+                .any(|window| window == b"AGENT_ENV:WezTerm")
             {
                 break String::from_utf8_lossy(&output).into_owned();
             }
             assert!(Instant::now() < deadline, "timed out: {output:?}");
             thread::sleep(Duration::from_millis(10));
         };
-        assert!(output.contains("AGENT_TERM_PROGRAM:WezTerm"));
+        assert!(output.contains("AGENT_ENV:WezTerm|/opt/homebrew/bin:/usr/bin:/bin|"));
+        assert!(output.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(output.contains("|/tmp/workman-env-fixture|"));
+        assert!(output.contains("C.UTF-8") || output.contains("en_US.UTF-8"));
     }
 
     #[test]

@@ -83,6 +83,7 @@ export interface SpawnAgentInput {
   name?: string;
   extra_args: string[];
   prompt?: string;
+  attachments?: string[];
 }
 
 export interface SpawnAgentResult {

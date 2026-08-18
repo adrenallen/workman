@@ -532,12 +532,19 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             "agent_tool_id": tool_id,
             "name": "template-worker",
             "extra_args": ["--caller", "beta"],
-            "prompt": "Review line one.\nReview line two."
+            "prompt": "Review line one.\nReview line two.",
+            "attachments": [source_icon]
         }),
     )
     .await;
     assert!(template_spawn["ok"].as_bool().unwrap());
     let template_process_id = template_spawn["result"]["process_id"].as_i64().unwrap();
+    let saved_attachment = data_dir.join(format!("agent-attachments/{template_process_id}/01.png"));
+    assert!(saved_attachment.is_file());
+    let expected_template_prompt = format!(
+        "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.\n\nAttached image files were saved locally at these paths:\n- {}",
+        saved_attachment.display()
+    );
     let template_deadline = Instant::now() + Duration::from_secs(8);
     loop {
         let raw = registry
@@ -545,9 +552,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             .await
             .raw_output(template_process_id, None, usize::MAX)?;
         let output = String::from_utf8_lossy(&raw.data);
-        if output.contains(
-            "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.",
-        ) {
+        if output.contains(&expected_template_prompt) {
             assert_eq!(output.matches("agent-answer:").count(), 1);
             assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
             assert!(
@@ -726,6 +731,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_template["result"]["status"], "stopped");
+    assert!(!saved_attachment.parent().unwrap().exists());
     let closed_override = rpc(
         &mut socket,
         43,

@@ -235,7 +235,7 @@
         pendingUserKeyTokens.push(++nextUserKeyToken);
         instance.paste(text);
       },
-      imagePasteRoute: () => clipboardImagePasteRoute(process.kind),
+      imagePasteRoute: () => clipboardImagePasteRoute(process.kind, process.agent_state.tool_type),
       forwardAgentImagePaste: () => {
         queueInput(encoder.encode(AGENT_TUI_CLIPBOARD_IMAGE_PASTE), true);
         flushInput();

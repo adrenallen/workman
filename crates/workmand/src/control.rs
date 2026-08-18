@@ -517,6 +517,9 @@ struct SpawnAgentParams {
     extra_args: Vec<String>,
     #[serde(default)]
     prompt: Option<String>,
+    /// Local image paths copied into daemon-owned per-process storage before prompt delivery.
+    #[serde(default)]
+    attachments: Vec<String>,
     /// Automatically accept narrowly recognized first-run trust dialogs.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
@@ -608,6 +611,7 @@ async fn dispatch(
                 params.extra_args,
                 params.model,
                 params.prompt,
+                params.attachments,
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,

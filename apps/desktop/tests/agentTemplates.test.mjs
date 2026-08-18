@@ -80,6 +80,7 @@ test('new-agent draft keeps template and agent choices independent and persisten
   assert.match(source, /<Select\.Item value="none" label="None">None<\/Select\.Item>/);
   assert.match(source, /agent_template_id: selectedTemplate\.id, agent_tool_id: selectedTool\.id/);
   assert.match(source, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
+  assert.match(source, /attachments: draft\.attachments\.length > 0/);
   assert.match(source, /onValueChange=\{selectTemplate\}/);
   assert.match(source, /onValueChange=\{selectAgent\}/);
   assert.match(source, /Template default: \{templateDefaultTool\.name\}\. Template launch args are skipped for other agents\./);

@@ -3,6 +3,7 @@ import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 
 import {
   type ClipboardImagePasteRoute,
+  deferAgentImagePaste,
   localPathsFromUriList,
   pointIsInsideRect,
   shellEscapePaths
@@ -133,11 +134,16 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
       options.reportError('Terminal input is not ready for a clipboard image.');
       return;
     }
-    if (options.imagePasteRoute() === 'agent-tui') {
+    const route = options.imagePasteRoute();
+    if (route !== 'shell-path') {
       // The TUI reads the image from the OS clipboard when it receives Ctrl+V. Do not save,
       // replace, or clear the clipboard here; forwarding the chord preserves its native flow.
       options.focus();
-      options.forwardAgentImagePaste();
+      const forward = () => {
+        if (!disposed) options.forwardAgentImagePaste();
+      };
+      if (route === 'agent-native-deferred') deferAgentImagePaste(forward);
+      else forward();
       return;
     }
     options.setPasteSaving(true);
@@ -162,7 +168,7 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
       options.pasteText(clipboard.text);
       return;
     }
-    if (route === 'agent-tui') {
+    if (route !== 'shell-path') {
       // The native command only observes that an image exists; the TUI reads the unchanged pasteboard.
       options.focus();
       options.forwardAgentImagePaste();

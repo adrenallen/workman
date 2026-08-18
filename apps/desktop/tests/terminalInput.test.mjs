@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   AGENT_TUI_CLIPBOARD_IMAGE_PASTE,
   clipboardImagePasteRoute,
+  deferAgentImagePaste,
   localPathsFromUriList,
   pointIsInsideRect,
   shellEscapePath,
@@ -12,11 +13,29 @@ import {
   shouldForwardTerminalInput
 } from '../src/lib/terminalInput.ts';
 
-test('routes image paste by process kind without changing text paste behavior', () => {
-  assert.equal(clipboardImagePasteRoute('agent'), 'agent-tui');
+test('routes image paste by process kind and agent tool without changing text paste behavior', () => {
+  assert.equal(clipboardImagePasteRoute('agent', 'claude_code'), 'agent-native-deferred');
+  assert.equal(clipboardImagePasteRoute('agent', 'claude'), 'agent-native-deferred');
+  assert.equal(clipboardImagePasteRoute('agent', 'codex'), 'agent-tui');
+  assert.equal(clipboardImagePasteRoute('agent', 'future_agent'), 'agent-tui');
   assert.equal(clipboardImagePasteRoute('terminal'), 'shell-path');
   assert.equal(clipboardImagePasteRoute('command'), 'shell-path');
   assert.deepEqual(Array.from(new TextEncoder().encode(AGENT_TUI_CLIPBOARD_IMAGE_PASTE)), [0x16]);
+});
+
+test('defers synthetic agent image paste until after the clipboard event task', () => {
+  const calls = [];
+  let scheduled = null;
+  deferAgentImagePaste(
+    () => calls.push('forward'),
+    (callback) => {
+      calls.push('schedule');
+      scheduled = callback;
+    }
+  );
+  assert.deepEqual(calls, ['schedule']);
+  scheduled();
+  assert.deepEqual(calls, ['schedule', 'forward']);
 });
 
 test('agent image paste forwards the TUI shortcut while plain shells keep saved paths', async () => {
@@ -28,12 +47,12 @@ test('agent image paste forwards the TUI shortcut while plain shells keep saved 
   const noImages = transfers.indexOf('if (images.length === 0) return;');
   const preventDefault = transfers.indexOf('event.preventDefault();', noImages);
   const sharedPaste = transfers.indexOf('pasteImages(images)', preventDefault);
-  const agentRoute = transfers.indexOf("options.imagePasteRoute() === 'agent-tui'");
+  const agentRoute = transfers.indexOf("if (route !== 'shell-path')");
   const shellSave = transfers.indexOf('saveClipboardImages(images)', agentRoute);
 
   assert.ok(noImages >= 0 && preventDefault > noImages, 'text-only paste must reach xterm unchanged');
   assert.ok(sharedPaste > preventDefault && agentRoute >= 0 && shellSave > agentRoute);
-  assert.match(transfers, /options\.forwardAgentImagePaste\(\);/);
+  assert.match(transfers, /deferAgentImagePaste\(forward\)/);
   assert.doesNotMatch(
     transfers.slice(transfers.indexOf('export function installTerminalTransfers')),
     /navigator\.clipboard\.(write|writeText)/

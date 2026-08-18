@@ -371,6 +371,7 @@ impl TerminalEmulator {
     }
 
     fn feed_with_replies(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        #[allow(unused_mut)]
         let mut replies = self.keyboard_protocol.feed(bytes);
         self.parser.advance(&mut self.terminal, bytes);
         // ConPTY withholds all child output until its startup `CSI 6 n` probe is

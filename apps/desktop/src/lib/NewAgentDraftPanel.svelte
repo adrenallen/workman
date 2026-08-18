@@ -1,6 +1,9 @@
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
+  import XIcon from '@lucide/svelte/icons/x';
+  import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+  import { onDestroy } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
   import { resolveAgentDraftChoice } from './agentDraftChoices';
@@ -65,6 +68,9 @@
   let advancedOpen = $state(false);
   let previewOpen = $state(true);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
+  let attachmentSaving = $state(false);
+  let attachmentDropActive = $state(false);
+  let attachmentPreviews = $state<Record<string, string>>({});
 
   const choice = $derived(resolveAgentDraftChoice(
     draft,
@@ -151,7 +157,7 @@
   }
 
   function submit(): void {
-    if (!selectedTool || busy) return;
+    if (!selectedTool || busy || attachmentSaving) return;
     let extraArgs: string[];
     try {
       extraArgs = parseExtraArgs(draft.extraArgs);
@@ -170,7 +176,8 @@
           : { agent_tool_id: selectedTool.id }),
         name: draft.name.trim() || undefined,
         extra_args: extraArgs,
-        prompt: draft.prompt.trim() || undefined
+        prompt: draft.prompt.trim() || undefined,
+        attachments: draft.attachments.length > 0 ? [...draft.attachments] : undefined
       },
       tool: selectedTool,
       template: selectedTemplate
@@ -182,6 +189,76 @@
     event.preventDefault();
     submit();
   }
+
+  async function attachImages(files: File[]): Promise<void> {
+    const available = Math.max(0, 8 - draft.attachments.length);
+    const images = files.filter((file) => file.type.startsWith('image/')).slice(0, available);
+    if (images.length === 0) {
+      if (available === 0) onError('A new-agent draft can have at most 8 image attachments.');
+      return;
+    }
+    attachmentSaving = true;
+    const paths: string[] = [];
+    const previews: Record<string, string> = {};
+    try {
+      for (const image of images) {
+        const bytes = Array.from(new Uint8Array(await image.arrayBuffer()));
+        const path = await invoke<string>('terminal_save_clipboard_image', {
+          bytes,
+          mimeType: image.type
+        });
+        paths.push(path);
+        previews[path] = URL.createObjectURL(image);
+      }
+      attachmentPreviews = { ...attachmentPreviews, ...previews };
+      onChange({ attachments: [...draft.attachments, ...paths] });
+    } catch (cause) {
+      for (const preview of Object.values(previews)) URL.revokeObjectURL(preview);
+      onError(`Could not attach image: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      attachmentSaving = false;
+    }
+  }
+
+  function handlePromptPaste(event: ClipboardEvent): void {
+    const images = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (images.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void attachImages(images);
+  }
+
+  function handlePromptDrop(event: DragEvent): void {
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!files.some((file) => file.type.startsWith('image/'))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    attachmentDropActive = false;
+    void attachImages(files);
+  }
+
+  function removeAttachment(path: string): void {
+    const preview = attachmentPreviews[path];
+    if (preview) URL.revokeObjectURL(preview);
+    const { [path]: _, ...remainingPreviews } = attachmentPreviews;
+    attachmentPreviews = remainingPreviews;
+    onChange({ attachments: draft.attachments.filter((candidate) => candidate !== path) });
+  }
+
+  function attachmentName(path: string): string {
+    return path.split('/').at(-1) || 'image';
+  }
+
+  function attachmentPreview(path: string): string {
+    return attachmentPreviews[path] ?? (isTauri() ? convertFileSrc(path) : '');
+  }
+
+  onDestroy(() => {
+    for (const preview of Object.values(attachmentPreviews)) URL.revokeObjectURL(preview);
+  });
 </script>
 
 <CreationDraftScaffold
@@ -190,7 +267,7 @@
   title={draft.name.trim() || 'New agent'}
   createLabel="Create agent"
   {busy}
-  canCreate={!loading && selectedTool !== null}
+  canCreate={!loading && !attachmentSaving && selectedTool !== null}
   onCreate={submit}
   {onDiscard}
 >
@@ -264,8 +341,20 @@
       </Collapsible.Root>
     {/if}
 
-    <label for={`draft-agent-prompt-${draft.id}`}>
-      <span>Prompt <small>optional</small></span>
+    <div
+      class="prompt-field"
+      role="group"
+      aria-label="Prompt and image attachments"
+      class:attachment-drop-active={attachmentDropActive}
+      ondragover={(event) => {
+        if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+        event.preventDefault();
+        attachmentDropActive = true;
+      }}
+      ondragleave={() => { attachmentDropActive = false; }}
+      ondrop={handlePromptDrop}
+    >
+      <label for={`draft-agent-prompt-${draft.id}`}><span>Prompt <small>optional</small></span></label>
       <Textarea
         id={`draft-agent-prompt-${draft.id}`}
         class="min-h-[17rem] resize-y text-sm leading-6"
@@ -275,9 +364,28 @@
         disabled={busy}
         oninput={(event) => onChange({ prompt: event.currentTarget.value })}
         onkeydown={handleKeydown}
+        onpaste={handlePromptPaste}
       />
+      {#if draft.attachments.length > 0}
+        <div class="attachment-list" aria-label="Attached images">
+          {#each draft.attachments as attachment, index (attachment)}
+            <div class="attachment-chip">
+              {#if attachmentPreview(attachment)}
+                <img src={attachmentPreview(attachment)} alt="" />
+              {/if}
+              <span>{attachmentName(attachment)}</span>
+              <button
+                type="button"
+                aria-label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
+                disabled={busy || attachmentSaving}
+                onclick={() => removeAttachment(attachment)}
+              ><XIcon size={13} /></button>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <small>{primaryModifierLabel}+Enter creates. Shift+Enter adds a line.</small>
-    </label>
+    </div>
 
     <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-md border border-border">
       <Collapsible.Trigger class="flex min-h-9 w-full items-center gap-2 px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
@@ -309,5 +417,14 @@
   .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
   .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .choice-warning { color: var(--warning-token); }
+  .prompt-field { display: grid; align-content: start; gap: 6px; }
+  .prompt-field > small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
+  .attachment-drop-active { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: var(--radius); }
+  .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; }
+  .attachment-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 5px 3px 3px; background: var(--muted); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 500; }
+  .attachment-chip img { width: 28px; height: 28px; flex: 0 0 auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
+  .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attachment-chip button { display: inline-grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); }
+  .attachment-chip button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 10%, transparent); color: var(--foreground); }
   @media (max-width: 620px) { .choice-grid, .advanced-grid { grid-template-columns: 1fr; } }
 </style>

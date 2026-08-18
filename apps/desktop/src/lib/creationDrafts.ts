@@ -16,6 +16,7 @@ export interface AgentCreationDraft extends CreationDraftBase {
   templateId: number | null;
   name: string;
   prompt: string;
+  attachments: string[];
   extraArgs: string;
 }
 
@@ -60,6 +61,8 @@ const maxRestoredDrafts = 100;
 const maxDraftTextLength = 256_000;
 const maxRestoredDraftText = 1_000_000;
 const maxRestoredBlockers = 1_000;
+const maxAgentAttachments = 8;
+const maxAttachmentPathLength = 4_096;
 let lastAllocatedDraftId = 0;
 
 export function creationDraftStorageKey(profileId: number): string {
@@ -81,6 +84,7 @@ export function createCreationDraft(
       templateId: null,
       name: '',
       prompt: '',
+      attachments: [],
       extraArgs: ''
     };
   }
@@ -210,9 +214,9 @@ export function saveCreationDrafts(
 }
 
 export function cloneCreationDraft(draft: CreationDraft): CreationDraft {
-  return draft.kind === 'todo'
-    ? { ...draft, blockerIds: [...draft.blockerIds] }
-    : { ...draft };
+  if (draft.kind === 'todo') return { ...draft, blockerIds: [...draft.blockerIds] };
+  if (draft.kind === 'agent') return { ...draft, attachments: [...draft.attachments] };
+  return { ...draft };
 }
 
 function parseCreationDraft(value: unknown): CreationDraft | null {
@@ -231,11 +235,13 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
     touched: value.touched
   };
   if (value.kind === 'agent') {
+    const attachments = value.attachments ?? [];
     if (
       !isNullablePositiveInteger(value.agentToolId)
       || !isNullablePositiveInteger(value.templateId)
       || !isDraftText(value.name)
       || !isDraftText(value.prompt)
+      || !isAgentAttachments(attachments)
       || !isDraftText(value.extraArgs)
     ) return null;
     return {
@@ -245,6 +251,7 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
       templateId: value.templateId,
       name: value.name,
       prompt: value.prompt,
+      attachments: [...attachments],
       extraArgs: value.extraArgs
     };
   }
@@ -321,8 +328,24 @@ function isDraftText(value: unknown): value is string {
   return typeof value === 'string' && value.length <= maxDraftTextLength;
 }
 
+function isAgentAttachments(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maxAgentAttachments
+    && value.every((path) =>
+      typeof path === 'string'
+      && path.startsWith('/')
+      && path.length <= maxAttachmentPathLength
+      && !/[\0\r\n]/u.test(path)
+    );
+}
+
 function creationDraftTextLength(draft: CreationDraft): number {
-  if (draft.kind === 'agent') return draft.name.length + draft.prompt.length + draft.extraArgs.length;
+  if (draft.kind === 'agent') {
+    return draft.name.length
+      + draft.prompt.length
+      + draft.extraArgs.length
+      + draft.attachments.reduce((total, path) => total + path.length, 0);
+  }
   if (draft.kind === 'command') {
     return draft.name.length
       + draft.command.length

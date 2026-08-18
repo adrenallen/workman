@@ -55,7 +55,12 @@ test('allocates non-recycled time-based ids after all live drafts are removed', 
 test('persistence round-trips each kind per profile and clones array fields', () => {
   const storage = memoryStorage();
   const drafts = [
-    { ...createCreationDraft('agent', 7, -1, 10), prompt: 'Keep this prompt', touched: true },
+    {
+      ...createCreationDraft('agent', 7, -1, 10),
+      prompt: 'Keep this prompt',
+      attachments: ['/tmp/workman/image-one.png'],
+      touched: true
+    },
     { ...createCreationDraft('command', 7, -2, 20), name: 'Vite', command: 'npm run dev', saveMode: 'local', touched: true },
     { ...createCreationDraft('todo', 8, -3, 30), title: 'Ship it', blockerIds: [4, 5], touched: true }
   ];
@@ -64,8 +69,29 @@ test('persistence round-trips each kind per profile and clones array fields', ()
   assert.deepEqual(loadCreationDrafts(4, storage), []);
 
   const loaded = loadCreationDrafts(3, storage);
+  loaded[0].attachments.push('/tmp/workman/image-two.png');
   loaded[2].blockerIds.push(99);
+  assert.deepEqual(loadCreationDrafts(3, storage)[0].attachments, ['/tmp/workman/image-one.png']);
   assert.deepEqual(loadCreationDrafts(3, storage)[2].blockerIds, [4, 5]);
+});
+
+test('agent draft attachments start empty and restore only bounded absolute paths', () => {
+  const empty = createCreationDraft('agent', 7, -1, 10);
+  assert.deepEqual(empty.attachments, []);
+
+  const storage = memoryStorage({
+    [creationDraftStorageKey(3)]: JSON.stringify({
+      version: 1,
+      drafts: [
+        { ...empty, attachments: ['/tmp/a.png', '/tmp/b.webp'], touched: true },
+        { ...empty, id: -2, attachments: ['relative.png'], touched: true },
+        { ...empty, id: -3, attachments: Array(9).fill('/tmp/a.png'), touched: true }
+      ]
+    })
+  });
+  assert.deepEqual(loadCreationDrafts(3, storage), [
+    { ...empty, attachments: ['/tmp/a.png', '/tmp/b.webp'], touched: true }
+  ]);
 });
 
 test('bad persisted data is ignored while valid drafts survive', () => {

@@ -2,14 +2,40 @@ import type { ProcessKind } from './daemon';
 
 const safePathCharacter = /^[\p{L}\p{N}_./-]$/u;
 
-export type ClipboardImagePasteRoute = 'agent-tui' | 'shell-path';
+export type ClipboardImagePasteRoute = 'agent-tui' | 'agent-native-deferred' | 'shell-path';
 
 /**
  * Agent TUIs own clipboard-image import, so forward their Ctrl+V signal and let them read the
  * unchanged system clipboard. Plain terminals retain Workman's saved-file + escaped-path paste.
  */
-export function clipboardImagePasteRoute(processKind: ProcessKind): ClipboardImagePasteRoute {
-  return processKind === 'agent' ? 'agent-tui' : 'shell-path';
+export function clipboardImagePasteRoute(
+  processKind: ProcessKind,
+  agentToolType: string | null = null
+): ClipboardImagePasteRoute {
+  if (processKind !== 'agent') return 'shell-path';
+  switch (agentToolType?.toLowerCase()) {
+    case 'claude':
+    case 'claude_code':
+      // Claude synchronously reads PNGf, so DOM paste must release WebKit's pasteboard read first.
+      return 'agent-native-deferred';
+    case 'codex':
+    default:
+      // Codex owns image import and keeps the pre-existing immediate Ctrl+V behavior. Unknown
+      // agent TUIs retain that same compatible fallback.
+      return 'agent-tui';
+  }
+}
+
+/**
+ * WebKit dispatches DOM paste while it still owns the pasteboard read. Move a synthetic Ctrl+V
+ * to the next task so Claude can synchronously read PNGf after that ownership is released.
+ * Physical Ctrl+V never uses this helper and remains byte-for-byte pass-through.
+ */
+export function deferAgentImagePaste(
+  forward: () => void,
+  schedule: (callback: () => void) => void = (callback) => { setTimeout(callback, 0); }
+): void {
+  schedule(forward);
 }
 
 /** Ctrl+V as a PTY byte; Claude Code and Codex use it to import an image from the clipboard. */
