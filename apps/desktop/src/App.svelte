@@ -4841,6 +4841,16 @@
       </span>
       {#if !projectRailCollapsed}
         <span class="project-meta-strip" data-project-meta-strip>
+          <ProjectKindIndicators
+            {activity}
+            processes={projectProcesses}
+            projectId={project.id}
+            projectTitle={fullTitle}
+            openPopoverKey={projectRailPopoverKey}
+            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+            onSelect={(process) => openProjectRailProcess(project, process)}
+            onShowAll={(kind) => openProjectRailOverview(project, kind)}
+          />
           {#if repository}
             <WorktreeRowMeta
               entry={worktree}
@@ -4854,6 +4864,9 @@
               onRefresh={() => void refreshWorktreeRepository(project, true)}
             />
           {/if}
+        </span>
+      {:else}
+        <span class="project-compact-meta" data-project-compact-meta>
           <ProjectKindIndicators
             {activity}
             processes={projectProcesses}
@@ -4861,22 +4874,25 @@
             projectTitle={fullTitle}
             openPopoverKey={projectRailPopoverKey}
             onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+            compact
             onSelect={(process) => openProjectRailProcess(project, process)}
             onShowAll={(kind) => openProjectRailOverview(project, kind)}
           />
+          {#if repository}
+            <WorktreeRowMeta
+              entry={worktree}
+              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+              projectId={project.id}
+              repositoryName={repository.name}
+              openPopoverKey={projectRailPopoverKey}
+              onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+              refreshing={worktreeRefreshingRepositoryId === repository.id}
+              showNoPullRequest={false}
+              compact
+              onRefresh={() => void refreshWorktreeRepository(project, true)}
+            />
+          {/if}
         </span>
-      {:else}
-        <ProjectKindIndicators
-          {activity}
-          processes={projectProcesses}
-          projectId={project.id}
-          projectTitle={fullTitle}
-          openPopoverKey={projectRailPopoverKey}
-          onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-          compact
-          onSelect={(process) => openProjectRailProcess(project, process)}
-          onShowAll={(kind) => openProjectRailOverview(project, kind)}
-        />
       {/if}
       <IconButton
         class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
@@ -5588,6 +5604,7 @@
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
   .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
+  .project-compact-meta { position: absolute; z-index: 4; right: 0; bottom: 0; display: inline-flex; height: 12px; align-items: end; pointer-events: none; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
   .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }

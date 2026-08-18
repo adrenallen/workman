@@ -209,7 +209,7 @@
   .kind-glyph { position: relative; display: grid; width: 14px; height: 14px; place-items: center; }
   .kind-glyph small { position: absolute; top: -5px; right: -5px; display: grid; min-width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 1px; color: var(--card); background: var(--indicator-tone); font: 750 8px/1 var(--terminal-font-family); text-align: center; }
 
-  .project-kind-indicators.compact { position: absolute; z-index: 4; right: 0; bottom: 0; height: 12px; min-height: 12px; align-items: end; gap: 0; pointer-events: none; }
+  .project-kind-indicators.compact { height: 12px; min-height: 12px; align-items: end; gap: 0; pointer-events: none; }
   .compact .project-kind-indicator :global(.project-kind-pip) { display: grid; width: 12px; min-width: 12px; height: 12px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: transparent; pointer-events: auto; }
   .compact .project-kind-indicator :global(.project-kind-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
   .pip-mark { display: block; width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; background: var(--agent-state-working); }

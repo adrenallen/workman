@@ -14,7 +14,7 @@ async function projectRowSource() {
   );
 }
 
-test('expanded project rows reserve a second-line meta strip in PR, agent, terminal, command order', async () => {
+test('project rows order agent, terminal, command, then PR in expanded and collapsed rails', async () => {
   const [row, app] = await Promise.all([projectRowSource(), readFile(appUrl, 'utf8')]);
   const strip = row.slice(
     row.indexOf('<span class="project-meta-strip"'),
@@ -27,7 +27,8 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   const processKindsIndex = strip.indexOf('<ProjectKindIndicators');
   assert.notEqual(pullRequestIndex, -1);
   assert.notEqual(processKindsIndex, -1);
-  assert.ok(pullRequestIndex < processKindsIndex);
+  assert.ok(processKindsIndex < pullRequestIndex);
+  assert.match(row, /\{:else\}\s*<span class="project-compact-meta" data-project-compact-meta>[\s\S]*<ProjectKindIndicators[\s\S]*compact[\s\S]*<WorktreeRowMeta[\s\S]*showNoPullRequest=\{false\}[\s\S]*compact/);
   assert.match(strip, /showNoPullRequest=\{false\}/);
   assert.match(strip, /openPopoverKey=\{projectRailPopoverKey\}/);
   assert.match(strip, /onOpenPopoverChange=\{\(key\) => \(projectRailPopoverKey = key\)\}/);
@@ -40,6 +41,7 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.match(app, /\.project-select \{[^}]*position: relative;[^}]*grid-template-rows: minmax\(20px, auto\) 20px;/);
   assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
+  assert.match(app, /\.project-compact-meta \{[^}]*display: inline-flex;[^}]*height: 12px;/);
   assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--accent\);/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
@@ -137,6 +139,7 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   assert.match(iconButton, /tooltip\?: boolean/);
   assert.match(iconButton, /aria-label=\{label\}/);
   assert.match(iconButton, /\{#if tooltip\}[\s\S]*<Tooltip\.Provider[\s\S]*\{:else\}\s*\{@render button\(\)\}/);
+  assert.doesNotMatch(indicators, /TooltipLabel|<Tooltip\.|\stitle=/);
   assert.doesNotMatch(indicators, /onpointer(?:enter|leave)/);
   assert.doesNotMatch(indicators, /PopoverHoverIntent/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
@@ -155,6 +158,9 @@ test('pull request icons always open a coordinated click-only list popover', asy
   assert.match(pullRequests, /label=\{pullRequestUnavailableLabel\}\s*tooltip=\{false\}/);
   assert.match(pullRequests, /label=\{`Refresh pull request status for \$\{repositoryName\}`\}\s*tooltip=\{false\}/);
   assert.match(pullRequests, /<span class="no-pull-request" role="img" aria-label=\{noPullRequestLabel\}>/);
+  assert.match(pullRequests, /compact\?: boolean/);
+  assert.match(pullRequests, /class=\{compact \? 'project-pr-pip'/);
+  assert.match(pullRequests, /<span class="pr-pip-mark" data-state=\{pullRequest\.state\}/);
   assert.doesNotMatch(pullRequests, /TooltipLabel|<Tooltip\./);
   assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
   assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);

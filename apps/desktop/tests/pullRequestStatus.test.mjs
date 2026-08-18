@@ -109,7 +109,7 @@ test('every PR status surface uses the shared state icon treatment', async () =>
   assert.match(row, /\{#if pullRequest\}/);
   assert.doesNotMatch(row, /pullRequestInteraction\(pullRequests\)/);
   assert.match(row, /onclick=\{togglePopover\}[\s\S]*<PullRequestList/);
-  assert.match(row, /\{#if pullRequests\.length === 1\}/);
+  assert.match(row, /\{:else if pullRequests\.length === 1\}/);
   assert.doesNotMatch(row, /onpointer(?:enter|leave)/);
   assert.match(row, /openBrowserUrl\(target\.url\)/);
   assert.match(row, /<PullRequestStateIcon state=\{pullRequest\.state\}/);
