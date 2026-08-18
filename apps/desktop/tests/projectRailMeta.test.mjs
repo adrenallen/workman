@@ -99,7 +99,8 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   );
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
-  assert.match(indicators, /\{#each kinds as kind \(kind\)\}/);
+  assert.match(indicators, /compact \? kinds\.filter\(\(kind\) => activity\[kind\]\.active > 0\) : kinds/);
+  assert.match(indicators, /\{#each visibleKinds as kind \(kind\)\}/);
   assert.match(indicators, /activity\[kind\]\.processIds/);
   assert.match(indicators, /No \{kindTitle\(kind\)\.toLocaleLowerCase\(\)\} in this project/);
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);

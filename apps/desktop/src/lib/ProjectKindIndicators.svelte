@@ -33,6 +33,9 @@
   }: Props = $props();
 
   const kinds = ['agent', 'terminal', 'command'] as const;
+  let visibleKinds = $derived(
+    compact ? kinds.filter((kind) => activity[kind].active > 0) : kinds
+  );
 
   function popoverKey(kind: ProcessKind): string {
     return `${projectId}:process:${kind}`;
@@ -110,7 +113,7 @@
   aria-label={`Processes in ${projectTitle}`}
   role="group"
 >
-    {#each kinds as kind (kind)}
+    {#each visibleKinds as kind (kind)}
       {@const detail = activity[kind]}
       <span
         class="project-kind-indicator"
