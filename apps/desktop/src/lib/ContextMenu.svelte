@@ -92,7 +92,12 @@
       ></span>
     {/snippet}
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content class="w-64 rounded-md border border-border p-1 shadow-xl" sideOffset={0}>
+  <DropdownMenu.Content
+    class="w-64 rounded-md border border-border p-1 shadow-xl"
+    sideOffset={0}
+    avoidCollisions={true}
+    collisionPadding={8}
+  >
     <DropdownMenu.Label class="grid gap-0.5 px-2 py-1.5">
       <span class="font-mono text-xs tracking-wide text-muted-foreground">{subtitle}</span>
       <strong class="truncate text-sm font-semibold text-popover-foreground">{title}</strong>
