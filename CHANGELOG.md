@@ -4,6 +4,44 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.10 - 2026-08-18
+
+Workman 0.1.10 brings creation and review work into project surfaces, makes updates and terminals
+more resilient, and lays the groundwork for running Workman natively on Windows.
+
+### Creation and project navigation
+
+- Create agents, commands, and todos as persistent inline drafts instead of modal flows, with
+  optimistic retry and keyboard navigation preserved.
+- Set project titles while registering projects and creating, forking, or adopting worktrees.
+- Redesign project rows with a compact meta strip, always-visible agent, terminal, and command
+  indicators, state-toned click rosters, PR status last, and unclipped count badges.
+- Add distinct worktree glyphs and icon badges, icon-only delayed project details, project-level
+  Mark as read, and project identity on notification rows while removing other rail hover hints.
+
+### Scratchpad review
+
+- Add anchored scratchpad comments from user selections and agent MCP tools, including live
+  re-anchoring, revision checks, permissions, resolution, and optional comment reads.
+- Keep multi-line selection and comment highlights readable in light and dark themes.
+
+### Updates, sessions, and terminals
+
+- Show staged install progress in the update banner and Settings, then restart the replaced app
+  and daemon automatically; command-line updates now request a daemon restart.
+- Keep the macOS keep-awake assertion armed through daemon reconnects and sleep-sized gaps, with
+  native watchdog recovery and clearer status.
+- Give Kimi launches a credential-bound Workman MCP connection and more reliable prompt delivery.
+- Import the native Terminal profile, recover rendering after hidden-view WebGL loss, and retain
+  the WezTerm capability identity for truecolor and modified-key support.
+
+### Agent spawning and platform foundations
+
+- Add an optional model override to MCP and control agent spawning, compact template summaries,
+  and dedicated spawning guidance.
+- Add Windows runtime, ConPTY, PowerShell installation, path handling, and self-update groundwork
+  for the daemon, CLI, and desktop app. Windows artifacts are not yet published by this pipeline.
+
 ## 0.1.9 - 2026-08-17
 
 Workman 0.1.9 adds flexible workspace and agent workflows, expands project controls, and keeps
