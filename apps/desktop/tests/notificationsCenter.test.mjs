@@ -14,6 +14,12 @@ test('notification rows show project icons, worktree markers, names, and aligned
   assert.match(center, /aria-label=\{`\$\{notificationTypeLabel\(notification\)\} · \$\{attachedProjectName\}\$\{project\?\.parent_project_id[\s\S]*' · Worktree'/);
   assert.match(center, /worktree=\{project\.parent_project_id !== null\}/);
   assert.match(center, /worktreeTooltip=\{false\}/);
+  assert.match(center, /class="notification-icons" aria-hidden="true"/);
+  assert.match(center, /class="notification-type-icon"/);
+  assert.match(center, /notification\.type === 'needs_input'[\s\S]*CircleHelpIcon/);
+  assert.match(center, /notification\.type === 'todo_assigned_to_you'[\s\S]*UserRoundCheckIcon/);
+  assert.match(center, /notification\.type === 'mentioned_in_comment'[\s\S]*AtSignIcon/);
+  assert.match(center, /\.notification-icons \{[^}]*width: 38px;[^}]*height: 24px;/);
   assert.match(center, /Project no longer registered/);
   assert.match(center, /No project/);
   assert.match(center, /\{:else\}\s*<BellIcon/);

@@ -1,7 +1,10 @@
 <script lang="ts">
   import BellIcon from '@lucide/svelte/icons/bell';
+  import AtSignIcon from '@lucide/svelte/icons/at-sign';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import CircleHelpIcon from '@lucide/svelte/icons/circle-help';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import UserRoundCheckIcon from '@lucide/svelte/icons/user-round-check';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
@@ -166,20 +169,33 @@
                   aria-label={`${notificationTypeLabel(notification)} · ${attachedProjectName}${project?.parent_project_id !== null && project?.parent_project_id !== undefined ? ' · Worktree' : ''} · ${notification.body}`}
                   onclick={() => choose(notification)}
                 >
-                  <span class="notification-project-icon">
-                    {#if project}
-                      <ProjectIcon
-                        icon={project.icon}
-                        color={project.icon_color}
-                        image={project.icon_image?.data_url}
-                        fallback={project.repository_id !== null ? 'repository' : 'project'}
-                        worktree={project.parent_project_id !== null}
-                        worktreeTooltip={false}
-                        size={16}
-                      />
-                    {:else}
-                      <BellIcon size={14} strokeWidth={1.8} aria-hidden="true" />
-                    {/if}
+                  <span class="notification-icons" aria-hidden="true">
+                    <span class="notification-project-icon">
+                      {#if project}
+                        <ProjectIcon
+                          icon={project.icon}
+                          color={project.icon_color}
+                          image={project.icon_image?.data_url}
+                          fallback={project.repository_id !== null ? 'repository' : 'project'}
+                          worktree={project.parent_project_id !== null}
+                          worktreeTooltip={false}
+                          size={16}
+                        />
+                      {:else}
+                        <BellIcon size={14} strokeWidth={1.8} />
+                      {/if}
+                    </span>
+                    <span class="notification-type-icon">
+                      {#if notification.type === 'needs_input'}
+                        <CircleHelpIcon size={12} strokeWidth={1.9} />
+                      {:else if notification.type === 'todo_assigned_to_you'}
+                        <UserRoundCheckIcon size={12} strokeWidth={1.9} />
+                      {:else if notification.type === 'mentioned_in_comment'}
+                        <AtSignIcon size={12} strokeWidth={1.9} />
+                      {:else}
+                        <CircleCheckIcon size={12} strokeWidth={1.9} />
+                      {/if}
+                    </span>
                   </span>
                   <span class="notification-copy">
                     <span class="notification-meta">
@@ -240,7 +256,9 @@
   .notification-open { display: flex; width: 100%; min-width: 0; flex: 1; align-items: start; gap: var(--space-2); border: 0; border-radius: var(--radius); padding: var(--space-2); background: transparent; color: inherit; text-align: left; cursor: pointer; }
   .notification-open:hover { background: var(--accent); }
   .notification-open:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
+  .notification-icons { display: flex; width: 38px; height: 24px; flex: none; align-items: center; gap: 2px; }
   .notification-project-icon { display: grid; width: 24px; height: 24px; flex: none; overflow: visible; place-items: center; border: 1px solid var(--border); border-radius: var(--radius); color: var(--muted-foreground); background: var(--card); }
+  .notification-type-icon { display: grid; width: 12px; height: 18px; flex: none; place-items: center; color: var(--muted-foreground); }
   .notification-copy { min-width: 0; flex: 1; }
   .notification-meta { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
   .notification-meta strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
