@@ -155,10 +155,10 @@
 
 <style>
   .worktree-meta { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
-  .worktree-meta.compact { height: 12px; gap: 0; pointer-events: none; }
-  .worktree-meta.compact :global(.project-pr-pip) { display: grid; width: 12px; min-width: 12px; height: 12px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; pointer-events: auto; }
+  .worktree-meta.compact { height: 8px; gap: 0; pointer-events: none; }
+  .worktree-meta.compact :global(.project-pr-pip) { display: grid; width: 8px; min-width: 8px; height: 8px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; pointer-events: auto; }
   .worktree-meta.compact :global(.project-pr-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
-  .pr-pip-mark { display: block; width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; background: var(--success); }
+  .pr-pip-mark { display: block; width: 5px; height: 5px; border: 1px solid var(--card); border-radius: 999px; background: var(--success); }
   .pr-pip-mark[data-state='merged'] { background: var(--pull-request-merged); }
   .pr-pip-mark[data-state='draft'] { background: var(--muted-foreground); opacity: .7; }
   .pr-pip-mark[data-state='closed'] { background: var(--destructive); }

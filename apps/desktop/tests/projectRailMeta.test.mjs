@@ -41,7 +41,7 @@ test('project rows order agent, terminal, command, then PR in expanded and colla
   assert.match(app, /\.project-select \{[^}]*position: relative;[^}]*grid-template-rows: minmax\(20px, auto\) 20px;/);
   assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
-  assert.match(app, /\.project-compact-meta \{[^}]*display: inline-flex;[^}]*height: 12px;/);
+  assert.match(app, /\.project-compact-meta \{[^}]*display: inline-flex;[^}]*height: 8px;/);
   assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--accent\);/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
@@ -157,7 +157,8 @@ test('kind indicators expose click-only per-process rosters and shared popover s
   assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
   assert.match(indicators, /onclick=\{\(event\) => togglePopover\(kind, event\)\}/);
   assert.match(indicators, /label=\{detail\.label\}\s*tooltip=\{false\}/);
-  assert.match(indicators, /\.project-kind-indicators\.compact \{[^}]*height: 12px;[^}]*min-height: 12px;[^}]*pointer-events: none;/);
+  assert.match(indicators, /\.project-kind-indicators\.compact \{[^}]*height: 8px;[^}]*min-height: 8px;[^}]*pointer-events: none;/);
+  assert.match(indicators, /\.project-kind-pip\)[^}]*width: 8px;[^}]*height: 8px;/);
   assert.match(indicators, /\.project-kind-pip\)[^}]*pointer-events: auto;/);
   assert.match(iconButton, /tooltip\?: boolean/);
   assert.match(iconButton, /aria-label=\{label\}/);
@@ -187,6 +188,7 @@ test('pull request icons always open a coordinated click-only list popover', asy
   assert.match(pullRequests, /compact\?: boolean/);
   assert.match(pullRequests, /class=\{compact \? 'project-pr-pip'/);
   assert.match(pullRequests, /<span class="pr-pip-mark" data-state=\{pullRequest\.state\}/);
+  assert.match(pullRequests, /\.project-pr-pip\)[^}]*width: 8px;[^}]*height: 8px;/);
   assert.doesNotMatch(pullRequests, /TooltipLabel|<Tooltip\./);
   assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
   assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);

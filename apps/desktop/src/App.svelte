@@ -5604,7 +5604,7 @@
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
   .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
   .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
-  .project-compact-meta { position: absolute; z-index: 4; right: 0; bottom: 0; display: inline-flex; height: 12px; align-items: end; pointer-events: none; }
+  .project-compact-meta { position: absolute; z-index: 4; right: 0; bottom: 0; display: inline-flex; height: 8px; align-items: end; pointer-events: none; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }
   .project-tooltip-copy > strong { color: inherit; font-size: var(--font-size-xs); font-weight: 650; }
