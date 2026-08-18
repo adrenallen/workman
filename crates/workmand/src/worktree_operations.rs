@@ -9,11 +9,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use workman_core::ProjectId;
+use workman_core::{Project, ProjectId};
 
 use crate::{SharedProcessRegistry, status_invalidation::StatusInvalidationHub, worktrees};
 
 const MAX_OPERATIONS: usize = 64;
+const TERMINAL_RECONCILE_GRACE_MS: u64 = 2_000;
+const TERMINAL_RETENTION_MS: u64 = 15 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -74,12 +76,20 @@ pub(crate) struct WorktreeOperation {
     project: Option<worktrees::ProjectEnvelope>,
     created_at: u64,
     updated_at: u64,
+    #[serde(skip)]
+    registration_completed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WorktreeOperationAck {
     pub operation_id: String,
     pub accepted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WorktreeOperationDismissal {
+    pub operation_id: String,
+    pub dismissed: bool,
 }
 
 #[derive(Clone)]
@@ -102,6 +112,7 @@ impl WorktreeOperationHub {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<WorktreeOperation> {
         self.inner
             .lock()
@@ -109,6 +120,31 @@ impl WorktreeOperationHub {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn snapshot_reconciled(&self, projects: &[Project]) -> Vec<WorktreeOperation> {
+        let now = now_millis();
+        let mut operations = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        operations.retain(|operation| operation_is_relevant(operation, projects, now));
+        operations.iter().cloned().collect()
+    }
+
+    pub(crate) fn dismiss(&self, id: &str) -> bool {
+        let mut operations = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = operations.len();
+        operations.retain(|operation| operation.id != id);
+        let dismissed = operations.len() != before;
+        drop(operations);
+        if dismissed {
+            self.status_invalidations.invalidate();
+        }
+        dismissed
     }
 
     fn begin(&self, operation: WorktreeOperation) -> Result<(), StartError> {
@@ -150,6 +186,24 @@ impl WorktreeOperationHub {
             self.status_invalidations.invalidate();
         }
     }
+
+    fn clear_failed_for_repository(&self, repository_id: i64, except_id: &str) {
+        let mut operations = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = operations.len();
+        operations.retain(|operation| {
+            operation.id == except_id
+                || operation.status != WorktreeOperationStatus::Failed
+                || operation.repository_id != Some(repository_id)
+        });
+        let changed = operations.len() != before;
+        drop(operations);
+        if changed {
+            self.status_invalidations.invalidate();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -163,6 +217,11 @@ impl WorktreeOperationReporter {
         let detail = detail.into();
         self.hub.update(&self.operation_id, |operation| {
             operation.status = WorktreeOperationStatus::Running;
+            if id == WorktreeStepId::Worktree
+                && let Some(path) = detail.as_ref()
+            {
+                operation.path = Some(path.clone());
+            }
             if let Some(step) = operation.steps.iter_mut().find(|step| step.id == id) {
                 step.status = WorktreeStepStatus::Running;
                 step.detail = detail;
@@ -173,6 +232,9 @@ impl WorktreeOperationReporter {
     pub(crate) fn completed(&self, id: WorktreeStepId, detail: impl Into<Option<String>>) {
         let detail = detail.into();
         self.hub.update(&self.operation_id, |operation| {
+            if id == WorktreeStepId::Registered {
+                operation.registration_completed = true;
+            }
             if let Some(step) = operation.steps.iter_mut().find(|step| step.id == id) {
                 step.status = WorktreeStepStatus::Completed;
                 step.detail = detail;
@@ -191,6 +253,7 @@ impl WorktreeOperationReporter {
     }
 
     fn finish(&self, mutation: &worktrees::WorktreeMutation) {
+        let repository_id = mutation.repository.id;
         self.hub.update(&self.operation_id, |operation| {
             operation.status = WorktreeOperationStatus::Completed;
             operation.error = None;
@@ -206,6 +269,8 @@ impl WorktreeOperationReporter {
                 }
             }
         });
+        self.hub
+            .clear_failed_for_repository(repository_id, &self.operation_id);
     }
 
     fn fail(&self, message: String) {
@@ -287,6 +352,23 @@ struct AdoptParams {
     display_name: Option<String>,
     #[serde(default)]
     preferences: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DismissParams {
+    operation_id: String,
+}
+
+pub(crate) fn dismiss(
+    params: Value,
+    hub: &WorktreeOperationHub,
+) -> Result<WorktreeOperationDismissal, StartError> {
+    let params: DismissParams = parse_params(params)?;
+    validate_operation_id(&params.operation_id)?;
+    Ok(WorktreeOperationDismissal {
+        dismissed: hub.dismiss(&params.operation_id),
+        operation_id: params.operation_id,
+    })
 }
 
 pub(crate) async fn start(
@@ -499,7 +581,43 @@ fn new_operation(
         project: None,
         created_at: now,
         updated_at: now,
+        registration_completed: false,
     }
+}
+
+fn operation_is_relevant(operation: &WorktreeOperation, projects: &[Project], now: u64) -> bool {
+    if operation.status == WorktreeOperationStatus::Running {
+        return true;
+    }
+    let age = now.saturating_sub(operation.updated_at);
+    if age >= TERMINAL_RETENTION_MS {
+        return false;
+    }
+    if operation.status == WorktreeOperationStatus::Completed || age < TERMINAL_RECONCILE_GRACE_MS {
+        return true;
+    }
+    if operation
+        .source_project_id
+        .is_some_and(|project_id| !projects.iter().any(|project| project.id == project_id))
+    {
+        return false;
+    }
+    let Some(path) = operation.path.as_deref() else {
+        return true;
+    };
+    if !PathBuf::from(path).exists() {
+        return false;
+    }
+    !operation.registration_completed || project_registered_at_path(projects, path)
+}
+
+fn project_registered_at_path(projects: &[Project], path: &str) -> bool {
+    let path = PathBuf::from(path);
+    let canonical = workman_core::canonical_path(&path).unwrap_or(path);
+    projects.iter().any(|project| {
+        let project_path = PathBuf::from(&project.path);
+        workman_core::canonical_path(&project_path).unwrap_or(project_path) == canonical
+    })
 }
 
 fn initial_steps(mode: WorktreeOperationMode) -> Vec<WorktreeOperationStep> {
@@ -606,5 +724,96 @@ mod tests {
         assert!(validate_operation_id("fixture_123-ok").is_ok());
         assert!(validate_operation_id("../../escape").is_err());
         assert!(validate_operation_id("").is_err());
+    }
+
+    #[test]
+    fn hub_dismisses_operations_and_prunes_expired_or_reconciled_failures() {
+        let invalidations = StatusInvalidationHub::default();
+        let hub = WorktreeOperationHub::new(invalidations.clone());
+        hub.begin(new_operation(
+            "dismiss-me".into(),
+            WorktreeOperationMode::Create,
+            Some(1),
+            Some(9),
+            Some("feature/dismiss".into()),
+            None,
+        ))
+        .unwrap();
+        assert!(hub.dismiss("dismiss-me"));
+        assert!(!hub.dismiss("dismiss-me"));
+        assert!(hub.snapshot().is_empty());
+
+        let missing = new_operation(
+            "missing-failure".into(),
+            WorktreeOperationMode::Create,
+            Some(1),
+            Some(9),
+            Some("feature/missing".into()),
+            Some("/definitely/missing/workman-operation".into()),
+        );
+        hub.begin(missing).unwrap();
+        let reporter = WorktreeOperationReporter {
+            hub: hub.clone(),
+            operation_id: "missing-failure".into(),
+        };
+        reporter.fail("fixture failure".into());
+        {
+            let mut operations = hub.inner.lock().unwrap();
+            operations[0].updated_at = now_millis() - TERMINAL_RECONCILE_GRACE_MS - 1;
+        }
+        let source = Project {
+            id: 1,
+            path: "/fixture/source".into(),
+            name: "source".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+        assert!(hub.snapshot_reconciled(&[source]).is_empty());
+
+        let expired = new_operation(
+            "expired-failure".into(),
+            WorktreeOperationMode::Fork,
+            Some(1),
+            Some(9),
+            Some("feature/expired".into()),
+            None,
+        );
+        hub.begin(expired).unwrap();
+        {
+            let mut operations = hub.inner.lock().unwrap();
+            operations[0].status = WorktreeOperationStatus::Failed;
+            operations[0].updated_at = now_millis() - TERMINAL_RETENTION_MS;
+        }
+        assert!(hub.snapshot_reconciled(&[]).is_empty());
+        assert!(invalidations.version_at(0) >= 4);
+    }
+
+    #[test]
+    fn successful_repository_operation_clears_older_failures() {
+        let hub = WorktreeOperationHub::default();
+        for id in ["older-failure", "successful"] {
+            hub.begin(new_operation(
+                id.into(),
+                WorktreeOperationMode::Create,
+                Some(1),
+                Some(7),
+                Some(format!("feature/{id}")),
+                None,
+            ))
+            .unwrap();
+        }
+        hub.update("older-failure", |operation| {
+            operation.status = WorktreeOperationStatus::Failed;
+        });
+        hub.clear_failed_for_repository(7, "successful");
+        assert_eq!(
+            hub.snapshot()
+                .into_iter()
+                .map(|operation| operation.id)
+                .collect::<Vec<_>>(),
+            vec!["successful"]
+        );
     }
 }

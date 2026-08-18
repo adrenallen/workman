@@ -1766,38 +1766,26 @@
 
   async function reconcileCompletedWorktree(operation: WorktreeOperation): Promise<void> {
     if (!operation.project) return;
-    const optimisticProject: Project = {
-      ...operation.project,
-      status: operation.project.status ?? 'idle'
-    };
-    if (!projects.some((project) => project.id === optimisticProject.id)) {
-      projects = [...projects, optimisticProject].sort(
-        (left, right) => left.sort_order - right.sort_order || left.id - right.id
-      );
-    }
-    if (operation.mode === 'adopt' && operation.repository_id !== null && operation.path) {
-      const currentList = worktreeLists[operation.repository_id];
-      if (currentList) {
-        worktreeLists = {
-          ...worktreeLists,
-          [operation.repository_id]: {
-            ...currentList,
-            worktrees: currentList.worktrees.map((entry) => entry.path === operation.path
-              ? {
-                  ...entry,
-                  project_id: optimisticProject.id,
-                  parent_project_id: optimisticProject.parent_project_id,
-                  kind: 'adopted',
-                  registered: true,
-                  can_adopt: false
-                }
-              : entry)
-          }
-        };
+    try {
+      const refreshedProjects = await client.projects();
+      projects = refreshedProjects;
+      const project = refreshedProjects.find((candidate) => candidate.id === operation.project?.id);
+      if (!project) {
+        dismissTrackedWorktreeOperation(operation.id);
+        if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+        return;
       }
+      if (operation.repository_id !== null) {
+        await refreshWorktreeMetadata(projects, true, true, operation.repository_id);
+      }
+      await tick();
+      dismissTrackedWorktreeOperation(operation.id);
+      if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+      appNavigation.navigate({ type: 'project', projectId: project.id }, 'api');
+    } catch (cause) {
+      reconciledWorktreeOperations.delete(operation.id);
+      reportError(cause);
     }
-    await tick();
-    appNavigation.navigate({ type: 'project', projectId: optimisticProject.id }, 'api');
   }
 
   function showWorktreeOperation(operation: WorktreeOperation): void {
@@ -1809,8 +1797,15 @@
     selection = null;
   }
 
+  function dismissTrackedWorktreeOperation(operationId: string): void {
+    dismissWorktreeOperation(
+      operationId,
+      (id) => client.dismissWorktreeOperation(id)
+    );
+  }
+
   function dismissActiveWorktreeOperation(): void {
-    if (activeWorktreeOperationId) dismissWorktreeOperation(activeWorktreeOperationId);
+    if (activeWorktreeOperationId) dismissTrackedWorktreeOperation(activeWorktreeOperationId);
     activeWorktreeOperationId = null;
   }
 
@@ -1820,7 +1815,7 @@
           project.repository_id === operation.repository_id && project.parent_project_id === null
         )
       : projects.find((project) => project.id === operation.source_project_id);
-    dismissWorktreeOperation(operation.id);
+    dismissTrackedWorktreeOperation(operation.id);
     activeWorktreeOperationId = null;
     if (!source) {
       reportError(new Error('The source project is no longer available'));
@@ -3500,6 +3495,12 @@
       removeWorktreeDialog = null;
       if (removal.registration_issue || (deleteFromDisk && removal.files_untouched)) {
         removeWorktreeNotice = `Files left untouched at ${removal.path}.${removal.registration_issue ? ` ${removal.registration_issue}` : ''}`;
+      }
+      for (const operation of $worktreeOperations) {
+        if (operation.project?.id === state.project.id || operation.path === state.project.path) {
+          dismissTrackedWorktreeOperation(operation.id);
+          if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
+        }
       }
       projects = await client.projects();
       if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {

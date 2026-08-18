@@ -64,7 +64,8 @@ import {
   replaceWorktreeOperations,
   resetWorktreeOperations,
   type WorktreeOperation,
-  type WorktreeOperationAck
+  type WorktreeOperationAck,
+  type WorktreeOperationDismissal
 } from './worktreeProgress';
 import type { ClaimedTodo } from './claimedTodos';
 import { DaemonRequestTimeoutError } from './daemonLog';
@@ -737,6 +738,14 @@ export class DaemonClient
       path,
       display_name: displayName
     });
+  }
+
+  dismissWorktreeOperation(operationId: string): Promise<WorktreeOperationDismissal> {
+    return this.requestOptional(
+      'worktree.operation_dismiss',
+      { operation_id: operationId },
+      { operation_id: operationId, dismissed: false }
+    );
   }
 
   removeWorktree(input: RemoveWorktreeInput): Promise<WorktreeRemoval> {
