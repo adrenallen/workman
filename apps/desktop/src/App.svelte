@@ -4647,7 +4647,8 @@
                     icon={project.icon}
                     color={project.icon_color}
                     image={project.icon_image?.data_url}
-                    fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                    fallback={project.repository_id !== null ? 'repository' : 'project'}
+                    worktree={parentLabel !== null}
                     size={15}
                   />
                 </span>
@@ -5412,7 +5413,7 @@
   .project-copy { min-width: 0; grid-column: 2; grid-row: 1; }
   .project-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: hidden; margin: 0 3px 3px 34px; pointer-events: none; }
+  .project-meta-strip { position: relative; z-index: 3; display: inline-flex; min-width: 0; height: 20px; grid-column: 1; grid-row: 1; align-self: end; justify-self: stretch; align-items: center; justify-content: flex-start; gap: 1px; overflow: visible; margin: 0 3px 3px 34px; pointer-events: none; }
   .project-meta-strip :global(.worktree-meta), .project-meta-strip :global(.project-kind-indicators) { pointer-events: auto; }
   .project-tooltip-copy { display: contents; }
   .project-tooltip-copy > strong, .project-tooltip-copy > span { display: block; min-width: 0; overflow-wrap: anywhere; }

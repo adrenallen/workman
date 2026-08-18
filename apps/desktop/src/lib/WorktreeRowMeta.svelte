@@ -131,7 +131,7 @@
   .worktree-meta { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
   .pull-request-picker { display: inline-flex; }
   .multi-pr-icon { position: relative; display: inline-flex; }
-  .multi-pr-icon > span:last-child { position: absolute; right: -7px; bottom: -6px; display: grid; min-width: 12px; height: 12px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 2px; background: var(--foreground); color: var(--background); font-family: var(--terminal-font-family); font-size: 8px; font-weight: 750; line-height: 1; }
+  .multi-pr-icon > span:last-child { position: absolute; top: -6px; right: -7px; display: grid; min-width: 12px; height: 12px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 2px; background: var(--foreground); color: var(--background); font-family: var(--terminal-font-family); font-size: 8px; font-weight: 750; line-height: 1; }
   .no-pull-request { display: inline-flex; width: 20px; height: 20px; cursor: default; align-items: center; justify-content: center; color: var(--muted-foreground); opacity: .72; }
   :global(.spin) { animation: worktree-spin 800ms linear infinite; }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }

@@ -35,7 +35,7 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.match(app, /\.project-row \{[^}]*min-height: 44px;/);
   assert.match(app, /\.project-meta-strip \{[^}]*height: 20px;/);
   assert.match(app, /\.project-select \{[^}]*position: relative;[^}]*grid-template-rows: minmax\(20px, auto\) 20px;/);
-  assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: hidden;[^}]*pointer-events: none;/);
+  assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
@@ -80,6 +80,26 @@ test('kind indicators consume helper tones, bound counts, and restore row focus'
   assert.match(indicators, /querySelector<HTMLButtonElement>\('\.project-select'\)/);
   assert.match(indicators, /tick\(\)\.then\(\(\) => projectButton\.focus\(\)\)/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
+});
+
+test('rail badges overflow upward and worktrees mark the project icon corner', async () => {
+  const [row, icon, indicators, pullRequests] = await Promise.all([
+    projectRowSource(),
+    readFile(new URL('../src/lib/ProjectIcon.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/WorktreeRowMeta.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(row, /fallback=\{project\.repository_id !== null \? 'repository' : 'project'\}/);
+  assert.match(row, /worktree=\{parentLabel !== null\}/);
+  assert.match(icon, /worktree\?: boolean/);
+  assert.match(icon, /data-project-worktree-badge/);
+  assert.match(icon, /label="Worktree"/);
+  assert.match(icon, /\.project-icon > :global\(\.tooltip-anchor\) \{[^}]*bottom: -4px;[^}]*left: -4px;/);
+  assert.match(indicators, /\.kind-glyph small \{[^}]*top: -5px;[^}]*right: -5px;/);
+  assert.doesNotMatch(indicators, /\.kind-glyph small \{[^}]*bottom:/);
+  assert.match(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*top: -6px;[^}]*right: -7px;/);
+  assert.doesNotMatch(pullRequests, /\.multi-pr-icon > span:last-child \{[^}]*bottom:/);
 });
 
 test('path remains visible in project overview and project settings', async () => {

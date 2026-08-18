@@ -198,7 +198,7 @@
   .project-kind-indicator[data-tone='needs-input'] { --indicator-tone: var(--warning-token); }
   .project-kind-indicator :global(.project-kind-trigger) { width: 18px; min-width: 18px; height: 20px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0; color: inherit; background: var(--card); }
   .kind-glyph { position: relative; display: grid; width: 14px; height: 14px; place-items: center; }
-  .kind-glyph small { position: absolute; right: -5px; bottom: -5px; display: grid; min-width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 1px; color: var(--card); background: var(--indicator-tone); font: 750 8px/1 var(--terminal-font-family); text-align: center; }
+  .kind-glyph small { position: absolute; top: -5px; right: -5px; display: grid; min-width: 11px; height: 11px; place-items: center; border: 1px solid var(--card); border-radius: 999px; padding: 0 1px; color: var(--card); background: var(--indicator-tone); font: 750 8px/1 var(--terminal-font-family); text-align: center; }
 
   .project-kind-indicators.compact { position: absolute; z-index: 4; right: 0; bottom: 0; align-items: end; gap: 0; }
   .compact .project-kind-indicator :global(.project-kind-pip) { display: grid; width: 12px; min-width: 12px; height: 12px; place-items: center; border: 0; border-radius: 0; padding: 0; background: transparent; color: transparent; }
