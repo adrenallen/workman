@@ -4,7 +4,6 @@
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
-  import TooltipLabel from '$lib/components/ds/TooltipLabel.svelte';
   import * as Popover from '$lib/components/ui/popover';
   import { openBrowserUrl } from './openers';
   import PullRequestList from './PullRequestList.svelte';
@@ -85,6 +84,7 @@
               {...props}
               class="size-5 border border-border bg-card"
               label={`Show ${pullRequests.length} pull request${pullRequests.length === 1 ? '' : 's'} for ${entry?.branch ?? 'this branch'}`}
+              tooltip={false}
               disabled={openingPullRequest}
               aria-expanded={popoverOpen}
               data-project-pr-trigger
@@ -122,6 +122,7 @@
     <IconButton
       class="size-5 text-warning"
       label={pullRequestUnavailableLabel}
+      tooltip={false}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
     >
@@ -129,16 +130,15 @@
     </IconButton>
   {:else if showNoPullRequest && entry && pullRequestCache?.available === true}
     {@const noPullRequestLabel = `No pull request for ${entry.branch}`}
-    <TooltipLabel label={noPullRequestLabel}>
-      <span class="no-pull-request" aria-label={noPullRequestLabel}>
-        <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
-      </span>
-    </TooltipLabel>
+    <span class="no-pull-request" aria-label={noPullRequestLabel}>
+      <GitPullRequestIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+    </span>
   {/if}
   {#if showRefresh && !pullRequestUnavailable}
     <IconButton
       class="size-5 opacity-0 group-hover/repository:opacity-100 focus-visible:opacity-100"
       label={`Refresh pull request status for ${repositoryName}`}
+      tooltip={false}
       disabled={refreshing}
       onclick={(event) => { event.stopPropagation(); onRefresh(); }}
     >

@@ -417,6 +417,7 @@
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let projectRailPopoverKey = $state<string | null>(null);
+  let projectRailTooltipEpoch = $state(0);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
@@ -4285,7 +4286,12 @@
     savePanelPreference('section-rail', { collapsed: treeRailCollapsed, width: treeRailWidth });
   }
 
+  function closeProjectRailTooltip(): void {
+    projectRailTooltipEpoch += 1;
+  }
+
   function toggleProjectRail(): void {
+    closeProjectRailTooltip();
     projectRailCollapsed = !projectRailCollapsed;
     persistProjectRail();
   }
@@ -4734,6 +4740,7 @@
   {@const projectProcesses = projectRailProcesses(project)}
   {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
   {@const activityLabel = projectRailActivityLabel(project, activity)}
+  {@const projectTooltipRenderKey = `${project.id}:${project.selected}:${fullTitle}:${project.path}:${parentLabel ?? ''}:${activityLabel}:${unreadAgentCount}:${projectRailCollapsed}:${projectRailTooltipEpoch}`}
   <article
     class:active={project.selected}
     class:has-unread={unreadAgentCount > 0}
@@ -4767,53 +4774,52 @@
               data-context-id={project.id}
             >
               <span class="project-icon-anchor">
-                <TooltipLabel
-                  label={tooltipLabel}
-                  side={projectRailCollapsed ? 'right' : 'top'}
-                  sideOffset={8}
-                  delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
-                  disableHoverableContent={true}
-                  skipDelayDuration={0}
-                  contentClass="project-rail-tooltip"
-                  tabindex={-1}
-                >
-                  {#snippet children()}
-                    <span class="project-kind-icon" aria-hidden="true">
-                      <ProjectIcon
-                        icon={project.icon}
-                        color={project.icon_color}
-                        image={project.icon_image?.data_url}
-                        fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-                        worktree={parentLabel !== null}
-                        worktreeTooltip={false}
-                        size={15}
-                      />
-                    </span>
-                  {/snippet}
-                  {#snippet content()}
-                    <span class="project-tooltip-copy">
-                      <strong>{fullTitle}</strong>
-                      <span>{project.path}</span>
-                      {#if parentLabel !== null}
-                        <span class="project-tooltip-parent">
-                          <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
-                          Worktree of {parentLabel}
-                        </span>
-                      {/if}
-                    </span>
-                  {/snippet}
-                </TooltipLabel>
+                {#key projectTooltipRenderKey}
+                  <TooltipLabel
+                    label={tooltipLabel}
+                    side={projectRailCollapsed ? 'right' : 'top'}
+                    sideOffset={8}
+                    delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
+                    disableHoverableContent={true}
+                    skipDelayDuration={0}
+                    contentClass="project-rail-tooltip"
+                    tabindex={-1}
+                    onpointerleave={closeProjectRailTooltip}
+                    onpointerdown={closeProjectRailTooltip}
+                  >
+                    {#snippet children()}
+                      <span class="project-kind-icon" aria-hidden="true">
+                        <ProjectIcon
+                          icon={project.icon}
+                          color={project.icon_color}
+                          image={project.icon_image?.data_url}
+                          fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                          worktree={parentLabel !== null}
+                          worktreeTooltip={false}
+                          size={15}
+                        />
+                      </span>
+                    {/snippet}
+                    {#snippet content()}
+                      <span class="project-tooltip-copy">
+                        <strong>{fullTitle}</strong>
+                        <span>{project.path}</span>
+                        {#if parentLabel !== null}
+                          <span class="project-tooltip-parent">
+                            <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                            Worktree of {parentLabel}
+                          </span>
+                        {/if}
+                      </span>
+                    {/snippet}
+                  </TooltipLabel>
+                {/key}
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}
-                <TooltipLabel
-                  label={`${unreadAgentCount} unread finished agent${unreadAgentCount === 1 ? '' : 's'} in ${fullTitle}`}
-                  tabindex={-1}
-                >
-                  <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-                    <span aria-hidden="true"></span>{unreadAgentCount}
-                  </span>
-                </TooltipLabel>
+                <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                  <span aria-hidden="true"></span>{unreadAgentCount}
+                </span>
               {/if}
         </button>
       </span>
@@ -4896,6 +4902,7 @@
     aria-label="Projects"
     data-app-panel="projects"
     tabindex="-1"
+    onpointerdown={closeProjectRailTooltip}
   >
     <header class="brand" data-tauri-drag-region>
       {#if projectRailCollapsed}
@@ -4949,7 +4956,7 @@
     </header>
 
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
-    <div class="project-list" aria-live="polite">
+    <div class="project-list" aria-live="polite" onscroll={closeProjectRailTooltip}>
       {#if projects.length === 0 && projectFolders.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Register a folder or switch profiles.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
       {/if}
@@ -5572,8 +5579,7 @@
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
   :global(.project-rail-tooltip) { pointer-events: none; }
-  .project-select > :global(.tooltip-anchor) { grid-column: 3; grid-row: 1; }
-  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; grid-column: 3; grid-row: 1; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }

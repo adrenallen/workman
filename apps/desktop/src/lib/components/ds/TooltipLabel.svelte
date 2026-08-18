@@ -14,6 +14,8 @@
     skipDelayDuration?: number;
     contentClass?: string;
     tabindex?: number;
+    onpointerleave?: (event: PointerEvent) => void;
+    onpointerdown?: (event: PointerEvent) => void;
   }
 
   let {
@@ -26,7 +28,9 @@
     disableHoverableContent = false,
     skipDelayDuration = 300,
     contentClass,
-    tabindex = 0
+    tabindex = 0,
+    onpointerleave,
+    onpointerdown
   }: Props = $props();
 </script>
 
@@ -34,7 +38,7 @@
   <Tooltip.Root>
     <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
-        <span {...props} class="tooltip-anchor">{@render children()}</span>
+        <span {...props} {onpointerleave} {onpointerdown} class="tooltip-anchor">{@render children()}</span>
       {/snippet}
     </Tooltip.Trigger>
     <Tooltip.Content {side} {sideOffset} class={contentClass}>

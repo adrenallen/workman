@@ -44,7 +44,7 @@ test('expanded project rows reserve a second-line meta strip in PR, agent, termi
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
 
-test('project tooltip is icon-only, delayed, non-blocking, and keeps worktree context', async () => {
+test('project tooltip is the sole row tooltip and closes on every stale-hover path', async () => {
   const [row, app, tooltip, timing] = await Promise.all([
     projectRowSource(),
     readFile(appUrl, 'utf8'),
@@ -55,22 +55,32 @@ test('project tooltip is icon-only, delayed, non-blocking, and keeps worktree co
   assert.match(row, /\{@const tooltipLabel = `\$\{fullTitle\} · \$\{project\.path\}/);
   assert.match(row, /aria-label=\{`\$\{tooltipLabel\} · \$\{projectKind\} · \$\{activityLabel\}/);
   assert.match(row, /\{:else\}\s*<span class="project-content">\s*<button/);
-  assert.match(row, /<span class="project-icon-anchor">\s*<TooltipLabel/);
+  assert.match(row, /<span class="project-icon-anchor">\s*\{#key projectTooltipRenderKey\}\s*<TooltipLabel/);
+  assert.equal(row.match(/<TooltipLabel/g)?.length, 1);
   assert.match(row, /delayDuration=\{PROJECT_RAIL_TOOLTIP_DELAY_MS\}/);
   assert.match(row, /side=\{projectRailCollapsed \? 'right' : 'top'\}/);
   assert.match(row, /disableHoverableContent=\{true\}/);
   assert.match(row, /skipDelayDuration=\{0\}/);
   assert.match(row, /contentClass="project-rail-tooltip"/);
   assert.match(row, /contentClass="project-rail-tooltip"\s*tabindex=\{-1\}/);
+  assert.match(row, /onpointerleave=\{closeProjectRailTooltip\}/);
+  assert.match(row, /onpointerdown=\{closeProjectRailTooltip\}/);
   assert.match(row, /worktreeTooltip=\{false\}/);
   assert.match(row, /\{#snippet content\(\)\}[\s\S]*<strong>\{fullTitle\}<\/strong>[\s\S]*<span>\{project\.path\}<\/span>/);
   assert.match(row, /<GitBranchIcon[^>]*>[\s\S]*Worktree of \{parentLabel\}/);
   assert.match(app, /:global\(\.project-rail-tooltip\) \{ pointer-events: none; \}/);
+  assert.match(app, /function closeProjectRailTooltip\(\): void \{\s*projectRailTooltipEpoch \+= 1;/);
+  assert.match(app, /function toggleProjectRail\(\): void \{\s*closeProjectRailTooltip\(\);/);
+  assert.match(app, /class="project-list" aria-live="polite" onscroll=\{closeProjectRailTooltip\}/);
+  assert.match(row, /projectTooltipRenderKey = `\$\{project\.id\}:[^`]*\$\{projectRailCollapsed\}:\$\{projectRailTooltipEpoch\}`/);
+  assert.match(row, /<span class="project-unread-rollup" aria-label=\{`\$\{unreadAgentCount\} unread agents`\}>/);
   assert.match(tooltip, /delayDuration\?: number/);
   assert.match(tooltip, /tabindex\?: number/);
+  assert.match(tooltip, /onpointerleave\?: \(event: PointerEvent\) => void/);
+  assert.match(tooltip, /onpointerdown\?: \(event: PointerEvent\) => void/);
   assert.match(tooltip, /<Tooltip\.Provider \{delayDuration\} \{disableHoverableContent\} \{skipDelayDuration\}>/);
   assert.match(tooltip, /<Tooltip\.Trigger \{tabindex\}>/);
-  assert.match(timing, /PROJECT_RAIL_TOOLTIP_DELAY_MS = 800/);
+  assert.match(timing, /PROJECT_RAIL_TOOLTIP_DELAY_MS = 1_000/);
   assert.doesNotMatch(row, /<small>\{project\.path\}<\/small>/);
   assert.doesNotMatch(row, /class="worktree-parent"/);
 });
@@ -94,10 +104,10 @@ test('show-all process navigation is serialized and contributes the project to r
 });
 
 test('kind indicators expose click-only idle rosters and shared popover state', async () => {
-  const indicators = await readFile(
-    new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url),
-    'utf8'
-  );
+  const [indicators, iconButton] = await Promise.all([
+    readFile(new URL('../src/lib/ProjectKindIndicators.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/components/ds/IconButton.svelte', import.meta.url), 'utf8')
+  ]);
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
   assert.match(indicators, /\.project-kind-indicator\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
@@ -110,6 +120,12 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   assert.match(indicators, /return count > 99 \? '99\+' : String\(count\)/);
   assert.match(indicators, /openPopoverKey === popoverKey\(kind\)/);
   assert.match(indicators, /onclick=\{\(event\) => togglePopover\(kind, event\)\}/);
+  assert.match(indicators, /label=\{detail\.label\}\s*tooltip=\{false\}/);
+  assert.match(indicators, /\.project-kind-indicators\.compact \{[^}]*height: 12px;[^}]*min-height: 12px;[^}]*pointer-events: none;/);
+  assert.match(indicators, /\.project-kind-pip\)[^}]*pointer-events: auto;/);
+  assert.match(iconButton, /tooltip\?: boolean/);
+  assert.match(iconButton, /aria-label=\{label\}/);
+  assert.match(iconButton, /\{#if tooltip\}[\s\S]*<Tooltip\.Provider[\s\S]*\{:else\}\s*\{@render button\(\)\}/);
   assert.doesNotMatch(indicators, /onpointer(?:enter|leave)/);
   assert.doesNotMatch(indicators, /PopoverHoverIntent/);
   assert.doesNotMatch(indicators, /Date\.now\(\)/);
@@ -124,6 +140,11 @@ test('pull request icons always open a coordinated click-only list popover', asy
   assert.match(pullRequests, /open=\{popoverOpen\} onOpenChange=\{changeOpen\}/);
   assert.match(pullRequests, /onclick=\{togglePopover\}/);
   assert.match(pullRequests, /Show \$\{pullRequests\.length\} pull request/);
+  assert.match(pullRequests, /label=\{`Show \$\{pullRequests\.length\} pull request[\s\S]*tooltip=\{false\}/);
+  assert.match(pullRequests, /label=\{pullRequestUnavailableLabel\}\s*tooltip=\{false\}/);
+  assert.match(pullRequests, /label=\{`Refresh pull request status for \$\{repositoryName\}`\}\s*tooltip=\{false\}/);
+  assert.match(pullRequests, /<span class="no-pull-request" aria-label=\{noPullRequestLabel\}>/);
+  assert.doesNotMatch(pullRequests, /TooltipLabel|<Tooltip\./);
   assert.match(pullRequests, /<PullRequestList[\s\S]*onChoose=/);
   assert.doesNotMatch(pullRequests, /onpointer(?:enter|leave)/);
   assert.doesNotMatch(pullRequests, /pullRequestMode|PopoverHoverIntent/);
