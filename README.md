@@ -20,6 +20,15 @@ The full project specification, architecture, milestones, and design decisions l
 This builds the daemon, CLI, and desktop app in release mode and links them into
 `~/.local/bin` without sudo. Re-run it after pulling updates. Then run `wrk` in any
 project directory, `wrk app` for the desktop workspace, or `wrk mcp-setup` for Claude Code.
+
+On Windows, run the counterpart from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+It installs the same three binaries under `%LOCALAPPDATA%\Programs\Workman\bin` and adds
+that directory to the user PATH unless `-NoPath` is given.
 The installer links `wrk`, `workmand`, and `workman-desktop`; it also creates a `workman → wrk`
 convenience symlink unless `WORKMAN_INSTALL_ALIAS=0` is set. Obsolete pre-Workman and `gbuild*`
 symlinks are removed only after the new binaries link successfully, and running daemons are never

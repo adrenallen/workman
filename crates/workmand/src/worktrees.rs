@@ -834,7 +834,7 @@ pub(crate) async fn create_with_progress(
         .managed_root
         .unwrap_or_else(|| PathBuf::from(&repository.managed_root));
     std::fs::create_dir_all(&managed_root)?;
-    let managed_root = std::fs::canonicalize(&managed_root)?;
+    let managed_root = workman_core::canonical_path(&managed_root)?;
     repository.managed_root = managed_root.to_string_lossy().into_owned();
 
     let slug = site_slug(&request.branch);
@@ -1196,7 +1196,7 @@ pub(crate) async fn adopt_with_progress(
             Some(request.path.to_string_lossy().into_owned()),
         );
     }
-    let canonical_input = std::fs::canonicalize(&request.path).map_err(|error| {
+    let canonical_input = workman_core::canonical_path(&request.path).map_err(|error| {
         WorktreeError::InvalidPath(format!(
             "could not open {}: {error}",
             request.path.display()
@@ -1209,7 +1209,7 @@ pub(crate) async fn adopt_with_progress(
         &command_environment,
     )
     .await?;
-    let top = std::fs::canonicalize(top.trim())?;
+    let top = workman_core::canonical_path(top.trim())?;
     let snapshot = snapshot_async(&top, &command_environment).await?;
     let record = matching_record(&snapshot, &top).ok_or_else(|| {
         WorktreeError::InvalidPath(format!("{} is not a listed Git worktree", top.display()))
@@ -1958,7 +1958,7 @@ fn register_project(
     display_name: Option<&str>,
     managed: bool,
 ) -> WorktreeResult<Project> {
-    let canonical = std::fs::canonicalize(path)?;
+    let canonical = workman_core::canonical_path(path)?;
     let canonical_string = canonical.to_string_lossy().into_owned();
     let existing = store.get_project_by_path_any(&canonical_string)?;
     let display_name = normalized_optional_project_title(display_name);
@@ -2287,7 +2287,7 @@ async fn snapshot_async(
         environment,
     )
     .await?;
-    let top = std::fs::canonicalize(top.trim())?;
+    let top = workman_core::canonical_path(top.trim())?;
     let porcelain = git_required_bytes(
         &top,
         ["worktree", "list", "--porcelain", "-z"],
@@ -2308,7 +2308,7 @@ fn snapshot_sync(
         "resolve repository",
         environment,
     )?;
-    let top = std::fs::canonicalize(top.trim())?;
+    let top = workman_core::canonical_path(top.trim())?;
     let porcelain = std_git_output(&top, ["worktree", "list", "--porcelain", "-z"], environment)?;
     if !porcelain.status.success() {
         return Err(git_failure("list worktrees", &porcelain));
@@ -2322,7 +2322,7 @@ fn snapshot_from_porcelain(root_hint: PathBuf, bytes: &[u8]) -> WorktreeResult<R
         .first()
         .map(|record| record.path.clone())
         .unwrap_or(root_hint);
-    let root_path = std::fs::canonicalize(&root_path).unwrap_or(root_path);
+    let root_path = workman_core::canonical_path(&root_path).unwrap_or(root_path);
     let name = root_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2404,8 +2404,8 @@ async fn verify_project_delete_target(
             project.path
         )));
     }
-    let path = fs::canonicalize(&registered_path)?;
-    let home = dirs::home_dir().map(|home| fs::canonicalize(&home).unwrap_or(home));
+    let path = workman_core::canonical_path(&registered_path)?;
+    let home = dirs::home_dir().map(|home| workman_core::canonical_path(&home).unwrap_or(home));
     if path.parent().is_none() || home.as_ref().is_some_and(|home| path == *home) {
         return Err(WorktreeError::InvalidPath(format!(
             "refusing to delete suspicious project path {}",
@@ -2416,7 +2416,7 @@ async fn verify_project_delete_target(
         .iter()
         .filter(|candidate| candidate.id != project.id)
     {
-        let Ok(other_path) = fs::canonicalize(&other.path) else {
+        let Ok(other_path) = workman_core::canonical_path(&other.path) else {
             continue;
         };
         if other_path.starts_with(&path) {
@@ -2436,7 +2436,7 @@ async fn verify_project_delete_target(
     let Some(top) = git_optional(&path, ["rev-parse", "--show-toplevel"], environment).await?
     else {
         if let Some(hint) = recovery_hint.filter(|hint| hint.linked_worktree) {
-            let repository_root = fs::canonicalize(&hint.repository_root).map_err(|error| {
+            let repository_root = workman_core::canonical_path(&hint.repository_root).map_err(|error| {
                 WorktreeError::InvalidPath(format!(
                     "could not verify the repository for partially removed worktree {}: {error}",
                     path.display()
@@ -2468,7 +2468,7 @@ async fn verify_project_delete_target(
             recovering_partial_removal: false,
         });
     };
-    let top = fs::canonicalize(top.trim())?;
+    let top = workman_core::canonical_path(top.trim())?;
     if top != path {
         // A project may intentionally point at a subdirectory inside a larger
         // checkout. Deleting that exact folder must not be broadened to the
@@ -2547,7 +2547,7 @@ fn ensure_verified_directory_removed(
             path.display()
         )));
     }
-    let current = fs::canonicalize(path).map_err(|error| {
+    let current = workman_core::canonical_path(path).map_err(|error| {
         WorktreeError::InvalidPath(format!(
             "could not re-verify deletion target {}: {error}",
             path.display()
@@ -3048,7 +3048,8 @@ fn parse_origin_default_ref(output: &str) -> Option<String> {
 
 fn is_swm_managed_path(path: &Path, managed_root: &str, branch: &str) -> bool {
     let managed_root = absolute_path(PathBuf::from(managed_root));
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| absolute_path(path.to_path_buf()));
+    let path =
+        workman_core::canonical_path(path).unwrap_or_else(|_| absolute_path(path.to_path_buf()));
     path == managed_root.join(site_slug(branch))
 }
 
@@ -3057,7 +3058,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn canonical_display(path: &Path) -> String {
-    std::fs::canonicalize(path)
+    workman_core::canonical_path(path)
         .unwrap_or_else(|_| absolute_path(path.to_path_buf()))
         .to_string_lossy()
         .into_owned()
@@ -3200,19 +3201,19 @@ where
 }
 
 fn git_executable(environment: &BTreeMap<OsString, OsString>) -> WorktreeResult<PathBuf> {
-    let path = environment
-        .get(std::ffi::OsStr::new("PATH"))
-        .ok_or_else(|| WorktreeError::Git {
+    // Windows reports the variable as `Path` and launches `git.exe` through
+    // PATHEXT, so resolution goes through the runtime doctor's shared lookup.
+    let path = crate::runtime_doctor::path_variable(environment);
+    if path.is_empty() {
+        return Err(WorktreeError::Git {
             operation: "resolve Git executable".into(),
             message: "resolved user environment has no PATH".into(),
-        })?;
-    env::split_paths(path)
-        .map(|directory| directory.join("git"))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| WorktreeError::Git {
-            operation: "resolve Git executable".into(),
-            message: "git was not found in the resolved user PATH".into(),
-        })
+        });
+    }
+    crate::runtime_doctor::resolve_executable("git", &path).ok_or_else(|| WorktreeError::Git {
+        operation: "resolve Git executable".into(),
+        message: "git was not found in the resolved user PATH".into(),
+    })
 }
 
 async fn command_environment(registry: &SharedProcessRegistry) -> BTreeMap<OsString, OsString> {

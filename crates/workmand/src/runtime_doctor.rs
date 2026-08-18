@@ -110,10 +110,7 @@ pub async fn check_agent_tools_with_user_environment(
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    let path = variables
-        .get(OsStr::new("PATH"))
-        .cloned()
-        .unwrap_or_default();
+    let path = path_variable(&variables);
     let environment = DoctorEnvironment {
         home,
         path,
@@ -435,14 +432,81 @@ fn is_environment_assignment(word: &str) -> bool {
     })
 }
 
-fn resolve_executable(executable: &str, path: &OsString) -> Option<PathBuf> {
+/// The environment map keeps whatever key case the operating system reports;
+/// Windows usually spells the variable `Path`, so an exact miss falls back to a
+/// case-insensitive scan there.
+pub(crate) fn path_variable(variables: &BTreeMap<OsString, OsString>) -> OsString {
+    if let Some(path) = variables.get(OsStr::new("PATH")) {
+        return path.clone();
+    }
+    #[cfg(windows)]
+    if let Some((_, path)) = variables
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+    {
+        return path.clone();
+    }
+    OsString::new()
+}
+
+pub(crate) fn resolve_executable(executable: &str, path: &OsString) -> Option<PathBuf> {
     let executable_path = Path::new(executable);
     if executable_path.components().count() > 1 {
-        return is_executable(executable_path).then(|| executable_path.to_path_buf());
+        return executable_candidates(executable_path.to_path_buf())
+            .into_iter()
+            .find(|candidate| is_executable(candidate));
     }
     env::split_paths(path)
-        .map(|directory| directory.join(executable))
+        .flat_map(|directory| executable_candidates(directory.join(executable)))
         .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(not(windows))]
+fn executable_candidates(candidate: PathBuf) -> Vec<PathBuf> {
+    vec![candidate]
+}
+
+/// Windows launches commands through PATHEXT, so a bare `kimi` on disk is
+/// `kimi.exe` and an npm shim like `codex` is `codex.cmd`. Keep the literal
+/// name only when it already carries an executable extension, then try the
+/// name with each PATHEXT extension in order.
+#[cfg(windows)]
+fn executable_candidates(candidate: PathBuf) -> Vec<PathBuf> {
+    let extensions = executable_extensions();
+    let literal_extension = candidate
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()));
+    let mut candidates = Vec::with_capacity(extensions.len() + 1);
+    if literal_extension.is_some_and(|literal| {
+        extensions
+            .iter()
+            .any(|extension| extension.eq_ignore_ascii_case(&literal))
+    }) {
+        candidates.push(candidate.clone());
+    }
+    for extension in &extensions {
+        let mut with_extension = candidate.clone().into_os_string();
+        with_extension.push(extension);
+        candidates.push(PathBuf::from(with_extension));
+    }
+    candidates
+}
+
+/// PATHEXT conventionally spells extensions in uppercase while files on disk
+/// are lowercase; resolve with lowercase so the reported binary matches disk.
+#[cfg(windows)]
+fn executable_extensions() -> Vec<String> {
+    let extensions = env::var("PATHEXT")
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.'))
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if extensions.is_empty() {
+        return [".com", ".exe", ".bat", ".cmd"].map(str::to_owned).into();
+    }
+    extensions
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -702,18 +766,21 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap, ffi::OsString, fs, os::unix::fs::PermissionsExt, path::Path,
-        time::Duration,
-    };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(any(unix, windows))]
+    use std::{collections::BTreeMap, ffi::OsString, time::Duration};
+    use std::{fs, path::Path};
 
     use workman_core::{AgentTool, AgentToolSource};
 
-    use super::{
-        DoctorEnvironment, apply_config_in, check_agent_tools_in,
-        check_agent_tools_with_user_environment, command_executable, config_preview_in,
-        config_target,
-    };
+    #[cfg(unix)]
+    use super::check_agent_tools_with_user_environment;
+    #[cfg(windows)]
+    use super::path_variable;
+    #[cfg(any(unix, windows))]
+    use super::{DoctorEnvironment, check_agent_tools_in};
+    use super::{apply_config_in, command_executable, config_preview_in, config_target};
 
     fn tool(id: i64, name: &str, command: &str, tool_type: &str, enabled: bool) -> AgentTool {
         AgentTool {
@@ -728,6 +795,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn health_resolves_path_captures_versions_and_rolls_up_launches() {
         let temp = tempfile::tempdir().unwrap();
@@ -774,6 +842,7 @@ mod tests {
         assert!(!health.tools[2].launch_ready);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn health_uses_the_resolved_login_shell_environment() {
         let temp = tempfile::tempdir().unwrap();
@@ -811,6 +880,62 @@ mod tests {
             health.tools[0].version.as_deref(),
             Some("profile-agent 9.1")
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn health_resolves_windows_executables_through_pathext() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("shim-agent.cmd"), "@echo shim-agent 3.2.0\r\n").unwrap();
+        fs::write(bin.join("exe-agent.exe"), b"not a real binary").unwrap();
+        let environment = DoctorEnvironment {
+            home: temp.path().join("home"),
+            path: std::env::join_paths([&bin]).unwrap(),
+            variables: std::env::vars_os().collect(),
+            version_timeout: Duration::from_secs(5),
+        };
+        let health = check_agent_tools_in(
+            vec![
+                tool(1, "Shim", "shim-agent --flag", "codex", true),
+                tool(2, "Exe", "exe-agent", "kimi", true),
+                tool(3, "Missing", "missing-agent", "custom", true),
+            ],
+            environment,
+        )
+        .await;
+
+        let shim = &health.tools[0];
+        assert!(shim.found_on_path);
+        assert!(
+            shim.resolved_binary
+                .as_deref()
+                .unwrap()
+                .ends_with("shim-agent.cmd")
+        );
+        assert_eq!(shim.version.as_deref(), Some("shim-agent 3.2.0"));
+        let exe = &health.tools[1];
+        assert!(exe.found_on_path);
+        assert!(
+            exe.resolved_binary
+                .as_deref()
+                .unwrap()
+                .ends_with("exe-agent.exe")
+        );
+        assert!(!health.tools[2].found_on_path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_variable_reads_the_windows_path_key_case_insensitively() {
+        let variables =
+            BTreeMap::from([(OsString::from("Path"), OsString::from("C:\\fixture-path"))]);
+        assert_eq!(
+            path_variable(&variables),
+            OsString::from("C:\\fixture-path")
+        );
+        assert_eq!(path_variable(&BTreeMap::new()), OsString::new());
     }
 
     #[test]

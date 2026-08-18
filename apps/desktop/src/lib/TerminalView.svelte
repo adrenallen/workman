@@ -26,6 +26,7 @@
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { Button } from './components/ui/button';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
+  import { primaryModifier, terminalUnfocusChord } from './primaryModifier';
   import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import {
     hasRetainedTerminalOutput,
@@ -187,7 +188,7 @@
     );
     appliedThemeSignature = Object.values(initialPalette).join('|');
     const activateLink = (event: MouseEvent, uri: string) => {
-      if (!event.metaKey || event.button !== 0) return;
+      if (!primaryModifier(event) || event.button !== 0) return;
       event.preventDefault();
       openExternalUrl(uri, onError);
     };
@@ -279,10 +280,7 @@
         pendingUserKeyTokens.push(userKeyToken);
         setTimeout(() => removePendingUserKeyToken(userKeyToken), 0);
       }
-      if (
-        event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
-        && event.key.toLowerCase() === 'u'
-      ) {
+      if (terminalUnfocusChord(event)) {
         if (event.type === 'keydown') onUnfocus?.();
         return false;
       }

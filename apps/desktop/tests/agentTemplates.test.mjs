@@ -84,7 +84,7 @@ test('new-agent draft keeps template and agent choices independent and persisten
   assert.match(source, /onValueChange=\{selectAgent\}/);
   assert.match(source, /Template default: \{templateDefaultTool\.name\}\. Template launch args are skipped for other agents\./);
   assert.match(source, /Template prompt is prepended/);
-  assert.match(source, /event\.metaKey/);
+  assert.match(source, /primaryModifier\(event\)/);
   assert.match(source, /\{#each templates as template/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
   assert.match(source, /agent disabled/);

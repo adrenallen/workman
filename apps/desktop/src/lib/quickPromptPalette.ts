@@ -1,5 +1,6 @@
 import type { QuickPrompt } from './quickPrompts';
 import { fuzzySubsequenceScoreNormalized } from './navigation.ts';
+import { primaryModifier, secondaryModifier } from './primaryModifier.ts';
 
 const QUICK_PROMPT_BODY_SEARCH_CHARS = 2_000;
 
@@ -36,8 +37,8 @@ interface PaletteKeyEvent {
 }
 
 export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
-  return event.metaKey && Boolean(event.shiftKey) && !event.ctrlKey && !event.altKey
-    && event.key.toLowerCase() === 'p';
+  return primaryModifier(event) && Boolean(event.shiftKey) && !secondaryModifier(event)
+    && !event.altKey && event.key.toLowerCase() === 'p';
 }
 
 /** Interpret palette-owned navigation and selection actions. */
@@ -54,8 +55,8 @@ export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPal
     || vimNavigation;
   if (event.isComposing || event.keyCode === 229) return navigationKey ? 'swallow' : null;
 
-  if (event.key === 'ArrowDown') return event.metaKey ? 'last' : 'next';
-  if (event.key === 'ArrowUp') return event.metaKey ? 'first' : 'previous';
+  if (event.key === 'ArrowDown') return primaryModifier(event) ? 'last' : 'next';
+  if (event.key === 'ArrowUp') return primaryModifier(event) ? 'first' : 'previous';
   if (event.key === 'Home') return 'first';
   if (event.key === 'End') return 'last';
   if (event.key === 'PageUp' || event.key === 'PageDown') return 'swallow';
@@ -64,8 +65,8 @@ export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPal
     return key === 'n' || key === 'j' ? 'next' : 'previous';
   }
   if (event.key === 'Enter') {
-    if (event.shiftKey || event.ctrlKey || event.altKey) return 'swallow';
-    return event.metaKey ? 'insert-and-send' : 'insert';
+    if (event.shiftKey || secondaryModifier(event) || event.altKey) return 'swallow';
+    return primaryModifier(event) ? 'insert-and-send' : 'insert';
   }
   if (event.metaKey && !event.shiftKey && key === 'n') return 'new';
   return null;

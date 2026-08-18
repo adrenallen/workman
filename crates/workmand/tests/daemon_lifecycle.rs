@@ -1,3 +1,7 @@
+// Asserts graceful SIGTERM shutdown via `kill`; Windows has no cross-process
+// console signal, so this contract is exercised on Unix hosts only.
+#![cfg(unix)]
+
 use std::{path::Path, process::Command, time::Duration};
 
 use workmand::{discover_or_spawn, discovery_path, probe};

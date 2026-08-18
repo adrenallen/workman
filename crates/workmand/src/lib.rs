@@ -1651,6 +1651,8 @@ fn set_private_permissions(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1666,6 +1668,8 @@ fn ensure_private_file(path: &Path) -> io::Result<()> {
             ));
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1697,6 +1701,62 @@ async fn probe_inner(discovery: &Discovery) -> io::Result<bool> {
     Ok(response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200"))
 }
 
+/// Keeps this process's standard handles out of a spawned child's handle table.
+///
+/// Windows copies every inheritable parent handle into a child created with
+/// explicit standard handles, so a shell pipeline reading this process's output
+/// would otherwise wait on the long-lived daemon even though the daemon's own
+/// stdio is null. Prior inheritance flags are restored on drop.
+#[cfg(windows)]
+struct StdHandleInheritanceGuard {
+    restore: Vec<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+#[cfg(windows)]
+impl StdHandleInheritanceGuard {
+    fn disable() -> Self {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+
+        let mut restore = Vec::new();
+        // SAFETY: standard pseudo-handles are process-owned, and toggling the
+        // inherit flag only changes what future children may receive.
+        unsafe {
+            for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let handle = GetStdHandle(std_handle);
+                let mut flags = 0_u32;
+                if handle.is_null() || GetHandleInformation(handle, &mut flags) == 0 {
+                    continue;
+                }
+                if flags & HANDLE_FLAG_INHERIT != 0
+                    && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0
+                {
+                    restore.push(handle);
+                }
+            }
+        }
+        Self { restore }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StdHandleInheritanceGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+        for handle in self.restore.drain(..) {
+            // SAFETY: the handle was valid when captured and standard handles
+            // live for the process; this only re-enables future inheritance.
+            let _ =
+                unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+    }
+}
+
 /// Return a live daemon discovery record, spawning `daemon_executable` when necessary.
 pub async fn discover_or_spawn(
     data_dir: impl AsRef<Path>,
@@ -1724,13 +1784,18 @@ pub async fn discover_or_spawn(
         ));
     }
 
-    let mut child = Command::new(daemon_executable.as_ref())
+    #[cfg(windows)]
+    let inheritance_guard = StdHandleInheritanceGuard::disable();
+    let child = Command::new(daemon_executable.as_ref())
         .arg("--data-dir")
         .arg(data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn();
+    #[cfg(windows)]
+    drop(inheritance_guard);
+    let mut child = child?;
     let child_pid = child.id();
     let deadline = Instant::now() + wait_timeout;
 
@@ -1777,7 +1842,9 @@ async fn clean_failed_spawn(child: &mut tokio::process::Child, pid: Option<u32>,
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
     use tempfile::TempDir;
@@ -2101,6 +2168,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn status_stream_delivers_silent_process_exit_before_next_stats_sample() {
         let server = TestServer::start().await;
@@ -2583,16 +2651,19 @@ mod tests {
     #[tokio::test]
     async fn discovery_is_private_probeable_and_removed_after_shutdown() {
         let server = TestServer::start().await;
-        let path = discovery_path(&server.data_dir);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let endpoint_path = mcp_endpoint_path(&server.data_dir);
-        let endpoint_mode = std::fs::metadata(&endpoint_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(endpoint_mode, 0o600);
+        #[cfg(unix)]
+        {
+            let path = discovery_path(&server.data_dir);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let endpoint_path = mcp_endpoint_path(&server.data_dir);
+            let endpoint_mode = std::fs::metadata(&endpoint_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(endpoint_mode, 0o600);
+        }
         assert_eq!(Discovery::read(&server.data_dir).unwrap(), server.discovery);
         assert!(probe(&server.discovery).await);
 
@@ -2763,6 +2834,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timed_out_discovery_reaps_the_spawned_daemon() {
         let temp = tempfile::tempdir().unwrap();

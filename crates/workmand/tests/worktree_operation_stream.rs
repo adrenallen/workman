@@ -54,7 +54,9 @@ impl TestServer {
             let registry = registry.lock().await;
             registry.store().put_project(&Project {
                 id: 1,
-                path: std::fs::canonicalize(&main)?.to_string_lossy().into_owned(),
+                path: workman_core::canonical_path(&main)?
+                    .to_string_lossy()
+                    .into_owned(),
                 name: "fixture".into(),
                 display_name: None,
                 icon: None,

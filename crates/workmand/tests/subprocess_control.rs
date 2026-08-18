@@ -120,7 +120,7 @@ async fn wait_for_python_child(socket: &mut Socket, next_id: &mut u64, process_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subprocess_rpc_lists_and_only_kills_live_descendants() {
     let root = TempDir::new().unwrap();
-    let project_path = fs::canonicalize(root.path()).unwrap();
+    let project_path = workman_core::canonical_path(root.path()).unwrap();
     let server = TestServer::start(&root.path().join("state")).await;
     let store = Store::open(root.path().join("state").join(workmand::DATABASE_FILE)).unwrap();
     store

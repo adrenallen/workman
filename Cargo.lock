@@ -6249,6 +6249,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.61.2",
  "workman-core",
  "workmand",
 ]
@@ -6259,6 +6260,7 @@ version = "0.1.9"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "dunce",
  "event-listener",
  "flate2",
  "nix",
@@ -6273,6 +6275,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -6324,6 +6327,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml_edit 0.25.13+spec-1.1.0",
  "uuid",
+ "windows-sys 0.61.2",
  "workman-core",
 ]
 

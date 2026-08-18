@@ -5,6 +5,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import QuickPromptEditor from './QuickPromptEditor.svelte';
   import type { DaemonClient } from './daemon';
+  import { primaryModifierLabel, shiftModifierLabel } from './primaryModifier.ts';
   import {
     filterQuickPrompts,
     moveQuickPromptSelection,
@@ -27,6 +28,10 @@
   }
 
   let { client, canInsert, onInsert, onClose, onError }: Props = $props();
+  const macChords = primaryModifierLabel === '⌘';
+  const chordJoin = macChords ? '' : '+';
+  const openChord = [primaryModifierLabel, shiftModifierLabel, 'P'].join(chordJoin);
+  const sendChord = [primaryModifierLabel, 'Enter'].join(chordJoin);
   let store = $derived(getQuickPromptsStore(client));
   let snapshot = $state<QuickPromptsSnapshot>({ prompts: [], loading: false, error: null });
   let query = $state('');
@@ -119,7 +124,7 @@
               <small class="block text-xs text-muted-foreground">Insert saved text into the selected agent</small>
             </div>
           </div>
-          <kbd class="rounded border border-border bg-accent px-1.5 py-0.5 font-mono text-xs text-muted-foreground">⌘⇧P</kbd>
+          <kbd class="rounded border border-border bg-accent px-1.5 py-0.5 font-mono text-xs text-muted-foreground">{openChord}</kbd>
         </header>
 
         <div class="border-b border-border p-2">
@@ -173,7 +178,9 @@
             {:else}
               <div class="grid min-h-28 place-content-center gap-1 text-center">
                 <strong class="text-sm text-foreground">{query ? 'No matching prompt' : 'No quick prompts saved'}</strong>
-                <span class="text-xs text-muted-foreground">Press ⌘N to create one.</span>
+                {#if macChords}
+                  <span class="text-xs text-muted-foreground">Press ⌘N to create one.</span>
+                {/if}
                 <Button class="mt-2 justify-self-center" size="sm" onclick={() => (editorOpen = true)}>New quick prompt</Button>
               </div>
             {/if}
@@ -183,8 +190,10 @@
         <footer class="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
           <span>↑↓ · navigate</span>
           <span>Enter · insert</span>
-          <span>⌘Enter · insert and send</span>
-          <span>⌘N · new quick prompt</span>
+          <span>{sendChord} · insert and send</span>
+          {#if macChords}
+            <span>⌘N · new quick prompt</span>
+          {/if}
           <span class="ml-auto">Esc · close</span>
         </footer>
       </Command.Root>

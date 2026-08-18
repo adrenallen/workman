@@ -10,7 +10,13 @@ import {
   quickPromptPreview,
   sanitizeQuickPromptBody
 } from '../src/lib/quickPromptPalette.ts';
+import { primaryModifierLabel } from '../src/lib/primaryModifier.ts';
 import { QuickPromptsStore } from '../src/lib/quickPrompts.ts';
+
+// The palette shortcut and send/jump chords follow the platform primary
+// modifier: Command on macOS, Control elsewhere. Creating a prompt stays ⌘N,
+// because Control+N belongs to the palette's vim navigation.
+const primary = primaryModifierLabel === '⌘' ? 'metaKey' : 'ctrlKey';
 
 function prompt(id, name, body, sortOrder = id) {
   return {
@@ -24,14 +30,14 @@ function prompt(id, name, body, sortOrder = id) {
 }
 
 test('palette actions distinguish insert, insert-and-send, and new prompt', () => {
-  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', metaKey: true, shiftKey: true }), true);
-  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', metaKey: true }), false);
+  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', [primary]: true, shiftKey: true }), true);
+  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', [primary]: true }), false);
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false }),
     'insert'
   );
   assert.equal(
-    quickPromptPaletteAction({ key: 'Enter', metaKey: true }),
+    quickPromptPaletteAction({ key: 'Enter', metaKey: false, [primary]: true }),
     'insert-and-send'
   );
   assert.equal(quickPromptPaletteAction({ key: 'n', metaKey: true }), 'new');
@@ -68,10 +74,13 @@ test('palette actions own arrow and boundary navigation', () => {
   assert.equal(quickPromptPaletteAction({ key: 'Home', metaKey: false }), 'first');
   assert.equal(quickPromptPaletteAction({ key: 'End', metaKey: false }), 'last');
   assert.equal(
-    quickPromptPaletteAction({ key: 'ArrowDown', metaKey: true }),
+    quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false, [primary]: true }),
     'last'
   );
-  assert.equal(quickPromptPaletteAction({ key: 'ArrowUp', metaKey: true }), 'first');
+  assert.equal(
+    quickPromptPaletteAction({ key: 'ArrowUp', metaKey: false, [primary]: true }),
+    'first'
+  );
   assert.equal(
     quickPromptPaletteAction({ key: 'ArrowDown', metaKey: false, altKey: true }),
     'next'
@@ -180,7 +189,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
     readFile(new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url), 'utf8')
   ]);
 
-  assert.match(app, /event\.metaKey && event\.shiftKey[\s\S]*event\.key\.toLowerCase\(\) === 'p'/);
+  assert.match(app, /primaryModifier\(event\) && event\.shiftKey[\s\S]*event\.key\.toLowerCase\(\) === 'p'/);
   assert.match(app, /onQuickPrompts=\{openQuickPrompts\}/);
   assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{terminalView !== null && selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
   assert.match(app, /bind:this=\{terminalView\}/);
@@ -191,7 +200,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(palette, /scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
-  assert.match(palette, /⌘Enter · insert and send/);
+  assert.match(palette, /\{sendChord\} · insert and send/);
   assert.match(palette, /<QuickPromptEditor/);
   assert.match(palette, />Retry<\/Button>/);
   assert.match(palette, />New quick prompt<\/Button>/);
@@ -210,6 +219,6 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
     'Create a quick prompt from the palette',
     'Close the palette'
   ]) assert.match(card, new RegExp(hint));
-  assert.match(shortcuts, /\['⌘', '⇧', 'P'\], label: 'Open quick prompts for the selected agent'/);
+  assert.match(shortcuts, /\[mod, shift, 'P'\], label: 'Open quick prompts for the selected agent'/);
   assert.match(shortcuts, /quick-prompt search uses them for first\/last/);
 });

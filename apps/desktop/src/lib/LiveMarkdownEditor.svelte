@@ -39,6 +39,7 @@
     markdownLinkAt,
     openExternalUrl
   } from './externalLinks';
+  import { primaryModifier } from './primaryModifier';
   import {
     resolveScratchpadAnchor,
     selectionAnchor,
@@ -495,7 +496,7 @@
                 onCommentClick?.(commentId);
                 return true;
               }
-              if (!event.metaKey || event.button !== 0) return false;
+              if (!primaryModifier(event) || event.button !== 0) return false;
               const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
               if (position === null) return false;
               const href = markdownLinkAt(editor.state.doc.toString(), position);

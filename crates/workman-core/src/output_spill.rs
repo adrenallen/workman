@@ -4,7 +4,6 @@ use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
@@ -287,7 +286,12 @@ fn lock_state(shared: &Shared) -> std::sync::MutexGuard<'_, State> {
 fn write_snapshot(path: &Path, retained: &VecDeque<u8>) -> io::Result<()> {
     let temporary = path.with_extension("raw.tmp");
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     let mut file = options.open(&temporary)?;
     let (first, second) = retained.as_slices();
     file.write_all(first)?;

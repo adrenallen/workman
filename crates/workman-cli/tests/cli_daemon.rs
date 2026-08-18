@@ -1,3 +1,7 @@
+// Drives Unix fixtures (shebang scripts, permission bits, symlinks); Windows
+// fixture parity is tracked as follow-up work.
+#![cfg(unix)]
+
 use std::{os::unix::fs::PermissionsExt, process::Stdio, time::Duration};
 
 use tempfile::TempDir;

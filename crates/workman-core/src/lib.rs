@@ -5,8 +5,8 @@ pub mod attention;
 pub mod domain;
 pub mod locks;
 pub mod notifications;
-#[cfg(unix)]
 mod output_spill;
+mod paths;
 pub mod project_folders;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
@@ -17,13 +17,13 @@ pub mod todos;
 /// Authenticated release checks and verified atomic self-updates.
 pub mod update;
 
-#[cfg(unix)]
 pub mod pty;
 
 pub use agent_notifications::*;
 pub use domain::*;
 pub use locks::*;
 pub use notifications::*;
+pub use paths::*;
 pub use project_folders::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};

@@ -1,6 +1,5 @@
 use std::{env, error::Error, path::PathBuf};
 
-use tokio::signal::unix::{SignalKind, signal};
 use workmand::{DaemonConfig, DaemonServer};
 
 #[tokio::main]
@@ -45,7 +44,10 @@ fn parse_args() -> Result<DaemonConfig, Box<dyn Error>> {
     Ok(config)
 }
 
+#[cfg(unix)]
 async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
     let mut terminate = signal(SignalKind::terminate()).ok();
 
     if let Some(terminate) = terminate.as_mut() {
@@ -55,5 +57,34 @@ async fn shutdown_signal() {
         }
     } else {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Resolve when console interrupt, console-window close, or system shutdown
+/// asks the daemon to stop.
+#[cfg(windows)]
+async fn shutdown_signal() {
+    use tokio::signal::windows::{ctrl_close, ctrl_shutdown};
+
+    let close = async {
+        match ctrl_close() {
+            Ok(mut close) => {
+                close.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    let shutdown = async {
+        match ctrl_shutdown() {
+            Ok(mut shutdown) => {
+                shutdown.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = close => {}
+        _ = shutdown => {}
     }
 }

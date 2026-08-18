@@ -76,7 +76,7 @@ async fn folder_layout_and_collapse_survive_daemon_restart_and_delete_lifts_chil
             &mut socket,
             offset as u64 + 1,
             "projects.register",
-            json!({ "path": fs::canonicalize(path).unwrap() }),
+            json!({ "path": workman_core::canonical_path(path).unwrap() }),
         )
         .await;
         ids = projects

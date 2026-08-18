@@ -90,7 +90,9 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
         let registry = registry.lock().await;
         registry.store().put_project(&Project {
             id: 1,
-            path: std::fs::canonicalize(&main)?.to_string_lossy().into_owned(),
+            path: workman_core::canonical_path(&main)?
+                .to_string_lossy()
+                .into_owned(),
             name: "rpc-repo".into(),
             display_name: None,
             icon: None,
@@ -103,7 +105,9 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
             kind: ProcessKind::Agent,
             name: "worktree-agent".into(),
             command: Some("true".into()),
-            working_dir: std::fs::canonicalize(&main)?.to_string_lossy().into_owned(),
+            working_dir: workman_core::canonical_path(&main)?
+                .to_string_lossy()
+                .into_owned(),
             env: BTreeMap::new(),
             auto_start: false,
             auto_restart: false,
@@ -308,7 +312,9 @@ async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
         ] {
             registry.store().put_project(&Project {
                 id,
-                path: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
+                path: workman_core::canonical_path(path)?
+                    .to_string_lossy()
+                    .into_owned(),
                 name: path.file_name().unwrap().to_string_lossy().into_owned(),
                 display_name: None,
                 icon: None,
@@ -323,7 +329,9 @@ async fn desktop_cli_control_and_mcp_delete_share_verified_disk_contract()
                 kind: ProcessKind::Agent,
                 name: format!("delete-agent-{id}"),
                 command: Some("true".into()),
-                working_dir: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
+                working_dir: workman_core::canonical_path(path)?
+                    .to_string_lossy()
+                    .into_owned(),
                 env: BTreeMap::new(),
                 auto_start: false,
                 auto_restart: false,

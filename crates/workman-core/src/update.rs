@@ -298,6 +298,11 @@ impl ReleaseTarget {
                 desktop_asset_name: "workman-linux-arm64.tar.gz".to_owned(),
                 platform_label: "Linux arm64".to_owned(),
             }),
+            ("windows", "x86_64") => Ok(Self {
+                binary_asset_name: "workman-windows-x86_64.zip".to_owned(),
+                desktop_asset_name: "workman-windows-x86_64.zip".to_owned(),
+                platform_label: "Windows x86_64".to_owned(),
+            }),
             (os, arch) => Err(UpdateError::UnsupportedPlatform(format!("{os}/{arch}"))),
         }
     }
@@ -485,8 +490,9 @@ impl UpdateClient {
             .binary_asset
             .as_ref()
             .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
-        let install_dir = install_dir.as_ref().canonicalize()?;
+        let install_dir = crate::canonical_path(install_dir.as_ref())?;
         let (wrk_target, workmand_target) = installed_binary_targets(&install_dir)?;
+        remove_retired_binaries(&[&wrk_target, &workmand_target]);
 
         let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
         let archive = self.download(binary_asset, on_progress).await?;
@@ -1132,6 +1138,8 @@ impl UpdateInstallEnvironment {
     fn from_environment() -> UpdateResult<Self> {
         let home_dir = env::var_os("WORKMAN_UPDATE_HOME")
             .or_else(|| env::var_os("HOME"))
+            // Windows sessions carry the home directory in USERPROFILE, not HOME.
+            .or_else(|| env::var_os("USERPROFILE"))
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| {
@@ -1167,7 +1175,7 @@ impl UpdateInstallEnvironment {
 /// Resolve the directory containing the actual executable target. current_exe generally
 /// resolves launcher symlinks; canonicalization makes that behavior explicit for installers.
 pub fn install_dir_from_executable(executable: impl AsRef<Path>) -> UpdateResult<PathBuf> {
-    let executable = executable.as_ref().canonicalize()?;
+    let executable = crate::canonical_path(executable.as_ref())?;
     executable
         .parent()
         .map(Path::to_path_buf)
@@ -1542,10 +1550,8 @@ fn ensure_launcher(path: &Path, target: &Path) -> UpdateResult<bool> {
 }
 
 fn replace_launcher(path: &Path, target: &Path) -> UpdateResult<Option<PathBuf>> {
-    if path.canonicalize().is_ok_and(|current| {
-        target
-            .canonicalize()
-            .is_ok_and(|expected| current == expected)
+    if crate::canonical_path(path).is_ok_and(|current| {
+        crate::canonical_path(target).is_ok_and(|expected| current == expected)
     }) {
         return Ok(None);
     }
@@ -1743,9 +1749,70 @@ fn atomic_replace(source: &Path, target: &Path) -> UpdateResult<()> {
     io::copy(&mut input, &mut output)?;
     output.sync_all()?;
     set_executable(&temporary)?;
-    fs::rename(&temporary, target)?;
+    replace_file(&temporary, target)?;
     sync_directory(parent)?;
     Ok(())
+}
+
+/// Move `source` over `target`, replacing any existing file.
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> UpdateResult<()> {
+    fs::rename(source, target)?;
+    Ok(())
+}
+
+/// Move `source` over `target`, replacing any existing file.
+///
+/// Windows cannot replace an executable that is currently running, but it can
+/// rename one aside. The retired file is parked beside the target and removed by
+/// [`remove_retired_binaries`] on the next install, once its process has exited.
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> UpdateResult<()> {
+    // A running image rejects replacement with access-denied; other open handles
+    // surface as a sharing violation (os error 32). Both mean "target is busy".
+    fn replace_blocked(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(32)
+    }
+
+    match fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) if replace_blocked(&error) && target.is_file() => {
+            let retired = next_update_path(target, "retired")?;
+            fs::rename(target, &retired)?;
+            match fs::rename(source, target) {
+                Ok(()) => {
+                    // Best effort: succeeds immediately unless the retired
+                    // binary is still running somewhere.
+                    let _ = fs::remove_file(&retired);
+                    Ok(())
+                }
+                Err(second) => {
+                    let _ = fs::rename(&retired, target);
+                    Err(second.into())
+                }
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Remove binaries retired by earlier Windows installs whose processes have
+/// since exited. Files still held open by a running process are left in place.
+fn remove_retired_binaries(targets: &[&Path]) {
+    for target in targets {
+        let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+            continue;
+        };
+        let prefix = format!(".{}.workman-update-retired-", name.to_string_lossy());
+        let Ok(entries) = fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 fn set_executable(path: &Path) -> io::Result<()> {
@@ -1754,12 +1821,16 @@ fn set_executable(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1846,8 +1917,50 @@ mod tests {
         assert!(parse_version("v0.2.0").unwrap() > parse_version("0.1.9").unwrap());
     }
 
+    #[cfg(windows)]
     #[test]
-    fn release_targets_cover_both_static_linux_archives() {
+    fn replace_file_retires_a_running_target_and_installs_the_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("wrk.exe");
+        let system32 =
+            PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32");
+        fs::copy(system32.join("ping.exe"), &target).unwrap();
+        let mut running = std::process::Command::new(&target)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let retired_exists = || {
+            fs::read_dir(temp.path()).unwrap().flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".wrk.exe.workman-update-retired-")
+            })
+        };
+
+        let source = temp.path().join("incoming.exe");
+        fs::write(&source, b"replacement").unwrap();
+        replace_file(&source, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(
+            retired_exists(),
+            "running original must be parked beside the target"
+        );
+
+        running.kill().unwrap();
+        running.wait().unwrap();
+        remove_retired_binaries(&[&target]);
+        assert!(
+            !retired_exists(),
+            "retired binary must be removed once its process exits"
+        );
+    }
+
+    #[test]
+    fn release_targets_cover_every_packaged_platform() {
         let macos = ReleaseTarget::for_platform("macos", "aarch64").unwrap();
         assert_eq!(macos.binary_asset_name, "workman-macos-arm64.zip");
         assert_eq!(macos.desktop_asset_name, macos.binary_asset_name);
@@ -1862,6 +1975,12 @@ mod tests {
                 .unwrap()
                 .binary_asset_name,
             "workman-linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            ReleaseTarget::for_platform("windows", "x86_64")
+                .unwrap()
+                .binary_asset_name,
+            "workman-windows-x86_64.zip"
         );
     }
 

@@ -1,4 +1,4 @@
-//! Unix PTY process hosting and bounded raw-output capture.
+//! PTY process hosting and bounded raw-output capture.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -18,8 +18,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use event_listener::{Event, EventListener};
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
@@ -596,11 +599,15 @@ impl PtyProcess {
             .context("open PTY")?;
 
         let mut command = CommandBuilder::new(&options.shell);
-        if options.login_shell {
+        // Login-shell semantics only exist on Unix; Windows shells reject `-l`.
+        if cfg!(unix) && options.login_shell {
             command.arg("-l");
         }
         if !options.interactive_shell {
-            command.arg("-c");
+            for flag in shell_command_prelude(&options.shell) {
+                command.arg(flag);
+            }
+            command.arg(shell_command_flag(&options.shell));
             // Keep the complete command as one argv item. The login shell, not Workman,
             // owns its quoting and expansion semantics.
             command.arg(&options.command);
@@ -651,7 +658,7 @@ impl PtyProcess {
         {
             Ok(spill) => spill,
             Err(error) => {
-                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = kill_process_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error).context("initialize raw-output spill");
@@ -681,7 +688,7 @@ impl PtyProcess {
             }) {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = kill_process_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error).context("spawn PTY attention renderer");
@@ -704,7 +711,7 @@ impl PtyProcess {
             }) {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = kill_process_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = attention_thread.join();
@@ -731,7 +738,7 @@ impl PtyProcess {
             }) {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = signal_process_group(pid, Signal::SIGKILL);
+                let _ = kill_process_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error).context("spawn PTY input worker");
@@ -783,6 +790,15 @@ impl PtyProcess {
         let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
         let process_group = nix::unistd::tcgetpgrp(borrowed).ok()?.as_raw();
         u32::try_from(process_group).ok()
+    }
+
+    /// Read the foreground process group currently attached to this PTY.
+    ///
+    /// Windows exposes no foreground-process-group concept for ConPTY sessions,
+    /// so telemetry callers always observe an unknown value.
+    #[cfg(not(unix))]
+    pub fn foreground_process_group(&self) -> Option<u32> {
+        None
     }
 
     /// Clone a thread-safe handle to the bounded raw output ring.
@@ -934,7 +950,7 @@ impl PtyProcess {
             return Ok(status);
         }
 
-        signal_process_group(self.pid, Signal::SIGTERM).context("send SIGTERM to process group")?;
+        terminate_process_group(self.pid).context("request process-group termination")?;
         if let Some(status) = self
             .wait_for_exit(grace_period)
             .context("wait for PTY child after SIGTERM")?
@@ -951,7 +967,7 @@ impl PtyProcess {
             return Ok(status);
         }
 
-        signal_process_group(self.pid, Signal::SIGKILL).context("send SIGKILL to process group")?;
+        kill_process_group(self.pid).context("force-kill process group")?;
         // Also target the direct child in case it changed process groups.
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -994,7 +1010,7 @@ impl Drop for PtyProcess {
     fn drop(&mut self) {
         let running = self.try_wait().ok().flatten().is_none();
         if running {
-            let _ = signal_process_group(self.pid, Signal::SIGKILL);
+            let _ = kill_process_group(self.pid);
             if let Some(child) = self.child.as_mut() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -1185,6 +1201,57 @@ fn wait_for_output_quiet(
     }
 }
 
+/// Removes the ConPTY cursor probe (`ESC [ 6 n`) from bytes destined for raw capture.
+///
+/// The probe is host-terminal traffic that the daemon itself answers, not process
+/// output: recording it would clutter `wrk logs` and replay a stale query to every
+/// live frontend that later receives the history. The emulator still sees the
+/// original bytes, so the daemon-side answer is unaffected. At most three bytes are
+/// held across reads while a potential probe prefix is unresolved.
+#[cfg(windows)]
+#[derive(Default)]
+struct ConptyProbeFilter {
+    held_prefix: usize,
+}
+
+#[cfg(windows)]
+impl ConptyProbeFilter {
+    const PROBE: &'static [u8] = b"\x1b[6n";
+
+    fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(self.held_prefix + bytes.len());
+        buffer.extend_from_slice(&Self::PROBE[..self.held_prefix]);
+        buffer.extend_from_slice(bytes);
+        self.held_prefix = 0;
+
+        let mut output = Vec::with_capacity(buffer.len());
+        let mut index = 0;
+        while index < buffer.len() {
+            if buffer[index] == 0x1b {
+                let remaining = &buffer[index..];
+                let compared = remaining.len().min(Self::PROBE.len());
+                if remaining[..compared] == Self::PROBE[..compared] {
+                    if compared == Self::PROBE.len() {
+                        index += compared;
+                        continue;
+                    }
+                    self.held_prefix = compared;
+                    break;
+                }
+            }
+            output.push(buffer[index]);
+            index += 1;
+        }
+        output
+    }
+
+    /// Release an unresolved prefix once the stream ends; it was real output.
+    fn flush(&mut self) -> Vec<u8> {
+        let held = std::mem::take(&mut self.held_prefix);
+        Self::PROBE[..held].to_vec()
+    }
+}
+
 /// Return whether a tool type uses Kimi's session-creation submission signal.
 pub fn is_kimi_tool_type(tool_type: &str) -> bool {
     matches!(
@@ -1234,6 +1301,8 @@ fn capture_output(
 ) {
     let mut profiler = PtyCaptureProfiler::new(Arc::clone(&metrics));
     let mut chunk = [0_u8; 8192];
+    #[cfg(windows)]
+    let mut probe_filter = ConptyProbeFilter::default();
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
@@ -1243,12 +1312,18 @@ fn capture_output(
                     .parsed_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
                 let replies = terminal_output.feed_with_replies(&chunk[..count]);
+                #[cfg(windows)]
+                let recorded = probe_filter.filter(&chunk[..count]);
+                #[cfg(windows)]
+                let recorded = recorded.as_slice();
+                #[cfg(not(windows))]
+                let recorded = &chunk[..count];
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
-                raw_output.push(&chunk[..count]);
+                raw_output.push(recorded);
                 if let Some(spill) = &output_spill {
-                    spill.push(&chunk[..count]);
+                    spill.push(recorded);
                 }
                 if !replies.is_empty() {
                     let mut writer = response_writer
@@ -1267,6 +1342,16 @@ fn capture_output(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             // Unix PTYs commonly report EIO when their final slave closes.
             Err(_) => break,
+        }
+    }
+    #[cfg(windows)]
+    {
+        let held = probe_filter.flush();
+        if !held.is_empty() {
+            raw_output.push(&held);
+            if let Some(spill) = &output_spill {
+                spill.push(&held);
+            }
         }
     }
     profiler.report_final();
@@ -1372,12 +1457,144 @@ fn profile_enabled() -> bool {
     })
 }
 
+/// Flags the configured shell needs before it will run one command string.
+///
+/// Windows PowerShell's default Restricted execution policy refuses `.ps1`
+/// launchers, which is how npm ships agent CLIs on PATH. The command string is
+/// explicit user intent, so bypass the policy for the spawned session only;
+/// interactive terminals keep the account's policy.
+fn shell_command_prelude(shell: &std::path::Path) -> &'static [&'static str] {
+    #[cfg(windows)]
+    if shell.file_name().is_some_and(|name| {
+        ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    }) {
+        return &["-ExecutionPolicy", "Bypass"];
+    }
+    #[cfg(not(windows))]
+    let _ = shell;
+    &[]
+}
+
+/// Flag that makes the configured shell run one command string.
+///
+/// POSIX shells and PowerShell both accept `-c`; only `cmd.exe` insists on `/c`.
+fn shell_command_flag(shell: &std::path::Path) -> &'static str {
+    #[cfg(windows)]
+    if shell.file_name().is_some_and(|name| {
+        name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
+    }) {
+        return "/c";
+    }
+    #[cfg(not(windows))]
+    let _ = shell;
+    "-c"
+}
+
+/// Ask every process in the PTY session to stop, gracefully where the platform allows.
+///
+/// Unix delivers SIGTERM to the process group. Windows has no group-wide graceful
+/// signal that reaches a detached ConPTY session, so the tree is force-terminated.
+#[cfg(unix)]
+fn terminate_process_group(pid: u32) -> Result<()> {
+    signal_process_group(pid, Signal::SIGTERM)
+}
+
+/// Immediately kill every process in the PTY session.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) -> Result<()> {
+    signal_process_group(pid, Signal::SIGKILL)
+}
+
+#[cfg(unix)]
 fn signal_process_group(pid: u32, signal: Signal) -> Result<()> {
     let pid = i32::try_from(pid).context("PTY process ID exceeds Unix pid_t")?;
     match killpg(Pid::from_raw(pid), signal) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(error).with_context(|| format!("signal process group {pid}")),
     }
+}
+
+#[cfg(windows)]
+fn terminate_process_group(pid: u32) -> Result<()> {
+    kill_process_tree(pid)
+}
+
+#[cfg(windows)]
+fn kill_process_group(pid: u32) -> Result<()> {
+    kill_process_tree(pid)
+}
+
+/// Terminate `root` and every transitive child visible in one process snapshot.
+///
+/// Windows has no process groups for ConPTY sessions, so the tree is discovered
+/// through a Toolhelp snapshot. A process that exits between the snapshot and the
+/// terminate call is treated as already stopped, mirroring the ESRCH tolerance of
+/// the Unix path.
+#[cfg(windows)]
+fn kill_process_tree(root: u32) -> Result<()> {
+    use std::collections::{BTreeMap, VecDeque};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    // SAFETY: the snapshot handle is checked before use, PROCESSENTRY32W is plain
+    // data sized before the first read, and the handle is closed on every path.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error())
+                .with_context(|| format!("snapshot processes to stop group {root}"));
+        }
+        let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+        entry.dwSize = u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(u32::MAX);
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                children
+                    .entry(entry.th32ParentProcessID)
+                    .or_default()
+                    .push(entry.th32ProcessID);
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+
+    // Walk the root's subtree breadth-first. Terminate parents before children so a
+    // stopped parent cannot replace killed descendants; a visited guard defends
+    // against parent-link cycles introduced by process ID reuse.
+    let mut queue = VecDeque::from([root]);
+    let mut targets: Vec<u32> = Vec::new();
+    while let Some(pid) = queue.pop_front() {
+        if targets.contains(&pid) {
+            continue;
+        }
+        targets.push(pid);
+        if let Some(child_pids) = children.get(&pid) {
+            queue.extend(child_pids.iter().copied());
+        }
+    }
+    for pid in targets {
+        // SAFETY: the process handle is checked before use and closed after the
+        // terminate call; an unopenable process has already exited or is foreign.
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if handle.is_null() {
+                continue;
+            }
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1406,6 +1623,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     fn wait_for_output(process: &PtyProcess, needle: &[u8]) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1421,6 +1639,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_for_rendered_output(process: &PtyProcess, needle: &str) {
         let output = process.terminal_output();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1437,6 +1656,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn parse_child_pid(output: &[u8]) -> u32 {
         String::from_utf8_lossy(output)
             .lines()
@@ -1446,6 +1666,7 @@ mod tests {
             .expect("numeric child pid")
     }
 
+    #[cfg(unix)]
     fn process_exists(pid: u32) -> bool {
         let Ok(pid) = i32::try_from(pid) else {
             return false;
@@ -1549,6 +1770,22 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn conpty_probe_filter_drops_probes_and_keeps_everything_else() {
+        let mut filter = ConptyProbeFilter::default();
+        assert_eq!(filter.filter(b"before\x1b[6nafter"), b"beforeafter");
+        assert_eq!(filter.filter(b"\x1b[7n\x1b\x1b[6n"), b"\x1b[7n\x1b");
+
+        // A probe split across reads is dropped once it completes.
+        assert_eq!(filter.filter(b"tail\x1b[6"), b"tail");
+        assert_eq!(filter.filter(b"nrest"), b"rest");
+
+        // An unresolved prefix at stream end was real output.
+        assert_eq!(filter.filter(b"end\x1b["), b"end");
+        assert_eq!(filter.flush(), b"\x1b[");
+    }
+
     #[tokio::test]
     async fn raw_output_append_wakes_every_current_listener() {
         let output = RawOutput::new(64);
@@ -1609,6 +1846,7 @@ mod tests {
         assert!(attention.snapshot().last_output_at.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn pty_injects_identity_writes_reads_and_resizes() {
         let command = concat!(
@@ -1653,6 +1891,7 @@ mod tests {
         wait_for_output(&process, b"cleanup-complete");
     }
 
+    #[cfg(unix)]
     #[test]
     fn pty_answers_supported_keyboard_protocol_queries_once() {
         let command = r#"stty raw -echo; printf '\033[>1u\033[>4;2m\033[?u\033[?4m'; exec perl -e '$|=1; my $reply=""; while (length($reply) < 12) { my $count = sysread(STDIN, my $chunk, 12 - length($reply)); exit 2 unless defined($count) && $count > 0; $reply .= $chunk; } print "REPLY:", unpack("H*", $reply), "\r\n";'"#;
@@ -1718,6 +1957,28 @@ mod tests {
         assert!(process.wait().unwrap().success());
     }
 
+    #[test]
+    fn powershell_command_sessions_bypass_the_execution_policy() {
+        #[cfg(windows)]
+        {
+            for shell in [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+            ] {
+                assert_eq!(
+                    super::shell_command_prelude(std::path::Path::new(shell)),
+                    ["-ExecutionPolicy", "Bypass"]
+                );
+            }
+            assert!(
+                super::shell_command_prelude(std::path::Path::new(r"C:\Windows\System32\cmd.exe"))
+                    .is_empty()
+            );
+        }
+        #[cfg(not(windows))]
+        assert!(super::shell_command_prelude(std::path::Path::new("/bin/zsh")).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn foreground_process_group_tracks_an_interactive_shell_job() {
@@ -1773,6 +2034,7 @@ mod tests {
             .expect("stop interactive shell");
     }
 
+    #[cfg(unix)]
     #[test]
     fn submission_queue_is_nonblocking_and_preserves_per_process_order() {
         let command = r#"stty raw -echo; printf 'READY\r\n'; exec perl -e '$|=1; my $message=""; while (1) { my $count = sysread(STDIN, my $chunk, 4096); exit 2 unless defined($count) && $count > 0; for my $character (split //, $chunk) { if ($character eq "\r") { print "MSG:$message\r\n"; exit 0 if $message eq "second"; $message = ""; } else { $message .= $character; } } }'"#;
@@ -1811,6 +2073,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn terminate_kills_the_process_group() {
         let mut process = PtyProcess::spawn(PtySpawnOptions::new(
@@ -1837,6 +2100,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn kill_immediately_kills_the_process_group() {
         let mut process = PtyProcess::spawn(PtySpawnOptions::new(
@@ -1861,6 +2125,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn flood_output_never_exceeds_ring_capacity() {
         const CAPACITY: usize = 4096;
@@ -1883,6 +2148,7 @@ mod tests {
         assert_eq!(output.snapshot().len(), CAPACITY);
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_behind_spill_keeps_up_with_yes_flood() {
         const TARGET_BYTES: u64 = 8 * 1024 * 1024;
@@ -1936,6 +2202,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pty_output_drives_tool_aware_attention_state() {
         let command = concat!(

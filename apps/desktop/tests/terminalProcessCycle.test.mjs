@@ -2,31 +2,38 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { primaryModifierLabel } from '../src/lib/primaryModifier.ts';
 import { processCycleDirection } from '../src/lib/terminalKeys.ts';
+
+// The cycle chord follows the platform primary modifier: Command on macOS,
+// Control elsewhere. The excluded modifier is the other platform's primary.
+const primary = primaryModifierLabel === '⌘' ? 'metaKey' : 'ctrlKey';
+const secondary = primary === 'metaKey' ? 'ctrlKey' : 'metaKey';
 
 function keyEvent(key, overrides = {}) {
   return {
     key,
     altKey: false,
     ctrlKey: false,
-    metaKey: true,
+    metaKey: false,
     shiftKey: false,
+    [primary]: true,
     ...overrides
   };
 }
 
-test('recognizes only bare Command-Up and Command-Down process cycling', () => {
+test('recognizes only the bare primary-modifier Up and Down process cycling', () => {
   assert.equal(processCycleDirection(keyEvent('ArrowUp')), -1);
   assert.equal(processCycleDirection(keyEvent('ArrowDown')), 1);
 
-  for (const modifier of ['altKey', 'ctrlKey', 'shiftKey']) {
+  for (const modifier of ['altKey', secondary, 'shiftKey']) {
     assert.equal(processCycleDirection(keyEvent('ArrowUp', { [modifier]: true })), null);
     assert.equal(processCycleDirection(keyEvent('ArrowDown', { [modifier]: true })), null);
   }
 
   assert.equal(processCycleDirection(keyEvent('ArrowLeft')), null);
   assert.equal(processCycleDirection(keyEvent('PageDown')), null);
-  assert.equal(processCycleDirection(keyEvent('ArrowDown', { metaKey: false })), null);
+  assert.equal(processCycleDirection(keyEvent('ArrowDown', { [primary]: false })), null);
 });
 
 test('terminal routes process cycling before user-key tracking and terminal encoding', async () => {

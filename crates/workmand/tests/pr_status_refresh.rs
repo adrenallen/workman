@@ -64,7 +64,7 @@ async fn manual_refresh_round_trips_terminal_pr_state_and_preserves_the_link()
     let store = Store::open(data_dir.join("state.sqlite3"))?;
     store.put_project(&Project {
         id: 1,
-        path: fs::canonicalize(&repository)?
+        path: workman_core::canonical_path(&repository)?
             .to_string_lossy()
             .into_owned(),
         name: "scratch-repository".into(),

@@ -1,5 +1,11 @@
 //! Harness-free integration test whose executable doubles as a disposable workmand.
 
+// Drives Unix signal fixtures (`kill -TERM` reaping); Windows fixture parity is
+// tracked as follow-up work. The stub keeps this harness-free binary linkable.
+#[cfg(not(unix))]
+fn main() {}
+
+#[cfg(unix)]
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -7,14 +13,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
 use workman_core::Store;
+#[cfg(unix)]
 use workmand::{DaemonConfig, DaemonServer, Discovery, database_path, discovery_path, probe};
 
+#[cfg(unix)]
 const STARTUP_DELAY_ENV: &str = "WORKMAN_CLI_AUTOSPAWN_TEST_DELAY_MS";
+#[cfg(unix)]
 const STARTED_MARKER_ENV: &str = "WORKMAN_CLI_AUTOSPAWN_TEST_STARTED_MARKER";
+#[cfg(unix)]
 const SIMULATED_BUSY_STARTUP: Duration = Duration::from_secs(6);
+#[cfg(unix)]
 const CLI_COMPLETION_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[cfg(unix)]
 fn main() {
     let mut args = env::args_os().skip(1);
     if matches!(args.next().as_deref(), Some(value) if value == "--data-dir") {
@@ -25,6 +38,7 @@ fn main() {
     }
 }
 
+#[cfg(unix)]
 fn run_daemon(data_dir: PathBuf) {
     if let Some(marker) = env::var_os(STARTED_MARKER_ENV) {
         fs::write(marker, std::process::id().to_string()).unwrap();
@@ -46,6 +60,7 @@ fn run_daemon(data_dir: PathBuf) {
         });
 }
 
+#[cfg(unix)]
 fn run_test() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         run_case(false, true).await;
@@ -53,6 +68,7 @@ fn run_test() {
     });
 }
 
+#[cfg(unix)]
 async fn run_case(use_environment: bool, simulate_busy_startup: bool) {
     let data_dir = tempfile::tempdir().unwrap();
     let project_dir = tempfile::tempdir().unwrap();
@@ -123,6 +139,7 @@ async fn run_case(use_environment: bool, simulate_busy_startup: bool) {
     .expect("auto-spawned daemon did not remove discovery after SIGTERM");
 }
 
+#[cfg(unix)]
 async fn wait_for_daemon_start(path: &Path) -> u32 {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -139,8 +156,10 @@ async fn wait_for_daemon_start(path: &Path) -> u32 {
     .expect("wrk did not spawn the isolated daemon")
 }
 
+#[cfg(unix)]
 struct TerminateOnDrop(Option<u32>);
 
+#[cfg(unix)]
 impl TerminateOnDrop {
     fn new(pid: u32) -> Self {
         Self(Some(pid))
@@ -153,6 +172,7 @@ impl TerminateOnDrop {
     }
 }
 
+#[cfg(unix)]
 impl Drop for TerminateOnDrop {
     fn drop(&mut self) {
         if let Some(pid) = self.0.take() {
@@ -164,6 +184,7 @@ impl Drop for TerminateOnDrop {
     }
 }
 
+#[cfg(unix)]
 fn terminate(pid: u32) {
     let status = Command::new("kill")
         .arg("-TERM")
@@ -173,6 +194,7 @@ fn terminate(pid: u32) {
     assert!(status.success());
 }
 
+#[cfg(unix)]
 async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");

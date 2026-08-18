@@ -1,3 +1,7 @@
+// The isolated-daemon-restart flow relies on the Unix graceful-shutdown contract
+// (SIGTERM); on Windows it stalls. Ported fixtures are tracked as follow-up work.
+#![cfg(unix)]
+
 use std::{collections::HashMap, error::Error, process::Stdio, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};

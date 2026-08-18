@@ -197,6 +197,7 @@
     requestNativeUpdateCheck,
     type NativeMenuAction
   } from './lib/nativeMenu';
+  import { primaryModifier, secondaryModifier } from './lib/primaryModifier';
   import {
     openerSettings,
     openBrowserUrl,
@@ -910,13 +911,13 @@
       return;
     }
     if (isTerminalInputTarget(target)) return;
-    if (event.metaKey && !event.altKey && !event.ctrlKey && event.key === '/') {
+    if (primaryModifier(event) && !event.altKey && !secondaryModifier(event) && event.key === '/') {
       event.preventDefault();
       if (shortcutsOpen) closeShortcuts();
       else openShortcuts();
       return;
     }
-    if (event.metaKey && !event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'k') {
+    if (primaryModifier(event) && !event.altKey && !secondaryModifier(event) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       if (shortcutsOpen) closeShortcuts();
       if (quickJumpOpen) closeQuickJump();
@@ -924,7 +925,7 @@
       return;
     }
     if (
-      event.metaKey && event.shiftKey && !event.altKey && !event.ctrlKey
+      primaryModifier(event) && event.shiftKey && !event.altKey && !secondaryModifier(event)
       && event.key.toLowerCase() === 'p'
     ) {
       event.preventDefault();
@@ -949,7 +950,7 @@
     }
     if (isTextEditingTarget(target)) return;
     if (
-      selection?.kind === 'todo' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+      selection?.kind === 'todo' && primaryModifier(event) && !event.altKey && !secondaryModifier(event) && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
       event.preventDefault();
@@ -957,7 +958,7 @@
       return;
     }
     if (
-      selection?.kind === 'scratchpad' && event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey
+      selection?.kind === 'scratchpad' && primaryModifier(event) && !event.altKey && !secondaryModifier(event) && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
       event.preventDefault();
@@ -965,7 +966,7 @@
       return;
     }
     if (
-      event.metaKey && !event.ctrlKey && !event.shiftKey
+      primaryModifier(event) && !secondaryModifier(event) && !event.shiftKey
       && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
     ) {
       event.preventDefault();
@@ -980,7 +981,7 @@
     }
     if (panelForTarget(target) === 'projects') handleProjectListKeys(event);
     if (event.defaultPrevented) return;
-    if (event.metaKey && !event.altKey && event.key.toLowerCase() === 'b') {
+    if (primaryModifier(event) && !event.altKey && event.key.toLowerCase() === 'b') {
       event.preventDefault();
       if (event.shiftKey) toggleTreeRail();
       else toggleProjectRail();

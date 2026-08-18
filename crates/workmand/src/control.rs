@@ -1731,7 +1731,7 @@ fn register_project(
     path: &str,
     display_name: Option<&str>,
 ) -> Result<(), (&'static str, String)> {
-    let canonical = std::fs::canonicalize(path).map_err(|error| {
+    let canonical = workman_core::canonical_path(path).map_err(|error| {
         (
             "invalid_project_path",
             format!("could not open project directory: {error}"),

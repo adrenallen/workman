@@ -4,6 +4,7 @@
   import MarkdownView from './MarkdownView.svelte';
   import type { TodoDetail, TodoStatus, TodoSummary } from './coordination';
   import { submitOnEnter } from './formInputConventions';
+  import { primaryModifier } from './primaryModifier';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -95,7 +96,7 @@
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (
-      !event.metaKey ||
+      !primaryModifier(event) ||
       !event.shiftKey ||
       event.altKey ||
       event.key.toLowerCase() !== 'i' ||

@@ -90,7 +90,7 @@ async fn context_action_rpcs_confirm_kill_remove_and_manage_scratchpads() {
     let root = TempDir::new().unwrap();
     let project_path = root.path().join("project");
     fs::create_dir(&project_path).unwrap();
-    let canonical_project = fs::canonicalize(&project_path).unwrap();
+    let canonical_project = workman_core::canonical_path(&project_path).unwrap();
     let server = TestServer::start(&root.path().join("state")).await;
     let (mut socket, _) = connect_async(server.request()).await.unwrap();
 

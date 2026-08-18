@@ -1,3 +1,5 @@
+import { primaryModifier, secondaryModifier } from './primaryModifier.ts';
+
 export interface TerminalKeyboardMode {
   kittyFlags: number;
   modifyOtherKeys: number;
@@ -12,7 +14,9 @@ export interface TerminalKeyEvent {
 }
 
 export function processCycleDirection(event: TerminalKeyEvent): -1 | 1 | null {
-  if (!event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return null;
+  if (!primaryModifier(event) || event.altKey || secondaryModifier(event) || event.shiftKey) {
+    return null;
+  }
   if (event.key === 'ArrowUp') return -1;
   if (event.key === 'ArrowDown') return 1;
   return null;

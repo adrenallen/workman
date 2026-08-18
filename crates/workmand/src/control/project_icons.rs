@@ -142,11 +142,13 @@ pub fn copy_custom_image(
     project: &Project,
     source_path: &Path,
 ) -> Result<String, ProjectIconError> {
-    let root = fs::canonicalize(&project.path).map_err(|_| ProjectIconError::ProjectMissing)?;
+    let root = workman_core::canonical_path(&project.path)
+        .map_err(|_| ProjectIconError::ProjectMissing)?;
     if !root.is_dir() {
         return Err(ProjectIconError::ProjectMissing);
     }
-    let source = fs::canonicalize(source_path).map_err(|_| ProjectIconError::SourceMissing)?;
+    let source =
+        workman_core::canonical_path(source_path).map_err(|_| ProjectIconError::SourceMissing)?;
     if !source.is_file() {
         return Err(ProjectIconError::SourceMissing);
     }
@@ -158,7 +160,7 @@ pub fn copy_custom_image(
     let icon_dir = root.join(".workman");
     fs::create_dir_all(&icon_dir)?;
     let destination = icon_dir.join(format!("icon.{extension}"));
-    let same_file = fs::canonicalize(&destination)
+    let same_file = workman_core::canonical_path(&destination)
         .ok()
         .is_some_and(|existing| existing == source);
     if !same_file {

@@ -44,7 +44,7 @@ fn listener_helper() {
 
 fn fixture() -> (TempDir, ProcessRegistry) {
     let root = tempfile::tempdir().unwrap();
-    let project_path = fs::canonicalize(root.path()).unwrap();
+    let project_path = workman_core::canonical_path(root.path()).unwrap();
     let store = Store::open_in_memory().unwrap();
     store
         .put_project(&Project {
@@ -71,7 +71,7 @@ fn helper_process(root: &TempDir, id: i64, delay: Duration) -> Process {
             "{} --exact listener_helper --nocapture; status=$?; exit \"$status\"",
             shell_quote(&executable.to_string_lossy())
         )),
-        working_dir: fs::canonicalize(root.path())
+        working_dir: workman_core::canonical_path(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned(),
@@ -277,7 +277,7 @@ async fn websocket_exposes_services_ports_and_wait_contract() {
         .store()
         .put_project(&Project {
             id: 1,
-            path: fs::canonicalize(root.path())
+            path: workman_core::canonical_path(root.path())
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),

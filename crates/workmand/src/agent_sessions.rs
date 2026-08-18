@@ -1,7 +1,7 @@
 //! Passive discovery of conversation IDs written by supported agent CLIs.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     env,
     ffi::OsString,
     fs::{self, File},
@@ -10,11 +10,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +107,29 @@ impl SessionCapture {
         !matches!(self.adapter, SessionAdapter::Codex | SessionAdapter::Grok)
     }
 
+    /// A captured ID names a resumable conversation only once the CLI has
+    /// persisted its transcript. Claude registers the ID in its live-session
+    /// registry at startup — before any message exists — and `--resume` fails
+    /// on such IDs forever, wedging every relaunch of that agent. Other
+    /// adapters discover from the transcript files themselves.
+    pub(crate) fn session_resumable(&self, session_id: &str) -> bool {
+        match self.adapter {
+            SessionAdapter::Claude => self
+                .claude_config_root()
+                .join("projects")
+                .join(claude_project_slug(&self.working_dir))
+                .join(format!("{session_id}.jsonl"))
+                .is_file(),
+            _ => true,
+        }
+    }
+
+    fn claude_config_root(&self) -> PathBuf {
+        self.claude_config
+            .clone()
+            .unwrap_or_else(|| self.home.join(".claude"))
+    }
+
     /// Resolve whether this CLI has any cwd-scoped session that its continue-latest
     /// command could select. Unsupported layouts stay unknown at construction time.
     pub(crate) fn latest_existing(&self) -> Result<Option<String>, String> {
@@ -151,10 +177,7 @@ fn adapter(tool_type: &str) -> Option<SessionAdapter> {
 }
 
 fn discover_claude(capture: &SessionCapture) -> io::Result<Option<String>> {
-    let config = capture
-        .claude_config
-        .clone()
-        .unwrap_or_else(|| capture.home.join(".claude"));
+    let config = capture.claude_config_root();
     let live = config.join("sessions");
     if let Some(session_id) = latest_session_file(&live, "json", capture.started_at_ms, |path| {
         let Some(value) = first_json_document(path)? else {
@@ -350,13 +373,13 @@ fn is_uuid_like(value: &str) -> bool {
 
 fn path_is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
-        || path
-            .canonicalize()
+        || workman_core::canonical_path(path)
             .ok()
-            .zip(root.canonicalize().ok())
+            .zip(workman_core::canonical_path(root).ok())
             .is_some_and(|(path, root)| path.starts_with(root))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_tree_pids(root_pid: u32) -> HashSet<u32> {
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -611,10 +634,9 @@ fn claude_project_slug(path: &Path) -> String {
 fn working_dirs_match(recorded: &str, expected: &Path) -> bool {
     let recorded = Path::new(recorded);
     recorded == expected
-        || recorded
-            .canonicalize()
+        || workman_core::canonical_path(recorded)
             .ok()
-            .zip(expected.canonicalize().ok())
+            .zip(workman_core::canonical_path(expected).ok())
             .is_some_and(|(recorded, expected)| recorded == expected)
 }
 
@@ -696,6 +718,33 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("codex-session")
+        );
+    }
+
+    #[test]
+    fn claude_resume_requires_a_persisted_conversation() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let capture = SessionCapture::fixture(SessionAdapter::Claude, temp.path(), &cwd, 0);
+
+        assert!(!capture.session_resumable("11f3d0d8-2e7a-41f8-a7be-62fcd1304617"));
+
+        let projects = temp
+            .path()
+            .join(".claude/projects")
+            .join(claude_project_slug(&cwd));
+        fs::create_dir_all(&projects).unwrap();
+        fs::write(
+            projects.join("11f3d0d8-2e7a-41f8-a7be-62fcd1304617.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        assert!(capture.session_resumable("11f3d0d8-2e7a-41f8-a7be-62fcd1304617"));
+
+        assert!(
+            SessionCapture::fixture(SessionAdapter::Codex, temp.path(), &cwd, 0)
+                .session_resumable("any-transcript-owning-adapter")
         );
     }
 

@@ -2045,7 +2045,7 @@ fn resolve_project_file(
             path.to_path_buf(),
         ));
     }
-    let root = fs::canonicalize(&project.path)?;
+    let root = crate::canonical_path(&project.path)?;
     let candidate = root.join(path);
     if for_write {
         let mut existing = candidate.parent().unwrap_or(&root);
@@ -2054,14 +2054,14 @@ fn resolve_project_file(
                 .parent()
                 .ok_or_else(|| ScratchpadServiceError::PathEscapesProject(path.to_path_buf()))?;
         }
-        let canonical_existing = fs::canonicalize(existing)?;
+        let canonical_existing = crate::canonical_path(existing)?;
         if !canonical_existing.starts_with(&root) {
             return Err(ScratchpadServiceError::PathEscapesProject(
                 path.to_path_buf(),
             ));
         }
         if fs::symlink_metadata(&candidate).is_ok() {
-            let canonical_candidate = fs::canonicalize(&candidate)
+            let canonical_candidate = crate::canonical_path(&candidate)
                 .map_err(|_| ScratchpadServiceError::PathEscapesProject(path.to_path_buf()))?;
             if !canonical_candidate.starts_with(&root) {
                 return Err(ScratchpadServiceError::PathEscapesProject(
@@ -2071,7 +2071,7 @@ fn resolve_project_file(
         }
         Ok(candidate)
     } else {
-        let canonical = fs::canonicalize(&candidate)?;
+        let canonical = crate::canonical_path(&candidate)?;
         if !canonical.starts_with(&root) {
             return Err(ScratchpadServiceError::PathEscapesProject(
                 path.to_path_buf(),
@@ -2082,7 +2082,7 @@ fn resolve_project_file(
 }
 
 fn verify_relative_parent(project: &Project, path: &Path) -> ScratchpadServiceResult<()> {
-    let root = fs::canonicalize(&project.path)?;
+    let root = crate::canonical_path(&project.path)?;
     if !path.is_absolute() {
         return Ok(());
     }
@@ -2091,7 +2091,7 @@ fn verify_relative_parent(project: &Project, path: &Path) -> ScratchpadServiceRe
         return Ok(());
     }
     let parent = path.parent().unwrap_or(&root);
-    if !fs::canonicalize(parent)?.starts_with(root) {
+    if !crate::canonical_path(parent)?.starts_with(root) {
         return Err(ScratchpadServiceError::PathEscapesProject(
             path.to_path_buf(),
         ));

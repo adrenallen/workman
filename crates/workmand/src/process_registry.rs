@@ -947,6 +947,14 @@ impl ProcessRegistry {
         let capture = tool_type.as_deref().and_then(|tool_type| {
             SessionCapture::new(tool_type, &process.working_dir, &process.env, started_at)
         });
+        // A captured ID only resumes once its conversation is on disk. Claude
+        // registers IDs at startup, so a session that exited before its first
+        // message would wedge every relaunch into an unresumable --resume.
+        let previous_session =
+            previous_session.filter(|session| match (&capture, session.session_id.as_deref()) {
+                (Some(capture), Some(session_id)) => capture.session_resumable(session_id),
+                _ => true,
+            });
         let needs_continue_check = process.exited_at.is_some()
             && previous_session
                 .as_ref()
@@ -2510,6 +2518,7 @@ fn ascii_case_insensitive_matches(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::{thread, time::Instant};
 
@@ -2685,6 +2694,7 @@ mod tests {
         assert_eq!(fresh.command, tool.command);
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_a_grok_process_removes_only_its_private_launch_home() {
         let source = tempfile::tempdir().unwrap();
@@ -2811,6 +2821,7 @@ mod tests {
         assert!(process.exited_at.is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn command_spawn_uses_login_profile_and_complete_pty_environment() {
         let temp = tempfile::tempdir().unwrap();

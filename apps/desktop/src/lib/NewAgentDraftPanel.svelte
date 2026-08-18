@@ -18,6 +18,7 @@
   import { Input } from './components/ui/input';
   import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
+  import { primaryModifier, primaryModifierLabel } from './primaryModifier';
 
   interface AgentDraftSubmission {
     input: SpawnAgentInput;
@@ -177,7 +178,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Enter' || !event.metaKey) return;
+    if (event.key !== 'Enter' || !primaryModifier(event)) return;
     event.preventDefault();
     submit();
   }
@@ -275,7 +276,7 @@
         oninput={(event) => onChange({ prompt: event.currentTarget.value })}
         onkeydown={handleKeydown}
       />
-      <small>Cmd+Enter creates. Shift+Enter adds a line.</small>
+      <small>{primaryModifierLabel}+Enter creates. Shift+Enter adds a line.</small>
     </label>
 
     <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-md border border-border">

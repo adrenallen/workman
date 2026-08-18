@@ -419,7 +419,7 @@ pub(crate) fn import(
     let mut projects = Vec::with_capacity(archive.projects.len());
     let mut memberships = Vec::with_capacity(archive.projects.len());
     for (position, project) in archive.projects.into_iter().enumerate() {
-        let path = fs::canonicalize(&project.path).map_err(|error| {
+        let path = workman_core::canonical_path(&project.path).map_err(|error| {
             (
                 "profile_import_invalid",
                 format!("{}: {error}", project.path),
