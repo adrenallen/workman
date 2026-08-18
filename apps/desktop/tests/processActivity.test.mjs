@@ -159,7 +159,7 @@ test('per-kind activity keeps agent, terminal, and command counts separate', () 
   assert.equal(activity.command.activeLabel, 'command-10 running');
 });
 
-test('per-kind tones use idle grey whenever a kind has no active work', () => {
+test('per-kind tones prioritize input and live work before crashes and idle states', () => {
   const needsInput = process(1, 'agent', 'running', 'needs_input');
   const crashed = process(2, 'agent', 'crashed', 'exited');
   const working = process(3, 'agent', 'running', 'working');
@@ -168,7 +168,7 @@ test('per-kind tones use idle grey whenever a kind has no active work', () => {
 
   assert.equal(projectKindActivity([needsInput, crashed, working, waiting], {}).agent.tone, 'needs-input');
   assert.equal(projectKindActivity([crashed, working, waiting], {}).agent.tone, 'success');
-  assert.equal(projectKindActivity([crashed, waiting], {}).agent.tone, 'idle');
+  assert.equal(projectKindActivity([crashed, waiting], {}).agent.tone, 'danger');
   assert.equal(projectKindActivity([waiting], {}).agent.tone, 'idle');
   assert.equal(projectKindActivity([idle], {}).agent.tone, 'idle');
   assert.equal(projectKindActivity([], {}).agent.tone, 'idle');
@@ -187,6 +187,9 @@ test('non-zero and signaled exits are errors while clean exits are stopped', () 
   assert.equal(activity.terminal.crashed, 1);
   assert.equal(activity.command.crashed, 0);
   assert.equal(activity.command.stopped, 1);
+  assert.equal(activity.agent.tone, 'danger');
+  assert.equal(activity.terminal.tone, 'danger');
+  assert.equal(activity.command.tone, 'idle');
 });
 
 test('jump targets prefer input and foreground work, then output or process start recency', () => {

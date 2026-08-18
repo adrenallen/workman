@@ -300,6 +300,7 @@ function processHasError(process: ProcessView): boolean {
 function kindActivityTone(detail: ProjectKindActivityDetail): ProjectKindActivityTone {
   if (detail.needsInput > 0) return 'needs-input';
   if (detail.running > 0 || detail.starting > 0) return 'success';
+  if (detail.crashed > 0) return 'danger';
   return 'idle';
 }
 

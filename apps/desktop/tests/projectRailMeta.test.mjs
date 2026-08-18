@@ -99,6 +99,9 @@ test('kind indicators expose click-only idle rosters and shared popover state', 
   );
 
   assert.match(indicators, /data-tone=\{detail\.tone\}/);
+  assert.match(indicators, /\.project-kind-indicator\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
+  assert.match(indicators, /\.kind-popover-header > span:first-child\[data-tone='idle'\][^{]*\{[^}]*var\(--muted-foreground\)/);
+  assert.match(indicators, /\.kind-popover-header > span:first-child\[data-tone='danger'\][^{]*\{[^}]*var\(--destructive\)/);
   assert.match(indicators, /compact \? kinds\.filter\(\(kind\) => activity\[kind\]\.active > 0\) : kinds/);
   assert.match(indicators, /\{#each visibleKinds as kind \(kind\)\}/);
   assert.match(indicators, /activity\[kind\]\.processIds/);

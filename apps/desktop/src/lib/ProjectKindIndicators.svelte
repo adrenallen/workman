@@ -202,6 +202,7 @@
   .project-kind-indicators { display: inline-flex; min-width: 0; min-height: 20px; flex: none; align-items: center; gap: 0; }
   .project-kind-indicator { --indicator-tone: var(--agent-state-working); display: inline-flex; color: var(--indicator-tone); }
   .project-kind-indicator[data-tone='needs-input'] { --indicator-tone: var(--warning-token); }
+  .project-kind-indicator[data-tone='danger'] { --indicator-tone: var(--destructive); }
   .project-kind-indicator[data-tone='idle'] { --indicator-tone: var(--muted-foreground); }
   .project-kind-indicator :global(.project-kind-trigger) { width: 18px; min-width: 18px; height: 20px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0; color: inherit; background: var(--card); }
   .kind-glyph { position: relative; display: grid; width: 14px; height: 14px; place-items: center; }
@@ -212,11 +213,14 @@
   .compact .project-kind-indicator :global(.project-kind-pip:focus-visible) { outline: 1px solid var(--ring); outline-offset: 1px; box-shadow: none; }
   .pip-mark { display: block; width: 7px; height: 7px; border: 1px solid var(--card); border-radius: 999px; background: var(--agent-state-working); }
   .project-kind-indicator[data-tone='needs-input'] .pip-mark { background: var(--warning-token); }
+  .project-kind-indicator[data-tone='danger'] .pip-mark { background: var(--destructive); }
   .project-kind-indicator[data-tone='idle'] .pip-mark { background: var(--muted-foreground); opacity: .58; }
 
   .kind-popover-header { display: flex; min-width: 0; align-items: center; gap: var(--space-2); border-bottom: 1px solid var(--border); padding: 4px 5px 7px; }
   .kind-popover-header > span:first-child { display: grid; width: 24px; height: 24px; flex: none; place-items: center; border: 1px solid var(--border); border-radius: var(--radius); color: var(--agent-state-working); background: var(--card); }
   .kind-popover-header > span:first-child[data-tone='needs-input'] { color: var(--warning-token); }
+  .kind-popover-header > span:first-child[data-tone='danger'] { color: var(--destructive); }
+  .kind-popover-header > span:first-child[data-tone='idle'] { color: var(--muted-foreground); }
   .kind-popover-header > span:last-child { min-width: 0; }
   .kind-popover-header strong, .kind-popover-header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kind-popover-header strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; }
