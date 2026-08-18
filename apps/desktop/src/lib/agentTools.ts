@@ -1,5 +1,6 @@
 import type { ProcessView } from './daemon';
 export { formatExtraArgs, parseExtraArgs } from './extraArgs';
+export { normalizeAgentToolType } from './agentToolType.ts';
 
 export interface AgentTool {
   id: number;

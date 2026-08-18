@@ -1,8 +1,15 @@
 import type { ProcessKind } from './daemon';
+import { normalizeAgentToolType } from './agentToolType.ts';
 
 const safePathCharacter = /^[\p{L}\p{N}_./-]$/u;
 
-export type ClipboardImagePasteRoute = 'agent-tui' | 'agent-native-deferred' | 'shell-path';
+export type ClipboardImagePasteRoute = 'agent-tui' | 'agent-native-normalized' | 'shell-path';
+
+export interface ClipboardImagePasteActions {
+  forwardNativePaste: () => void;
+  normalizeSystemClipboard: () => Promise<void>;
+  insertSavedPngFallback: () => Promise<void>;
+}
 
 /**
  * Agent TUIs own clipboard-image import, so forward their Ctrl+V signal and let them read the
@@ -13,11 +20,12 @@ export function clipboardImagePasteRoute(
   agentToolType: string | null = null
 ): ClipboardImagePasteRoute {
   if (processKind !== 'agent') return 'shell-path';
-  switch (agentToolType?.toLowerCase()) {
+  switch (normalizeAgentToolType(agentToolType)) {
     case 'claude':
     case 'claude_code':
-      // Claude synchronously reads PNGf, so DOM paste must release WebKit's pasteboard read first.
-      return 'agent-native-deferred';
+      // Claude reads PNGf through AppleScript. Normalize the pasteboard before forwarding Ctrl+V
+      // so TIFF and file-URL sources do not depend on an implicit AppKit conversion.
+      return 'agent-native-normalized';
     case 'codex':
     default:
       // Codex owns image import and keeps the pre-existing immediate Ctrl+V behavior. Unknown
@@ -26,16 +34,26 @@ export function clipboardImagePasteRoute(
   }
 }
 
-/**
- * WebKit dispatches DOM paste while it still owns the pasteboard read. Move a synthetic Ctrl+V
- * to the next task so Claude can synchronously read PNGf after that ownership is released.
- * Physical Ctrl+V never uses this helper and remains byte-for-byte pass-through.
- */
-export function deferAgentImagePaste(
-  forward: () => void,
-  schedule: (callback: () => void) => void = (callback) => { setTimeout(callback, 0); }
-): void {
-  schedule(forward);
+/** Execute the selected image-paste strategy without coupling tests to DOM or Tauri globals. */
+export async function performClipboardImagePaste(
+  route: ClipboardImagePasteRoute,
+  actions: ClipboardImagePasteActions
+): Promise<void> {
+  if (route === 'agent-tui') {
+    actions.forwardNativePaste();
+    return;
+  }
+  if (route === 'shell-path') {
+    await actions.insertSavedPngFallback();
+    return;
+  }
+  try {
+    await actions.normalizeSystemClipboard();
+  } catch {
+    await actions.insertSavedPngFallback();
+    return;
+  }
+  actions.forwardNativePaste();
 }
 
 /** Ctrl+V as a PTY byte; Claude Code and Codex use it to import an image from the clipboard. */

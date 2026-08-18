@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -9,14 +9,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use image::{ImageFormat, ImageReader, Limits};
 use workmand::default_data_dir;
 
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString};
 use serde::Serialize;
 
 const CLIPBOARD_DIRECTORY: &str = "terminal-clipboard";
@@ -30,16 +32,37 @@ static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TerminalClipboardRead {
-    Text { text: String },
-    Image { path: Option<String> },
+    Text {
+        text: String,
+    },
+    Image {
+        path: Option<String>,
+        clipboard_ready: bool,
+    },
     Empty,
 }
 
 #[tauri::command]
-pub async fn terminal_read_clipboard(save_image: bool) -> Result<TerminalClipboardRead, String> {
-    tauri::async_runtime::spawn_blocking(move || read_native_clipboard(save_image))
+pub async fn terminal_read_clipboard(
+    save_image: bool,
+    normalize_image: bool,
+) -> Result<TerminalClipboardRead, String> {
+    tauri::async_runtime::spawn_blocking(move || read_native_clipboard(save_image, normalize_image))
         .await
         .map_err(|error| format!("clipboard read task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_write_clipboard_image(
+    bytes: Vec<u8>,
+    mime_type: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let png = normalize_image_png(&bytes, &mime_type)?;
+        write_native_clipboard_png(&png)
+    })
+    .await
+    .map_err(|error| format!("clipboard write task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -50,7 +73,10 @@ pub async fn terminal_write_clipboard_text(text: String) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_native_clipboard(save_image: bool) -> Result<TerminalClipboardRead, String> {
+fn read_native_clipboard(
+    save_image: bool,
+    normalize_image: bool,
+) -> Result<TerminalClipboardRead, String> {
     let pasteboard = NSPasteboard::generalPasteboard();
     // SAFETY: These AppKit globals are immutable NSString constants.
     let image = unsafe {
@@ -63,11 +89,34 @@ fn read_native_clipboard(save_image: bool) -> Result<TerminalClipboardRead, Stri
                     .map(|data| (data.to_vec(), "image/tiff"))
             })
     };
+    let image = match image {
+        Some(image) => Some(image),
+        None => read_clipboard_file_url(&pasteboard)?,
+    };
     if let Some((bytes, mime_type)) = image {
+        if normalize_image {
+            let png = normalize_image_png(&bytes, mime_type)?;
+            if write_native_clipboard_png(&png).is_ok() {
+                return Ok(TerminalClipboardRead::Image {
+                    path: None,
+                    clipboard_ready: true,
+                });
+            }
+            return Ok(TerminalClipboardRead::Image {
+                path: Some(save_clipboard_image(&png, "image/png")?),
+                clipboard_ready: false,
+            });
+        }
         let path = save_image
-            .then(|| save_clipboard_image(&bytes, mime_type))
+            .then(|| {
+                let png = normalize_image_png(&bytes, mime_type)?;
+                save_clipboard_image(&png, "image/png")
+            })
             .transpose()?;
-        return Ok(TerminalClipboardRead::Image { path });
+        return Ok(TerminalClipboardRead::Image {
+            path,
+            clipboard_ready: false,
+        });
     }
 
     // SAFETY: NSPasteboardTypeString is an immutable AppKit NSString constant.
@@ -77,6 +126,50 @@ fn read_native_clipboard(save_image: bool) -> Result<TerminalClipboardRead, Stri
             text: text.to_string(),
         }
     }))
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_file_url(
+    pasteboard: &NSPasteboard,
+) -> Result<Option<(Vec<u8>, &'static str)>, String> {
+    // SAFETY: NSPasteboardTypeFileURL is an immutable AppKit NSString constant.
+    let value = unsafe { pasteboard.stringForType(NSPasteboardTypeFileURL) };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let url = url::Url::parse(&value.to_string())
+        .map_err(|error| format!("clipboard file URL is invalid: {error}"))?;
+    let path = url
+        .to_file_path()
+        .map_err(|()| "clipboard file URL is not local".to_owned())?;
+    let mut file = fs::File::open(&path)
+        .map_err(|error| format!("could not open clipboard image file: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect clipboard image file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("clipboard file URL is not a regular file".to_owned());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err(format!(
+            "clipboard image exceeds the {} MiB limit",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read clipboard image file: {error}"))?;
+    (bytes.len() <= MAX_IMAGE_BYTES)
+        .then_some((bytes, "application/octet-stream"))
+        .ok_or_else(|| {
+            format!(
+                "clipboard image exceeds the {} MiB limit",
+                MAX_IMAGE_BYTES / 1024 / 1024
+            )
+        })
+        .map(Some)
 }
 
 #[cfg(target_os = "macos")]
@@ -91,9 +184,29 @@ fn write_native_clipboard_text(text: &str) -> Result<(), String> {
         .ok_or_else(|| "the system pasteboard rejected terminal text".to_owned())
 }
 
+#[cfg(target_os = "macos")]
+fn write_native_clipboard_png(png: &[u8]) -> Result<(), String> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    let data = NSData::with_bytes(png);
+    // SAFETY: NSPasteboardTypePNG is an immutable AppKit NSString constant.
+    let written = pasteboard.setData_forType(Some(&data), unsafe { NSPasteboardTypePNG });
+    written
+        .then_some(())
+        .ok_or_else(|| "the system pasteboard rejected the normalized PNG".to_owned())
+}
+
 #[cfg(not(target_os = "macos"))]
-fn read_native_clipboard(_save_image: bool) -> Result<TerminalClipboardRead, String> {
+fn read_native_clipboard(
+    _save_image: bool,
+    _normalize_image: bool,
+) -> Result<TerminalClipboardRead, String> {
     Err("terminal context-menu paste is not supported on this platform".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_native_clipboard_png(_png: &[u8]) -> Result<(), String> {
+    Err("terminal image clipboard writes are not supported on this platform".to_owned())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -109,6 +222,85 @@ pub async fn terminal_save_clipboard_image(
     tauri::async_runtime::spawn_blocking(move || save_clipboard_image(&bytes, &mime_type))
         .await
         .map_err(|error| format!("clipboard image task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_save_clipboard_png(
+    bytes: Vec<u8>,
+    mime_type: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let png = normalize_image_png(&bytes, &mime_type)?;
+        save_clipboard_image(&png, "image/png")
+    })
+    .await
+    .map_err(|error| format!("clipboard image task failed: {error}"))?
+}
+
+fn normalize_image_png(bytes: &[u8], mime_type: &str) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Err("clipboard image is empty".to_owned());
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "clipboard image exceeds the {} MiB limit",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let format = image_format(mime_type)
+        .or_else(|| image::guess_format(bytes).ok())
+        .ok_or_else(|| "clipboard item is not a supported raster image".to_owned())?;
+    if !matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::WebP
+            | ImageFormat::Bmp
+            | ImageFormat::Tiff
+    ) {
+        return Err("clipboard item is not a supported raster image".to_owned());
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| format!("could not decode clipboard image: {error}"))?;
+    let mut output = Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| format!("could not encode clipboard image as PNG: {error}"))?;
+    let png = output.into_inner();
+    if png.len() > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "normalized clipboard image exceeds the {} MiB limit",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(png)
+}
+
+fn image_format(mime_type: &str) -> Option<ImageFormat> {
+    match mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::WebP),
+        "image/bmp" => Some(ImageFormat::Bmp),
+        "image/tiff" => Some(ImageFormat::Tiff),
+        _ => None,
+    }
 }
 
 fn save_clipboard_image(bytes: &[u8], mime_type: &str) -> Result<String, String> {
@@ -372,6 +564,20 @@ mod tests {
         assert!(
             save_image_in(root.path(), &vec![0; MAX_IMAGE_BYTES + 1], "image/png", now).is_err()
         );
+    }
+
+    #[test]
+    fn normalizes_tiff_bytes_to_png_for_claude_clipboard_delivery() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([12, 34, 56, 255]),
+        ));
+        let mut tiff = Cursor::new(Vec::new());
+        image.write_to(&mut tiff, ImageFormat::Tiff).unwrap();
+
+        let png = normalize_image_png(&tiff.into_inner(), "image/tiff").unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[test]

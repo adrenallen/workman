@@ -3,8 +3,8 @@ import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 
 import {
   type ClipboardImagePasteRoute,
-  deferAgentImagePaste,
   localPathsFromUriList,
+  performClipboardImagePaste,
   pointIsInsideRect,
   shellEscapePaths
 } from './terminalInput';
@@ -33,7 +33,7 @@ interface PathFile extends File {
 
 type NativeTerminalClipboardRead =
   | { kind: 'text'; text: string }
-  | { kind: 'image'; path: string | null }
+  | { kind: 'image'; path: string | null; clipboard_ready: boolean }
   | { kind: 'empty' };
 
 export async function writeTerminalClipboardText(text: string): Promise<void> {
@@ -135,21 +135,33 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
       return;
     }
     const route = options.imagePasteRoute();
-    if (route !== 'shell-path') {
-      // The TUI reads the image from the OS clipboard when it receives Ctrl+V. Do not save,
-      // replace, or clear the clipboard here; forwarding the chord preserves its native flow.
+    if (route === 'agent-tui') {
+      // Codex and unknown agent TUIs keep the existing immediate native clipboard flow.
       options.focus();
-      const forward = () => {
-        if (!disposed) options.forwardAgentImagePaste();
-      };
-      if (route === 'agent-native-deferred') deferAgentImagePaste(forward);
-      else forward();
+      options.forwardAgentImagePaste();
       return;
     }
     options.setPasteSaving(true);
     try {
-      const paths = await saveClipboardImages(images);
-      if (!disposed) insertPaths(paths);
+      await performClipboardImagePaste(route, {
+        forwardNativePaste: () => {
+          if (disposed) return;
+          options.focus();
+          options.forwardAgentImagePaste();
+        },
+        normalizeSystemClipboard: async () => {
+          const image = images[0];
+          const bytes = Array.from(new Uint8Array(await image.arrayBuffer()));
+          await invoke('terminal_write_clipboard_image', {
+            bytes,
+            mimeType: image.type
+          });
+        },
+        insertSavedPngFallback: async () => {
+          const paths = await saveClipboardImages(images, route === 'agent-native-normalized');
+          if (!disposed) insertPaths(paths);
+        }
+      });
     } catch (cause) {
       if (!disposed) options.reportError(message(cause));
     } finally {
@@ -159,7 +171,8 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
   const pasteNativeClipboard = async () => {
     const route = options.imagePasteRoute();
     const clipboard = await invoke<NativeTerminalClipboardRead>('terminal_read_clipboard', {
-      saveImage: route === 'shell-path'
+      saveImage: route === 'shell-path',
+      normalizeImage: route === 'agent-native-normalized'
     });
     if (disposed || clipboard.kind === 'empty') return;
     if (clipboard.kind === 'text') {
@@ -168,13 +181,12 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
       options.pasteText(clipboard.text);
       return;
     }
-    if (route !== 'shell-path') {
-      // The native command only observes that an image exists; the TUI reads the unchanged pasteboard.
+    if (route === 'agent-tui' || clipboard.clipboard_ready) {
       options.focus();
       options.forwardAgentImagePaste();
       return;
     }
-    if (!clipboard.path) throw new Error('The clipboard image was not saved for terminal paste.');
+    if (!clipboard.path) throw new Error('The clipboard image could not be prepared for terminal paste.');
     insertPaths([clipboard.path]);
   };
   const paste = (event: ClipboardEvent) => {
@@ -267,14 +279,17 @@ async function clipboardText(items: ClipboardItems): Promise<string> {
   return parts.join('\n');
 }
 
-async function saveClipboardImages(images: File[]): Promise<string[]> {
+async function saveClipboardImages(images: File[], normalizeToPng = false): Promise<string[]> {
   const paths: string[] = [];
   for (const image of images) {
     const bytes = Array.from(new Uint8Array(await image.arrayBuffer()));
-    paths.push(await invoke<string>('terminal_save_clipboard_image', {
+    paths.push(await invoke<string>(
+      normalizeToPng ? 'terminal_save_clipboard_png' : 'terminal_save_clipboard_image',
+      {
       bytes,
       mimeType: image.type
-    }));
+      }
+    ));
   }
   return paths;
 }
