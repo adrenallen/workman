@@ -417,7 +417,7 @@
   let treeBulkBusy = $state(false);
   let contextRequest = $state<ContextMenuRequest | null>(null);
   let projectRailPopoverKey = $state<string | null>(null);
-  let projectRailTooltipEpoch = $state(0);
+  let projectRailTooltipOpenId = $state<number | null>(null);
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
@@ -4287,7 +4287,23 @@
   }
 
   function closeProjectRailTooltip(): void {
-    projectRailTooltipEpoch += 1;
+    projectRailTooltipOpenId = null;
+  }
+
+  function changeProjectRailTooltipOpen(projectId: number, open: boolean): void {
+    if (open) {
+      projectRailTooltipOpenId = projectId;
+    } else if (projectRailTooltipOpenId === projectId) {
+      projectRailTooltipOpenId = null;
+    }
+  }
+
+  function closeProjectRailTooltipOnUnmount(_node: HTMLElement, projectId: number) {
+    return {
+      destroy(): void {
+        if (projectRailTooltipOpenId === projectId) closeProjectRailTooltip();
+      }
+    };
   }
 
   function toggleProjectRail(): void {
@@ -4740,12 +4756,12 @@
   {@const projectProcesses = projectRailProcesses(project)}
   {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
   {@const activityLabel = projectRailActivityLabel(project, activity)}
-  {@const projectTooltipRenderKey = `${project.id}:${project.selected}:${fullTitle}:${project.path}:${parentLabel ?? ''}:${activityLabel}:${unreadAgentCount}:${projectRailCollapsed}:${projectRailTooltipEpoch}`}
   <article
     class:active={project.selected}
     class:has-unread={unreadAgentCount > 0}
     class:nested
     class="project-row group/project group/repository"
+    use:closeProjectRailTooltipOnUnmount={project.id}
   >
     {#if renameId === project.id}
       <form class="rename-form" onsubmit={(event) => { event.preventDefault(); void commitRename(); }}>
@@ -4774,46 +4790,46 @@
               data-context-id={project.id}
             >
               <span class="project-icon-anchor">
-                {#key projectTooltipRenderKey}
-                  <TooltipLabel
-                    label={tooltipLabel}
-                    side={projectRailCollapsed ? 'right' : 'top'}
-                    sideOffset={8}
-                    delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
-                    disableHoverableContent={true}
-                    skipDelayDuration={0}
-                    contentClass="project-rail-tooltip"
-                    tabindex={-1}
-                    onpointerleave={closeProjectRailTooltip}
-                    onpointerdown={closeProjectRailTooltip}
-                  >
-                    {#snippet children()}
-                      <span class="project-kind-icon" aria-hidden="true">
-                        <ProjectIcon
-                          icon={project.icon}
-                          color={project.icon_color}
-                          image={project.icon_image?.data_url}
-                          fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
-                          worktree={parentLabel !== null}
-                          worktreeTooltip={false}
-                          size={15}
-                        />
-                      </span>
-                    {/snippet}
-                    {#snippet content()}
-                      <span class="project-tooltip-copy">
-                        <strong>{fullTitle}</strong>
-                        <span>{project.path}</span>
-                        {#if parentLabel !== null}
-                          <span class="project-tooltip-parent">
-                            <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
-                            Worktree of {parentLabel}
-                          </span>
-                        {/if}
-                      </span>
-                    {/snippet}
-                  </TooltipLabel>
-                {/key}
+                <TooltipLabel
+                  label={tooltipLabel}
+                  side={projectRailCollapsed ? 'right' : 'top'}
+                  sideOffset={8}
+                  delayDuration={PROJECT_RAIL_TOOLTIP_DELAY_MS}
+                  disableHoverableContent={true}
+                  skipDelayDuration={0}
+                  contentClass="project-rail-tooltip"
+                  tabindex={-1}
+                  open={projectRailTooltipOpenId === project.id}
+                  onOpenChange={(open) => changeProjectRailTooltipOpen(project.id, open)}
+                  onpointerleave={closeProjectRailTooltip}
+                  onpointerdown={closeProjectRailTooltip}
+                >
+                  {#snippet children()}
+                    <span class="project-kind-icon" aria-hidden="true">
+                      <ProjectIcon
+                        icon={project.icon}
+                        color={project.icon_color}
+                        image={project.icon_image?.data_url}
+                        fallback={parentLabel !== null ? 'worktree' : project.repository_id !== null ? 'repository' : 'project'}
+                        worktree={parentLabel !== null}
+                        worktreeTooltip={false}
+                        size={15}
+                      />
+                    </span>
+                  {/snippet}
+                  {#snippet content()}
+                    <span class="project-tooltip-copy">
+                      <strong>{fullTitle}</strong>
+                      <span>{project.path}</span>
+                      {#if parentLabel !== null}
+                        <span class="project-tooltip-parent">
+                          <GitBranchIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                          Worktree of {parentLabel}
+                        </span>
+                      {/if}
+                    </span>
+                  {/snippet}
+                </TooltipLabel>
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if unreadAgentCount > 0}

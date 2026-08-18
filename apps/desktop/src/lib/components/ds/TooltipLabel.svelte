@@ -14,6 +14,8 @@
     skipDelayDuration?: number;
     contentClass?: string;
     tabindex?: number;
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
     onpointerleave?: (event: PointerEvent) => void;
     onpointerdown?: (event: PointerEvent) => void;
   }
@@ -29,13 +31,20 @@
     skipDelayDuration = 300,
     contentClass,
     tabindex = 0,
+    open = $bindable(false),
+    onOpenChange,
     onpointerleave,
     onpointerdown
   }: Props = $props();
+
+  function changeOpen(nextOpen: boolean): void {
+    open = nextOpen;
+    onOpenChange?.(nextOpen);
+  }
 </script>
 
 <Tooltip.Provider {delayDuration} {disableHoverableContent} {skipDelayDuration}>
-  <Tooltip.Root>
+  <Tooltip.Root {open} onOpenChange={changeOpen}>
     <Tooltip.Trigger {tabindex}>
       {#snippet child({ props })}
         <span
