@@ -1030,6 +1030,15 @@ async fn dispatch(
                 .map(|updated| json!({ "updated": usize::from(updated) }))
                 .map_err(project_store_error);
         }
+        "projects.mark_read" => {
+            let params: ProjectParams = params_as(params)?;
+            let result = registry
+                .store()
+                .mark_project_read(params.project_id, crate::timers::now_millis())
+                .map_err(project_store_error)?;
+            registry.status_invalidations().invalidate();
+            return Ok(json_value(result));
+        }
         "projects.list" => {
             return project_result(list_projects(registry.store()));
         }
