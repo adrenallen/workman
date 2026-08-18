@@ -6,7 +6,8 @@ import {
   localPathsFromUriList,
   performClipboardImagePaste,
   pointIsInsideRect,
-  shellEscapePaths
+  shellEscapePaths,
+  shouldUseNativeClipboardFallback
 } from './terminalInput';
 
 interface TerminalTransferOptions {
@@ -190,14 +191,27 @@ export function installTerminalTransfers(options: TerminalTransferOptions): Term
     insertPaths([clipboard.path]);
   };
   const paste = (event: ClipboardEvent) => {
+    const route = options.imagePasteRoute();
     const images = Array.from(event.clipboardData?.items ?? [])
       .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
       .map((item) => item.getAsFile())
       .filter((file): file is File => file !== null);
-    if (images.length === 0) return;
+    const nativeFallback = shouldUseNativeClipboardFallback(route, images.length, isTauri());
+    if (images.length === 0 && !nativeFallback) return;
 
     event.preventDefault();
     event.stopPropagation();
+    if (nativeFallback) {
+      options.setPasteSaving(true);
+      void pasteNativeClipboard()
+        .catch((cause) => {
+          if (!disposed) options.reportError(`Could not read the clipboard: ${message(cause)}`);
+        })
+        .finally(() => {
+          if (!disposed) options.setPasteSaving(false);
+        });
+      return;
+    }
     void pasteImages(images);
   };
 

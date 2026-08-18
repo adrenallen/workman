@@ -56,6 +56,17 @@ export async function performClipboardImagePaste(
   actions.forwardNativePaste();
 }
 
+/** File-URL-only pasteboards may not expose a DOM image item in WKWebView. */
+export function shouldUseNativeClipboardFallback(
+  route: ClipboardImagePasteRoute,
+  domImageCount: number,
+  nativeClipboardAvailable: boolean
+): boolean {
+  return nativeClipboardAvailable
+    && route === 'agent-native-normalized'
+    && domImageCount === 0;
+}
+
 /** Ctrl+V as a PTY byte; Claude Code and Codex use it to import an image from the clipboard. */
 export const AGENT_TUI_CLIPBOARD_IMAGE_PASTE = '\x16';
 

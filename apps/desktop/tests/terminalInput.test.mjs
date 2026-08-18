@@ -10,6 +10,7 @@ import {
   pointIsInsideRect,
   shellEscapePath,
   shellEscapePaths,
+  shouldUseNativeClipboardFallback,
   shouldForwardTerminalInput
 } from '../src/lib/terminalInput.ts';
 import { normalizeAgentToolType } from '../src/lib/agentToolType.ts';
@@ -59,20 +60,24 @@ test('normalizes Claude clipboard before forwarding and falls back to a saved PN
   assert.deepEqual(calls, ['fallback']);
 });
 
-test('agent image paste forwards the TUI shortcut while plain shells keep saved paths', async () => {
+test('uses the native reader only for Claude pasteboards that expose no DOM image', () => {
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 0, true), true);
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 1, true), false);
+  assert.equal(shouldUseNativeClipboardFallback('agent-native-normalized', 0, false), false);
+  assert.equal(shouldUseNativeClipboardFallback('agent-tui', 0, true), false);
+  assert.equal(shouldUseNativeClipboardFallback('shell-path', 0, true), false);
+});
+
+test('terminal transfer wiring uses normalized image paste and the native no-blob fallback', async () => {
   const transfers = await readFile(
     new URL('../src/lib/terminalTransfers.ts', import.meta.url),
     'utf8'
   );
   const terminal = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
-  const noImages = transfers.indexOf('if (images.length === 0) return;');
-  const preventDefault = transfers.indexOf('event.preventDefault();', noImages);
-  const sharedPaste = transfers.indexOf('pasteImages(images)', preventDefault);
-
-  assert.ok(noImages >= 0 && preventDefault > noImages, 'text-only paste must reach xterm unchanged');
-  assert.ok(sharedPaste > preventDefault);
   assert.match(transfers, /terminal_write_clipboard_image/);
   assert.match(transfers, /performClipboardImagePaste\(route/);
+  assert.match(transfers, /shouldUseNativeClipboardFallback\(route, images\.length, isTauri\(\)\)/);
+  assert.match(transfers, /void pasteNativeClipboard\(\)/);
   assert.match(terminal, /queueInput\(encoder\.encode\(AGENT_TUI_CLIPBOARD_IMAGE_PASTE\), true\)/);
 });
 
