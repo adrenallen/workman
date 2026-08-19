@@ -18,6 +18,7 @@ import {
   runningAgents,
   saveAutoKeepAwakePreference,
   savePersistedKeepAwakeState,
+  shouldHoldAutoKeepAwake,
   suppressAutoKeepAwake,
   shouldSubscribeProcessStatuses
 } from '../src/lib/keepAwake.ts';
@@ -135,6 +136,14 @@ test('auto mode requests an all-agent arm from the first active snapshot', () =>
   assert.equal(evaluation.shouldArm, true);
   assert.deepEqual(evaluation.activeAgentIds, [1]);
   assert.equal(armKeepAwake('all', null, 'auto').armSource, 'auto');
+});
+
+test('auto should-hold is computed from current state, preference, and suppression', () => {
+  const active = [agent(1, 'working')];
+  assert.equal(shouldHoldAutoKeepAwake(active, true), true);
+  assert.equal(shouldHoldAutoKeepAwake(active, false), false);
+  assert.equal(shouldHoldAutoKeepAwake(active, true, true), false);
+  assert.equal(shouldHoldAutoKeepAwake([agent(1, 'idle')], true), false);
 });
 
 test('manual disarm suppresses auto re-arm until a fresh agent activity edge', () => {
@@ -512,12 +521,15 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(control, /keep_awake_start/);
   assert.match(control, /keep_awake_stop/);
   assert.match(control, /keep_awake_status/);
-  assert.equal(control.match(/invoke<NativeKeepAwakeStatus>\('keep_awake_start'\)/g)?.length, 2);
+  assert.match(control, /keep_awake_auto_configure/);
+  assert.equal(control.match(/invoke<NativeKeepAwakeStatus>\('keep_awake_start'\)/g)?.length, 1);
   assert.match(control, /Daemon reconnecting — still keeping Mac awake/);
   assert.match(control, /Daemon unreachable — still keeping Mac awake/);
   assert.match(control, /Keep awake assertion restored/);
   assert.match(control, /Keep awake will not auto-release until the daemon reconnects/);
   assert.match(control, /Assertion PID \$\{status\.assertion_pid\} held/);
+  assert.match(control, /machine\.armed && nativeStatus\.armed && nativeStatus\.active/);
+  assert.match(control, /data-armed=\{verifiedArmed\}/);
   assert.match(control, /Released because all watched agents became idle/);
   assert.match(control, /Released by you/);
   assert.match(control, /Prevents idle sleep on AC or battery/);
@@ -530,7 +542,10 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(shortcuts, /keepAwakeSupported \? ', including Keep awake…' : ''/);
   assert.doesNotMatch(shortcuts, /keys: \['⌘', 'K'\], label: 'Open Keep awake/);
   assert.match(native, /run_keep_awake_watchdog/);
-  assert.match(native, /if !inner\.armed \|\| inner\.child\.is_some\(\)/);
+  assert.match(native, /observe_auto_keep_awake_snapshot/);
+  assert.match(native, /evaluate_auto_keep_awake_tick/);
+  assert.match(native, /auto_keep_awake_active_agent_ids_from_message/);
+  assert.match(native, /if !inner\.armed/);
   assert.match(native, /KEEP_AWAKE_MAX_RETRY_DELAY/);
   assert.match(native, /respawn_count/);
   assert.match(config, /"acceptFirstMouse": true/);
