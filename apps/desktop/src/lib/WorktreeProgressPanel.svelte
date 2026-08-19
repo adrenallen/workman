@@ -4,6 +4,7 @@
   import CircleXIcon from '@lucide/svelte/icons/circle-x';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import XIcon from '@lucide/svelte/icons/x';
 
   import { Button } from '$lib/components/ui/button';
@@ -18,16 +19,23 @@
   let { operation, onRetry, onDismiss }: Props = $props();
   let completed = $derived(operation.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length);
   let progress = $derived(Math.round((completed / operation.steps.length) * 100));
+  let removalNotice = $derived(
+    operation.removal?.registration_issue
+      ? `${operation.removal.registration_issue} Local files remain at ${operation.removal.path}.`
+      : operation.removal?.files_untouched
+        ? `Local files remain at ${operation.removal.path}.`
+        : null
+  );
 </script>
 
 <section class="progress-panel" aria-live="polite" aria-busy={operation.status === 'running'}>
   <header>
     <div>
-      <span>{operation.mode === 'adopt' ? 'Adopting worktree' : operation.mode === 'fork' ? 'Forking worktree' : 'Creating worktree'}</span>
+      <span>{operation.mode === 'remove' ? 'Removing project' : operation.mode === 'adopt' ? 'Adopting worktree' : operation.mode === 'fork' ? 'Forking worktree' : 'Creating worktree'}</span>
       <h2>{operation.label}</h2>
     </div>
     <strong class:failed={operation.status === 'failed'} class:complete={operation.status === 'completed'}>
-      {operation.status === 'failed' ? 'Needs attention' : operation.status === 'completed' ? 'Ready' : `${progress}%`}
+      {operation.status === 'failed' ? 'Needs attention' : operation.status === 'completed' ? operation.mode === 'remove' ? 'Removed' : 'Ready' : `${progress}%`}
     </strong>
   </header>
 
@@ -50,10 +58,13 @@
   {#if operation.error}
     <p class="operation-error" role="alert">{operation.error}</p>
   {/if}
+  {#if removalNotice}
+    <p class="operation-result"><Trash2Icon size={14} />{removalNotice}</p>
+  {/if}
 
   <footer>
     {#if onDismiss}<Button size="sm" variant="ghost" onclick={onDismiss}><XIcon size={13} />{operation.status === 'completed' ? 'Close' : 'Dismiss'}</Button>{/if}
-    {#if operation.status === 'failed' && onRetry}<Button size="sm" variant="outline" onclick={onRetry}><RotateCcwIcon size={13} />Back to form</Button>{/if}
+    {#if operation.status === 'failed' && onRetry}<Button size="sm" variant="outline" onclick={onRetry}><RotateCcwIcon size={13} />{operation.mode === 'remove' ? 'Back to removal' : 'Back to form'}</Button>{/if}
   </footer>
 </section>
 
@@ -82,6 +93,8 @@
   .step-icon { display: inline-flex; align-items: center; }
   :global(.spinner) { animation: spin 800ms linear infinite; }
   .operation-error { margin: 0 14px 9px; border: 1px solid color-mix(in srgb, var(--destructive) 42%, var(--border)); border-radius: var(--radius); padding: 8px 9px; background: color-mix(in srgb, var(--destructive) 8%, var(--card)); color: var(--destructive); font-size: var(--font-size-sm); }
+  .operation-result { display: flex; align-items: flex-start; gap: 7px; margin: 0 14px 9px; border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border)); border-radius: var(--radius); padding: 8px 9px; background: color-mix(in srgb, var(--warning) 8%, var(--card)); color: var(--foreground); font-size: var(--font-size-sm); }
+  .operation-result :global(svg) { flex: none; margin-top: 2px; color: var(--warning); }
   footer { display: flex; justify-content: flex-end; gap: 7px; border-top: 1px solid var(--border); padding: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>

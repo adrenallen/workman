@@ -937,6 +937,7 @@ async fn handle_session_control(
             | "worktree.create_async"
             | "worktree.fork_async"
             | "worktree.adopt_async"
+            | "worktree.remove_async"
             | "worktree.operation_dismiss"
     ) {
         return None;
@@ -959,7 +960,10 @@ async fn handle_session_control(
     }
     if matches!(
         method,
-        "worktree.create_async" | "worktree.fork_async" | "worktree.adopt_async"
+        "worktree.create_async"
+            | "worktree.fork_async"
+            | "worktree.adopt_async"
+            | "worktree.remove_async"
     ) {
         let params = request.get("params").cloned().unwrap_or_default();
         return Some(

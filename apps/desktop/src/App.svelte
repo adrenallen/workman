@@ -603,7 +603,7 @@
     for (const operation of $worktreeOperations) {
       if (
         operation.status === 'completed'
-        && operation.project
+        && (operation.project || operation.removal)
         && !reconciledWorktreeOperations.has(operation.id)
       ) {
         reconciledWorktreeOperations.add(operation.id);
@@ -626,7 +626,6 @@
       todoBrowserOpen = false;
       scratchpadBrowserOpen = false;
       processOverviewKind = null;
-      activeWorktreeOperationId = null;
       loadedProjectId = null;
       return;
     }
@@ -1764,7 +1763,35 @@
     );
   }
 
+  function unattachedWorktreeOperations(): WorktreeOperation[] {
+    return $worktreeOperations.filter((operation) =>
+      operation.repository_id === null
+      || !projects.some((project) =>
+        project.parent_project_id === null
+        && project.repository_id === operation.repository_id
+      )
+    );
+  }
+
   async function reconcileCompletedWorktree(operation: WorktreeOperation): Promise<void> {
+    if (operation.removal) {
+      try {
+        projects = await client.projects();
+        if (operation.removal.registration_issue || operation.removal.files_untouched) {
+          removeWorktreeNotice = `Files left untouched at ${operation.removal.path}.${operation.removal.registration_issue ? ` ${operation.removal.registration_issue}` : ''}`;
+        }
+        if (
+          operation.repository_id !== null
+          && projects.some((project) => project.repository_id === operation.repository_id)
+        ) {
+          await refreshWorktreeMetadata(projects, true, true, operation.repository_id);
+        }
+      } catch (cause) {
+        reconciledWorktreeOperations.delete(operation.id);
+        reportError(cause);
+      }
+      return;
+    }
     if (!operation.project) return;
     try {
       const refreshedProjects = await client.projects();
@@ -1819,6 +1846,13 @@
     activeWorktreeOperationId = null;
     if (!source) {
       reportError(new Error('The source project is no longer available'));
+      return;
+    }
+    if (operation.mode === 'remove') {
+      if (source.repository_id !== null) {
+        await refreshWorktreeMetadata(projects, true, true, source.repository_id);
+      }
+      openRemoveWorktree(source, operation.error_code === 'dirty_worktree');
       return;
     }
     await openWorktreeDialog(operation.mode, source);
@@ -3468,11 +3502,11 @@
     selectProject(project);
   }
 
-  function openRemoveWorktree(project: Project): void {
+  function openRemoveWorktree(project: Project, serverForceRequired = false): void {
     const repository = worktreeRepositoryFor(project);
     const entry = worktreeEntryFor(project);
     removeWorktreeError = null;
-    removeWorktreeForceRequired = false;
+    removeWorktreeForceRequired = serverForceRequired;
     removeWorktreeDialog = { project, repository, entry };
   }
 
@@ -3484,38 +3518,77 @@
     if (!state || removeWorktreeBusy) return;
     removeWorktreeBusy = true;
     removeWorktreeError = null;
+    const operationId = crypto.randomUUID();
+    const operation = beginWorktreeOperation({
+      id: operationId,
+      mode: 'remove',
+      sourceProjectId: state.project.id,
+      repositoryId: state.project.repository_id,
+      branch: state.entry?.branch ?? null,
+      path: state.project.path,
+      label: projectDisplayName(state.project)
+    });
+    removeWorktreeDialog = null;
+    showWorktreeOperation(operation);
+    await tick();
     try {
-      const removal = await client.control<WorktreeRemoval>('projects.remove', {
+      await client.removeWorktreeAsync(operationId, {
         project_id: state.project.id,
         confirm_remove: true,
         confirm_stop_running: true,
         delete_from_disk: deleteFromDisk,
         force_dirty: forceDirty
       });
-      removeWorktreeDialog = null;
-      if (removal.registration_issue || (deleteFromDisk && removal.files_untouched)) {
-        removeWorktreeNotice = `Files left untouched at ${removal.path}.${removal.registration_issue ? ` ${removal.registration_issue}` : ''}`;
-      }
-      for (const operation of $worktreeOperations) {
-        if (operation.project?.id === state.project.id || operation.path === state.project.path) {
-          dismissTrackedWorktreeOperation(operation.id);
-          if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
-        }
-      }
-      projects = await client.projects();
-      if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {
-        await refreshWorktreeMetadata(projects, true, true, state.repository.id);
-      }
-      const next = projects.find((project) => project.selected) ?? projects[0];
-      if (next) appNavigation.navigate({ type: 'project', projectId: next.id }, 'api');
     } catch (cause) {
-      if (cause instanceof DaemonRequestError && cause.code === 'dirty_worktree') {
-        removeWorktreeForceRequired = true;
+      if (isUnsupportedControlMethod(cause)) {
+        dismissTrackedWorktreeOperation(operationId);
+        if (activeWorktreeOperationId === operationId) activeWorktreeOperationId = null;
+        try {
+          const removal = await client.control<WorktreeRemoval>('projects.remove', {
+            project_id: state.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: deleteFromDisk,
+            force_dirty: forceDirty
+          });
+          await reconcileSynchronousRemoval(state, removal, deleteFromDisk);
+        } catch (fallbackCause) {
+          if (isDaemonRequestTimeoutError(fallbackCause)) {
+            removeWorktreeNotice = `Removal of ${projectDisplayName(state.project)} is taking longer than the request window and may still complete. Workman will refresh the project list to reconcile the result.`;
+            void refreshProjects();
+          } else {
+            removeWorktreeDialog = state;
+            if (fallbackCause instanceof DaemonRequestError && fallbackCause.code === 'dirty_worktree') {
+              removeWorktreeForceRequired = true;
+            }
+            removeWorktreeError = fallbackCause instanceof Error ? fallbackCause.message : String(fallbackCause);
+          }
+        }
+      } else {
+        failWorktreeOperation(
+          operationId,
+          cause instanceof Error ? cause.message : String(cause)
+        );
       }
-      removeWorktreeError = cause instanceof Error ? cause.message : String(cause);
     } finally {
       removeWorktreeBusy = false;
     }
+  }
+
+  async function reconcileSynchronousRemoval(
+    state: NonNullable<typeof removeWorktreeDialog>,
+    removal: WorktreeRemoval,
+    deleteFromDisk: boolean
+  ): Promise<void> {
+    if (removal.registration_issue || (deleteFromDisk && removal.files_untouched)) {
+      removeWorktreeNotice = `Files left untouched at ${removal.path}.${removal.registration_issue ? ` ${removal.registration_issue}` : ''}`;
+    }
+    projects = await client.projects();
+    if (state.repository && !(deleteFromDisk && state.entry?.kind === 'main')) {
+      await refreshWorktreeMetadata(projects, true, true, state.repository.id);
+    }
+    const next = projects.find((project) => project.selected) ?? projects[0];
+    if (next) appNavigation.navigate({ type: 'project', projectId: next.id }, 'api');
   }
 
   async function adoptImportPath(path: string, navigate = true): Promise<number | null> {
@@ -5082,6 +5155,13 @@
           {/if}
         {/if}
       {/each}
+      {#each unattachedWorktreeOperations() as operation (operation.id)}
+        <WorktreeOperationRow
+          {operation}
+          collapsed={projectRailCollapsed}
+          onSelect={() => showWorktreeOperation(operation)}
+        />
+      {/each}
     </div>
     <footer class="project-footer">
       <Button class="min-w-0 flex-1 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>
@@ -5168,7 +5248,7 @@
 
   <section
     class="main-frame"
-    class:empty={selectedProject === null}
+    class:empty={selectedProject === null && activeWorktreeOperation === null}
     class:has-error={error !== null}
     data-app-panel="main"
     tabindex="-1"
@@ -5190,6 +5270,17 @@
           onProfileSwitched={() => window.location.reload()}
         />
       </div>
+    {:else if activeWorktreeOperation}
+      {#if error}
+        <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
+      {/if}
+      <div class="item-viewer" role="region" aria-label={`${frameItemLabel} detail`}>
+        <WorktreeProgressPanel
+          operation={activeWorktreeOperation}
+          onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
+          onDismiss={dismissActiveWorktreeOperation}
+        />
+      </div>
     {:else if selectedProject}
       {#if error}
         <button class="error-banner" type="button" onclick={() => (error = null)}><span>{error}</span><strong>Dismiss</strong></button>
@@ -5200,13 +5291,7 @@
         aria-label={`${frameItemLabel} detail`}
         oncontextmenu={showViewerContextMenu}
       >
-        {#if activeWorktreeOperation}
-          <WorktreeProgressPanel
-            operation={activeWorktreeOperation}
-            onRetry={() => void retryWorktreeOperation(activeWorktreeOperation!)}
-            onDismiss={dismissActiveWorktreeOperation}
-          />
-        {:else if selectedDraft}
+        {#if selectedDraft}
           {#key selectedDraft.id}
             {@const draft = selectedDraft}
             {#if draft.kind === 'agent'}

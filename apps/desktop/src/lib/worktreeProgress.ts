@@ -1,10 +1,19 @@
 import { writable } from 'svelte/store';
 
 import type { Project } from './daemon';
+import type { WorktreeRemoval } from './worktrees';
 
-export type WorktreeOperationMode = 'create' | 'fork' | 'adopt';
+export type WorktreeOperationMode = 'create' | 'fork' | 'adopt' | 'remove';
 export type WorktreeOperationStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type WorktreeStepId = 'branch' | 'worktree' | 'environment' | 'herd' | 'registered';
+export type WorktreeStepId =
+  | 'branch'
+  | 'processes'
+  | 'worktree'
+  | 'files'
+  | 'prune'
+  | 'environment'
+  | 'herd'
+  | 'registered';
 export type WorktreeStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
 export interface WorktreeOperationStep {
@@ -25,7 +34,9 @@ export interface WorktreeOperation {
   status: WorktreeOperationStatus;
   steps: WorktreeOperationStep[];
   error: string | null;
+  error_code: string | null;
   project: Project | null;
+  removal: WorktreeRemoval | null;
   created_at: number;
   updated_at: number;
   local: boolean;
@@ -38,6 +49,7 @@ export interface BeginWorktreeOperation {
   repositoryId: number | null;
   branch?: string | null;
   path?: string | null;
+  label?: string | null;
 }
 
 export interface WorktreeOperationAck {
@@ -50,13 +62,13 @@ export interface WorktreeOperationDismissal {
   dismissed: boolean;
 }
 
-const labels: Record<WorktreeStepId, string> = {
+const labels = {
   branch: 'Branch created',
   worktree: 'Worktree added',
   environment: '.env ported',
   herd: 'Herd parked',
   registered: 'Project registered'
-};
+} as const;
 
 const store = writable<WorktreeOperation[]>([]);
 const dismissedOperationIds = new Set<string>();
@@ -72,13 +84,17 @@ export function beginWorktreeOperation(input: BeginWorktreeOperation): WorktreeO
     repository_id: input.repositoryId,
     branch: input.branch ?? null,
     path: input.path ?? null,
-    label: input.mode === 'adopt'
-      ? basename(input.path ?? '') || 'Adopting worktree'
-      : input.branch || (input.mode === 'fork' ? 'Forking worktree' : 'Creating worktree'),
+    label: input.label ?? (
+      input.mode === 'adopt' || input.mode === 'remove'
+        ? basename(input.path ?? '') || (input.mode === 'remove' ? 'Removing project' : 'Adopting worktree')
+        : input.branch || (input.mode === 'fork' ? 'Forking worktree' : 'Creating worktree')
+    ),
     status: 'running',
     steps: initialSteps(input.mode),
     error: null,
+    error_code: null,
     project: null,
+    removal: null,
     created_at: now,
     updated_at: now,
     local: true
@@ -139,7 +155,21 @@ export function resetWorktreeOperations(): void {
 }
 
 function initialSteps(mode: WorktreeOperationMode): WorktreeOperationStep[] {
-  return (Object.keys(labels) as WorktreeStepId[]).map((id, index) => ({
+  if (mode === 'remove') {
+    return [
+      ['processes', 'Processes stopped'],
+      ['worktree', 'Git worktree removed'],
+      ['files', 'Local files deleted'],
+      ['prune', 'Metadata pruned'],
+      ['registered', 'Project unregistered']
+    ].map(([id, label], index) => ({
+      id: id as WorktreeStepId,
+      label,
+      status: index === 0 ? 'running' : 'pending',
+      detail: null
+    }));
+  }
+  return (Object.keys(labels) as Array<keyof typeof labels>).map((id, index) => ({
     id,
     label: mode === 'adopt' && id === 'branch' ? 'Worktree inspected' : labels[id],
     status: index === 0 ? 'running' : 'pending',

@@ -3,6 +3,7 @@
   import CircleXIcon from '@lucide/svelte/icons/circle-x';
   import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
   import type { WorktreeOperation } from './worktreeProgress';
 
@@ -14,7 +15,11 @@
 
   let { operation, collapsed, onSelect }: Props = $props();
   let stateLabel = $derived(
-    operation.status === 'failed' ? 'Failed' : operation.status === 'completed' ? 'Ready' : 'Creating'
+    operation.status === 'failed'
+      ? 'Failed'
+      : operation.status === 'completed'
+        ? operation.mode === 'remove' ? 'Removed' : 'Ready'
+        : operation.mode === 'remove' ? 'Removing' : 'Creating'
   );
 </script>
 
@@ -30,9 +35,9 @@
       {:else if operation.status === 'completed'}<CheckIcon size={13} />
       {:else}<LoaderCircleIcon class="spinner" size={13} />{/if}
     </span>
-    <GitBranchIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+    {#if operation.mode === 'remove'}<Trash2Icon size={15} strokeWidth={1.8} aria-hidden="true" />{:else}<GitBranchIcon size={15} strokeWidth={1.8} aria-hidden="true" />{/if}
     {#if !collapsed}
-      <span class="copy"><strong>{operation.label}</strong><small>{stateLabel.toLowerCase()}…</small></span>
+      <span class="copy"><strong>{operation.label}</strong><small>{stateLabel.toLowerCase()}{operation.status === 'running' ? '…' : ''}</small></span>
     {/if}
   </button>
 </article>

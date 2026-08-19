@@ -1609,6 +1609,14 @@ pub async fn remove(
     registry: &SharedProcessRegistry,
     request: RemoveWorktree,
 ) -> WorktreeResult<WorktreeRemoval> {
+    remove_with_progress(registry, request, None).await
+}
+
+pub(crate) async fn remove_with_progress(
+    registry: &SharedProcessRegistry,
+    request: RemoveWorktree,
+    progress: Option<&WorktreeOperationReporter>,
+) -> WorktreeResult<WorktreeRemoval> {
     let command_environment = command_environment(registry).await;
     if !request.confirm_remove {
         return Err(WorktreeError::Confirmation(
@@ -1653,6 +1661,16 @@ pub async fn remove(
             "worktree project has running processes; also set confirm_stop_running=true".into(),
         ));
     }
+    if let Some(progress) = progress {
+        progress.running(
+            WorktreeStepId::Processes,
+            Some(if processes.is_empty() {
+                "No Workman processes to remove".into()
+            } else {
+                format!("Stopping {} Workman process(es)", processes.len())
+            }),
+        );
+    }
 
     let path = absolute_path(PathBuf::from(&project.path));
     let registration_issue = broken_registration_issue(
@@ -1692,6 +1710,16 @@ pub async fn remove(
                 }
             }
         }
+        if let Some(progress) = progress {
+            progress.completed(
+                WorktreeStepId::Processes,
+                Some(if processes.is_empty() {
+                    "No Workman processes were registered".into()
+                } else {
+                    format!("Removed {} Workman process(es)", processes.len())
+                }),
+            );
+        }
         // A stopped process can flush or create files. Recompute immediately
         // before deletion so the final force decision uses the quiesced path.
         safety = delete_target_safety(&verified, &command_environment).await?;
@@ -1711,18 +1739,67 @@ pub async fn remove(
                 }
                 args.push(OsString::from("--"));
                 args.push(verified.path.as_os_str().to_owned());
-                let git_error = git_required(
-                    repository_root,
+                if let Some(progress) = progress {
+                    progress.running(
+                        WorktreeStepId::Worktree,
+                        Some(verified.path.to_string_lossy().into_owned()),
+                    );
+                }
+                let git_error = blocking_git_required(
+                    repository_root.to_path_buf(),
                     args,
                     "remove local Git worktree",
-                    &command_environment,
+                    command_environment.clone(),
                 )
                 .await
                 .err();
-                ensure_verified_directory_removed(&verified.path, git_error.as_ref())?;
+                if let Some(progress) = progress {
+                    if let Some(error) = git_error.as_ref() {
+                        progress.skipped(
+                            WorktreeStepId::Worktree,
+                            Some(format!("Git removal needed filesystem fallback: {error}")),
+                        );
+                    } else {
+                        progress.completed(
+                            WorktreeStepId::Worktree,
+                            Some("Git worktree metadata removed".into()),
+                        );
+                    }
+                    progress.running(
+                        WorktreeStepId::Files,
+                        Some(verified.path.to_string_lossy().into_owned()),
+                    );
+                }
+                ensure_verified_directory_removed_async(
+                    verified.path.clone(),
+                    git_error.as_ref().map(ToString::to_string),
+                )
+                .await?;
+                if let Some(progress) = progress {
+                    progress.completed(
+                        WorktreeStepId::Files,
+                        Some("Verified local folder is gone".into()),
+                    );
+                }
             }
             DeleteTargetKind::PrimaryCheckout | DeleteTargetKind::Folder => {
-                ensure_verified_directory_removed(&verified.path, None)?;
+                if let Some(progress) = progress {
+                    progress.skipped(
+                        WorktreeStepId::Worktree,
+                        Some("This project is not a linked Git worktree".into()),
+                    );
+                    progress.running(
+                        WorktreeStepId::Files,
+                        Some(verified.path.to_string_lossy().into_owned()),
+                    );
+                }
+                ensure_verified_directory_removed_async(verified.path.clone(), None).await?;
+                if let Some(progress) = progress {
+                    progress.completed(
+                        WorktreeStepId::Files,
+                        Some("Verified local folder is gone".into()),
+                    );
+                }
             }
         }
         if verified.kind == DeleteTargetKind::LinkedWorktree {
@@ -1730,17 +1807,36 @@ pub async fn remove(
                 .repository_root
                 .as_ref()
                 .expect("linked worktree has repository root");
-            match git_required(
-                repository_root,
-                ["worktree", "prune"],
+            if let Some(progress) = progress {
+                progress.running(
+                    WorktreeStepId::Prune,
+                    Some(repository_root.to_string_lossy().into_owned()),
+                );
+            }
+            match blocking_git_required(
+                repository_root.to_path_buf(),
+                vec![OsString::from("worktree"), OsString::from("prune")],
                 "prune local worktree metadata",
-                &command_environment,
+                command_environment.clone(),
             )
             .await
             {
-                Ok(_) => metadata_pruned = true,
+                Ok(_) => {
+                    metadata_pruned = true;
+                    if let Some(progress) = progress {
+                        progress.completed(
+                            WorktreeStepId::Prune,
+                            Some("Local worktree metadata pruned".into()),
+                        );
+                    }
+                }
                 Err(error) => post_delete_issue = Some(error),
             }
+        } else if let Some(progress) = progress {
+            progress.skipped(
+                WorktreeStepId::Prune,
+                Some("No linked-worktree metadata to prune".into()),
+            );
         }
         if verified.kind == DeleteTargetKind::LinkedWorktree {
             let repository_root = verified
@@ -1795,10 +1891,33 @@ pub async fn remove(
                 registry.close(process.id)?;
             }
         }
+        if let Some(progress) = progress {
+            progress.completed(
+                WorktreeStepId::Processes,
+                Some(if processes.is_empty() {
+                    "No Workman processes were registered".into()
+                } else {
+                    format!("Removed {} Workman process(es)", processes.len())
+                }),
+            );
+            let detail = registration_issue
+                .as_ref()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| "Local files were kept".into());
+            progress.skipped(WorktreeStepId::Worktree, Some(detail.clone()));
+            progress.skipped(WorktreeStepId::Files, Some(detail.clone()));
+            progress.skipped(WorktreeStepId::Prune, Some(detail));
+        }
     }
 
     // Project deletion is intentionally last: even a self-targeting agent has
     // already finished the Git operation before its process can disappear.
+    if let Some(progress) = progress {
+        progress.running(
+            WorktreeStepId::Registered,
+            Some(format!("Unregistering project {}", project.id)),
+        );
+    }
     let (project_unregistered, selected_project_id) = {
         let registry = registry.lock().await;
         let project_unregistered = if deleted_from_disk
@@ -1820,6 +1939,12 @@ pub async fn remove(
         }
         (project_unregistered, selected_project_id)
     };
+    if let Some(progress) = progress {
+        progress.completed(
+            WorktreeStepId::Registered,
+            Some(format!("Project {} unregistered", project.id)),
+        );
+    }
     if let Some(error) = post_delete_issue {
         return Err(WorktreeError::Git {
             operation: "finalize worktree deletion".into(),
@@ -2961,10 +3086,17 @@ async fn verify_project_delete_target(
     })
 }
 
-fn ensure_verified_directory_removed(
-    path: &Path,
-    git_error: Option<&WorktreeError>,
+async fn ensure_verified_directory_removed_async(
+    path: PathBuf,
+    git_error: Option<String>,
 ) -> WorktreeResult<()> {
+    run_removal_blocking("delete verified project folder", move || {
+        ensure_verified_directory_removed(&path, git_error.as_deref())
+    })
+    .await
+}
+
+fn ensure_verified_directory_removed(path: &Path, git_error: Option<&str>) -> WorktreeResult<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -3014,6 +3146,30 @@ fn ensure_verified_directory_removed(
             path.display()
         ))),
     }
+}
+
+async fn blocking_git_required(
+    directory: PathBuf,
+    args: Vec<OsString>,
+    operation: &'static str,
+    environment: BTreeMap<OsString, OsString>,
+) -> WorktreeResult<String> {
+    run_removal_blocking(operation, move || {
+        std_git_required(&directory, args.iter(), operation, &environment)
+    })
+    .await
+}
+
+async fn run_removal_blocking<T, F>(operation: &'static str, task: F) -> WorktreeResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> WorktreeResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task).await.map_err(|error| {
+        WorktreeError::Io(io::Error::other(format!(
+            "{operation} worker failed: {error}"
+        )))
+    })?
 }
 
 fn ensure_verified_directory_still_absent(path: &Path) -> WorktreeResult<()> {
@@ -3721,6 +3877,21 @@ mod tests {
         );
         assert_eq!(untracked, 1);
         assert_eq!(ignored, [".env"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removal_blocking_work_leaves_the_async_control_thread_responsive() {
+        let heavy = run_removal_blocking("fixture removal", || {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(())
+        });
+        tokio::pin!(heavy);
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            result = &mut heavy => panic!("blocking removal finished before the control-loop probe: {result:?}"),
+        }
+        heavy.await.unwrap();
     }
 
     #[test]

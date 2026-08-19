@@ -16,11 +16,17 @@ export class DaemonRequestTimeoutError extends Error {
   readonly timeoutMs: number;
 
   constructor(method: string, timeoutMs: number) {
-    super('The daemon did not answer in time');
+    super(isSynchronousRemovalMethod(method)
+      ? 'Project removal is taking longer than the request window and may still complete; refresh the project list to reconcile the result.'
+      : 'The daemon did not answer in time');
     this.name = 'DaemonRequestTimeoutError';
     this.method = method;
     this.timeoutMs = timeoutMs;
   }
+}
+
+function isSynchronousRemovalMethod(method: string): boolean {
+  return ['projects.remove', 'project.remove', 'project_remove', 'worktree.remove'].includes(method);
 }
 
 export function isDaemonRequestTimeoutError(cause: unknown): cause is DaemonRequestTimeoutError {
