@@ -1046,7 +1046,12 @@ impl ProcessRegistry {
             .copied()
             .unwrap_or(DEFAULT_PTY_SIZE);
         let mut options = PtySpawnOptions::new(process.id, token, command).with_size(size);
-        for (key, value) in user_environment.pty_environment() {
+        let spawn_environment = if interactive_terminal {
+            user_environment.interactive_terminal_environment()
+        } else {
+            user_environment.pty_environment()
+        };
+        for (key, value) in spawn_environment {
             options = options.with_env(key, value);
         }
         if let Some(tool_type) = tool_type.as_deref() {
@@ -3361,9 +3366,9 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry =
-            ProcessRegistry::with_user_environment(store, UserEnvironmentResolver::new(&config))
-                .unwrap();
+        let resolver = UserEnvironmentResolver::new(&config);
+        resolver.refresh();
+        let mut registry = ProcessRegistry::with_user_environment(store, resolver).unwrap();
         let mut environment = BTreeMap::new();
         environment.insert(
             "HOME".to_owned(),

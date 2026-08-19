@@ -74,9 +74,11 @@ async fn manual_refresh_round_trips_terminal_pr_state_and_preserves_the_link()
         sort_order: 0,
     })?;
     worktrees::reconcile_existing_projects(&store)?;
+    let user_environment = UserEnvironmentResolver::new(config);
+    user_environment.refresh();
     let registry = Arc::new(Mutex::new(ProcessRegistry::with_user_environment(
         store,
-        UserEnvironmentResolver::new(config),
+        user_environment,
     )?));
 
     let open = worktrees::list_for_project_refresh(&registry, 1, true).await?;

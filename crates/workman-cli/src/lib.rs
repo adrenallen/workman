@@ -79,6 +79,7 @@ const ROOT_HELP: &str = concat!(
     "  update        Check for or install Workman updates\n",
     "\n",
     "Daemon\n",
+    "  doctor        Check runtime PATH health or run one deep check\n",
     "  mcp-setup     Print authenticated MCP client setup\n",
     "\n",
     "Misc\n",
@@ -237,6 +238,18 @@ Options
   -h, --help       Show help and exit
 "#;
 
+const DOCTOR_HELP: &str = r#"wrk doctor — inspect agent runtime health
+Usage: wrk doctor [--deep-check TOOL_ID] [--project ID]
+
+Options
+  --deep-check TOOL_ID  Spawn one isolated runtime deep check after health
+  --project ID          Deep-check project; defaults to the current project
+  -h, --help            Show help and exit
+
+The report includes Workman's environment capture mode, resolved PATH, and any
+shell rc-file diagnosis for missing runtimes.
+"#;
+
 const RUN_HELP: &str = r#"wrk run — create and start a durable command
 Usage: wrk run [OPTIONS] [--] COMMAND [ARG...]
 
@@ -367,6 +380,7 @@ async fn run(
         Command::Down { project_id } => set_commands(&mut client, project_id, false).await,
         Command::Run(options) => run_command(&mut client, options).await,
         Command::Agent(options) => run_agent(&mut client, options).await,
+        Command::Doctor(options) => doctor(&mut client, options).await,
         Command::Ps { project_id } => ps(&mut client, project_id).await,
         Command::Logs { process_id, follow } => logs(&mut client, process_id, follow).await,
         Command::Attach { process_id } => attach(&mut client, process_id).await,
@@ -441,6 +455,7 @@ enum Command {
     },
     Run(RunOptions),
     Agent(AgentOptions),
+    Doctor(DoctorOptions),
     Ps {
         project_id: Option<ProjectId>,
     },
@@ -490,6 +505,7 @@ enum HelpTopic {
     App,
     Update,
     McpSetup,
+    Doctor,
     Run,
     Agent,
     Ps,
@@ -503,13 +519,14 @@ enum HelpTopic {
 }
 
 impl HelpTopic {
-    const SUBCOMMANDS: [(&'static str, Self); 16] = [
+    const SUBCOMMANDS: [(&'static str, Self); 17] = [
         ("add", Self::Add),
         ("up", Self::Up),
         ("down", Self::Down),
         ("app", Self::App),
         ("update", Self::Update),
         ("mcp-setup", Self::McpSetup),
+        ("doctor", Self::Doctor),
         ("run", Self::Run),
         ("agent", Self::Agent),
         ("ps", Self::Ps),
@@ -544,6 +561,7 @@ fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::App => APP_HELP,
         HelpTopic::Update => UPDATE_HELP,
         HelpTopic::McpSetup => MCP_SETUP_HELP,
+        HelpTopic::Doctor => DOCTOR_HELP,
         HelpTopic::Run => RUN_HELP,
         HelpTopic::Agent => AGENT_HELP,
         HelpTopic::Ps => PS_HELP,
@@ -599,6 +617,12 @@ struct AgentOptions {
     extra_args: Vec<String>,
 }
 
+#[derive(Debug)]
+struct DoctorOptions {
+    project_id: Option<ProjectId>,
+    deep_check_tool_id: Option<i64>,
+}
+
 impl Cli {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut args = args.into_iter();
@@ -651,6 +675,7 @@ impl Cli {
                     break Command::App;
                 }
                 "mcp-setup" => break parse_mcp_setup(args.collect())?,
+                "doctor" => break parse_doctor(args.collect())?,
                 "run" => break parse_run(args.collect())?,
                 "agent" => break parse_agent(args.collect())?,
                 "ps" => break parse_ps(args.collect())?,
@@ -699,9 +724,9 @@ fn root_help_requested(args: &[String]) -> bool {
                     .iter()
                     .any(|arg| matches!(arg.as_str(), "-h" | "--help"));
             }
-            "--update" | "update" | "add" | "up" | "down" | "app" | "mcp-setup" | "run"
-            | "agent" | "ps" | "logs" | "attach" | "stop" | "profile" | "project" | "worktree"
-            | "help" => {
+            "--update" | "update" | "add" | "up" | "down" | "app" | "mcp-setup" | "doctor"
+            | "run" | "agent" | "ps" | "logs" | "attach" | "stop" | "profile" | "project"
+            | "worktree" | "help" => {
                 return false;
             }
             _ => index += 1,
@@ -1055,6 +1080,56 @@ fn require_no_args(args: Vec<String>, command: &str, topic: HelpTopic) -> Result
         ));
     }
     Ok(())
+}
+
+fn parse_doctor(args: Vec<String>) -> Result<Command> {
+    if help_requested(&args) {
+        return Ok(Command::Help(HelpTopic::Doctor));
+    }
+    let mut args = args.into_iter();
+    let mut project_id = None;
+    let mut deep_check_tool_id = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--project" if project_id.is_none() => {
+                project_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Doctor)?,
+                    "project",
+                    HelpTopic::Doctor,
+                )?);
+            }
+            "--project" => {
+                return Err(usage_error(
+                    HelpTopic::Doctor,
+                    "--project may only be specified once",
+                ));
+            }
+            "--deep-check" if deep_check_tool_id.is_none() => {
+                deep_check_tool_id = Some(parse_id_arg(
+                    &next_value(&mut args, &arg, HelpTopic::Doctor)?,
+                    "agent tool",
+                    HelpTopic::Doctor,
+                )?);
+            }
+            "--deep-check" => {
+                return Err(usage_error(
+                    HelpTopic::Doctor,
+                    "--deep-check may only be specified once",
+                ));
+            }
+            _ => return Err(unknown_option(HelpTopic::Doctor, &arg)),
+        }
+    }
+    if project_id.is_some() && deep_check_tool_id.is_none() {
+        return Err(usage_error(
+            HelpTopic::Doctor,
+            "--project requires --deep-check TOOL_ID",
+        ));
+    }
+    Ok(Command::Doctor(DoctorOptions {
+        project_id,
+        deep_check_tool_id,
+    }))
 }
 
 fn parse_run(args: Vec<String>) -> Result<Command> {
@@ -1807,6 +1882,101 @@ struct SpawnAgentReceipt {
     process_id: i64,
     project_id: ProjectId,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DoctorDeepCheckReceipt {
+    agent_tool_id: i64,
+    process_id: Option<i64>,
+    success: bool,
+    elapsed_ms: u64,
+    message: String,
+}
+
+async fn doctor(client: &mut Client, options: DoctorOptions) -> Result<()> {
+    let health: workmand::runtime_doctor::AgentToolsHealth =
+        client.rpc("agent_tools.health", json!({})).await?;
+    print!("{}", render_doctor_health(&health));
+
+    if let Some(agent_tool_id) = options.deep_check_tool_id {
+        let cwd = canonical_directory(&env::current_dir()?)?;
+        let project_id = resolve_project_id(client, options.project_id, &cwd).await?;
+        let deep_check: DoctorDeepCheckReceipt = client
+            .rpc(
+                "agent_tools.deep_check",
+                json!({
+                    "project_id": project_id,
+                    "agent_tool_id": agent_tool_id,
+                }),
+            )
+            .await?;
+        println!(
+            "\nDeep check {}: {} ({}ms{})\n{}",
+            deep_check.agent_tool_id,
+            if deep_check.success {
+                "passed"
+            } else {
+                "failed"
+            },
+            deep_check.elapsed_ms,
+            deep_check
+                .process_id
+                .map(|id| format!(", process {id}"))
+                .unwrap_or_default(),
+            deep_check.message
+        );
+    }
+    Ok(())
+}
+
+fn render_doctor_health(health: &workmand::runtime_doctor::AgentToolsHealth) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    let _ = writeln!(output, "Runtime Doctor: {}", health.summary);
+    let _ = writeln!(
+        output,
+        "Environment: {}",
+        health.environment_capture_mode.as_str()
+    );
+    let _ = writeln!(
+        output,
+        "Resolved PATH: {}",
+        if health.resolved_path.is_empty() {
+            "<unavailable>"
+        } else {
+            &health.resolved_path
+        }
+    );
+    if let Some(error) = &health.environment_capture_error {
+        let _ = writeln!(output, "Capture: {error}");
+        let _ = writeln!(
+            output,
+            "Recovery: after 30 seconds run `wrk doctor` to refresh, or restart Workman to re-capture now."
+        );
+    }
+    for tool in &health.tools {
+        let state = if !tool.enabled {
+            "disabled"
+        } else if tool.launch_ready {
+            "ready"
+        } else if !tool.found_on_path {
+            "not found"
+        } else {
+            "MCP unavailable"
+        };
+        let _ = writeln!(output, "- {} ({}): {state}", tool.name, tool.id);
+        if let Some(binary) = &tool.resolved_binary {
+            let _ = writeln!(output, "  Binary: {binary}");
+        }
+        if let Some(version) = &tool.version {
+            let _ = writeln!(output, "  Version: {version}");
+        }
+        if let Some(diagnostic) = &tool.path_diagnostic {
+            let _ = writeln!(output, "  {diagnostic}");
+        }
+    }
+    output
 }
 
 async fn run_agent(client: &mut Client, options: AgentOptions) -> Result<()> {
@@ -3160,6 +3330,19 @@ mod tests {
             }
         ));
 
+        let cli = Cli::parse(
+            ["wrk", "doctor", "--deep-check", "4", "--project", "8"].map(OsString::from),
+        )
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Doctor(DoctorOptions {
+                project_id: Some(8),
+                deep_check_tool_id: Some(4),
+            })
+        ));
+        assert!(Cli::parse(["wrk", "doctor", "--project", "8"].map(OsString::from)).is_err());
+
         let cli = Cli::parse(["wrk", "mcp-setup", "--run"].map(OsString::from)).unwrap();
         assert!(matches!(
             cli.command,
@@ -3369,6 +3552,7 @@ mod tests {
             &["wrk", "app", "extra", "--unknown"],
             &["wrk", "update", "--unknown"],
             &["wrk", "mcp-setup", "--unknown"],
+            &["wrk", "doctor", "--unknown"],
             &["wrk", "run", "--unknown"],
             &["wrk", "agent", "--unknown"],
             &["wrk", "ps", "--unknown"],
@@ -3391,6 +3575,7 @@ mod tests {
             &["wrk", "run", "--cwd", "--unsafe", "echo"],
             &["wrk", "run", "--", "--unsafe"],
             &["wrk", "agent", "--tool", "--unsafe"],
+            &["wrk", "doctor", "--deep-check", "--unsafe"],
             &["wrk", "agent", "--tool", "1", "--name", "--unsafe"],
         ];
         for args in leading_value_cases {
@@ -3413,6 +3598,52 @@ mod tests {
             panic!("expected run command");
         };
         assert_eq!(run.command, ["npm", "--help"]);
+    }
+
+    #[test]
+    fn doctor_output_names_capture_mode_path_and_rc_diagnostic() {
+        let health: workmand::runtime_doctor::AgentToolsHealth = serde_json::from_value(json!({
+            "checked_at": 1,
+            "environment_capture_mode": "non_interactive_login_fallback",
+            "environment_capture_error": "interactive capture timed out",
+            "resolved_path": "/usr/bin:/bin",
+            "ready_count": 0,
+            "total_count": 1,
+            "enabled_ready_count": 0,
+            "enabled_count": 1,
+            "all_enabled_ready": false,
+            "summary": "0 of 1 agent tools are MCP-ready",
+            "tools": [{
+                "id": 7,
+                "name": "Codex",
+                "command": "codex",
+                "tool_type": "codex",
+                "enabled": true,
+                "source": "local",
+                "found_on_path": false,
+                "resolved_binary": null,
+                "version": null,
+                "version_error": null,
+                "path_diagnostic": "codex is initialized in ~/.zshrc; refresh or restart",
+                "config_path": "/tmp/config.toml",
+                "config_exists": false,
+                "launch_ready": false,
+                "install_url": null,
+                "mcp_launch_supported": true,
+                "mcp_launch_mechanism": "per_launch",
+                "mcp_launch_note": "supported",
+                "configuration_mode": "per_launch",
+                "configuration_note": "automatic"
+            }]
+        }))
+        .unwrap();
+
+        let rendered = render_doctor_health(&health);
+        assert!(rendered.contains("Environment: non_interactive_login_fallback"));
+        assert!(rendered.contains("Resolved PATH: /usr/bin:/bin"));
+        assert!(rendered.contains("Capture: interactive capture timed out"));
+        assert!(rendered.contains("~/.zshrc"));
+        assert!(rendered.contains("wrk doctor"));
     }
 
     #[test]

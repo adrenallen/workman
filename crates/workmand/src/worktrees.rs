@@ -26,8 +26,6 @@ use workman_core::{
 use crate::{
     RegistryError, SharedProcessRegistry,
     project_titles::normalized_optional_project_title,
-    user_config::user_config_path,
-    user_environment::UserEnvironmentResolver,
     worktree_integrations::{
         self, HerdView, PullRequestCacheView, PullRequestView, WorktreeHealth,
     },
@@ -538,11 +536,13 @@ pub fn project_envelopes(
         .collect()
 }
 
-/// Populate metadata for pre-existing SWM/workman projects without touching Git or project rows.
+/// Populate metadata for embeddings that do not own a daemon environment resolver.
+///
+/// Daemon paths pass their shared cached environment to
+/// `reconcile_existing_projects_with_environment`; this compatibility helper deliberately uses
+/// the inherited environment instead of creating a fresh resolver and re-running shell rc files.
 pub fn reconcile_existing_projects(store: &Store) -> WorktreeResult<()> {
-    let environment = UserEnvironmentResolver::new(user_config_path())
-        .resolve()
-        .command_environment();
+    let environment = env::vars_os().collect();
     reconcile_existing_projects_with_environment(store, &environment)
 }
 

@@ -48,6 +48,7 @@ pub struct AgentToolHealth {
 pub struct AgentToolsHealth {
     pub checked_at: u64,
     pub environment_capture_mode: crate::EnvironmentCaptureMode,
+    pub environment_capture_error: Option<String>,
     pub resolved_path: String,
     pub ready_count: usize,
     pub total_count: usize,
@@ -162,6 +163,7 @@ async fn check_agent_tools_in(
     environment: DoctorEnvironment,
 ) -> AgentToolsHealth {
     let environment_capture_mode = environment.capture_mode;
+    let environment_capture_error = environment.capture_error.clone();
     let resolved_path = environment.path.to_string_lossy().into_owned();
     let mut checks = JoinSet::new();
     for tool in tools {
@@ -187,6 +189,7 @@ async fn check_agent_tools_in(
     AgentToolsHealth {
         checked_at: now_millis(),
         environment_capture_mode,
+        environment_capture_error,
         resolved_path,
         ready_count,
         total_count,
@@ -493,7 +496,7 @@ fn missing_path_diagnostic(executable: &str, environment: &DoctorEnvironment) ->
             .as_deref()
             .unwrap_or("interactive login environment capture was unavailable");
         return Some(format!(
-            "Workman is using the {} environment because {reason}. A runtime initialized only in {interactive_rc} (for example by nvm/fnm/volta) is absent from non-interactive launches, which don't read {interactive_rc}; move that PATH setup to {login_rc}.",
+            "Workman is using the {} environment because {reason}. A runtime initialized only in {interactive_rc} (for example by nvm/fnm/volta) may be absent; Workman retries degraded captures after 30 seconds, so use Refresh health then or restart Workman to re-capture now. For a permanent non-interactive setup, move that PATH initialization to {login_rc}.",
             environment.capture_mode.as_str()
         ));
     }
@@ -962,7 +965,8 @@ mod tests {
         let diagnostic = super::missing_path_diagnostic("codex", &environment).unwrap();
         assert!(diagnostic.contains("timed out after 10000ms"));
         assert!(diagnostic.contains("~/.zshrc"));
-        assert!(diagnostic.contains("non-interactive launches"));
+        assert!(diagnostic.contains("retries degraded captures after 30 seconds"));
+        assert!(diagnostic.contains("permanent non-interactive setup"));
         assert!(diagnostic.contains("~/.zprofile or ~/.zshenv"));
     }
 
@@ -992,7 +996,7 @@ mod tests {
             format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
         )
         .unwrap();
-        let resolved = crate::UserEnvironmentResolver::new(&config).resolve();
+        let resolved = crate::UserEnvironmentResolver::new(&config).refresh();
 
         let health = check_agent_tools_with_user_environment(
             vec![tool(8, "Profile", "profile-agent", "codex", true)],

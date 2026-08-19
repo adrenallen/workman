@@ -27,6 +27,7 @@ export interface AgentToolHealth extends AgentTool {
   resolved_binary: string | null;
   version: string | null;
   version_error: string | null;
+  path_diagnostic: string | null;
   config_path: string;
   config_exists: boolean;
   launch_ready: boolean;
@@ -40,6 +41,13 @@ export interface AgentToolHealth extends AgentTool {
 
 export interface AgentToolsHealth {
   checked_at: number;
+  environment_capture_mode:
+    | 'interactive_login'
+    | 'non_interactive_login_fallback'
+    | 'daemon_fallback'
+    | 'daemon_environment';
+  environment_capture_error: string | null;
+  resolved_path: string;
   ready_count: number;
   total_count: number;
   enabled_ready_count: number;

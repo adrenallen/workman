@@ -277,6 +277,10 @@ impl DaemonServer {
                 .mark_active_profile_legacy_config_imported()
                 .map_err(registry_io_error)?;
         }
+        // Shell rc files are user code and can take the full bounded capture deadline. Warm the
+        // shared cache on Tokio's blocking pool while daemon binding continues; hot-path resolves
+        // serve the inherited environment until the capture is ready.
+        user_environment.prewarm();
         let command_environment = user_environment.resolve().command_environment();
         if let Err(error) =
             worktrees::reconcile_existing_projects_with_environment(&store, &command_environment)

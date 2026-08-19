@@ -106,6 +106,15 @@
     return tool.mcp_launch_supported ? 'ready' : 'degraded';
   }
 
+  function captureModeLabel(mode: AgentToolsHealth['environment_capture_mode']): string {
+    switch (mode) {
+      case 'interactive_login': return 'Interactive shell captured';
+      case 'non_interactive_login_fallback': return 'Login-profile fallback';
+      case 'daemon_fallback': return 'Daemon environment fallback';
+      case 'daemon_environment': return 'Daemon environment';
+    }
+  }
+
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
@@ -126,6 +135,18 @@
     </button>
   </header>
 
+  {#if health}
+    <div class:degraded={health.environment_capture_mode === 'non_interactive_login_fallback' || health.environment_capture_mode === 'daemon_fallback'} class="environment-status" role="status">
+      <div>
+        <strong>{captureModeLabel(health.environment_capture_mode)}</strong>
+        <code title={health.resolved_path}>{health.resolved_path || 'PATH unavailable'}</code>
+      </div>
+      {#if health.environment_capture_error}
+        <p>{health.environment_capture_error} Workman retries degraded captures after 30 seconds; use Refresh health then, or restart Workman to re-capture now.</p>
+      {/if}
+    </div>
+  {/if}
+
   {#if health && health.tools.length > 0}
     <div class="runtime-list">
       {#each health.tools as tool (tool.id)}
@@ -145,6 +166,9 @@
               <span title={tool.mcp_launch_note}>MCP: {tool.mcp_launch_mechanism}</span>
             </div>
             <p>{tool.configuration_note}</p>
+            {#if !tool.found_on_path && tool.path_diagnostic}
+              <p class="path-diagnostic" role="status">{tool.path_diagnostic}</p>
+            {/if}
             {#if deepChecks[tool.id]}
               <div class:passed={deepChecks[tool.id].success} class="deep-result" aria-live="polite">
                 {deepChecks[tool.id].success ? '✓' : '!'} {deepChecks[tool.id].message}
@@ -194,6 +218,13 @@
   .doctor { position: relative; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
   .doctor-header, .runtime-title, .runtime-facts, .runtime-actions, .preview-dialog header, .preview-dialog footer, .preview-dialog footer > div { display: flex; align-items: center; }
   .doctor-header { gap: 11px; padding: 12px; }
+  .environment-status { display: grid; gap: 4px; border-top: 1px solid var(--border); padding: 8px 12px; background: rgb(99 215 197 / 5%); color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .environment-status.degraded { background: rgb(224 165 87 / 8%); }
+  .environment-status > div { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .environment-status strong { flex: 0 0 auto; color: var(--signal); }
+  .environment-status.degraded strong { color: var(--warning); }
+  .environment-status code { overflow: hidden; color: #718089; text-overflow: ellipsis; white-space: nowrap; }
+  .environment-status p { margin: 0; color: var(--warning); line-height: 1.45; }
   .summary-mark { display: flex; width: 42px; height: 42px; align-items: baseline; justify-content: center; border: 1px solid #5a4940; background: #2b211b; color: var(--warning); font: 700 17px/42px 'JetBrains Mono Variable', monospace; }
   .summary-mark.healthy { border-color: #356a63; background: #102b2b; color: var(--signal); }
   .summary-mark i { color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: normal; }
@@ -226,6 +257,7 @@
   .runtime-facts span { flex: 0 0 auto; }
   .runtime-facts code { overflow: hidden; color: #64727b; text-overflow: ellipsis; white-space: nowrap; }
   .runtime-copy p { margin: 4px 0 0; color: #61717a; font-size: var(--font-size-xs); }
+  .runtime-copy .path-diagnostic { color: var(--warning); line-height: 1.45; }
   .deep-result { margin-top: 5px; color: var(--fault); font-size: var(--font-size-xs); }
   .deep-result.passed { color: var(--signal); }
 
