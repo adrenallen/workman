@@ -77,6 +77,7 @@ test('remove operations use removal phases and preserve terminal removal details
     source_project_id: 7,
     repository_id: null,
     path: '/tmp/plain-project',
+    label: 'plain-project',
     removal: {
       project_id: 7,
       path: '/tmp/plain-project',
@@ -86,11 +87,14 @@ test('remove operations use removal phases and preserve terminal removal details
       deleted_from_disk: false,
       metadata_pruned: false,
       branch_kept: true,
+      delete_from_disk: true,
       files_removed: false,
       files_untouched: true,
-      registration_issue: 'broken registration'
+      registration_issue: 'broken registration',
+      post_delete_warning: null
     }
   }]);
+  assert.equal(get(worktreeOperations)[0].label, 'Plain project');
   assert.equal(get(worktreeOperations)[0].removal.registration_issue, 'broken registration');
   assert.equal(get(worktreeOperations)[0].removal.files_untouched, true);
   resetWorktreeOperations();

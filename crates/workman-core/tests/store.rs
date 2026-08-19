@@ -6,10 +6,10 @@ use std::{
 };
 
 use workman_core::{
-    Actor, AgentLaunchMode, AgentTemplate, AgentTool, AgentToolSource, LATEST_SCHEMA_VERSION,
-    Process, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectLock, ProjectWorktree,
-    Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker, TodoComment, TodoPriority, TodoStatus,
-    WorktreeRepository,
+    ActiveWorktreeRemoval, Actor, AgentLaunchMode, AgentTemplate, AgentTool, AgentToolSource,
+    LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    ProjectLock, ProjectWorktree, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker,
+    TodoComment, TodoPriority, TodoStatus, WorktreeRepository,
 };
 
 #[test]
@@ -47,6 +47,7 @@ fn fresh_database_migrates_to_current_schema() {
     assert_eq!(
         tables,
         [
+            "active_worktree_removals",
             "actors",
             "agent_notifications",
             "agent_templates",
@@ -86,6 +87,37 @@ fn fresh_database_migrates_to_current_schema() {
         store.schema_version().expect("read schema version"),
         LATEST_SCHEMA_VERSION
     );
+}
+
+#[test]
+fn active_worktree_removal_journal_round_trips_and_clears() {
+    let store = Store::open_in_memory().expect("open store");
+    store
+        .put_active_worktree_removal(&ActiveWorktreeRemoval {
+            project_id: 42,
+            phase: "processes".into(),
+            delete_from_disk: true,
+        })
+        .expect("journal removal");
+    assert!(
+        store
+            .update_active_worktree_removal_phase(42, "files")
+            .expect("advance journal")
+    );
+    assert_eq!(
+        store.list_active_worktree_removals().expect("list journal"),
+        vec![ActiveWorktreeRemoval {
+            project_id: 42,
+            phase: "files".into(),
+            delete_from_disk: true,
+        }]
+    );
+    assert!(
+        store
+            .delete_active_worktree_removal(42)
+            .expect("clear journal")
+    );
+    assert!(store.list_active_worktree_removals().unwrap().is_empty());
 }
 
 #[test]

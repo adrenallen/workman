@@ -293,9 +293,11 @@ pub struct WorktreeRemoval {
     pub deleted_from_disk: bool,
     pub metadata_pruned: bool,
     pub branch_kept: bool,
+    pub delete_from_disk: bool,
     pub files_removed: bool,
     pub files_untouched: bool,
     pub registration_issue: Option<String>,
+    pub post_delete_warning: Option<String>,
     pub selected_project_id: Option<ProjectId>,
 }
 
@@ -1662,6 +1664,7 @@ pub(crate) async fn remove_with_progress(
         ));
     }
     if let Some(progress) = progress {
+        update_removal_journal_phase(registry, project.id, WorktreeStepId::Processes).await?;
         progress.running(
             WorktreeStepId::Processes,
             Some(if processes.is_empty() {
@@ -1740,16 +1743,18 @@ pub(crate) async fn remove_with_progress(
                 args.push(OsString::from("--"));
                 args.push(verified.path.as_os_str().to_owned());
                 if let Some(progress) = progress {
+                    update_removal_journal_phase(registry, project.id, WorktreeStepId::Worktree)
+                        .await?;
                     progress.running(
                         WorktreeStepId::Worktree,
                         Some(verified.path.to_string_lossy().into_owned()),
                     );
                 }
-                let git_error = blocking_git_required(
-                    repository_root.to_path_buf(),
-                    args,
+                let git_error = git_required(
+                    repository_root,
+                    args.iter(),
                     "remove local Git worktree",
-                    command_environment.clone(),
+                    &command_environment,
                 )
                 .await
                 .err();
@@ -1765,6 +1770,8 @@ pub(crate) async fn remove_with_progress(
                             Some("Git worktree metadata removed".into()),
                         );
                     }
+                    update_removal_journal_phase(registry, project.id, WorktreeStepId::Files)
+                        .await?;
                     progress.running(
                         WorktreeStepId::Files,
                         Some(verified.path.to_string_lossy().into_owned()),
@@ -1788,6 +1795,8 @@ pub(crate) async fn remove_with_progress(
                         WorktreeStepId::Worktree,
                         Some("This project is not a linked Git worktree".into()),
                     );
+                    update_removal_journal_phase(registry, project.id, WorktreeStepId::Files)
+                        .await?;
                     progress.running(
                         WorktreeStepId::Files,
                         Some(verified.path.to_string_lossy().into_owned()),
@@ -1808,16 +1817,17 @@ pub(crate) async fn remove_with_progress(
                 .as_ref()
                 .expect("linked worktree has repository root");
             if let Some(progress) = progress {
+                update_removal_journal_phase(registry, project.id, WorktreeStepId::Prune).await?;
                 progress.running(
                     WorktreeStepId::Prune,
                     Some(repository_root.to_string_lossy().into_owned()),
                 );
             }
-            match blocking_git_required(
-                repository_root.to_path_buf(),
-                vec![OsString::from("worktree"), OsString::from("prune")],
+            match git_required(
+                repository_root,
+                [OsString::from("worktree"), OsString::from("prune")].iter(),
                 "prune local worktree metadata",
-                command_environment.clone(),
+                &command_environment,
             )
             .await
             {
@@ -1913,6 +1923,7 @@ pub(crate) async fn remove_with_progress(
     // Project deletion is intentionally last: even a self-targeting agent has
     // already finished the Git operation before its process can disappear.
     if let Some(progress) = progress {
+        update_removal_journal_phase(registry, project.id, WorktreeStepId::Registered).await?;
         progress.running(
             WorktreeStepId::Registered,
             Some(format!("Unregistering project {}", project.id)),
@@ -1945,15 +1956,12 @@ pub(crate) async fn remove_with_progress(
             Some(format!("Project {} unregistered", project.id)),
         );
     }
-    if let Some(error) = post_delete_issue {
-        return Err(WorktreeError::Git {
-            operation: "finalize worktree deletion".into(),
-            message: format!(
-                "the checkout at {} and its Workman registration were removed, but final verification failed: {error}",
-                path.display()
-            ),
-        });
-    }
+    let post_delete_warning = post_delete_issue.map(|error| {
+        format!(
+            "The checkout at {} and its Workman registration were removed, but final verification failed: {error}",
+            path.display()
+        )
+    });
     Ok(WorktreeRemoval {
         project_id: project.id,
         path: path.to_string_lossy().into_owned(),
@@ -1963,11 +1971,55 @@ pub(crate) async fn remove_with_progress(
         deleted_from_disk,
         metadata_pruned,
         branch_kept,
+        delete_from_disk: request.delete_from_disk,
         files_removed: deleted_from_disk,
         files_untouched: !deleted_from_disk,
         registration_issue: registration_issue.map(|issue| issue.message),
+        post_delete_warning,
         selected_project_id,
     })
+}
+
+pub(crate) async fn registered_repository_id_for_path(
+    registry: &SharedProcessRegistry,
+    path: &str,
+) -> Option<i64> {
+    let command_environment = command_environment(registry).await;
+    let snapshot = snapshot_async(Path::new(path), &command_environment)
+        .await
+        .ok()?;
+    let root_path = snapshot.root_path.to_string_lossy();
+    registry
+        .lock()
+        .await
+        .store()
+        .get_worktree_repository_by_root(&root_path)
+        .ok()
+        .flatten()
+        .map(|repository| repository.id)
+}
+
+async fn update_removal_journal_phase(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+    phase: WorktreeStepId,
+) -> WorktreeResult<()> {
+    let phase = match phase {
+        WorktreeStepId::Processes => "processes",
+        WorktreeStepId::Worktree => "worktree",
+        WorktreeStepId::Files => "files",
+        WorktreeStepId::Prune => "prune",
+        WorktreeStepId::Registered => "registered",
+        WorktreeStepId::Branch | WorktreeStepId::Environment | WorktreeStepId::Herd => {
+            return Ok(());
+        }
+    };
+    registry
+        .lock()
+        .await
+        .store()
+        .update_active_worktree_removal_phase(project_id, phase)?;
+    Ok(())
 }
 
 async fn broken_registration_issue(
@@ -3148,18 +3200,6 @@ fn ensure_verified_directory_removed(path: &Path, git_error: Option<&str>) -> Wo
     }
 }
 
-async fn blocking_git_required(
-    directory: PathBuf,
-    args: Vec<OsString>,
-    operation: &'static str,
-    environment: BTreeMap<OsString, OsString>,
-) -> WorktreeResult<String> {
-    run_removal_blocking(operation, move || {
-        std_git_required(&directory, args.iter(), operation, &environment)
-    })
-    .await
-}
-
 async fn run_removal_blocking<T, F>(operation: &'static str, task: F) -> WorktreeResult<T>
 where
     T: Send + 'static,
@@ -3892,6 +3932,42 @@ mod tests {
             result = &mut heavy => panic!("blocking removal finished before the control-loop probe: {result:?}"),
         }
         heavy.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_deadline_kills_the_spawned_child() {
+        use std::time::Instant;
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("child.pid");
+        let script = format!(
+            "printf '%s' $$ > '{}'; exec /bin/sleep 5",
+            pid_path.display()
+        );
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+        let started = Instant::now();
+        let error = command_output(&mut command, Duration::from_millis(100), &BTreeMap::new())
+            .await
+            .expect_err("the child should exceed its deadline");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.to_string().contains("timed out"));
+
+        let pid = fs::read_to_string(pid_path).unwrap();
+        for _ in 0..20 {
+            if !StdCommand::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed-out child {pid} was still running");
     }
 
     #[test]

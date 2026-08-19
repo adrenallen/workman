@@ -102,6 +102,20 @@ test('async removal closes the dialog, stays visible in the operation rail, and 
   assert.match(app, /class:empty=\{selectedProject === null && activeWorktreeOperation === null\}/);
 });
 
+test('async keep-files completion stays quiet and running removals cannot be dismissed', async () => {
+  const [app, panel] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/WorktreeProgressPanel.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(app, /operation\.removal\.registration_issue\s*\|\| \(operation\.removal\.delete_from_disk && operation\.removal\.files_untouched\)/);
+  assert.match(panel, /operation\.removal\?\.delete_from_disk && operation\.removal\.files_untouched/);
+  assert.match(panel, /operation\.mode === 'remove' && operation\.status === 'running'/);
+  assert.match(panel, /Removal continues in the background and can be closed after it finishes/);
+  assert.match(app, /cause\.code === 'worktree_operation_in_progress'/);
+  assert.match(app, /Removal already in progress for this project/);
+});
+
 test('legacy synchronous removal timeout copy says the operation may still complete', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   assert.match(app, /isDaemonRequestTimeoutError\(fallbackCause\)/);

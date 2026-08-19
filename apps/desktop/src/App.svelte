@@ -1782,7 +1782,12 @@
     if (operation.removal) {
       try {
         projects = await client.projects();
-        if (operation.removal.registration_issue || operation.removal.files_untouched) {
+        if (operation.removal.post_delete_warning) {
+          removeWorktreeNotice = operation.removal.post_delete_warning;
+        } else if (
+          operation.removal.registration_issue
+          || (operation.removal.delete_from_disk && operation.removal.files_untouched)
+        ) {
           removeWorktreeNotice = `Files left untouched at ${operation.removal.path}.${operation.removal.registration_issue ? ` ${operation.removal.registration_issue}` : ''}`;
         }
         if (
@@ -3569,6 +3574,11 @@
             removeWorktreeError = fallbackCause instanceof Error ? fallbackCause.message : String(fallbackCause);
           }
         }
+      } else if (cause instanceof DaemonRequestError && cause.code === 'worktree_operation_in_progress') {
+        dismissTrackedWorktreeOperation(operationId);
+        if (activeWorktreeOperationId === operationId) activeWorktreeOperationId = null;
+        removeWorktreeDialog = state;
+        removeWorktreeError = `Removal already in progress for this project. ${cause.message}`;
       } else {
         failWorktreeOperation(
           operationId,

@@ -20,9 +20,11 @@
   let completed = $derived(operation.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length);
   let progress = $derived(Math.round((completed / operation.steps.length) * 100));
   let removalNotice = $derived(
-    operation.removal?.registration_issue
+    operation.removal?.post_delete_warning
+      ? operation.removal.post_delete_warning
+      : operation.removal?.registration_issue
       ? `${operation.removal.registration_issue} Local files remain at ${operation.removal.path}.`
-      : operation.removal?.files_untouched
+      : operation.removal?.delete_from_disk && operation.removal.files_untouched
         ? `Local files remain at ${operation.removal.path}.`
         : null
   );
@@ -63,7 +65,9 @@
   {/if}
 
   <footer>
-    {#if onDismiss}<Button size="sm" variant="ghost" onclick={onDismiss}><XIcon size={13} />{operation.status === 'completed' ? 'Close' : 'Dismiss'}</Button>{/if}
+    {#if operation.mode === 'remove' && operation.status === 'running'}
+      <span class="running-removal-copy">Removal continues in the background and can be closed after it finishes.</span>
+    {:else if onDismiss}<Button size="sm" variant="ghost" onclick={onDismiss}><XIcon size={13} />{operation.status === 'completed' ? 'Close' : 'Dismiss'}</Button>{/if}
     {#if operation.status === 'failed' && onRetry}<Button size="sm" variant="outline" onclick={onRetry}><RotateCcwIcon size={13} />{operation.mode === 'remove' ? 'Back to removal' : 'Back to form'}</Button>{/if}
   </footer>
 </section>
@@ -96,5 +100,6 @@
   .operation-result { display: flex; align-items: flex-start; gap: 7px; margin: 0 14px 9px; border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border)); border-radius: var(--radius); padding: 8px 9px; background: color-mix(in srgb, var(--warning) 8%, var(--card)); color: var(--foreground); font-size: var(--font-size-sm); }
   .operation-result :global(svg) { flex: none; margin-top: 2px; color: var(--warning); }
   footer { display: flex; justify-content: flex-end; gap: 7px; border-top: 1px solid var(--border); padding: 8px; }
+  .running-removal-copy { margin-right: auto; align-self: center; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>

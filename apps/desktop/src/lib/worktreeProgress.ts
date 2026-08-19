@@ -122,6 +122,7 @@ export function replaceWorktreeOperations(serverOperations: WorktreeOperation[])
           repository_id: operation.repository_id ?? local?.repository_id ?? null,
           branch: operation.branch ?? local?.branch ?? null,
           path: operation.path ?? local?.path ?? null,
+          label: local?.label ?? operation.label,
           local: false
         };
       }),
