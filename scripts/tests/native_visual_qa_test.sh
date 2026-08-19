@@ -4,8 +4,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMP_DIR="$(mktemp -d)"
 QA_ROOT=""
+CUSTOM_ROOT=""
 cleanup() {
   [[ -z "$QA_ROOT" ]] || rm -rf "$QA_ROOT"
+  [[ -z "$CUSTOM_ROOT" ]] || rm -rf "$CUSTOM_ROOT"
   rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT
@@ -41,6 +43,7 @@ test -f "$OPEN_CAPTURE"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_CONFIG' "$QA_APP/Contents/Info.plist")" == "$CONFIG" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$QA_APP/Contents/Info.plist")" == 1 ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$QA_APP/Contents/Info.plist")" == "$OPEN_CAPTURE" ]]
+/usr/bin/codesign --verify --deep --strict "$QA_APP"
 FAKE_PATH="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:PATH' "$QA_APP/Contents/Info.plist")"
 [[ "$FAKE_PATH" == "$QA_ROOT/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin" ]]
 grep -qx 'agent_tools: \[\]' "$CONFIG"
@@ -52,6 +55,14 @@ if WORKMAN_BROWSER_OPEN_CAPTURE="$OPEN_CAPTURE" "$QA_ROOT/fake-bin/open" 'file:/
   exit 1
 fi
 test -z "$(find "$DATA_DIR" -mindepth 1 -print -quit)"
+
+CUSTOM_ROOT="/tmp/qa-native-script-$RANDOM-$$"
+custom_output="$($REPO_ROOT/scripts/native-visual-qa.sh --todo 307 --identity fix28 --qa-root "$CUSTOM_ROOT" --source-app "$SOURCE_APP" --prepare-only)"
+CUSTOM_APP="$(printf '%s\n' "$custom_output" | awk -F= '$1 == "QA_APP" { sub(/^QA_APP=/, ""); print; exit }')"
+[[ "$(printf '%s\n' "$custom_output" | awk -F= '$1 == "BUNDLE_ID" { print $2; exit }')" == com.workman.fix28 ]]
+[[ "$(printf '%s\n' "$custom_output" | awk -F= '$1 == "QA_ROOT" { sub(/^QA_ROOT=/, ""); print; exit }')" == "$CUSTOM_ROOT" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CUSTOM_APP/Contents/Info.plist")" == com.workman.fix28 ]]
+/usr/bin/codesign --verify --deep --strict "$CUSTOM_APP"
 
 if "$REPO_ROOT/scripts/native-visual-qa.sh" --todo unsafe --source-app "$SOURCE_APP" --prepare-only >/dev/null 2>&1; then
   printf 'expected non-numeric todo id to fail\n' >&2
