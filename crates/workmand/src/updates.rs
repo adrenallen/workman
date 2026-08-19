@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn stale_pre_update_cache_never_reannounces_an_installed_release() {
         let mut old_check = UpdateCheck::current("0.1.9");
-        old_check.latest = "0.1.10".to_owned();
+        old_check.latest = "0.1.11".to_owned();
         old_check.available = true;
         let cache = UpdateCache {
             last_checked_at: Some(123),
@@ -463,10 +463,10 @@ mod tests {
             ..UpdateCache::default()
         };
 
-        assert!(!cached_check_is_current(&cache, "0.1.10"));
-        let status = status_from_cache(&cache, "0.1.10", false);
-        assert_eq!(status.check.current, "0.1.10");
-        assert_eq!(status.check.latest, "0.1.10");
+        assert!(!cached_check_is_current(&cache, "0.1.11"));
+        let status = status_from_cache(&cache, "0.1.11", false);
+        assert_eq!(status.check.current, "0.1.11");
+        assert_eq!(status.check.latest, "0.1.11");
         assert!(!status.check.available);
     }
 }

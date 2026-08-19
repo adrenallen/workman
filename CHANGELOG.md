@@ -4,6 +4,36 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.11 - 2026-08-19
+
+Workman 0.1.11 makes launched tools inherit the user's real shell environment, keeps automatic
+sleep prevention tied to native agent state, and smooths project, terminal, and compact-window
+workflows.
+
+### Runtime reliability
+
+- Resolve command and agent environments through an interactive login shell so runtimes managed
+  by nvm, fnm, Volta, and asdf are available on `PATH`; runtime doctor now points to shell rc-file
+  configuration when tools such as npm or Codex cannot be found.
+- Evaluate automatic keep-awake natively from current agent state and require a verified power
+  assertion, surviving hidden windows, persisted suppression edge cases, and daemon loss.
+- Remove projects asynchronously so longer cleanup no longer reports a false daemon timeout.
+
+### Projects and agent workflows
+
+- Handle existing worktrees and branches gracefully during project creation, preserve truthful
+  rollback behavior, and let stale operation rows be dismissed.
+- Paste PNG clipboard images into Claude from both new-agent drafts and existing terminals, with
+  durable attachment staging and previews.
+- Keep menus, dropdowns, and selects reachable when the desktop window is small.
+
+### Controls and platform support
+
+- Make keep-awake a single-click, verified-armed control with an automatic mode, keep scratchpad
+  outlines scrollable, and strengthen quick-prompt selection highlighting.
+- Add Windows x86_64 release-archive tooling, installer polish, static CRT packaging, and update
+  support, contributed by mleukering.
+
 ## 0.1.10 - 2026-08-18
 
 Workman 0.1.10 brings creation and review work into project surfaces, makes updates and terminals

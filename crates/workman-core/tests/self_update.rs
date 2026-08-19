@@ -866,7 +866,7 @@ async fn app_surface_hop_updates_versioned_layout_launchers_and_matching_app() {
 fn legacy_install_reports_default_to_a_daemon_only_restart_plan() {
     let report: workman_core::UpdateInstallReport = serde_json::from_value(serde_json::json!({
         "current": "0.1.9",
-        "latest": "0.1.10",
+        "latest": "0.1.11",
         "install_dir": "/tmp/workman",
         "updated_files": ["/tmp/workman/wrk", "/tmp/workman/workmand"],
         "desktop_instruction": null,
