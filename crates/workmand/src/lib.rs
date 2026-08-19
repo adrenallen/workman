@@ -34,6 +34,7 @@ use tokio::{
 use uuid::Uuid;
 
 mod agent_sessions;
+mod command_line;
 pub mod config;
 mod context_actions;
 mod control;

@@ -91,6 +91,19 @@ if ($env:WORKMAN_INSTALL_ALIAS -ne '0') {
     catch { Write-Host '  skipped workman.exe alias (file busy)' }
 }
 
+# A Start Menu entry so the desktop app launches like any Windows app.
+try {
+    $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Workman.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($startMenu)
+    $shortcut.TargetPath = Join-Path $binDir 'workman-desktop.exe'
+    $shortcut.WorkingDirectory = $binDir
+    $shortcut.Description = 'Workman terminal workspace'
+    $shortcut.Save()
+    Write-Host '  added the Workman Start Menu entry'
+}
+catch { Write-Host "  skipped the Start Menu entry: $($_.Exception.Message)" }
+
 if (-not $NoPath) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not $userPath) { $userPath = '' }

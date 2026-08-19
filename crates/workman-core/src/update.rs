@@ -492,7 +492,8 @@ impl UpdateClient {
             .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
         let install_dir = crate::canonical_path(install_dir.as_ref())?;
         let (wrk_target, workmand_target) = installed_binary_targets(&install_dir)?;
-        remove_retired_binaries(&[&wrk_target, &workmand_target]);
+        let desktop_candidate = install_dir.join(executable_name("workman-desktop"));
+        remove_retired_binaries(&[&wrk_target, &workmand_target, &desktop_candidate]);
 
         let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
         let archive = self.download(binary_asset, on_progress).await?;
@@ -533,17 +534,27 @@ impl UpdateClient {
             let quarantine_cleared = clear_macos_quarantine(&staging);
             atomic_replace(&wrk_source, &wrk_target)?;
             atomic_replace(&workmand_source, &workmand_target)?;
+            let desktop_target = replace_staged_desktop(&staging, &install_dir)?;
 
+            let mut updated_files = vec![
+                wrk_target.to_string_lossy().into_owned(),
+                workmand_target.to_string_lossy().into_owned(),
+            ];
+            if let Some(desktop) = &desktop_target {
+                updated_files.push(desktop.to_string_lossy().into_owned());
+            }
             Ok(UpdateInstallReport {
                 current: check.current.clone(),
                 latest: check.latest.clone(),
                 install_dir: install_dir.to_string_lossy().into_owned(),
-                updated_files: vec![
-                    wrk_target.to_string_lossy().into_owned(),
-                    workmand_target.to_string_lossy().into_owned(),
-                ],
+                updated_files,
                 desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
-                    if asset.name == binary_asset.name {
+                    if let Some(desktop) = &desktop_target {
+                        format!(
+                            "Updated wrk at {}, workmand at {}, and the desktop app at {}. Restart Workman to load the update.",
+                            wrk_target.display(), workmand_target.display(), desktop.display()
+                        )
+                    } else if asset.name == binary_asset.name {
                         format!(
                             "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
                             wrk_target.display(), workmand_target.display(), asset.name, asset.url
@@ -1635,6 +1646,30 @@ fn ensure_staged_binary(path: &Path, staging: &Path) -> UpdateResult<()> {
     Ok(())
 }
 
+/// Replace the flat Windows desktop executable in place when both the archive
+/// and the install directory carry one. A running app is renamed aside by the
+/// same retire-and-swap as the other binaries and keeps working until restart.
+/// Bundle platforms keep their manual replacement flow, so this is a no-op there.
+fn replace_staged_desktop(staging: &Path, install_dir: &Path) -> UpdateResult<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        let target = install_dir.join(executable_name("workman-desktop"));
+        if target.is_file()
+            && let Ok(source) = staged_binary(staging, "workman-desktop")
+        {
+            set_executable(&source)?;
+            atomic_replace(&source, &target)?;
+            return Ok(Some(target));
+        }
+        Ok(None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (staging, install_dir);
+        Ok(None)
+    }
+}
+
 fn staged_binary(staging: &Path, name: &str) -> UpdateResult<PathBuf> {
     let executable = executable_name(name);
     let bundled = staging.join("bin").join(&executable);
@@ -1915,6 +1950,33 @@ mod tests {
     #[test]
     fn semver_comparison_ignores_tag_prefix() {
         assert!(parse_version("v0.2.0").unwrap() > parse_version("0.1.9").unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staged_desktop_replaces_the_flat_windows_executable_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_dir = temp.path().join("install");
+        let staging = temp.path().join("staging");
+        fs::create_dir_all(install_dir.join("ignored")).unwrap();
+        fs::create_dir_all(staging.join("bin")).unwrap();
+        fs::write(install_dir.join("workman-desktop.exe"), b"old").unwrap();
+        fs::write(staging.join("bin").join("workman-desktop.exe"), b"new").unwrap();
+
+        let replaced = replace_staged_desktop(&staging, &install_dir).unwrap();
+        assert_eq!(
+            replaced.as_deref(),
+            Some(install_dir.join("workman-desktop.exe").as_path())
+        );
+        assert_eq!(
+            fs::read(install_dir.join("workman-desktop.exe")).unwrap(),
+            b"new"
+        );
+
+        // Without an installed desktop executable the update leaves it alone.
+        let cli_only = temp.path().join("cli-only");
+        fs::create_dir_all(&cli_only).unwrap();
+        assert_eq!(replace_staged_desktop(&staging, &cli_only).unwrap(), None);
     }
 
     #[cfg(windows)]

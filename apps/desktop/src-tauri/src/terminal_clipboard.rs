@@ -176,7 +176,100 @@ fn write_native_clipboard_png(png: &[u8]) -> Result<(), String> {
         .ok_or_else(|| "the system pasteboard rejected the normalized PNG".to_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn read_native_clipboard(
+    save_image: bool,
+    normalize_image: bool,
+) -> Result<TerminalClipboardRead, String> {
+    let mut clipboard = windows_clipboard()?;
+    match clipboard.get_image() {
+        Ok(image) => {
+            let png = windows_clipboard_png(&image)?;
+            if normalize_image {
+                if write_native_clipboard_png(&png).is_ok() {
+                    return Ok(TerminalClipboardRead::Image {
+                        path: None,
+                        clipboard_ready: true,
+                    });
+                }
+                return Ok(TerminalClipboardRead::Image {
+                    path: Some(save_clipboard_image(&png, "image/png")?),
+                    clipboard_ready: false,
+                });
+            }
+            let path = save_image
+                .then(|| save_clipboard_image(&png, "image/png"))
+                .transpose()?;
+            Ok(TerminalClipboardRead::Image {
+                path,
+                clipboard_ready: false,
+            })
+        }
+        Err(arboard::Error::ContentNotAvailable) => match clipboard.get_text() {
+            Ok(text) => Ok(TerminalClipboardRead::Text { text }),
+            Err(arboard::Error::ContentNotAvailable) => Ok(TerminalClipboardRead::Empty),
+            Err(error) => Err(format!("could not read the clipboard: {error}")),
+        },
+        Err(error) => Err(format!("could not read the clipboard image: {error}")),
+    }
+}
+
+#[cfg(windows)]
+fn write_native_clipboard_png(png: &[u8]) -> Result<(), String> {
+    let decoded = image::load_from_memory_with_format(png, ImageFormat::Png)
+        .map_err(|error| format!("could not decode the normalized PNG: {error}"))?
+        .into_rgba8();
+    let (width, height) = decoded.dimensions();
+    let image = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Owned(decoded.into_raw()),
+    };
+    windows_clipboard()?
+        .set_image(image)
+        .map_err(|error| format!("the clipboard rejected the normalized PNG: {error}"))
+}
+
+#[cfg(windows)]
+fn write_native_clipboard_text(text: &str) -> Result<(), String> {
+    windows_clipboard()?
+        .set_text(text)
+        .map_err(|error| format!("the clipboard rejected terminal text: {error}"))
+}
+
+#[cfg(windows)]
+fn windows_clipboard() -> Result<arboard::Clipboard, String> {
+    arboard::Clipboard::new().map_err(|error| format!("could not open the clipboard: {error}"))
+}
+
+/// Encode the clipboard's raw RGBA frame as PNG under the same dimension and
+/// size limits `normalize_image_png` enforces for encoded inputs.
+#[cfg(windows)]
+fn windows_clipboard_png(image: &arboard::ImageData<'_>) -> Result<Vec<u8>, String> {
+    if image.width > 16_384 || image.height > 16_384 {
+        return Err("clipboard image exceeds the supported dimensions".to_owned());
+    }
+    let rgba = image::RgbaImage::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.clone().into_owned(),
+    )
+    .ok_or_else(|| "clipboard image data is malformed".to_owned())?;
+    let mut output = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| format!("could not encode clipboard image as PNG: {error}"))?;
+    let png = output.into_inner();
+    if png.len() > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "clipboard image exceeds the {} MiB limit",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(png)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn read_native_clipboard(
     _save_image: bool,
     _normalize_image: bool,
@@ -184,12 +277,12 @@ fn read_native_clipboard(
     Err("terminal context-menu paste is not supported on this platform".to_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn write_native_clipboard_png(_png: &[u8]) -> Result<(), String> {
     Err("terminal image clipboard writes are not supported on this platform".to_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn write_native_clipboard_text(_text: &str) -> Result<(), String> {
     Err("terminal context-menu copy is not supported on this platform".to_owned())
 }
@@ -655,6 +748,30 @@ mod tests {
         assert!(
             save_image_in(root.path(), &vec![0; MAX_IMAGE_BYTES + 1], "image/png", now).is_err()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_clipboard_frames_encode_to_bounded_png() {
+        let image = arboard::ImageData {
+            width: 2,
+            height: 2,
+            bytes: std::borrow::Cow::Owned(vec![200; 2 * 2 * 4]),
+        };
+        let png = windows_clipboard_png(&image).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let decoded = image::load_from_memory_with_format(&png, ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 2));
+        assert_eq!(decoded.get_pixel(1, 1).0, [200, 200, 200, 200]);
+
+        let oversized = arboard::ImageData {
+            width: 20_000,
+            height: 2,
+            bytes: std::borrow::Cow::Owned(Vec::new()),
+        };
+        assert!(windows_clipboard_png(&oversized).is_err());
     }
 
     #[test]

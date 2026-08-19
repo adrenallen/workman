@@ -367,7 +367,7 @@ async fn capture_version(
 }
 
 fn command_executable(command: &str) -> Option<String> {
-    let words = shell_words(command);
+    let words = crate::command_line::split_permissive(command);
     let mut words = words.into_iter();
     let first = words.next()?;
     if first == "env" {
@@ -379,48 +379,6 @@ fn command_executable(command: &str) -> Option<String> {
             .find(|word| !is_environment_assignment(word));
     }
     Some(first)
-}
-
-fn shell_words(source: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut started = false;
-    for character in source.chars() {
-        if escaped {
-            word.push(character);
-            escaped = false;
-            started = true;
-        } else if character == '\\' && quote != Some('\'') {
-            escaped = true;
-            started = true;
-        } else if matches!(character, '\'' | '"') {
-            if quote == Some(character) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(character);
-            } else {
-                word.push(character);
-            }
-            started = true;
-        } else if character.is_whitespace() && quote.is_none() {
-            if started {
-                words.push(std::mem::take(&mut word));
-                started = false;
-            }
-        } else {
-            word.push(character);
-            started = true;
-        }
-    }
-    if escaped {
-        word.push('\\');
-    }
-    if started {
-        words.push(word);
-    }
-    words
 }
 
 fn is_environment_assignment(word: &str) -> bool {

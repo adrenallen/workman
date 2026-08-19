@@ -584,6 +584,46 @@ mod tests {
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
 
+    /// Drives the real Herd CLI end to end: PATHEXT resolution of `herd.bat`,
+    /// the batch launch through the cleaned environment, and the `tld`/`paths`
+    /// output parsing. Read-only: parking is never requested.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires Laravel Herd installed, with the desktop app running for its dynamic CLI commands"]
+    async fn herd_integration_reads_the_windows_cli() {
+        let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        // A shell opened before Herd finished its setup has the old PATH;
+        // mirror a fresh session by ensuring the shim directory is present.
+        let herd_bin = dirs::home_dir()
+            .expect("home directory")
+            .join(".config")
+            .join("herd")
+            .join("bin");
+        let path = crate::runtime_doctor::path_variable(&environment);
+        let mut paths: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        if !paths.contains(&herd_bin) {
+            paths.push(herd_bin);
+        }
+        environment.insert(
+            OsString::from("PATH"),
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+
+        let view = herd_for_root(
+            Path::new("C:\\workman-not-parked-fixture"),
+            false,
+            &environment,
+        )
+        .await
+        .expect("herd integration view");
+        assert!(view.available, "herd was not detected: {:?}", view.error);
+        assert_eq!(view.tld.as_deref(), Some("test"));
+        assert!(
+            !view.parked,
+            "read-only check must not report the fixture root as parked"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn executable_on_path_finds_windows_launchers_through_path_and_pathext() {
