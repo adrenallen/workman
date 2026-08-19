@@ -105,7 +105,9 @@ pub use user_config::{
     UserTerminalConfig, UserUpdateConfig, WORKMAN_CONFIG_ENV, parse_user_config,
     resolve_update_key, sync_user_agent_tools, sync_user_config_file, user_config_path,
 };
-pub use user_environment::{ResolvedUserEnvironment, UserEnvironmentInfo, UserEnvironmentResolver};
+pub use user_environment::{
+    EnvironmentCaptureMode, ResolvedUserEnvironment, UserEnvironmentInfo, UserEnvironmentResolver,
+};
 pub use version::{BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonVersion};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;
@@ -275,6 +277,10 @@ impl DaemonServer {
                 .mark_active_profile_legacy_config_imported()
                 .map_err(registry_io_error)?;
         }
+        // Shell rc files are user code and can take the full bounded capture deadline. Warm the
+        // shared cache on Tokio's blocking pool while daemon binding continues; hot-path resolves
+        // serve the inherited environment until the capture is ready.
+        user_environment.prewarm();
         let command_environment = user_environment.resolve().command_environment();
         if let Err(error) =
             worktrees::reconcile_existing_projects_with_environment(&store, &command_environment)

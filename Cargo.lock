@@ -6399,6 +6399,7 @@ dependencies = [
  "globset",
  "image",
  "listeners",
+ "nix",
  "notify",
  "plist",
  "rmcp",

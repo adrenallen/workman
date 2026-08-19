@@ -891,6 +891,46 @@ async fn dispatch(
                 .map_err(|error| ("terminal_theme_import_error", error.to_string()))?;
             return Ok(json_value(report));
         }
+        "settings.user_shell" => {
+            let params: UserShellParams = params_as(params)?;
+            let resolver = {
+                let registry = registry.lock().await;
+                registry.user_environment_resolver().clone()
+            };
+            crate::user_config::save_user_shell_from_settings_at(
+                resolver.config_path(),
+                params.shell.as_deref(),
+            )
+            .map_err(|error| ("user_config_error", error.to_string()))?;
+            {
+                let registry = registry.lock().await;
+                registry
+                    .store()
+                    .set_active_profile_terminal_shell(params.shell.as_deref())
+                    .map_err(project_store_error)?;
+            }
+            resolver.refresh_async();
+            return Ok(json_value(resolver.resolve().info().clone()));
+        }
+        "projects.register" => {
+            let params: RegisterProjectParams = params_as(params)?;
+            let resolver = {
+                let registry = registry.lock().await;
+                register_project(
+                    registry.store(),
+                    &params.path,
+                    params.display_name.as_deref(),
+                )?;
+                registry.user_environment_resolver().clone()
+            };
+            let environment = resolver.resolve().command_environment();
+            let registry = registry.lock().await;
+            let _ = crate::worktrees::reconcile_existing_projects_with_environment(
+                registry.store(),
+                &environment,
+            );
+            return project_result(list_projects(registry.store()));
+        }
         _ => {}
     }
 
@@ -1015,21 +1055,6 @@ async fn dispatch(
                 params.name.as_deref(),
             );
         }
-        "settings.user_shell" => {
-            let params: UserShellParams = params_as(params)?;
-            crate::user_config::save_user_shell_from_settings_at(
-                registry.user_environment_resolver().config_path(),
-                params.shell.as_deref(),
-            )
-            .map_err(|error| ("user_config_error", error.to_string()))?;
-            registry
-                .store()
-                .set_active_profile_terminal_shell(params.shell.as_deref())
-                .map_err(project_store_error)?;
-            return Ok(json_value(
-                registry.resolved_user_environment().info().clone(),
-            ));
-        }
         "notifications.list" | "notifications_list" => {
             let params: NotificationsListParams = params_as(params)?;
             return registry
@@ -1072,16 +1097,6 @@ async fn dispatch(
         }
         "project.rail" => {
             return project_rail_result(registry.store());
-        }
-        "projects.register" => {
-            let params: RegisterProjectParams = params_as(params)?;
-            register_project(
-                registry.store(),
-                &params.path,
-                params.display_name.as_deref(),
-            )?;
-            let _ = crate::worktrees::reconcile_existing_projects(registry.store());
-            return project_result(list_projects(registry.store()));
         }
         "projects.select" => {
             let params: ProjectParams = params_as(params)?;

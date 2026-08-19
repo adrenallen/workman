@@ -30,6 +30,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1.8.0"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["process", "signal"] }
+
 [dev-dependencies]
 futures-util = "0.3.31"
 tempfile = "3.21.0"

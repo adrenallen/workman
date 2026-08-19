@@ -622,9 +622,11 @@ impl GitFixture {
                 &config,
                 format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
             )?;
+            let user_environment = UserEnvironmentResolver::new(config);
+            user_environment.refresh();
             Arc::new(Mutex::new(ProcessRegistry::with_user_environment(
                 store,
-                UserEnvironmentResolver::new(config),
+                user_environment,
             )?))
         } else {
             Arc::new(Mutex::new(ProcessRegistry::new(store)?))
@@ -2549,9 +2551,11 @@ async fn pr_lookup_uses_login_path_for_plain_and_managed_worktrees_and_refreshes
         &config,
         format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
     )?;
+    let user_environment = UserEnvironmentResolver::new(config);
+    user_environment.refresh();
     let registry = Arc::new(Mutex::new(ProcessRegistry::with_user_environment(
         store,
-        UserEnvironmentResolver::new(config),
+        user_environment,
     )?));
 
     let unavailable = worktrees::list_for_project_refresh(&registry, 1, true).await?;

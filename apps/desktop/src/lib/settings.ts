@@ -36,6 +36,13 @@ export interface UserEnvironmentInfo {
   inferred_shell: string;
   inferred_from: string;
   using_override: boolean;
+  capture_mode:
+    | 'interactive_login'
+    | 'non_interactive_login_fallback'
+    | 'daemon_fallback'
+    | 'daemon_environment';
+  resolved_path: string;
+  capture_error: string | null;
   warning: string | null;
 }
 

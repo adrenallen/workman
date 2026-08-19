@@ -32,6 +32,7 @@ pub struct AgentToolHealth {
     pub resolved_binary: Option<String>,
     pub version: Option<String>,
     pub version_error: Option<String>,
+    pub path_diagnostic: Option<String>,
     pub config_path: String,
     pub config_exists: bool,
     pub launch_ready: bool,
@@ -46,6 +47,9 @@ pub struct AgentToolHealth {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentToolsHealth {
     pub checked_at: u64,
+    pub environment_capture_mode: crate::EnvironmentCaptureMode,
+    pub environment_capture_error: Option<String>,
+    pub resolved_path: String,
     pub ready_count: usize,
     pub total_count: usize,
     pub enabled_ready_count: usize,
@@ -83,6 +87,11 @@ struct DoctorEnvironment {
     path: OsString,
     variables: BTreeMap<OsString, OsString>,
     version_timeout: Duration,
+    capture_mode: crate::EnvironmentCaptureMode,
+    shell: Option<PathBuf>,
+    interactive_path: Option<OsString>,
+    non_interactive_path: Option<OsString>,
+    capture_error: Option<String>,
 }
 
 impl DoctorEnvironment {
@@ -96,6 +105,11 @@ impl DoctorEnvironment {
             path: env::var_os("PATH").unwrap_or_default(),
             variables,
             version_timeout: VERSION_TIMEOUT,
+            capture_mode: crate::EnvironmentCaptureMode::DaemonEnvironment,
+            shell: None,
+            interactive_path: None,
+            non_interactive_path: None,
+            capture_error: None,
         }
     }
 }
@@ -111,11 +125,35 @@ pub async fn check_agent_tools_with_user_environment(
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     let path = path_variable(&variables);
+    let needs_path_diagnostic = tools.iter().any(|tool| {
+        command_executable(&tool.command)
+            .as_deref()
+            .is_some_and(|executable| resolve_executable(executable, &path).is_none())
+    });
+    let (interactive_path, non_interactive_path) = if needs_path_diagnostic {
+        (
+            resolved
+                .interactive_login_environment()
+                .ok()
+                .map(|environment| path_variable(&environment)),
+            resolved
+                .non_interactive_login_environment()
+                .ok()
+                .map(|environment| path_variable(&environment)),
+        )
+    } else {
+        (None, None)
+    };
     let environment = DoctorEnvironment {
         home,
         path,
         variables,
         version_timeout: VERSION_TIMEOUT,
+        capture_mode: resolved.capture_mode(),
+        shell: Some(resolved.active_shell().to_owned()),
+        interactive_path,
+        non_interactive_path,
+        capture_error: resolved.info().capture_error.clone(),
     };
     check_agent_tools_in(tools, environment).await
 }
@@ -124,6 +162,9 @@ async fn check_agent_tools_in(
     tools: Vec<AgentTool>,
     environment: DoctorEnvironment,
 ) -> AgentToolsHealth {
+    let environment_capture_mode = environment.capture_mode;
+    let environment_capture_error = environment.capture_error.clone();
+    let resolved_path = environment.path.to_string_lossy().into_owned();
     let mut checks = JoinSet::new();
     for tool in tools {
         let environment = environment.clone();
@@ -147,6 +188,9 @@ async fn check_agent_tools_in(
     let total_count = health.len();
     AgentToolsHealth {
         checked_at: now_millis(),
+        environment_capture_mode,
+        environment_capture_error,
+        resolved_path,
         ready_count,
         total_count,
         enabled_ready_count,
@@ -177,6 +221,10 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
     let capability = crate::mcp::agent_spawning::mcp_launch_capability(&tool.tool_type);
     let found_on_path = resolved.is_some();
     let launch_ready = tool.enabled && found_on_path && capability.supported;
+    let path_diagnostic = (!found_on_path)
+        .then_some(executable.as_deref())
+        .flatten()
+        .and_then(|executable| missing_path_diagnostic(executable, environment));
 
     AgentToolHealth {
         id: tool.id,
@@ -189,6 +237,7 @@ async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> A
         resolved_binary: resolved.map(|path| path.to_string_lossy().into_owned()),
         version,
         version_error,
+        path_diagnostic,
         config_path: target.path.to_string_lossy().into_owned(),
         config_exists: target.exists(),
         launch_ready,
@@ -417,6 +466,58 @@ pub(crate) fn resolve_executable(executable: &str, path: &OsString) -> Option<Pa
     env::split_paths(path)
         .flat_map(|directory| executable_candidates(directory.join(executable)))
         .find(|candidate| is_executable(candidate))
+}
+
+fn missing_path_diagnostic(executable: &str, environment: &DoctorEnvironment) -> Option<String> {
+    let found_interactively = environment
+        .interactive_path
+        .as_ref()
+        .is_some_and(|path| resolve_executable(executable, path).is_some());
+    let found_non_interactively = environment
+        .non_interactive_path
+        .as_ref()
+        .is_some_and(|path| resolve_executable(executable, path).is_some());
+    let (interactive_rc, login_rc) = shell_rc_guidance(environment.shell.as_deref());
+
+    if found_interactively && !found_non_interactively {
+        return Some(format!(
+            "{executable} is on PATH in your interactive shell (likely via {interactive_rc} — nvm/fnm/volta init). Non-interactive launches don't read {interactive_rc}; move that PATH setup to {login_rc}. Active environment capture mode: {}.",
+            environment.capture_mode.as_str()
+        ));
+    }
+
+    if matches!(
+        environment.capture_mode,
+        crate::EnvironmentCaptureMode::NonInteractiveLoginFallback
+            | crate::EnvironmentCaptureMode::DaemonFallback
+    ) {
+        let reason = environment
+            .capture_error
+            .as_deref()
+            .unwrap_or("interactive login environment capture was unavailable");
+        return Some(format!(
+            "Workman is using the {} environment because {reason}. A runtime initialized only in {interactive_rc} (for example by nvm/fnm/volta) may be absent; Workman retries degraded captures after 30 seconds, so use Refresh health then or restart Workman to re-capture now. For a permanent non-interactive setup, move that PATH initialization to {login_rc}.",
+            environment.capture_mode.as_str()
+        ));
+    }
+
+    None
+}
+
+fn shell_rc_guidance(shell: Option<&Path>) -> (&'static str, &'static str) {
+    match shell.and_then(Path::file_name).and_then(OsStr::to_str) {
+        Some("zsh") => ("~/.zshrc", "~/.zprofile or ~/.zshenv"),
+        Some("bash") => ("~/.bashrc", "~/.bash_profile or ~/.profile"),
+        Some("fish") => (
+            "~/.config/fish/config.fish",
+            "a login-safe fish configuration file",
+        ),
+        Some("csh" | "tcsh") => ("~/.cshrc", "~/.login"),
+        _ => (
+            "your interactive shell rc file",
+            "your shell's login environment file",
+        ),
+    }
 }
 
 #[cfg(not(windows))]
@@ -776,6 +877,7 @@ mod tests {
                 ),
             ]),
             version_timeout: Duration::from_secs(2),
+            ..DoctorEnvironment::current()
         };
         let health = check_agent_tools_in(
             vec![
@@ -798,6 +900,74 @@ mod tests {
         assert!(!health.tools[1].found_on_path);
         assert!(health.tools[2].found_on_path);
         assert!(!health.tools[2].launch_ready);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_runtime_names_interactive_rc_path_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let interactive_bin = temp.path().join("interactive-bin");
+        fs::create_dir(&interactive_bin).unwrap();
+        let runtime = interactive_bin.join("rc-only-agent");
+        fs::write(&runtime, "#!/bin/sh\nprintf 'rc-only-agent 1.0\\n'\n").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let fallback_path = OsString::from("/usr/bin:/bin");
+        let environment = DoctorEnvironment {
+            home: temp.path().join("home"),
+            path: fallback_path.clone(),
+            variables: BTreeMap::from([(OsString::from("PATH"), fallback_path.clone())]),
+            version_timeout: Duration::from_secs(2),
+            capture_mode: crate::EnvironmentCaptureMode::NonInteractiveLoginFallback,
+            shell: Some(Path::new("/bin/zsh").to_owned()),
+            interactive_path: Some(std::env::join_paths([&interactive_bin]).unwrap()),
+            non_interactive_path: Some(fallback_path),
+            capture_error: Some(
+                "interactive login environment capture failed: timed out after 10000ms".into(),
+            ),
+        };
+
+        let health = check_agent_tools_in(
+            vec![tool(1, "RC only", "rc-only-agent", "codex", true)],
+            environment,
+        )
+        .await;
+
+        assert_eq!(
+            health.environment_capture_mode,
+            crate::EnvironmentCaptureMode::NonInteractiveLoginFallback
+        );
+        assert_eq!(health.resolved_path, "/usr/bin:/bin");
+        let diagnostic = health.tools[0].path_diagnostic.as_deref().unwrap();
+        assert!(diagnostic.contains("is on PATH in your interactive shell"));
+        assert!(diagnostic.contains("~/.zshrc"));
+        assert!(diagnostic.contains("~/.zprofile or ~/.zshenv"));
+        assert!(diagnostic.contains("non_interactive_login_fallback"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_runtime_explains_timed_out_interactive_capture() {
+        let fallback_path = OsString::from("/usr/bin:/bin");
+        let environment = DoctorEnvironment {
+            home: Path::new("/tmp/todo328-home").to_owned(),
+            path: fallback_path.clone(),
+            variables: BTreeMap::from([(OsString::from("PATH"), fallback_path.clone())]),
+            version_timeout: Duration::from_secs(2),
+            capture_mode: crate::EnvironmentCaptureMode::NonInteractiveLoginFallback,
+            shell: Some(Path::new("/bin/zsh").to_owned()),
+            interactive_path: None,
+            non_interactive_path: Some(fallback_path),
+            capture_error: Some(
+                "interactive login environment capture failed: interactive login shell /bin/zsh timed out after 10000ms".into(),
+            ),
+        };
+
+        let diagnostic = super::missing_path_diagnostic("codex", &environment).unwrap();
+        assert!(diagnostic.contains("timed out after 10000ms"));
+        assert!(diagnostic.contains("~/.zshrc"));
+        assert!(diagnostic.contains("retries degraded captures after 30 seconds"));
+        assert!(diagnostic.contains("permanent non-interactive setup"));
+        assert!(diagnostic.contains("~/.zprofile or ~/.zshenv"));
     }
 
     #[cfg(unix)]
@@ -826,7 +996,7 @@ mod tests {
             format!("terminal:\n  shell: {:?}\n", shell.to_string_lossy()),
         )
         .unwrap();
-        let resolved = crate::UserEnvironmentResolver::new(&config).resolve();
+        let resolved = crate::UserEnvironmentResolver::new(&config).refresh();
 
         let health = check_agent_tools_with_user_environment(
             vec![tool(8, "Profile", "profile-agent", "codex", true)],
@@ -853,6 +1023,7 @@ mod tests {
             path: std::env::join_paths([&bin]).unwrap(),
             variables: std::env::vars_os().collect(),
             version_timeout: Duration::from_secs(5),
+            ..DoctorEnvironment::current()
         };
         let health = check_agent_tools_in(
             vec![
