@@ -55,6 +55,13 @@ export interface KeepAwakeReconciliation {
   holdLost: boolean;
 }
 
+export function nativeAutoKeepAwakeNeedsReconciliation(
+  intendedEnabled: boolean,
+  nativeEnabled: boolean
+): boolean {
+  return intendedEnabled !== nativeEnabled;
+}
+
 export interface KeepAwakeObservation {
   connected: boolean;
 }
@@ -195,6 +202,16 @@ export function activeKeepAwakeAgents<T extends KeepAwakeAgent>(processes: T[]):
   return runningAgents(processes).filter(agentRequiresKeepAwake);
 }
 
+export function shouldHoldAutoKeepAwake(
+  processes: KeepAwakeAgent[],
+  enabled: boolean,
+  suppressedUntilActivityEdge = false
+): boolean {
+  return enabled
+    && !suppressedUntilActivityEdge
+    && activeKeepAwakeAgents(processes).length > 0;
+}
+
 export function shouldSubscribeProcessStatuses(
   documentVisible: boolean,
   keepAwakeArmed: boolean,
@@ -298,7 +315,7 @@ export function evaluateAutoKeepAwake(
     state: nextState,
     activeAgentIds,
     activityEdge,
-    shouldArm: enabled && activeAgentIds.length > 0 && !suppressedUntilActivityEdge
+    shouldArm: shouldHoldAutoKeepAwake(processes, enabled, suppressedUntilActivityEdge)
   };
 }
 

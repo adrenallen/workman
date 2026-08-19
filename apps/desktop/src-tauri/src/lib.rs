@@ -60,6 +60,12 @@ const BRIDGE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(3);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const KEEP_AWAKE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
 const KEEP_AWAKE_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const KEEP_AWAKE_AUTO_SETTLE: Duration = Duration::from_secs(60);
+const KEEP_AWAKE_MAX_OBSERVATION_GAP: Duration = Duration::from_secs(5);
+const KEEP_AWAKE_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(10 * 60);
+const KEEP_AWAKE_SUBSCRIPTION_REASSERT_INTERVAL: Duration = Duration::from_secs(30);
+const KEEP_AWAKE_STATUS_SUBSCRIBE_ID: &str = "__workman_keep_awake_status_subscribe__";
+const KEEP_AWAKE_PREFERENCE_FILE: &str = "desktop-keep-awake.json";
 
 #[derive(Clone)]
 struct BridgeState {
@@ -68,14 +74,17 @@ struct BridgeState {
     status: Arc<Mutex<ConnectionStatus>>,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 struct KeepAwakeState {
     inner: Arc<Mutex<KeepAwakeInner>>,
+    preference_path: Option<Arc<PathBuf>>,
 }
 
 #[derive(Default)]
 struct KeepAwakeInner {
     armed: bool,
+    arm_source: Option<KeepAwakeArmSource>,
+    manual_requested: bool,
     child: Option<Child>,
     warning: Option<String>,
     notice: Option<String>,
@@ -83,6 +92,26 @@ struct KeepAwakeInner {
     last_loss_reason: Option<String>,
     consecutive_spawn_failures: u32,
     next_spawn_attempt_at: Option<Instant>,
+    auto_enabled: bool,
+    auto_suppressed_until_activity_edge: bool,
+    auto_active_agent_ids: Vec<i64>,
+    auto_hold_requested: bool,
+    auto_idle_observed: Duration,
+    auto_last_idle_observation_at: Option<Instant>,
+    auto_observation_continuous: bool,
+    daemon_connected: bool,
+    auto_last_snapshot_at: Option<Instant>,
+    auto_snapshot_stale: bool,
+    auto_last_subscription_assertion_at: Option<Instant>,
+    auto_preference_warning: Option<String>,
+    last_emitted_status: Option<KeepAwakeStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum KeepAwakeArmSource {
+    Manual,
+    Auto,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -90,63 +119,312 @@ struct KeepAwakeStatus {
     supported: bool,
     armed: bool,
     active: bool,
+    arm_source: Option<KeepAwakeArmSource>,
     assertion_pid: Option<u32>,
     warning: Option<String>,
     notice: Option<String>,
     respawn_count: u32,
     last_loss_reason: Option<String>,
     retry_in_ms: Option<u64>,
+    auto_enabled: bool,
+    auto_should_hold: bool,
+    auto_suppressed_until_activity_edge: bool,
+    auto_active_agent_ids: Vec<i64>,
+    auto_snapshot_stale: bool,
+    auto_snapshot_max_age_ms: u64,
+    auto_preference_warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct PersistedKeepAwakePreference {
+    #[serde(default)]
+    auto_enabled: bool,
+    #[serde(default)]
+    suppressed_until_activity_edge: bool,
+    #[serde(default)]
+    suppressed_active_agent_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoKeepAwakeProcess {
+    id: i64,
+    kind: String,
+    status: String,
+    agent_state: AutoKeepAwakeAgentState,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AutoKeepAwakeAgentState {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    working: bool,
+    #[serde(default)]
+    needs_input: bool,
+    #[serde(default)]
+    thinking: bool,
+    #[serde(default)]
+    planning: bool,
+    #[serde(default)]
+    last_output_at: Option<i64>,
+    #[serde(default)]
+    waiting_on: Vec<AutoKeepAwakeWaitingReason>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoKeepAwakeWaitingReason {
+    #[serde(default)]
+    max_wait_ms: i64,
+    #[serde(default)]
+    remaining_ms: i64,
+    #[serde(default)]
+    paused: bool,
+}
+
+impl Default for KeepAwakeState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(KeepAwakeInner::default())),
+            preference_path: None,
+        }
+    }
 }
 
 impl KeepAwakeState {
-    fn stop(&self) -> Result<KeepAwakeStatus, String> {
+    fn persistent(preference_path: PathBuf) -> Self {
+        let (preference, auto_preference_warning) =
+            match load_keep_awake_preference(&preference_path) {
+                Ok(preference) => (preference, None),
+                Err(error) => (
+                    PersistedKeepAwakePreference::default(),
+                    Some(format!(
+                        "Could not load the native auto keep-awake preference: {error}"
+                    )),
+                ),
+            };
+        let inner = KeepAwakeInner {
+            auto_enabled: preference.auto_enabled,
+            auto_suppressed_until_activity_edge: preference.suppressed_until_activity_edge,
+            auto_active_agent_ids: normalized_agent_ids(preference.suppressed_active_agent_ids),
+            // A persisted snapshot is only an edge baseline. The daemon must publish current
+            // state before native auto intent can arm or clear suppression.
+            auto_observation_continuous: false,
+            auto_preference_warning,
+            ..KeepAwakeInner::default()
+        };
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+            preference_path: Some(Arc::new(preference_path)),
+        }
+    }
+
+    fn persist_auto_preference(&self, inner: &mut KeepAwakeInner) {
+        let Some(path) = self.preference_path.as_deref() else {
+            return;
+        };
+        let preference = PersistedKeepAwakePreference {
+            auto_enabled: inner.auto_enabled,
+            suppressed_until_activity_edge: inner.auto_suppressed_until_activity_edge,
+            suppressed_active_agent_ids: if inner.auto_suppressed_until_activity_edge {
+                inner.auto_active_agent_ids.clone()
+            } else {
+                Vec::new()
+            },
+        };
+        match save_keep_awake_preference(path, &preference) {
+            Ok(()) => inner.auto_preference_warning = None,
+            Err(error) => {
+                inner.auto_preference_warning = Some(format!(
+                    "Auto keep awake is active for this session but its preference could not be saved: {error}"
+                ));
+            }
+        }
+    }
+
+    fn emit_status_if_changed(&self, status: KeepAwakeStatus) -> Option<KeepAwakeStatus> {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        stop_keep_awake_child(&mut inner)?;
+        if inner.last_emitted_status.as_ref() == Some(&status) {
+            return None;
+        }
+        inner.last_emitted_status = Some(status.clone());
+        Some(status)
+    }
+
+    fn status_subscription_due(&self, now: Instant) -> bool {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.auto_enabled || !inner.daemon_connected {
+            return false;
+        }
+        let due = inner
+            .auto_last_subscription_assertion_at
+            .is_none_or(|last| {
+                now.saturating_duration_since(last) >= KEEP_AWAKE_SUBSCRIPTION_REASSERT_INTERVAL
+            });
+        if due {
+            inner.auto_last_subscription_assertion_at = Some(now);
+        }
+        due
+    }
+
+    fn mark_status_subscription_asserted(&self, now: Instant) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .auto_last_subscription_assertion_at = Some(now);
+    }
+
+    fn request_manual_hold(&self) -> KeepAwakeStatus {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.manual_requested = true;
+        reconcile_keep_awake_intent(&mut inner);
+        sync_keep_awake_platform(&mut inner, Instant::now());
+        keep_awake_status_for_platform(&inner, Instant::now())
+    }
+
+    fn stop(&self, suppress_auto: bool) -> Result<KeepAwakeStatus, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.manual_requested = false;
+        if suppress_auto && inner.auto_enabled {
+            inner.auto_suppressed_until_activity_edge = true;
+            inner.auto_hold_requested = false;
+            inner.auto_idle_observed = Duration::ZERO;
+            inner.auto_last_idle_observation_at = None;
+            self.persist_auto_preference(&mut inner);
+        }
+        reconcile_keep_awake_intent(&mut inner);
+        let now = Instant::now();
+        sync_keep_awake_platform(&mut inner, now);
+        if !inner.armed {
+            inner.warning = None;
+            inner.notice = None;
+            inner.respawn_count = 0;
+            inner.last_loss_reason = None;
+            if suppress_auto {
+                inner.consecutive_spawn_failures = 0;
+                inner.next_spawn_attempt_at = None;
+            }
+        }
+        Ok(keep_awake_status_for_platform(&inner, now))
+    }
+
+    fn shutdown(&self) -> Result<KeepAwakeStatus, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.manual_requested = false;
+        inner.auto_enabled = false;
+        inner.auto_hold_requested = false;
         inner.armed = false;
-        inner.warning = None;
-        inner.notice = None;
-        inner.respawn_count = 0;
-        inner.last_loss_reason = None;
-        inner.consecutive_spawn_failures = 0;
-        inner.next_spawn_attempt_at = None;
-        Ok(keep_awake_status_from(&inner, Instant::now()))
+        inner.arm_source = None;
+        stop_keep_awake_child(&mut inner)?;
+        Ok(keep_awake_status_for_platform(&inner, Instant::now()))
     }
 
     fn stop_silently(&self) {
-        let _ = self.stop();
+        let _ = self.shutdown();
     }
 
-    fn resync_after_power_event(&self) -> KeepAwakeStatus {
-        #[cfg(target_os = "macos")]
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let now = Instant::now();
-            resync_keep_awake_child_with(&mut inner, now, || {
-                keep_awake_command(std::process::id())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-            });
-            keep_awake_status_from(&inner, now)
-        }
+    fn configure_auto(
+        &self,
+        enabled: bool,
+        seed_suppressed_until_activity_edge: bool,
+        seed_active_agent_ids: Vec<i64>,
+    ) -> KeepAwakeStatus {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        configure_auto_keep_awake_state(
+            &mut inner,
+            enabled,
+            seed_suppressed_until_activity_edge,
+            seed_active_agent_ids,
+        );
+        let now = Instant::now();
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now,
+            KEEP_AWAKE_AUTO_SETTLE,
+            keep_awake_max_snapshot_age(),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        self.persist_auto_preference(&mut inner);
+        sync_keep_awake_platform(&mut inner, now);
+        keep_awake_status_for_platform(&inner, now)
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            keep_awake_status_from(&KeepAwakeInner::default(), Instant::now())
+    fn observe_daemon_message(&self, message: &str) -> Option<KeepAwakeStatus> {
+        let active_agent_ids = auto_keep_awake_active_agent_ids_from_message(message)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        let was_suppressed = inner.auto_suppressed_until_activity_edge;
+        observe_auto_keep_awake_snapshot(&mut inner, active_agent_ids, now);
+        if was_suppressed != inner.auto_suppressed_until_activity_edge {
+            self.persist_auto_preference(&mut inner);
         }
+        sync_keep_awake_platform(&mut inner, now);
+        Some(keep_awake_status_for_platform(&inner, now))
+    }
+
+    fn set_daemon_connected(&self, connected: bool) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.daemon_connected = connected;
+        inner.auto_last_subscription_assertion_at = None;
+        if !connected {
+            inner.auto_observation_continuous = false;
+            inner.auto_last_idle_observation_at = None;
+        }
+    }
+
+    fn auto_enabled(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .auto_enabled
+    }
+
+    fn reconcile_tick(&self) -> KeepAwakeStatus {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now,
+            KEEP_AWAKE_AUTO_SETTLE,
+            keep_awake_max_snapshot_age(),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        sync_keep_awake_platform(&mut inner, now);
+        keep_awake_status_for_platform(&inner, now)
     }
 }
 
 impl Drop for KeepAwakeState {
     fn drop(&mut self) {
-        self.stop_silently();
+        if Arc::strong_count(&self.inner) == 1 {
+            self.stop_silently();
+        }
     }
 }
 
@@ -490,46 +768,51 @@ fn daemon_status(state: State<'_, BridgeState>) -> ConnectionStatus {
 
 #[tauri::command]
 fn keep_awake_start(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut inner = state
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !inner.armed {
-            begin_keep_awake_session(&mut inner);
-        }
-        let now = Instant::now();
-        sync_keep_awake_child_with(&mut inner, now, || {
-            keep_awake_command(std::process::id())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-        });
-        Ok(keep_awake_status_from(&inner, now))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = state;
-        Ok(KeepAwakeStatus {
-            supported: false,
-            armed: false,
-            active: false,
-            assertion_pid: None,
-            warning: None,
-            notice: None,
-            respawn_count: 0,
-            last_loss_reason: None,
-            retry_in_ms: None,
-        })
-    }
+    Ok(state.request_manual_hold())
 }
 
 #[tauri::command]
-fn keep_awake_stop(state: State<'_, KeepAwakeState>) -> Result<KeepAwakeStatus, String> {
-    state.stop()
+fn keep_awake_stop(
+    suppress_auto: bool,
+    state: State<'_, KeepAwakeState>,
+) -> Result<KeepAwakeStatus, String> {
+    state.stop(suppress_auto)
+}
+
+#[tauri::command]
+fn keep_awake_auto_configure(
+    enabled: bool,
+    seed_suppressed_until_activity_edge: bool,
+    seed_active_agent_ids: Vec<i64>,
+    state: State<'_, KeepAwakeState>,
+    bridge: State<'_, BridgeState>,
+) -> KeepAwakeStatus {
+    let status = state.configure_auto(
+        enabled,
+        seed_suppressed_until_activity_edge,
+        seed_active_agent_ids,
+    );
+    if enabled {
+        request_keep_awake_status_subscription(&bridge);
+    }
+    status
+}
+
+fn request_keep_awake_status_subscription(bridge: &BridgeState) {
+    let sender = bridge.sender.clone();
+    let request = keep_awake_status_subscription_request();
+    tauri::async_runtime::spawn(async move {
+        let _ = sender.send(BridgeCommand::Send(request)).await;
+    });
+}
+
+fn keep_awake_status_subscription_request() -> String {
+    json!({
+        "id": KEEP_AWAKE_STATUS_SUBSCRIBE_ID,
+        "method": "process.status_subscribe",
+        "params": {}
+    })
+    .to_string()
 }
 
 /// Read current intent/liveness and reap an exited owned child. Process repair is handled by the
@@ -548,8 +831,11 @@ fn keep_awake_status(state: State<'_, KeepAwakeState>) -> KeepAwakeStatus {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = state;
-        keep_awake_status_from(&KeepAwakeInner::default(), Instant::now())
+        let inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsupported_keep_awake_status(&inner)
     }
 }
 
@@ -565,6 +851,7 @@ fn keep_awake_status_from(inner: &KeepAwakeInner, now: Instant) -> KeepAwakeStat
         supported: cfg!(target_os = "macos"),
         armed: inner.armed,
         active: inner.child.is_some(),
+        arm_source: inner.arm_source,
         assertion_pid: inner.child.as_ref().map(Child::id),
         warning: inner.warning.clone(),
         notice: inner.notice.clone(),
@@ -573,7 +860,303 @@ fn keep_awake_status_from(inner: &KeepAwakeInner, now: Instant) -> KeepAwakeStat
         retry_in_ms: inner.next_spawn_attempt_at.map(|deadline| {
             u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
         }),
+        auto_enabled: inner.auto_enabled,
+        auto_should_hold: inner.auto_hold_requested,
+        auto_suppressed_until_activity_edge: inner.auto_suppressed_until_activity_edge,
+        auto_active_agent_ids: inner.auto_active_agent_ids.clone(),
+        auto_snapshot_stale: inner.auto_snapshot_stale,
+        auto_snapshot_max_age_ms: duration_millis(keep_awake_max_snapshot_age()),
+        auto_preference_warning: inner.auto_preference_warning.clone(),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unsupported_keep_awake_status(inner: &KeepAwakeInner) -> KeepAwakeStatus {
+    KeepAwakeStatus {
+        supported: false,
+        armed: false,
+        active: false,
+        arm_source: None,
+        assertion_pid: None,
+        warning: None,
+        notice: None,
+        respawn_count: 0,
+        last_loss_reason: None,
+        retry_in_ms: None,
+        auto_enabled: inner.auto_enabled,
+        auto_should_hold: false,
+        auto_suppressed_until_activity_edge: inner.auto_suppressed_until_activity_edge,
+        auto_active_agent_ids: inner.auto_active_agent_ids.clone(),
+        auto_snapshot_stale: inner.auto_snapshot_stale,
+        auto_snapshot_max_age_ms: duration_millis(keep_awake_max_snapshot_age()),
+        auto_preference_warning: inner.auto_preference_warning.clone(),
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn keep_awake_max_snapshot_age() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = env::var("WORKMAN_KEEP_AWAKE_MAX_SNAPSHOT_AGE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value >= 100)
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    KEEP_AWAKE_MAX_SNAPSHOT_AGE
+}
+
+fn load_keep_awake_preference(path: &Path) -> Result<PersistedKeepAwakePreference, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
+fn save_keep_awake_preference(
+    path: &Path,
+    preference: &PersistedKeepAwakePreference,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(preference).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn keep_awake_status_for_platform(inner: &KeepAwakeInner, now: Instant) -> KeepAwakeStatus {
+    #[cfg(target_os = "macos")]
+    return keep_awake_status_from(inner, now);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = now;
+        unsupported_keep_awake_status(inner)
+    }
+}
+
+fn sync_keep_awake_platform(inner: &mut KeepAwakeInner, now: Instant) {
+    #[cfg(target_os = "macos")]
+    sync_keep_awake_child_with(inner, now, || {
+        keep_awake_command(std::process::id())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    });
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (inner, now);
+    }
+}
+
+fn reconcile_keep_awake_intent(inner: &mut KeepAwakeInner) {
+    let desired_source = if inner.manual_requested {
+        Some(KeepAwakeArmSource::Manual)
+    } else if inner.auto_enabled && inner.auto_hold_requested {
+        Some(KeepAwakeArmSource::Auto)
+    } else {
+        None
+    };
+    match desired_source {
+        Some(source) => {
+            if !inner.armed {
+                begin_keep_awake_session(inner);
+            }
+            inner.arm_source = Some(source);
+        }
+        None => {
+            inner.armed = false;
+            inner.arm_source = None;
+        }
+    }
+}
+
+fn configure_auto_keep_awake_state(
+    inner: &mut KeepAwakeInner,
+    enabled: bool,
+    seed_suppressed_until_activity_edge: bool,
+    seed_active_agent_ids: Vec<i64>,
+) {
+    let was_enabled = inner.auto_enabled;
+    inner.auto_enabled = enabled;
+    if enabled && !was_enabled {
+        inner.auto_suppressed_until_activity_edge = seed_suppressed_until_activity_edge;
+        if seed_suppressed_until_activity_edge {
+            if inner.auto_active_agent_ids.is_empty() {
+                inner.auto_active_agent_ids = normalized_agent_ids(seed_active_agent_ids);
+            }
+            // Enabling after launch/reload is a rebase, not a fabricated activity edge.
+            inner.auto_observation_continuous = false;
+        }
+    } else if !enabled {
+        inner.auto_suppressed_until_activity_edge = false;
+        inner.auto_snapshot_stale = false;
+    } else {
+        // Once enabled, native observations are authoritative. The remaining arguments are
+        // intentionally enable-edge seeds so a WebView reload cannot overwrite newer native
+        // suppression or activity state.
+    }
+    if !enabled || inner.auto_suppressed_until_activity_edge {
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+    } else if !inner.auto_active_agent_ids.is_empty() {
+        inner.auto_hold_requested = true;
+    }
+    reconcile_keep_awake_intent(inner);
+}
+
+fn observe_auto_keep_awake_snapshot(
+    inner: &mut KeepAwakeInner,
+    active_agent_ids: Vec<i64>,
+    now: Instant,
+) {
+    let active_agent_ids = normalized_agent_ids(active_agent_ids);
+    let activity_edge = inner.auto_observation_continuous
+        && active_agent_ids
+            .iter()
+            .any(|id| inner.auto_active_agent_ids.binary_search(id).is_err());
+    inner.auto_active_agent_ids = active_agent_ids;
+    inner.auto_observation_continuous = true;
+    inner.auto_last_snapshot_at = Some(now);
+    inner.auto_snapshot_stale = false;
+
+    if activity_edge {
+        inner.auto_suppressed_until_activity_edge = false;
+    }
+    if !inner.auto_enabled || inner.auto_suppressed_until_activity_edge {
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+    } else if inner.auto_active_agent_ids.is_empty() {
+        if inner.auto_hold_requested && inner.daemon_connected {
+            inner.auto_last_idle_observation_at.get_or_insert(now);
+        }
+    } else {
+        inner.auto_hold_requested = true;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+    }
+    reconcile_keep_awake_intent(inner);
+}
+
+fn evaluate_auto_keep_awake_tick(
+    inner: &mut KeepAwakeInner,
+    now: Instant,
+    settle: Duration,
+    max_snapshot_age: Duration,
+) {
+    if !inner.auto_enabled {
+        inner.auto_snapshot_stale = false;
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+        return;
+    }
+    if inner
+        .auto_last_snapshot_at
+        .is_some_and(|snapshot| now.saturating_duration_since(snapshot) >= max_snapshot_age)
+    {
+        inner.auto_snapshot_stale = true;
+        inner.auto_active_agent_ids.clear();
+        inner.auto_observation_continuous = false;
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+        return;
+    }
+    if inner.auto_suppressed_until_activity_edge {
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+        return;
+    }
+    if !inner.auto_active_agent_ids.is_empty() {
+        inner.auto_hold_requested = true;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+        return;
+    }
+    if !inner.auto_hold_requested || !inner.daemon_connected {
+        inner.auto_last_idle_observation_at = None;
+        return;
+    }
+    let delta = inner
+        .auto_last_idle_observation_at
+        .map(|previous| now.saturating_duration_since(previous))
+        .unwrap_or_default()
+        .min(KEEP_AWAKE_MAX_OBSERVATION_GAP);
+    inner.auto_idle_observed = inner.auto_idle_observed.saturating_add(delta);
+    inner.auto_last_idle_observation_at = Some(now);
+    if inner.auto_idle_observed >= settle {
+        inner.auto_hold_requested = false;
+        inner.auto_idle_observed = Duration::ZERO;
+        inner.auto_last_idle_observation_at = None;
+    }
+}
+
+fn normalized_agent_ids(mut ids: Vec<i64>) -> Vec<i64> {
+    ids.retain(|id| *id > 0);
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn auto_keep_awake_active_agent_ids_from_message(message: &str) -> Option<Vec<i64>> {
+    let value: Value = serde_json::from_str(message).ok()?;
+    if value.get("event").and_then(Value::as_str) != Some("process.statuses") {
+        return None;
+    }
+    let processes =
+        serde_json::from_value::<Vec<AutoKeepAwakeProcess>>(value.get("processes")?.clone())
+            .ok()?;
+    Some(auto_keep_awake_active_agent_ids(&processes))
+}
+
+fn auto_keep_awake_active_agent_ids(processes: &[AutoKeepAwakeProcess]) -> Vec<i64> {
+    normalized_agent_ids(
+        processes
+            .iter()
+            .filter(|process| auto_keep_awake_process_should_hold(process))
+            .map(|process| process.id)
+            .collect(),
+    )
+}
+
+fn auto_keep_awake_process_should_hold(process: &AutoKeepAwakeProcess) -> bool {
+    if process.kind != "agent" || !matches!(process.status.as_str(), "starting" | "running") {
+        return false;
+    }
+    let state = &process.agent_state;
+    if state.working
+        || state.needs_input
+        || state.thinking
+        || state.planning
+        || matches!(state.state.as_str(), "working" | "needs_input")
+    {
+        return true;
+    }
+    if state.state == "waiting" {
+        return state
+            .waiting_on
+            .iter()
+            .any(|reason| !reason.paused && reason.max_wait_ms > 0 && reason.remaining_ms > 0);
+    }
+    process.status == "starting" && state.last_output_at.is_none()
 }
 
 fn begin_keep_awake_session(inner: &mut KeepAwakeInner) {
@@ -582,8 +1165,6 @@ fn begin_keep_awake_session(inner: &mut KeepAwakeInner) {
     inner.notice = None;
     inner.respawn_count = 0;
     inner.last_loss_reason = None;
-    inner.consecutive_spawn_failures = 0;
-    inner.next_spawn_attempt_at = None;
 }
 
 fn sync_keep_awake_child_with(
@@ -592,7 +1173,13 @@ fn sync_keep_awake_child_with(
     spawn: impl FnOnce() -> std::io::Result<Child>,
 ) {
     refresh_keep_awake_child(inner);
-    if !inner.armed || inner.child.is_some() {
+    if !inner.armed {
+        if let Err(error) = stop_keep_awake_child(inner) {
+            inner.warning = Some(error);
+        }
+        return;
+    }
+    if inner.child.is_some() {
         return;
     }
     if inner
@@ -639,18 +1226,6 @@ fn sync_keep_awake_child_with(
     }
 }
 
-fn resync_keep_awake_child_with(
-    inner: &mut KeepAwakeInner,
-    now: Instant,
-    spawn: impl FnOnce() -> std::io::Result<Child>,
-) {
-    // `Instant` retry deadlines can pause while macOS sleeps. A power resume is
-    // an explicit re-verification edge, so retry immediately instead of carrying
-    // a pre-sleep deadline into the wake period.
-    inner.next_spawn_attempt_at = None;
-    sync_keep_awake_child_with(inner, now, spawn);
-}
-
 fn keep_awake_retry_delay(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(6);
     Duration::from_secs(1_u64 << exponent).min(KEEP_AWAKE_MAX_RETRY_DELAY)
@@ -683,22 +1258,23 @@ fn refresh_keep_awake_child(inner: &mut KeepAwakeInner) {
 }
 
 #[cfg(target_os = "macos")]
-async fn run_keep_awake_watchdog(inner: Arc<Mutex<KeepAwakeInner>>) {
+async fn run_keep_awake_watchdog(
+    app: tauri::AppHandle,
+    state: KeepAwakeState,
+    bridge: BridgeState,
+) {
     let mut timer = interval(KEEP_AWAKE_WATCHDOG_INTERVAL);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         timer.tick().await;
-        let mut inner = inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
-        sync_keep_awake_child_with(&mut inner, now, || {
-            keep_awake_command(std::process::id())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-        });
+        let status = state.reconcile_tick();
+        if state.status_subscription_due(now) {
+            request_keep_awake_status_subscription(&bridge);
+        }
+        if let Some(status) = state.emit_status_if_changed(status) {
+            let _ = app.emit(KEEP_AWAKE_RESYNC_EVENT, status);
+        }
     }
 }
 
@@ -771,13 +1347,17 @@ pub fn run() {
         status: Arc::new(Mutex::new(ConnectionStatus::connecting())),
     };
     let task_state = state.clone();
+    let watchdog_bridge_state = state.clone();
+    let keep_awake_state =
+        KeepAwakeState::persistent(default_data_dir().join(KEEP_AWAKE_PREFERENCE_FILE));
+    let bridge_keep_awake_state = keep_awake_state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(external_navigation::plugin())
         .manage(state)
-        .manage(KeepAwakeState::default())
+        .manage(keep_awake_state)
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
             if let Some(action) = native_menu_action(event.id().as_ref()) {
@@ -794,6 +1374,7 @@ pub fn run() {
             keep_awake_start,
             keep_awake_stop,
             keep_awake_status,
+            keep_awake_auto_configure,
             shell_open_path,
             shell_open_url,
             shell_detect_editors,
@@ -814,22 +1395,21 @@ pub fn run() {
             tauri::async_runtime::spawn(run_bridge(
                 app.handle().clone(),
                 task_state,
+                bridge_keep_awake_state,
                 receiver,
                 input_receiver,
             ));
             #[cfg(target_os = "macos")]
             tauri::async_runtime::spawn(run_keep_awake_watchdog(
-                app.state::<KeepAwakeState>().inner.clone(),
+                app.handle().clone(),
+                app.state::<KeepAwakeState>().inner().clone(),
+                watchdog_bridge_state,
             ));
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build workman desktop")
         .run(|app, event| {
-            if matches!(&event, RunEvent::Resumed) {
-                let status = app.state::<KeepAwakeState>().resync_after_power_event();
-                let _ = app.emit(KEEP_AWAKE_RESYNC_EVENT, status);
-            }
             let should_stop = matches!(&event, RunEvent::Exit | RunEvent::ExitRequested { .. })
                 || matches!(
                     &event,
@@ -1106,6 +1686,7 @@ pub fn run_embedded_daemon(data_dir: PathBuf) -> Result<(), Box<dyn Error>> {
 async fn run_bridge(
     app: tauri::AppHandle,
     state: BridgeState,
+    keep_awake: KeepAwakeState,
     mut receiver: mpsc::Receiver<BridgeCommand>,
     mut input_receiver: mpsc::Receiver<TerminalInput>,
 ) {
@@ -1118,6 +1699,27 @@ async fn run_bridge(
                 reconnect_delay = Duration::from_millis(250);
                 let daemon_version = negotiate_daemon_version(&mut socket).await;
                 log_daemon_version(daemon_version.as_ref());
+                keep_awake.set_daemon_connected(true);
+                if keep_awake.auto_enabled()
+                    && !send_bridge_message(
+                        &mut socket,
+                        Message::Text(keep_awake_status_subscription_request().into()),
+                    )
+                    .await
+                {
+                    keep_awake.set_daemon_connected(false);
+                    publish_status(
+                        &app,
+                        &state,
+                        ConnectionStatus::disconnected(
+                            "Daemon stopped accepting keep-awake status subscription; reconnecting",
+                        ),
+                    );
+                    continue;
+                }
+                if keep_awake.auto_enabled() {
+                    keep_awake.mark_status_subscription_asserted(Instant::now());
+                }
                 publish_status(
                     &app,
                     &state,
@@ -1146,7 +1748,13 @@ async fn run_bridge(
                             last_incoming = Instant::now();
                             match incoming {
                                 Ok(Message::Text(text)) => {
-                                    let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Text(text.to_string()));
+                                    let text = text.to_string();
+                                    if let Some(status) = keep_awake.observe_daemon_message(&text)
+                                        && let Some(status) = keep_awake.emit_status_if_changed(status)
+                                    {
+                                        let _ = app.emit(KEEP_AWAKE_RESYNC_EVENT, status);
+                                    }
+                                    let _ = app.emit(MESSAGE_EVENT, DaemonFrame::Text(text));
                                 }
                                 Ok(Message::Binary(bytes)) => {
                                     let frame = parse_terminal_frame(&bytes)
@@ -1215,6 +1823,7 @@ async fn run_bridge(
                         }
                     }
                 }
+                keep_awake.set_daemon_connected(false);
                 publish_status(
                     &app,
                     &state,
@@ -1222,6 +1831,7 @@ async fn run_bridge(
                 );
             }
             Err(error) => {
+                keep_awake.set_daemon_connected(false);
                 publish_status(&app, &state, ConnectionStatus::disconnected(error));
             }
         }
@@ -1777,14 +2387,487 @@ mod tests {
                 supported: cfg!(target_os = "macos"),
                 armed: false,
                 active: false,
+                arm_source: None,
                 assertion_pid: None,
                 warning: None,
                 notice: None,
                 respawn_count: 0,
                 last_loss_reason: None,
                 retry_in_ms: None,
+                auto_enabled: false,
+                auto_should_hold: false,
+                auto_suppressed_until_activity_edge: false,
+                auto_active_agent_ids: vec![],
+                auto_snapshot_stale: false,
+                auto_snapshot_max_age_ms: duration_millis(keep_awake_max_snapshot_age()),
+                auto_preference_warning: None,
             }
         );
+    }
+
+    #[test]
+    fn auto_should_hold_uses_current_agent_state_and_live_unpaused_waits() {
+        let message = json!({
+            "event": "process.statuses",
+            "processes": [
+                {
+                    "id": 1,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": { "state": "working", "last_output_at": 1 }
+                },
+                {
+                    "id": 2,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": {
+                        "state": "waiting",
+                        "last_output_at": 1,
+                        "waiting_on": [{
+                            "max_wait_ms": 30_000,
+                            "remaining_ms": 20_000,
+                            "paused": false
+                        }]
+                    }
+                },
+                {
+                    "id": 3,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": {
+                        "state": "waiting",
+                        "last_output_at": 1,
+                        "waiting_on": [{
+                            "max_wait_ms": 30_000,
+                            "remaining_ms": 20_000,
+                            "paused": true
+                        }]
+                    }
+                },
+                {
+                    "id": 4,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": { "state": "idle", "last_output_at": 1 }
+                }
+            ]
+        })
+        .to_string();
+
+        assert_eq!(
+            auto_keep_awake_active_agent_ids_from_message(&message),
+            Some(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn auto_arms_from_startup_snapshot_without_an_activity_transition() {
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            ..KeepAwakeInner::default()
+        };
+        configure_auto_keep_awake_state(&mut inner, true, false, vec![]);
+        assert!(!inner.armed);
+
+        observe_auto_keep_awake_snapshot(&mut inner, vec![7], Instant::now());
+
+        assert!(inner.armed);
+        assert!(inner.auto_hold_requested);
+        assert_eq!(inner.arm_source, Some(KeepAwakeArmSource::Auto));
+    }
+
+    #[test]
+    fn enabling_auto_arms_from_an_already_active_snapshot() {
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![11], Instant::now());
+        assert!(!inner.armed);
+
+        configure_auto_keep_awake_state(&mut inner, true, false, vec![]);
+
+        assert!(inner.armed);
+        assert_eq!(inner.auto_active_agent_ids, vec![11]);
+        assert_eq!(inner.arm_source, Some(KeepAwakeArmSource::Auto));
+    }
+
+    #[test]
+    fn enabling_auto_does_not_arm_from_an_expired_disabled_snapshot() {
+        let now = Instant::now();
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![12], now);
+        configure_auto_keep_awake_state(&mut inner, true, false, vec![]);
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + Duration::from_secs(11),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+
+        assert!(inner.auto_snapshot_stale);
+        assert!(!inner.armed);
+    }
+
+    #[test]
+    fn persisted_suppression_rebases_then_accepts_only_a_fresh_activity_edge() {
+        let now = Instant::now();
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            ..KeepAwakeInner::default()
+        };
+        configure_auto_keep_awake_state(&mut inner, true, true, vec![19]);
+        observe_auto_keep_awake_snapshot(&mut inner, vec![19], now);
+        assert!(inner.auto_suppressed_until_activity_edge);
+        assert!(!inner.armed);
+
+        observe_auto_keep_awake_snapshot(&mut inner, vec![19, 23], now + Duration::from_secs(1));
+
+        assert!(!inner.auto_suppressed_until_activity_edge);
+        assert!(inner.armed);
+    }
+
+    #[test]
+    fn native_suppression_edge_detection_does_not_depend_on_a_webview_clock() {
+        let now = Instant::now();
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            ..KeepAwakeInner::default()
+        };
+        configure_auto_keep_awake_state(&mut inner, true, true, vec![13]);
+        observe_auto_keep_awake_snapshot(&mut inner, vec![13], now);
+        assert!(inner.auto_suppressed_until_activity_edge);
+
+        // This native observation path has no dependency on a renderer timer. A new active ID
+        // therefore clears persisted suppression even while the WebView is hidden or throttled.
+        observe_auto_keep_awake_snapshot(&mut inner, vec![13, 17], now + Duration::from_secs(3600));
+
+        assert!(!inner.auto_suppressed_until_activity_edge);
+        assert!(inner.armed);
+        assert_eq!(inner.arm_source, Some(KeepAwakeArmSource::Auto));
+    }
+
+    #[test]
+    fn auto_idle_release_keeps_the_settle_window() {
+        let now = Instant::now();
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            auto_enabled: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![17], now);
+        observe_auto_keep_awake_snapshot(&mut inner, vec![], now);
+
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        assert!(inner.armed);
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + Duration::from_secs(2),
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+
+        assert!(!inner.auto_hold_requested);
+        assert!(!inner.armed);
+    }
+
+    #[test]
+    fn stale_daemon_snapshot_releases_auto_after_a_deliberate_ceiling() {
+        let now = Instant::now();
+        let max_snapshot_age = Duration::from_secs(10 * 60);
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            auto_enabled: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![29], now);
+        inner.daemon_connected = false;
+
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + max_snapshot_age - Duration::from_secs(1),
+            Duration::from_secs(60),
+            max_snapshot_age,
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        assert!(inner.armed);
+        assert!(!inner.auto_snapshot_stale);
+
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + max_snapshot_age,
+            Duration::from_secs(60),
+            max_snapshot_age,
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        assert!(!inner.armed);
+        assert!(!inner.auto_hold_requested);
+        assert!(inner.auto_active_agent_ids.is_empty());
+        assert!(inner.auto_snapshot_stale);
+    }
+
+    #[test]
+    fn fresh_snapshot_recovers_after_stale_daemon_release() {
+        let now = Instant::now();
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            auto_enabled: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![31], now);
+        evaluate_auto_keep_awake_tick(
+            &mut inner,
+            now + Duration::from_secs(5),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        );
+        reconcile_keep_awake_intent(&mut inner);
+        assert!(inner.auto_snapshot_stale);
+        assert!(!inner.armed);
+
+        observe_auto_keep_awake_snapshot(&mut inner, vec![31], now + Duration::from_secs(6));
+
+        assert!(!inner.auto_snapshot_stale);
+        assert!(inner.armed);
+    }
+
+    #[test]
+    fn starting_agent_without_output_gets_a_keep_awake_grace_hold() {
+        let message = json!({
+            "event": "process.statuses",
+            "processes": [{
+                "id": 41,
+                "kind": "agent",
+                "status": "starting",
+                "agent_state": { "state": "idle", "last_output_at": null }
+            }]
+        })
+        .to_string();
+
+        assert_eq!(
+            auto_keep_awake_active_agent_ids_from_message(&message),
+            Some(vec![41])
+        );
+    }
+
+    #[test]
+    fn auto_snapshot_filters_non_agents_inactive_agents_and_non_live_waits() {
+        let message = json!({
+            "event": "process.statuses",
+            "processes": [
+                {
+                    "id": 1,
+                    "kind": "shell",
+                    "status": "running",
+                    "agent_state": { "state": "working" }
+                },
+                {
+                    "id": 2,
+                    "kind": "agent",
+                    "status": "stopped",
+                    "agent_state": { "state": "working" }
+                },
+                {
+                    "id": 3,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": { "state": "idle", "last_output_at": 1 }
+                },
+                {
+                    "id": 4,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": {
+                        "state": "waiting",
+                        "waiting_on": [{ "max_wait_ms": 10, "remaining_ms": 10, "paused": true }]
+                    }
+                },
+                {
+                    "id": 5,
+                    "kind": "agent",
+                    "status": "running",
+                    "agent_state": {
+                        "state": "waiting",
+                        "waiting_on": [{ "max_wait_ms": 10, "remaining_ms": 0, "paused": false }]
+                    }
+                },
+                {
+                    "id": 6,
+                    "kind": "agent",
+                    "status": "starting",
+                    "agent_state": { "state": "idle", "last_output_at": 1 }
+                }
+            ]
+        })
+        .to_string();
+
+        assert_eq!(
+            auto_keep_awake_active_agent_ids_from_message(&message),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn malformed_or_unrelated_daemon_frames_do_not_change_auto_state() {
+        assert_eq!(auto_keep_awake_active_agent_ids_from_message("{"), None);
+        assert_eq!(
+            auto_keep_awake_active_agent_ids_from_message(
+                &json!({ "event": "daemon.hello", "processes": [] }).to_string()
+            ),
+            None
+        );
+        assert_eq!(
+            auto_keep_awake_active_agent_ids_from_message(
+                &json!({
+                    "event": "process.statuses",
+                    "processes": [{ "id": "not-an-id" }]
+                })
+                .to_string()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn manual_request_takes_precedence_over_auto_and_hands_back_cleanly() {
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            auto_enabled: true,
+            manual_requested: true,
+            ..KeepAwakeInner::default()
+        };
+        observe_auto_keep_awake_snapshot(&mut inner, vec![43], Instant::now());
+        assert_eq!(inner.arm_source, Some(KeepAwakeArmSource::Manual));
+
+        inner.manual_requested = false;
+        reconcile_keep_awake_intent(&mut inner);
+
+        assert!(inner.armed);
+        assert_eq!(inner.arm_source, Some(KeepAwakeArmSource::Auto));
+    }
+
+    #[test]
+    fn native_auto_preference_survives_state_recreation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(KEEP_AWAKE_PREFERENCE_FILE);
+        let state = KeepAwakeState::persistent(path.clone());
+        let status = state.configure_auto(true, true, vec![47]);
+        assert!(status.auto_enabled);
+        assert!(status.auto_suppressed_until_activity_edge);
+        drop(state);
+
+        let restored = KeepAwakeState::persistent(path);
+        let inner = restored
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(inner.auto_enabled);
+        assert!(inner.auto_suppressed_until_activity_edge);
+        assert_eq!(inner.auto_active_agent_ids, vec![47]);
+        assert!(!inner.auto_observation_continuous);
+    }
+
+    #[test]
+    fn only_an_explicit_user_stop_suppresses_auto_mode() {
+        let state = KeepAwakeState::default();
+        state.configure_auto(true, false, vec![]);
+
+        state.stop(false).unwrap();
+        {
+            let inner = state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!inner.auto_suppressed_until_activity_edge);
+        }
+
+        state.stop(true).unwrap();
+        let inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(inner.auto_suppressed_until_activity_edge);
+    }
+
+    #[test]
+    fn malformed_native_preference_falls_back_and_surfaces_a_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(KEEP_AWAKE_PREFERENCE_FILE);
+        std::fs::write(&path, b"not json").unwrap();
+
+        let state = KeepAwakeState::persistent(path);
+        let status = {
+            let inner = state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            keep_awake_status_for_platform(&inner, Instant::now())
+        };
+
+        assert!(!status.auto_enabled);
+        assert!(
+            status
+                .auto_preference_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("Could not load"))
+        );
+    }
+
+    #[test]
+    fn watchdog_emits_status_only_when_the_payload_changes() {
+        let state = KeepAwakeState::default();
+        let status = {
+            let inner = state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            keep_awake_status_for_platform(&inner, Instant::now())
+        };
+        assert_eq!(
+            state.emit_status_if_changed(status.clone()),
+            Some(status.clone())
+        );
+        assert_eq!(state.emit_status_if_changed(status), None);
+
+        let changed = {
+            let mut inner = state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.auto_enabled = true;
+            keep_awake_status_for_platform(&inner, Instant::now())
+        };
+        assert_eq!(state.emit_status_if_changed(changed.clone()), Some(changed));
+    }
+
+    #[test]
+    fn native_status_subscription_is_periodically_reasserted() {
+        let state = KeepAwakeState::default();
+        {
+            let mut inner = state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.auto_enabled = true;
+            inner.daemon_connected = true;
+        }
+        let now = Instant::now();
+        assert!(state.status_subscription_due(now));
+        assert!(!state.status_subscription_due(
+            now + KEEP_AWAKE_SUBSCRIPTION_REASSERT_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(state.status_subscription_due(now + KEEP_AWAKE_SUBSCRIPTION_REASSERT_INTERVAL));
     }
 
     #[test]
@@ -1800,7 +2883,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_keep_awake_assertion_is_checked_reaped_and_respawned() {
+    fn watchdog_repairs_a_lost_assertion_in_the_same_tick() {
         let mut inner = KeepAwakeInner::default();
         begin_keep_awake_session(&mut inner);
         let now = Instant::now();
@@ -1813,10 +2896,10 @@ mod tests {
 
         sync_keep_awake_child_with(
             &mut inner,
-            now + Duration::from_secs(1),
+            now + Duration::from_millis(500),
             test_keep_awake_child,
         );
-        let status = keep_awake_status_from(&inner, now + Duration::from_secs(1));
+        let status = keep_awake_status_from(&inner, now + Duration::from_millis(500));
         let replacement_pid = status.assertion_pid.unwrap();
         assert!(status.armed);
         assert!(status.active);
@@ -1891,17 +2974,35 @@ mod tests {
     }
 
     #[test]
-    fn power_resync_rechecks_immediately_instead_of_carrying_a_retry_deadline() {
-        let mut inner = KeepAwakeInner::default();
-        begin_keep_awake_session(&mut inner);
+    fn auto_rearm_preserves_spawn_backoff() {
+        let attempts = std::cell::Cell::new(0);
+        let mut inner = KeepAwakeInner {
+            daemon_connected: true,
+            auto_enabled: true,
+            ..KeepAwakeInner::default()
+        };
         let now = Instant::now();
-        inner.next_spawn_attempt_at = now.checked_add(Duration::from_secs(60));
+        observe_auto_keep_awake_snapshot(&mut inner, vec![5], now);
+        sync_keep_awake_child_with(&mut inner, now, || {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "temporary process limit",
+            ))
+        });
+        assert_eq!(attempts.get(), 1);
 
-        resync_keep_awake_child_with(&mut inner, now, test_keep_awake_child);
+        inner.auto_hold_requested = false;
+        reconcile_keep_awake_intent(&mut inner);
+        observe_auto_keep_awake_snapshot(&mut inner, vec![5], now + Duration::from_millis(250));
+        sync_keep_awake_child_with(&mut inner, now + Duration::from_millis(500), || {
+            attempts.set(attempts.get() + 1);
+            test_keep_awake_child()
+        });
 
-        assert!(inner.child.is_some());
-        assert!(inner.next_spawn_attempt_at.is_none());
-        stop_keep_awake_child(&mut inner).unwrap();
+        assert_eq!(attempts.get(), 1);
+        assert!(inner.child.is_none());
+        assert!(inner.next_spawn_attempt_at.is_some());
     }
 
     #[cfg(unix)]

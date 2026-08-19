@@ -21,6 +21,7 @@
     initialKeepAwakeState,
     loadAutoKeepAwakePreference,
     loadPersistedKeepAwakeState,
+    nativeAutoKeepAwakeNeedsReconciliation,
     reconcileKeepAwakeIntent,
     runningAgents,
     saveAutoKeepAwakePreference,
@@ -48,19 +49,28 @@
     supported: boolean;
     armed: boolean;
     active: boolean;
+    arm_source: Exclude<KeepAwakeArmSource, null> | null;
     assertion_pid: number | null;
     warning: string | null;
     notice: string | null;
     respawn_count: number;
     last_loss_reason: string | null;
     retry_in_ms: number | null;
+    auto_enabled: boolean;
+    auto_should_hold: boolean;
+    auto_suppressed_until_activity_edge: boolean;
+    auto_active_agent_ids: number[];
+    auto_snapshot_stale: boolean;
+    auto_snapshot_max_age_ms: number;
+    auto_preference_warning: string | null;
   }
 
   type ReleaseReason = 'idle' | 'toggle' | 'user' | null;
 
-  const AUTO_ARM_MAX_RETRY_MS = 60_000;
   const POWER_RESYNC_GAP_MS = 5_000;
   const KEEP_AWAKE_RESYNC_EVENT = 'keep-awake://resync';
+  const NATIVE_AUTO_CONFIG_TIMEOUT_MS = 5_000;
+  const NATIVE_AUTO_CONFIG_MAX_RETRY_MS = 60_000;
 
   let {
     processes,
@@ -85,14 +95,13 @@
   let machineGeneration = $state(0);
   let autoReleasePending = false;
   let componentActive = false;
-  let nativeSyncPending = false;
+  let nativeStatusPending = false;
+  let nativeConfigPending = false;
+  let nativeConfigRetryTimer: number | null = null;
+  let nativeConfigFailureCount = 0;
+  let nativeConfigWarning = $state<string | null>(null);
   let nativeHydrated = $state(false);
   let preferencesHydrated = $state(false);
-  let autoArmPending = false;
-  let autoArmFailureCount = $state(0);
-  let autoArmFailedAt = $state<number | null>(null);
-  let autoArmRetryAt = $state<number | null>(null);
-  let autoDisableReleasePending = false;
   let lastPersistedState = '';
   let restoredHold: PersistedKeepAwakeState['activeHold'] = null;
   let notifiedRespawnCount = 0;
@@ -102,12 +111,20 @@
     supported: false,
     armed: false,
     active: false,
+    arm_source: null,
     assertion_pid: null,
     warning: null,
     notice: null,
     respawn_count: 0,
     last_loss_reason: null,
-    retry_in_ms: null
+    retry_in_ms: null,
+    auto_enabled: false,
+    auto_should_hold: false,
+    auto_suppressed_until_activity_edge: false,
+    auto_active_agent_ids: [],
+    auto_snapshot_stale: false,
+    auto_snapshot_max_age_ms: 10 * 60_000,
+    auto_preference_warning: null
   });
   let lastReleaseReason = $state<ReleaseReason>(null);
   let availableAgents = $derived(runningAgents(processes));
@@ -124,6 +141,9 @@
     clockTick,
     { connected: connectionStatus === 'connected' }
   ));
+  let autoActiveAgentIds = $derived(
+    nativeStatus.auto_enabled ? nativeStatus.auto_active_agent_ids : autoEvaluation.activeAgentIds
+  );
   let connectionEvaluation = $derived(evaluateKeepAwakeConnection(
     connectionMachine,
     machine.armed ? connectionStatus : 'connected',
@@ -136,16 +156,19 @@
     machine.armed && nativeStatus.armed && nativeStatus.active
   );
   let autoRetryInSeconds = $derived(
-    autoArmRetryAt === null ? null : Math.max(0, Math.ceil((autoArmRetryAt - clockTick) / 1_000))
+    nativeStatus.retry_in_ms === null ? null : Math.max(0, Math.ceil(nativeStatus.retry_in_ms / 1_000))
   );
   let triggerLabel = $derived.by(() => {
     if (warning) return warning;
     if (!machine.armed) {
+      if (autoEnabled && nativeStatus.auto_snapshot_stale) {
+        return 'Auto keep awake released — agent state is stale';
+      }
       if (autoEnabled && autoMachine.suppressedUntilActivityEdge) {
         return 'Auto keep awake paused until fresh agent activity';
       }
       if (autoEnabled) {
-        const count = autoEvaluation.activeAgentIds.length;
+        const count = autoActiveAgentIds.length;
         if (count > 0 && autoRetryInSeconds !== null && autoRetryInSeconds > 0) {
           return `Auto keep awake retrying in ${autoRetryInSeconds}s`;
         }
@@ -160,7 +183,7 @@
       return 'Daemon unreachable — Mac is still being kept awake';
     }
     if (machine.armSource === 'auto') {
-      const count = autoEvaluation.activeAgentIds.length;
+      const count = autoActiveAgentIds.length;
       return count > 0
         ? `Keeping Mac awake — auto (${count} ${count === 1 ? 'agent' : 'agents'} running)`
         : 'Keeping Mac awake — auto (waiting for idle settle)';
@@ -173,6 +196,7 @@
   });
   let statusIsWarning = $derived(
     warning !== null
+      || (autoEnabled && nativeStatus.auto_snapshot_stale)
       || (machine.armed && (!nativeStatus.active || connectionEvaluation.daemonUnreachable))
   );
   let statusLine = $derived.by(() => {
@@ -180,11 +204,14 @@
     if (machine.armed && warning) return `${warning} ${assertion}`;
     if (!machine.armed && warning) return warning;
     if (!machine.armed) {
+      if (autoEnabled && nativeStatus.auto_snapshot_stale) {
+        return `Auto keep awake released because no fresh agent state arrived for ${formatDuration(nativeStatus.auto_snapshot_max_age_ms)}.`;
+      }
       if (autoEnabled && autoMachine.suppressedUntilActivityEdge) {
         return 'Auto keep awake paused by your manual disarm until fresh agent activity.';
       }
       if (autoEnabled) {
-        const count = autoEvaluation.activeAgentIds.length;
+        const count = autoActiveAgentIds.length;
         if (count > 0 && autoRetryInSeconds !== null && autoRetryInSeconds > 0) {
           return `Auto keep awake could not arm — retrying in ${autoRetryInSeconds}s.`;
         }
@@ -229,17 +256,6 @@
   $effect(() => {
     const next = autoEvaluation;
     if (next.state !== autoMachine) autoMachine = next.state;
-    if (next.activityEdge && autoArmFailedAt !== null) resetAutoArmFailure();
-    if (
-      componentActive
-      && nativeHydrated
-      && connectionStatus === 'connected'
-      && next.shouldArm
-      && !machine.armed
-      && !busy
-      && !autoArmPending
-      && (autoArmRetryAt === null || clockTick >= autoArmRetryAt)
-    ) void armAutomatically();
   });
 
   $effect(() => {
@@ -253,7 +269,7 @@
       : null;
     const persistedState: PersistedKeepAwakeState = {
       autoState: {
-        activeAgentIds: autoMachine.activeAgentIds,
+        activeAgentIds: autoActiveAgentIds,
         suppressedUntilActivityEdge: autoMachine.suppressedUntilActivityEdge
       },
       preferredMode,
@@ -276,7 +292,7 @@
   $effect(() => {
     const next = evaluation;
     if (next.shouldRelease) {
-      if (!autoReleasePending) void releaseAutomatically();
+      if (machine.armSource !== 'auto' && !autoReleasePending) void releaseAutomatically();
       return;
     }
     if (next.state !== machine) machine = next.state;
@@ -311,7 +327,9 @@
     daemonUnreachableNotified = true;
     void deliverNativeSystemNotification(
       'Daemon unreachable — still keeping Mac awake',
-      'Keep awake will not auto-release until the daemon reconnects.'
+      machine.armSource === 'auto'
+        ? `Auto keep awake will release if agent state stays stale for ${formatDuration(nativeStatus.auto_snapshot_max_age_ms)}.`
+        : 'Manual keep awake will not auto-release until the daemon reconnects.'
     );
   });
 
@@ -346,8 +364,8 @@
     let pollCount = 0;
     let lastWallTick = Date.now();
     let lastMonotonicTick = monotonicNow();
-    let unlistenPowerResume: UnlistenFn | null = null;
-    void syncNativeStatus().finally(() => {
+    let unlistenNativeResync: UnlistenFn | null = null;
+    void configureNativeAutoKeepAwake().finally(() => {
       if (componentActive) nativeHydrated = true;
     });
     const resync = () => {
@@ -362,7 +380,7 @@
       if (!componentActive) return;
       reconcileNativeStatus(payload, machineGeneration);
     }).then((unlisten) => {
-      if (componentActive) unlistenPowerResume = unlisten;
+      if (componentActive) unlistenNativeResync = unlisten;
       else unlisten();
     }).catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -383,16 +401,21 @@
     return () => {
       componentActive = false;
       window.clearInterval(timer);
+      if (nativeConfigRetryTimer !== null) window.clearTimeout(nativeConfigRetryTimer);
       window.removeEventListener('focus', resync);
       document.removeEventListener('visibilitychange', resyncWhenVisible);
-      unlistenPowerResume?.();
-      if (machine.armed) void invoke('keep_awake_stop').catch(() => undefined);
+      unlistenNativeResync?.();
+      // Auto mode is owned by the native app process so a WebView reload/teardown
+      // cannot create an assertion gap while the app itself is still running.
+      if (machine.armed && machine.armSource !== 'auto') {
+        void invoke('keep_awake_stop', { suppressAuto: false }).catch(() => undefined);
+      }
     };
   });
 
   async function syncNativeStatus(): Promise<void> {
-    if (nativeSyncPending) return;
-    nativeSyncPending = true;
+    if (nativeStatusPending) return;
+    nativeStatusPending = true;
     const statusGeneration = machineGeneration;
     try {
       const status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
@@ -401,13 +424,62 @@
     } catch (cause) {
       if (componentActive && machineGeneration === statusGeneration) warning = message(cause);
     } finally {
-      nativeSyncPending = false;
+      nativeStatusPending = false;
+    }
+  }
+
+  async function configureNativeAutoKeepAwake(): Promise<void> {
+    if (nativeConfigPending) return;
+    nativeConfigPending = true;
+    const statusGeneration = machineGeneration;
+    const intendedEnabled = autoEnabled;
+    try {
+      const status = await invokeWithTimeout<NativeKeepAwakeStatus>(
+        'keep_awake_auto_configure',
+        {
+          enabled: intendedEnabled,
+          seedSuppressedUntilActivityEdge: autoMachine.suppressedUntilActivityEdge,
+          seedActiveAgentIds: autoMachine.activeAgentIds
+        },
+        NATIVE_AUTO_CONFIG_TIMEOUT_MS
+      );
+      if (!componentActive || machineGeneration !== statusGeneration) return;
+      reconcileNativeStatus(status, statusGeneration);
+      if (status.auto_enabled === intendedEnabled && intendedEnabled === autoEnabled) {
+        nativeConfigFailureCount = 0;
+        nativeConfigWarning = null;
+        applyNativeStatus(status);
+      }
+    } catch (cause) {
+      if (componentActive && machineGeneration === statusGeneration) {
+        nativeConfigFailureCount += 1;
+        nativeConfigWarning = `Could not sync auto keep awake with the native watchdog: ${message(cause)}`;
+        warning = nativeConfigWarning;
+      }
+    } finally {
+      nativeConfigPending = false;
+      if (
+        componentActive
+        && nativeAutoKeepAwakeNeedsReconciliation(autoEnabled, nativeStatus.auto_enabled)
+      ) {
+        scheduleNativeAutoConfiguration(nativeAutoConfigRetryDelay());
+      }
     }
   }
 
   function reconcileNativeStatus(status: NativeKeepAwakeStatus, statusGeneration: number): void {
     if (machineGeneration !== statusGeneration) return;
+    if (preferencesHydrated && status.auto_enabled === autoEnabled) {
+      nativeConfigFailureCount = 0;
+      nativeConfigWarning = null;
+    }
     applyNativeStatus(status);
+    if (
+      preferencesHydrated
+      && nativeAutoKeepAwakeNeedsReconciliation(autoEnabled, status.auto_enabled)
+    ) {
+      scheduleNativeAutoConfiguration();
+    }
     const reconciliation = reconcileKeepAwakeIntent(machine, status.armed);
     if (reconciliation.holdLost) {
       const lostSource = machine.armSource;
@@ -415,6 +487,11 @@
       machineGeneration += 1;
       restoredHold = null;
       if (lostSource === 'auto') restoreManualSelection();
+      if (lostSource === 'auto' && !status.auto_should_hold) {
+        warning = nativeStatusWarning(status);
+        lastReleaseReason = status.auto_enabled ? 'idle' : 'toggle';
+        return;
+      }
       warning = status.warning ?? 'Keep awake hold lost — macOS no longer reports an armed assertion.';
       void deliverNativeSystemNotification(
         'Keep awake hold lost',
@@ -426,11 +503,11 @@
 
     const saved = restoredHold;
     const fallbackSource: Exclude<KeepAwakeArmSource, null> = autoEnabled
-      && autoEvaluation.activeAgentIds.length > 0
+      && autoActiveAgentIds.length > 0
       && !autoMachine.suppressedUntilActivityEdge
       ? 'auto'
       : 'manual';
-    const source = saved?.armSource ?? fallbackSource;
+    const source = status.arm_source ?? saved?.armSource ?? fallbackSource;
     const adoptedMode = saved?.mode ?? (source === 'auto' ? 'all' : preferredMode);
     const watchedAgentId = adoptedMode === 'specific'
       ? saved?.watchedAgentIds[0] ?? positiveAgentId(preferredSpecificAgentId)
@@ -498,7 +575,9 @@
     const generation = machineGeneration;
     const source = machine.armSource;
     try {
-      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop', {
+        suppressAuto: manualOverride
+      });
       const disarmed = machine.armed && machineGeneration === generation;
       if (disarmed) {
         machine = disarmKeepAwake(machine);
@@ -520,62 +599,20 @@
     }
   }
 
-  async function armAutomatically(): Promise<void> {
-    if (busy || autoArmPending || machine.armed || !autoEnabled || supported !== true) return;
-    busy = true;
-    autoArmPending = true;
-    warning = null;
-    try {
-      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
-      applyNativeStatus(status);
-      if (!status.supported || !status.armed) {
-        recordAutoArmFailure(status.warning ?? 'macOS keep awake is unavailable.');
-        return;
-      }
-      if (!autoEnabled) {
-        const stopped = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
-        applyNativeStatus(stopped);
-        return;
-      }
-      resetAutoArmFailure();
-      warning = status.warning;
-      mode = 'all';
-      machine = armKeepAwake('all', null, 'auto');
-      machineGeneration += 1;
-      lastReleaseReason = null;
-      clockTick = monotonicNow();
-      if (!status.active) warning = status.warning ?? 'Restoring the macOS idle-sleep assertion.';
-    } catch (cause) {
-      recordAutoArmFailure(message(cause));
-    } finally {
-      autoArmPending = false;
-      busy = false;
-    }
-  }
-
   async function changeAutoEnabled(next: boolean): Promise<void> {
     if (autoEnabled === next) return;
     autoEnabled = next;
     saveAutoKeepAwakePreference(next);
     if (!next) {
       autoMachine = initialAutoKeepAwakeState();
-      resetAutoArmFailure();
       if (!machine.armed) warning = null;
-      await releaseAutoHoldAfterToggleOff();
     }
-  }
-
-  async function releaseAutoHoldAfterToggleOff(): Promise<void> {
-    if (autoDisableReleasePending) return;
-    autoDisableReleasePending = true;
+    busy = true;
     try {
-      while (componentActive && !autoEnabled) {
-        if (!machine.armed || machine.armSource !== 'auto') return;
-        if (!busy && await disarm(false, 'toggle')) return;
-        await wait(1_000);
-      }
+      await configureNativeAutoKeepAwake();
+      if (!next && !nativeStatus.armed) lastReleaseReason = 'toggle';
     } finally {
-      autoDisableReleasePending = false;
+      busy = false;
     }
   }
 
@@ -585,7 +622,9 @@
     autoReleasePending = true;
     const generation = machineGeneration;
     try {
-      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop', {
+        suppressAuto: false
+      });
       applyNativeStatus(status);
     } catch (cause) {
       warning = message(cause);
@@ -617,20 +656,6 @@
     return cause instanceof Error ? cause.message : String(cause);
   }
 
-  function recordAutoArmFailure(reason: string): void {
-    autoArmFailureCount += 1;
-    autoArmFailedAt = clockTick;
-    const retryMs = Math.min(2 ** (autoArmFailureCount - 1) * 1_000, AUTO_ARM_MAX_RETRY_MS);
-    autoArmRetryAt = clockTick + retryMs;
-    warning = `${reason} Auto keep awake will retry in ${Math.ceil(retryMs / 1_000)}s.`;
-  }
-
-  function resetAutoArmFailure(): void {
-    autoArmFailureCount = 0;
-    autoArmFailedAt = null;
-    autoArmRetryAt = null;
-  }
-
   function selectManualMode(next: KeepAwakeMode): void {
     mode = next;
     preferredMode = next;
@@ -651,15 +676,63 @@
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   }
 
-  function wait(milliseconds: number): Promise<void> {
-    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-  }
-
   function applyNativeStatus(status: NativeKeepAwakeStatus): void {
-    const retainedAutoFailure = autoArmFailedAt !== null && !status.armed ? warning : null;
     supported = status.supported;
     nativeStatus = status;
-    warning = status.warning ?? retainedAutoFailure;
+    autoMachine = {
+      ...autoMachine,
+      suppressedUntilActivityEdge: status.auto_suppressed_until_activity_edge
+    };
+    warning = nativeStatusWarning(status);
+  }
+
+  function nativeStatusWarning(status: NativeKeepAwakeStatus): string | null {
+    return status.warning ?? status.auto_preference_warning ?? nativeConfigWarning;
+  }
+
+  function scheduleNativeAutoConfiguration(delayMs = 0): void {
+    if (!componentActive || nativeConfigRetryTimer !== null) return;
+    nativeConfigRetryTimer = window.setTimeout(() => {
+      nativeConfigRetryTimer = null;
+      void configureNativeAutoKeepAwake();
+    }, delayMs);
+  }
+
+  function nativeAutoConfigRetryDelay(): number {
+    const exponent = Math.max(0, nativeConfigFailureCount - 1);
+    return Math.min(1_000 * (2 ** exponent), NATIVE_AUTO_CONFIG_MAX_RETRY_MS);
+  }
+
+  function invokeWithTimeout<T>(
+    command: string,
+    args: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(
+        () => reject(new Error(`${command} timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
+      void invoke<T>(command, args).then(
+        (value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        },
+        (cause) => {
+          window.clearTimeout(timer);
+          reject(cause);
+        }
+      );
+    });
+  }
+
+  function formatDuration(durationMs: number): string {
+    if (durationMs < 60_000) {
+      const seconds = Math.max(1, Math.round(durationMs / 1_000));
+      return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+    }
+    const minutes = Math.max(1, Math.round(durationMs / 60_000));
+    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
   }
 
   function assertionStatus(status: NativeKeepAwakeStatus): string {
