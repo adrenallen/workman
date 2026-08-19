@@ -3585,6 +3585,7 @@ mod tests {
         registry.stop(20).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn kimi_initial_prompt_retries_until_the_tui_creates_a_session() {
         let store = Store::open_in_memory().unwrap();
