@@ -45,6 +45,12 @@ if (-not $SkipFrontend) {
     finally { Pop-Location }
 }
 
+# Ship self-contained binaries: the MSVC runtime links statically so the
+# archive runs on machines without a Visual C++ redistributable installed.
+if ($env:RUSTFLAGS -notmatch 'crt-static') {
+    $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
+}
+
 Push-Location $repo
 try {
     cargo build --locked --profile dist -p workman-cli -p workmand
