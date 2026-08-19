@@ -201,7 +201,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(palette, /vimBindings=\{false\}/);
   assert.match(palette, /bind:ref=\{promptList\}/);
   assert.match(palette, /querySelector<HTMLElement>[\s\S]*scrollIntoView\(\{ block: 'nearest' \}\)/);
-  assert.match(palette, /\.quick-prompt-option\[data-selected\][\s\S]*background: var\(--accent\)[\s\S]*box-shadow: inset 3px 0 var\(--ring\)/);
+  assert.match(palette, /\.quick-prompt-option\[data-selected\][\s\S]*background: var\(--ring\)[\s\S]*box-shadow: inset 3px 0 var\(--foreground\)/);
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /\{sendChord\} · insert and send/);
@@ -226,3 +226,32 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(shortcuts, /\[mod, shift, 'P'\], label: 'Open quick prompts for the selected agent'/);
   assert.match(shortcuts, /quick-prompt search uses them for first\/last/);
 });
+
+test('selected prompt row background clears 3:1 against adjacent rows in both themes', async () => {
+  const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
+  const dark = styles.slice(styles.indexOf(':root {'), styles.indexOf(':root[data-theme=\'light\']'));
+  const light = styles.slice(styles.indexOf(':root[data-theme=\'light\']'), styles.indexOf('@theme inline'));
+  for (const theme of [dark, light]) {
+    const ring = tokenColor(theme, 'ring');
+    const popover = tokenColor(theme, 'popover');
+    assert.ok(contrastRatio(ring, popover) >= 3);
+  }
+});
+
+function tokenColor(css, token) {
+  const value = css.match(new RegExp(`--${token}:\\s*(#[0-9a-f]{6})`, 'i'))?.[1];
+  assert.ok(value, `missing --${token}`);
+  return value;
+}
+
+function contrastRatio(left, right) {
+  const [lighter, darker] = [luminance(left), luminance(right)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function luminance(hex) {
+  return [1, 3, 5]
+    .map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+    .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+}

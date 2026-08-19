@@ -219,21 +219,23 @@
 
 <style>
   :global(.quick-prompt-option[data-selected]) {
-    background: var(--accent);
-    color: var(--foreground);
-    box-shadow: inset 3px 0 var(--ring);
+    background: var(--ring);
+    color: var(--primary-foreground);
+    box-shadow: inset 3px 0 var(--foreground);
   }
 
   :global(.quick-prompt-option[data-selected] .quick-prompt-icon) {
-    border-color: var(--border-strong);
-    color: var(--foreground);
+    border-color: currentColor;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--primary-foreground);
   }
 
   :global(.quick-prompt-option[data-selected] .quick-prompt-name) {
-    color: var(--foreground);
+    color: var(--primary-foreground);
   }
 
   :global(.quick-prompt-option[data-selected] .quick-prompt-preview) {
-    color: var(--text-soft);
+    color: var(--primary-foreground);
+    opacity: 0.82;
   }
 </style>
