@@ -589,7 +589,7 @@ mod tests {
     /// output parsing. Read-only: parking is never requested.
     #[cfg(windows)]
     #[tokio::test]
-    #[ignore = "requires Laravel Herd installed with its CLI shims"]
+    #[ignore = "requires Laravel Herd installed, with the desktop app running for its dynamic CLI commands"]
     async fn herd_integration_reads_the_windows_cli() {
         let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         // A shell opened before Herd finished its setup has the old PATH;
