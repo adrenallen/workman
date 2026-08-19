@@ -55,6 +55,13 @@ export interface KeepAwakeReconciliation {
   holdLost: boolean;
 }
 
+export function nativeAutoKeepAwakeNeedsReconciliation(
+  intendedEnabled: boolean,
+  nativeEnabled: boolean
+): boolean {
+  return intendedEnabled !== nativeEnabled;
+}
+
 export interface KeepAwakeObservation {
   connected: boolean;
 }

@@ -14,6 +14,7 @@ import {
   KEEP_AWAKE_SETTLE_MS,
   loadAutoKeepAwakePreference,
   loadPersistedKeepAwakeState,
+  nativeAutoKeepAwakeNeedsReconciliation,
   reconcileKeepAwakeIntent,
   runningAgents,
   saveAutoKeepAwakePreference,
@@ -192,6 +193,13 @@ test('auto preference persists as a per-machine boolean', () => {
   assert.equal(loadAutoKeepAwakePreference(storage), true);
   saveAutoKeepAwakePreference(false, storage);
   assert.equal(loadAutoKeepAwakePreference(storage), false);
+});
+
+test('auto config reconciliation retries whenever native intent differs', () => {
+  assert.equal(nativeAutoKeepAwakeNeedsReconciliation(true, false), true);
+  assert.equal(nativeAutoKeepAwakeNeedsReconciliation(false, true), true);
+  assert.equal(nativeAutoKeepAwakeNeedsReconciliation(true, true), false);
+  assert.equal(nativeAutoKeepAwakeNeedsReconciliation(false, false), false);
 });
 
 test('manual suppression and hold ownership survive reload without a fake activity edge', () => {
@@ -526,7 +534,8 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(control, /Daemon reconnecting — still keeping Mac awake/);
   assert.match(control, /Daemon unreachable — still keeping Mac awake/);
   assert.match(control, /Keep awake assertion restored/);
-  assert.match(control, /Keep awake will not auto-release until the daemon reconnects/);
+  assert.match(control, /Auto keep awake will release if agent state stays stale/);
+  assert.match(control, /Auto keep awake released because no fresh agent state arrived/);
   assert.match(control, /Assertion PID \$\{status\.assertion_pid\} held/);
   assert.match(control, /machine\.armed && nativeStatus\.armed && nativeStatus\.active/);
   assert.match(control, /data-armed=\{verifiedArmed\}/);
@@ -547,6 +556,17 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(native, /auto_keep_awake_active_agent_ids_from_message/);
   assert.match(native, /if !inner\.armed/);
   assert.match(native, /KEEP_AWAKE_MAX_RETRY_DELAY/);
+  assert.match(native, /KEEP_AWAKE_MAX_SNAPSHOT_AGE/);
+  assert.match(native, /PersistedKeepAwakePreference/);
+  assert.match(native, /status_subscription_due/);
+  assert.match(native, /emit_status_if_changed/);
   assert.match(native, /respawn_count/);
+  assert.doesNotMatch(native, /RunEvent::Resumed/);
+  assert.match(control, /nativeAutoKeepAwakeNeedsReconciliation\(autoEnabled, status\.auto_enabled\)[\s\S]*scheduleNativeAutoConfiguration/);
+  assert.match(control, /invokeWithTimeout<NativeKeepAwakeStatus>/);
+  assert.match(control, /nativeAutoConfigRetryDelay/);
+  assert.match(control, /seedSuppressedUntilActivityEdge/);
+  assert.match(control, /suppressAuto: manualOverride/);
+  assert.match(control, /suppressAuto: false/);
   assert.match(config, /"acceptFirstMouse": true/);
 });
