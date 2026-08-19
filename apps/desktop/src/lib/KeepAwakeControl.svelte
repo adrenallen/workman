@@ -1,22 +1,34 @@
 <script lang="ts">
   import CoffeeIcon from '@lucide/svelte/icons/coffee';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount, untrack } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as Popover from '$lib/components/ui/popover';
   import * as Select from '$lib/components/ui/select';
+  import { Switch } from '$lib/components/ui/switch';
   import type { ConnectionStatus, ProcessView, Project } from './daemon';
   import {
     armKeepAwake,
     disarmKeepAwake,
+    evaluateAutoKeepAwake,
     evaluateKeepAwakeAtCurrentTime,
     evaluateKeepAwakeConnection,
+    initialAutoKeepAwakeState,
     initialKeepAwakeConnectionState,
     initialKeepAwakeState,
+    loadAutoKeepAwakePreference,
+    loadPersistedKeepAwakeState,
+    reconcileKeepAwakeIntent,
     runningAgents,
-    type KeepAwakeMode
+    saveAutoKeepAwakePreference,
+    savePersistedKeepAwakeState,
+    suppressAutoKeepAwake,
+    type KeepAwakeArmSource,
+    type KeepAwakeMode,
+    type PersistedKeepAwakeState
   } from './keepAwake';
   import { deliverNativeSystemNotification } from './nativeNotifications';
   import { projectDisplayName } from './worktrees';
@@ -28,6 +40,7 @@
     visible: boolean;
     open?: boolean;
     armed?: boolean;
+    autoEnabled?: boolean;
     supported?: boolean;
   }
 
@@ -43,7 +56,11 @@
     retry_in_ms: number | null;
   }
 
-  type ReleaseReason = 'idle' | 'user' | null;
+  type ReleaseReason = 'idle' | 'toggle' | 'user' | null;
+
+  const AUTO_ARM_MAX_RETRY_MS = 60_000;
+  const POWER_RESYNC_GAP_MS = 5_000;
+  const KEEP_AWAKE_RESYNC_EVENT = 'keep-awake://resync';
 
   let {
     processes,
@@ -52,6 +69,7 @@
     visible,
     open = $bindable(false),
     armed = $bindable(false),
+    autoEnabled = $bindable(false),
     supported = $bindable(false)
   }: Props = $props();
 
@@ -59,12 +77,24 @@
   let warning = $state<string | null>(null);
   let mode = $state<KeepAwakeMode>('all');
   let specificAgentId = $state('');
+  let preferredMode = $state<KeepAwakeMode>('all');
+  let preferredSpecificAgentId = $state('');
   let machine = $state(initialKeepAwakeState());
+  let autoMachine = $state(initialAutoKeepAwakeState());
   let connectionMachine = $state(initialKeepAwakeConnectionState());
   let machineGeneration = $state(0);
   let autoReleasePending = false;
   let componentActive = false;
   let nativeSyncPending = false;
+  let nativeHydrated = $state(false);
+  let preferencesHydrated = $state(false);
+  let autoArmPending = false;
+  let autoArmFailureCount = $state(0);
+  let autoArmFailedAt = $state<number | null>(null);
+  let autoArmRetryAt = $state<number | null>(null);
+  let autoDisableReleasePending = false;
+  let lastPersistedState = '';
+  let restoredHold: PersistedKeepAwakeState['activeHold'] = null;
   let notifiedRespawnCount = 0;
   let daemonUnreachableNotified = false;
   let clockTick = $state(monotonicNow());
@@ -81,6 +111,13 @@
   });
   let lastReleaseReason = $state<ReleaseReason>(null);
   let availableAgents = $derived(runningAgents(processes));
+  let autoEvaluation = $derived(evaluateAutoKeepAwake(
+    autoMachine,
+    processes,
+    autoEnabled,
+    clockTick,
+    { connected: connectionStatus === 'connected' }
+  ));
   let evaluation = $derived(evaluateKeepAwakeAtCurrentTime(
     machine,
     processes,
@@ -95,12 +132,38 @@
   let selectedAgent = $derived(
     availableAgents.find((process) => String(process.id) === specificAgentId) ?? null
   );
+  let verifiedArmed = $derived(
+    machine.armed && nativeStatus.armed && nativeStatus.active
+  );
+  let autoRetryInSeconds = $derived(
+    autoArmRetryAt === null ? null : Math.max(0, Math.ceil((autoArmRetryAt - clockTick) / 1_000))
+  );
   let triggerLabel = $derived.by(() => {
     if (warning) return warning;
-    if (!machine.armed) return 'Keep Mac awake until agents idle';
-    if (!nativeStatus.active) return 'Restoring the macOS idle-sleep assertion';
+    if (!machine.armed) {
+      if (autoEnabled && autoMachine.suppressedUntilActivityEdge) {
+        return 'Auto keep awake paused until fresh agent activity';
+      }
+      if (autoEnabled) {
+        const count = autoEvaluation.activeAgentIds.length;
+        if (count > 0 && autoRetryInSeconds !== null && autoRetryInSeconds > 0) {
+          return `Auto keep awake retrying in ${autoRetryInSeconds}s`;
+        }
+        return count > 0
+          ? `Auto keep awake is arming for ${count} ${count === 1 ? 'agent' : 'agents'}`
+          : 'Auto keep awake is on — waiting for agent activity';
+      }
+      return 'Keep Mac awake until agents idle';
+    }
+    if (!verifiedArmed) return 'Keep awake hold is being repaired';
     if (connectionEvaluation.daemonUnreachable) {
       return 'Daemon unreachable — Mac is still being kept awake';
+    }
+    if (machine.armSource === 'auto') {
+      const count = autoEvaluation.activeAgentIds.length;
+      return count > 0
+        ? `Keeping Mac awake — auto (${count} ${count === 1 ? 'agent' : 'agents'} running)`
+        : 'Keeping Mac awake — auto (waiting for idle settle)';
     }
     if (machine.mode === 'specific') {
       const name = processName(machine.watchedAgentIds[0]);
@@ -117,11 +180,24 @@
     if (machine.armed && warning) return `${warning} ${assertion}`;
     if (!machine.armed && warning) return warning;
     if (!machine.armed) {
+      if (autoEnabled && autoMachine.suppressedUntilActivityEdge) {
+        return 'Auto keep awake paused by your manual disarm until fresh agent activity.';
+      }
+      if (autoEnabled) {
+        const count = autoEvaluation.activeAgentIds.length;
+        if (count > 0 && autoRetryInSeconds !== null && autoRetryInSeconds > 0) {
+          return `Auto keep awake could not arm — retrying in ${autoRetryInSeconds}s.`;
+        }
+        return count > 0
+          ? `Auto keep awake is on — arming for ${count} ${count === 1 ? 'agent' : 'agents'}.`
+          : 'Auto keep awake is on — waiting for agent activity.';
+      }
       if (lastReleaseReason === 'idle') return 'Released because all watched agents became idle.';
+      if (lastReleaseReason === 'toggle') return 'Released because auto keep awake was turned off.';
       if (lastReleaseReason === 'user') return 'Released by you.';
       return 'Ready to prevent system idle sleep.';
     }
-    if (!nativeStatus.active) return 'Restoring the macOS idle-sleep assertion…';
+    if (!verifiedArmed) return 'Keep awake hold lost — the native watchdog is repairing it…';
     if (connectionEvaluation.daemonUnreachable) {
       return `Daemon unreachable — still keeping Mac awake. ${assertion}`;
     }
@@ -130,12 +206,16 @@
     }
     if (evaluation.releaseInSeconds !== null) {
       const subject = machine.mode === 'all' ? 'All agents' : 'Watched agent';
-      return `${subject} idle — releasing in ${evaluation.releaseInSeconds}s. ${assertion}`;
+      const prefix = machine.armSource === 'auto' ? 'Auto keep awake — ' : '';
+      return `${prefix}${subject.toLocaleLowerCase()} idle — releasing in ${evaluation.releaseInSeconds}s. ${assertion}`;
     }
     const names = evaluation.waitingAgentIds
       .map(processName)
       .filter((name): name is string => name !== null);
     const count = evaluation.waitingAgentIds.length;
+    if (machine.armSource === 'auto') {
+      return `Keeping Mac awake — auto (${count} ${count === 1 ? 'agent' : 'agents'} running). ${assertion}`;
+    }
     return `Keeping Mac awake. ${assertion} Waiting on ${count} ${count === 1 ? 'agent' : 'agents'}: ${names.join(', ')}`;
   });
   let assertionHistoryLine = $derived(
@@ -147,8 +227,50 @@
   });
 
   $effect(() => {
+    const next = autoEvaluation;
+    if (next.state !== autoMachine) autoMachine = next.state;
+    if (next.activityEdge && autoArmFailedAt !== null) resetAutoArmFailure();
+    if (
+      componentActive
+      && nativeHydrated
+      && connectionStatus === 'connected'
+      && next.shouldArm
+      && !machine.armed
+      && !busy
+      && !autoArmPending
+      && (autoArmRetryAt === null || clockTick >= autoArmRetryAt)
+    ) void armAutomatically();
+  });
+
+  $effect(() => {
+    if (!preferencesHydrated || !nativeHydrated) return;
+    const activeHold = machine.armed && machine.armSource !== null
+      ? {
+          mode: machine.mode,
+          armSource: machine.armSource,
+          watchedAgentIds: machine.watchedAgentIds
+        }
+      : null;
+    const persistedState: PersistedKeepAwakeState = {
+      autoState: {
+        activeAgentIds: autoMachine.activeAgentIds,
+        suppressedUntilActivityEdge: autoMachine.suppressedUntilActivityEdge
+      },
+      preferredMode,
+      preferredSpecificAgentId: positiveAgentId(preferredSpecificAgentId),
+      activeHold
+    };
+    const serialized = JSON.stringify(persistedState);
+    if (serialized === lastPersistedState) return;
+    lastPersistedState = serialized;
+    savePersistedKeepAwakeState(persistedState);
+  });
+
+  $effect(() => {
     if (machine.armed || availableAgents.some((process) => String(process.id) === specificAgentId)) return;
-    specificAgentId = String(availableAgents[0]?.id ?? '');
+    const next = String(availableAgents[0]?.id ?? '');
+    specificAgentId = next;
+    preferredSpecificAgentId = next;
   });
 
   $effect(() => {
@@ -207,18 +329,63 @@
 
   onMount(() => {
     componentActive = true;
+    autoEnabled = loadAutoKeepAwakePreference();
+    const persisted = loadPersistedKeepAwakeState();
+    autoMachine = {
+      ...initialAutoKeepAwakeState(),
+      ...persisted.autoState
+    };
+    preferredMode = persisted.preferredMode;
+    preferredSpecificAgentId = persisted.preferredSpecificAgentId === null
+      ? ''
+      : String(persisted.preferredSpecificAgentId);
+    mode = preferredMode;
+    specificAgentId = preferredSpecificAgentId;
+    restoredHold = persisted.activeHold;
+    preferencesHydrated = true;
     let pollCount = 0;
-    void syncNativeStatus();
+    let lastWallTick = Date.now();
+    let lastMonotonicTick = monotonicNow();
+    let unlistenPowerResume: UnlistenFn | null = null;
+    void syncNativeStatus().finally(() => {
+      if (componentActive) nativeHydrated = true;
+    });
+    const resync = () => {
+      if (machine.armed || nativeStatus.armed) void syncNativeStatus();
+    };
+    const resyncWhenVisible = () => {
+      if (document.visibilityState === 'visible') resync();
+    };
+    window.addEventListener('focus', resync);
+    document.addEventListener('visibilitychange', resyncWhenVisible);
+    void listen<NativeKeepAwakeStatus>(KEEP_AWAKE_RESYNC_EVENT, ({ payload }) => {
+      if (!componentActive) return;
+      reconcileNativeStatus(payload, machineGeneration);
+    }).then((unlisten) => {
+      if (componentActive) unlistenPowerResume = unlisten;
+      else unlisten();
+    }).catch(() => undefined);
     const timer = window.setInterval(() => {
-      clockTick = monotonicNow();
+      const nextMonotonicTick = monotonicNow();
+      const nextWallTick = Date.now();
+      const monotonicDelta = Math.max(0, nextMonotonicTick - lastMonotonicTick);
+      const wallDelta = Math.max(0, nextWallTick - lastWallTick);
+      const resumedFromPowerGap = wallDelta - monotonicDelta > POWER_RESYNC_GAP_MS
+        || monotonicDelta > POWER_RESYNC_GAP_MS;
+      lastMonotonicTick = nextMonotonicTick;
+      lastWallTick = nextWallTick;
+      clockTick = nextMonotonicTick;
       pollCount += 1;
       const shouldPoll = machine.armed ? pollCount % 3 === 0 : pollCount % 15 === 0;
-      if (!busy && shouldPoll) void syncNativeStatus();
+      if (!busy && (resumedFromPowerGap || shouldPoll)) void syncNativeStatus();
     }, 1_000);
 
     return () => {
       componentActive = false;
       window.clearInterval(timer);
+      window.removeEventListener('focus', resync);
+      document.removeEventListener('visibilitychange', resyncWhenVisible);
+      unlistenPowerResume?.();
       if (machine.armed) void invoke('keep_awake_stop').catch(() => undefined);
     };
   });
@@ -230,19 +397,51 @@
     try {
       const status = await invoke<NativeKeepAwakeStatus>('keep_awake_status');
       if (!componentActive || machineGeneration !== statusGeneration) return;
-      applyNativeStatus(status);
-      if (!machine.armed && status.armed) {
-        mode = 'all';
-        machine = armKeepAwake('all', null);
-        machineGeneration += 1;
-        lastReleaseReason = null;
-        clockTick = monotonicNow();
-      }
+      reconcileNativeStatus(status, statusGeneration);
     } catch (cause) {
       if (componentActive && machineGeneration === statusGeneration) warning = message(cause);
     } finally {
       nativeSyncPending = false;
     }
+  }
+
+  function reconcileNativeStatus(status: NativeKeepAwakeStatus, statusGeneration: number): void {
+    if (machineGeneration !== statusGeneration) return;
+    applyNativeStatus(status);
+    const reconciliation = reconcileKeepAwakeIntent(machine, status.armed);
+    if (reconciliation.holdLost) {
+      const lostSource = machine.armSource;
+      machine = reconciliation.state;
+      machineGeneration += 1;
+      restoredHold = null;
+      if (lostSource === 'auto') restoreManualSelection();
+      warning = status.warning ?? 'Keep awake hold lost — macOS no longer reports an armed assertion.';
+      void deliverNativeSystemNotification(
+        'Keep awake hold lost',
+        'Workman no longer reports an armed macOS idle-sleep assertion.'
+      );
+      return;
+    }
+    if (machine.armed || !status.armed) return;
+
+    const saved = restoredHold;
+    const fallbackSource: Exclude<KeepAwakeArmSource, null> = autoEnabled
+      && autoEvaluation.activeAgentIds.length > 0
+      && !autoMachine.suppressedUntilActivityEdge
+      ? 'auto'
+      : 'manual';
+    const source = saved?.armSource ?? fallbackSource;
+    const adoptedMode = saved?.mode ?? (source === 'auto' ? 'all' : preferredMode);
+    const watchedAgentId = adoptedMode === 'specific'
+      ? saved?.watchedAgentIds[0] ?? positiveAgentId(preferredSpecificAgentId)
+      : null;
+    mode = adoptedMode;
+    specificAgentId = watchedAgentId === null ? specificAgentId : String(watchedAgentId);
+    machine = armKeepAwake(adoptedMode, watchedAgentId, source);
+    machineGeneration += 1;
+    lastReleaseReason = null;
+    restoredHold = null;
+    clockTick = monotonicNow();
   }
 
   function processName(processId: number | undefined): string | null {
@@ -272,8 +471,11 @@
       }
       machine = armKeepAwake(
         mode,
-        mode === 'specific' ? Number(specificAgentId) : null
+        mode === 'specific' ? Number(specificAgentId) : null,
+        'manual'
       );
+      preferredMode = mode;
+      preferredSpecificAgentId = specificAgentId;
       machineGeneration += 1;
       lastReleaseReason = null;
       clockTick = monotonicNow();
@@ -287,24 +489,93 @@
     }
   }
 
-  async function disarm(): Promise<void> {
-    if (busy) return;
+  async function disarm(
+    manualOverride = true,
+    releaseReason: Exclude<ReleaseReason, 'idle' | null> = 'user'
+  ): Promise<boolean> {
+    if (busy) return false;
     busy = true;
     const generation = machineGeneration;
+    const source = machine.armSource;
     try {
       const status = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
       const disarmed = machine.armed && machineGeneration === generation;
       if (disarmed) {
         machine = disarmKeepAwake(machine);
+        if (manualOverride && autoEnabled) {
+          autoMachine = suppressAutoKeepAwake(autoMachine, processes, clockTick);
+        }
         machineGeneration += 1;
-        lastReleaseReason = 'user';
+        lastReleaseReason = releaseReason;
+        if (source === 'auto') restoreManualSelection();
       }
       applyNativeStatus(status);
       warning = null;
+      return disarmed;
     } catch (cause) {
       warning = message(cause);
+      return false;
     } finally {
       busy = false;
+    }
+  }
+
+  async function armAutomatically(): Promise<void> {
+    if (busy || autoArmPending || machine.armed || !autoEnabled || supported !== true) return;
+    busy = true;
+    autoArmPending = true;
+    warning = null;
+    try {
+      const status = await invoke<NativeKeepAwakeStatus>('keep_awake_start');
+      applyNativeStatus(status);
+      if (!status.supported || !status.armed) {
+        recordAutoArmFailure(status.warning ?? 'macOS keep awake is unavailable.');
+        return;
+      }
+      if (!autoEnabled) {
+        const stopped = await invoke<NativeKeepAwakeStatus>('keep_awake_stop');
+        applyNativeStatus(stopped);
+        return;
+      }
+      resetAutoArmFailure();
+      warning = status.warning;
+      mode = 'all';
+      machine = armKeepAwake('all', null, 'auto');
+      machineGeneration += 1;
+      lastReleaseReason = null;
+      clockTick = monotonicNow();
+      if (!status.active) warning = status.warning ?? 'Restoring the macOS idle-sleep assertion.';
+    } catch (cause) {
+      recordAutoArmFailure(message(cause));
+    } finally {
+      autoArmPending = false;
+      busy = false;
+    }
+  }
+
+  async function changeAutoEnabled(next: boolean): Promise<void> {
+    if (autoEnabled === next) return;
+    autoEnabled = next;
+    saveAutoKeepAwakePreference(next);
+    if (!next) {
+      autoMachine = initialAutoKeepAwakeState();
+      resetAutoArmFailure();
+      if (!machine.armed) warning = null;
+      await releaseAutoHoldAfterToggleOff();
+    }
+  }
+
+  async function releaseAutoHoldAfterToggleOff(): Promise<void> {
+    if (autoDisableReleasePending) return;
+    autoDisableReleasePending = true;
+    try {
+      while (componentActive && !autoEnabled) {
+        if (!machine.armed || machine.armSource !== 'auto') return;
+        if (!busy && await disarm(false, 'toggle')) return;
+        await wait(1_000);
+      }
+    } finally {
+      autoDisableReleasePending = false;
     }
   }
 
@@ -330,6 +601,7 @@
       machine = disarmKeepAwake(machine);
       machineGeneration += 1;
       lastReleaseReason = 'idle';
+      restoreManualSelection();
     }
     autoReleasePending = false;
     busy = false;
@@ -345,10 +617,49 @@
     return cause instanceof Error ? cause.message : String(cause);
   }
 
+  function recordAutoArmFailure(reason: string): void {
+    autoArmFailureCount += 1;
+    autoArmFailedAt = clockTick;
+    const retryMs = Math.min(2 ** (autoArmFailureCount - 1) * 1_000, AUTO_ARM_MAX_RETRY_MS);
+    autoArmRetryAt = clockTick + retryMs;
+    warning = `${reason} Auto keep awake will retry in ${Math.ceil(retryMs / 1_000)}s.`;
+  }
+
+  function resetAutoArmFailure(): void {
+    autoArmFailureCount = 0;
+    autoArmFailedAt = null;
+    autoArmRetryAt = null;
+  }
+
+  function selectManualMode(next: KeepAwakeMode): void {
+    mode = next;
+    preferredMode = next;
+  }
+
+  function selectSpecificAgent(value: string): void {
+    specificAgentId = value;
+    preferredSpecificAgentId = value;
+  }
+
+  function restoreManualSelection(): void {
+    mode = preferredMode;
+    specificAgentId = preferredSpecificAgentId;
+  }
+
+  function positiveAgentId(value: string): number | null {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function wait(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
   function applyNativeStatus(status: NativeKeepAwakeStatus): void {
+    const retainedAutoFailure = autoArmFailedAt !== null && !status.armed ? warning : null;
     supported = status.supported;
     nativeStatus = status;
-    warning = status.warning;
+    warning = status.warning ?? retainedAutoFailure;
   }
 
   function assertionStatus(status: NativeKeepAwakeStatus): string {
@@ -370,12 +681,12 @@
         <IconButton
           {...props}
           class="keep-awake-trigger size-7 rounded border border-border bg-card"
-          data-armed={machine.armed}
+          data-armed={verifiedArmed}
           data-warning={statusIsWarning}
           label={triggerLabel}
         >
           {#snippet icon()}
-            <CoffeeIcon size={15} strokeWidth={1.8} fill={machine.armed ? 'currentColor' : 'none'} />
+            <CoffeeIcon size={15} strokeWidth={1.8} fill={verifiedArmed ? 'currentColor' : 'none'} />
           {/snippet}
         </IconButton>
       {/snippet}
@@ -389,14 +700,38 @@
       <fieldset disabled={busy || machine.armed}>
         <legend>Release condition</legend>
         <label class:chosen={mode === 'all'}>
-          <input type="radio" bind:group={mode} value="all" />
+          <input
+            type="radio"
+            name="keep-awake-mode"
+            checked={mode === 'all'}
+            onchange={() => selectManualMode('all')}
+          />
           <span>Until all agents are idle</span>
         </label>
         <label class:chosen={mode === 'specific'}>
-          <input type="radio" bind:group={mode} value="specific" />
+          <input
+            type="radio"
+            name="keep-awake-mode"
+            checked={mode === 'specific'}
+            onchange={() => selectManualMode('specific')}
+          />
           <span>Until a specific agent is idle</span>
         </label>
       </fieldset>
+
+      <div class="auto-setting">
+        <Switch
+          id="auto-keep-awake"
+          size="sm"
+          checked={autoEnabled}
+          aria-describedby="auto-keep-awake-description"
+          onCheckedChange={(checked) => void changeAutoEnabled(checked === true)}
+        />
+        <label for="auto-keep-awake">
+          <strong>Auto keep awake while agents are running</strong>
+          <span id="auto-keep-awake-description">Uses working agents and live, unpaused waits. Manual disarm pauses auto mode until fresh agent activity.</span>
+        </label>
+      </div>
 
       {#if mode === 'specific'}
         <div class="agent-select">
@@ -405,7 +740,7 @@
             type="single"
             value={specificAgentId}
             disabled={busy || machine.armed || availableAgents.length === 0}
-            onValueChange={(value) => { if (value) specificAgentId = value; }}
+            onValueChange={(value) => { if (value) selectSpecificAgent(value); }}
           >
             <Select.Trigger id="keep-awake-agent" size="sm">
               {#if selectedAgent}
@@ -436,7 +771,7 @@
         size="sm"
         variant={machine.armed ? 'outline' : 'default'}
         disabled={busy || (!machine.armed && mode === 'specific' && !selectedAgent)}
-        onclick={() => machine.armed ? void disarm() : void arm()}
+        onclick={() => machine.armed ? void disarm(true) : void arm()}
       >
         {busy ? 'Working…' : machine.armed ? 'Disarm' : 'Arm keep awake'}
       </Button>
@@ -457,6 +792,12 @@
   fieldset > label { display: flex; min-height: 30px; align-items: center; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-1) var(--space-2); color: var(--text-soft); font-size: var(--font-size-sm); }
   fieldset > label.chosen { border-color: var(--input); background: var(--accent); color: var(--foreground); }
   fieldset input { accent-color: var(--agent-state-waiting); }
+  .auto-setting { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); background: var(--card); }
+  .auto-setting :global([data-slot='switch']) { margin-top: 2px; }
+  .auto-setting label { min-width: 0; cursor: pointer; }
+  .auto-setting strong, .auto-setting span { display: block; }
+  .auto-setting strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 650; line-height: 1.3; }
+  .auto-setting span { margin-top: 2px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .agent-select { display: grid; }
   .agent-select :global([data-slot='select-trigger']) { width: 100%; }
   p { min-height: 31px; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); background: var(--card); color: var(--text-soft); font: var(--font-size-xs) var(--font-mono); line-height: 1.45; }

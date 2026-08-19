@@ -3,10 +3,11 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/native-visual-qa.sh --todo NNN --source-app PATH [--daemon-bin PATH] [--prepare-only]
+Usage: scripts/native-visual-qa.sh --todo NNN --source-app PATH [--daemon-bin PATH]
+       [--identity TOKEN] [--qa-root /tmp/PATH] [--prepare-only]
 
 Copies an unsigned/ad-hoc Workman bundle into a fresh per-todo /tmp root, assigns the
-com.workman.todoNNN identity, persists its isolated data/config environment in Info.plist,
+com.workman.TOKEN identity (default: todoNNN), persists its isolated data/config environment in Info.plist,
 registers that exact copy with LaunchServices, and launches it unless --prepare-only is set.
 EOF
   exit 64
@@ -15,12 +16,16 @@ EOF
 TODO_ID=""
 SOURCE_APP=""
 DAEMON_BIN=""
+IDENTITY=""
+REQUESTED_QA_ROOT=""
 PREPARE_ONLY=0
 while (($#)); do
   case "$1" in
     --todo) TODO_ID="${2:?--todo requires a value}"; shift ;;
     --source-app) SOURCE_APP="${2:?--source-app requires a value}"; shift ;;
     --daemon-bin) DAEMON_BIN="${2:?--daemon-bin requires a value}"; shift ;;
+    --identity) IDENTITY="${2:?--identity requires a value}"; shift ;;
+    --qa-root) REQUESTED_QA_ROOT="${2:?--qa-root requires a value}"; shift ;;
     --prepare-only) PREPARE_ONLY=1 ;;
     -h|--help) usage ;;
     *) printf 'native visual QA: unknown argument: %s\n' "$1" >&2; usage ;;
@@ -29,6 +34,13 @@ while (($#)); do
 done
 
 [[ "$TODO_ID" =~ ^[0-9]+$ ]] || { printf 'native visual QA: --todo must contain digits only\n' >&2; exit 64; }
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITY="todo${TODO_ID}"
+fi
+[[ "$IDENTITY" =~ ^[a-z][a-z0-9-]*$ ]] || {
+  printf 'native visual QA: --identity must start with a lowercase letter and contain lowercase letters, digits, or hyphens\n' >&2
+  exit 64
+}
 [[ -n "$SOURCE_APP" ]] || usage
 SOURCE_APP="$(cd "$(dirname "$SOURCE_APP")" && pwd)/$(basename "$SOURCE_APP")"
 [[ -d "$SOURCE_APP/Contents/MacOS" && -f "$SOURCE_APP/Contents/Info.plist" ]] || {
@@ -52,14 +64,27 @@ if [[ "$signature" == *"TeamIdentifier="* && "$signature" != *"TeamIdentifier=no
   exit 65
 fi
 
-QA_ROOT="$(mktemp -d "/tmp/workman-todo${TODO_ID}-qa.XXXXXX")"
-APP_NAME="Workman Todo ${TODO_ID}.app"
+if [[ -n "$REQUESTED_QA_ROOT" ]]; then
+  case "$REQUESTED_QA_ROOT" in
+    /tmp/*) ;;
+    *) printf 'native visual QA: --qa-root must be an absolute path below /tmp\n' >&2; exit 64 ;;
+  esac
+  [[ ! -e "$REQUESTED_QA_ROOT" ]] || {
+    printf 'native visual QA: --qa-root must not already exist: %s\n' "$REQUESTED_QA_ROOT" >&2
+    exit 65
+  }
+  mkdir -m 700 "$REQUESTED_QA_ROOT"
+  QA_ROOT="$REQUESTED_QA_ROOT"
+else
+  QA_ROOT="$(mktemp -d "/tmp/workman-todo${TODO_ID}-qa.XXXXXX")"
+fi
+APP_NAME="Workman ${IDENTITY}.app"
 QA_APP="$QA_ROOT/$APP_NAME"
 DATA_DIR="$QA_ROOT/data"
 CONFIG="$QA_ROOT/config.yml"
 OPEN_CAPTURE="$QA_ROOT/browser-open.log"
 FAKE_BIN="$QA_ROOT/fake-bin"
-BUNDLE_ID="com.workman.todo${TODO_ID}"
+BUNDLE_ID="com.workman.${IDENTITY}"
 cleanup_on_error() {
   status=$?
   if ((status != 0)); then
@@ -87,9 +112,9 @@ chmod 700 "$FAKE_BIN/open"
 
 PLIST="$QA_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleName Workman Todo $TODO_ID" "$PLIST"
-if ! /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Workman Todo $TODO_ID" "$PLIST" 2>/dev/null; then
-  /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Workman Todo $TODO_ID" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName Workman $IDENTITY" "$PLIST"
+if ! /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Workman $IDENTITY" "$PLIST" 2>/dev/null; then
+  /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Workman $IDENTITY" "$PLIST"
 fi
 /usr/libexec/PlistBuddy -c "Delete :LSEnvironment" "$PLIST" >/dev/null 2>&1 || true
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$PLIST"
@@ -101,6 +126,13 @@ fi
 if [[ -n "$DAEMON_BIN" ]]; then
   /usr/libexec/PlistBuddy -c "Add :LSEnvironment:WORKMAN_DAEMON_BIN string $DAEMON_BIN" "$PLIST"
 fi
+
+# Rewriting Info.plist invalidates the debug bundle's existing ad-hoc signature.
+# Clear inherited quarantine/provenance metadata and sign only the disposable copy
+# so LaunchServices can execute the new identity.
+/usr/bin/xattr -cr "$QA_APP"
+/usr/bin/codesign --force --deep --sign - "$QA_APP"
+/usr/bin/codesign --verify --deep --strict "$QA_APP"
 
 actual_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")"
 actual_data="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_DATA_DIR' "$PLIST")"
