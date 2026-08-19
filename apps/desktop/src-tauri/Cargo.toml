@@ -31,5 +31,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPa
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSString"] }
 plist = "1.8.0"
 
+[target.'cfg(windows)'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
+
 [dev-dependencies]
 tempfile = "3.21.0"
