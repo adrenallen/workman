@@ -4,20 +4,22 @@ import test from 'node:test';
 
 const detailFile = new URL('../src/lib/ScratchpadDetailView.svelte', import.meta.url);
 
-test('desktop scratchpad outline is viewport-bounded and independently scrollable', async () => {
-  const detail = await readFile(detailFile, 'utf8');
-  assert.match(detail, /\.outline-rail \{[^}]*position: sticky/);
-  assert.match(detail, /\.outline-rail \{[^}]*max-height: calc\(100vh - 36px\)/);
-  assert.match(detail, /grid-template-rows: minmax\(112px, 1fr\) auto/);
-  assert.match(detail, /\.outline-list\[data-scratchpad-outline='desktop'\] \{[^}]*overflow-y: auto/);
-  assert.match(detail, /scrollbar-gutter: stable/);
-  assert.match(detail, /<div class="comments-section">/);
-});
-
-test('active desktop outline item scrolls into view with nearest alignment', async () => {
+test('scratchpad outline exposes stable geometry hooks for the real-app harness', async () => {
   const detail = await readFile(detailFile, 'utf8');
   assert.match(detail, /data-scratchpad-outline=\{closeAfterSelect \? 'mobile' : 'desktop'\}/);
   assert.match(detail, /data-outline-id=\{item\.id\}/);
-  assert.match(detail, /\$effect\(\(\) => \{[\s\S]*const activeId = activeOutlineId/);
-  assert.match(detail, /active\?\.scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(detail, /<div class="comments-section">/);
+});
+
+test('active desktop outline scrolling is scoped to the owned rail', async () => {
+  const detail = await readFile(detailFile, 'utf8');
+  const outlineTracking = detail.slice(
+    detail.indexOf('const activeId = activeOutlineId'),
+    detail.indexOf('$effect(() => () => clearSaveTimer')
+  );
+  assert.match(detail, /let desktopOutlineList = \$state<HTMLElement \| null>\(null\)/);
+  assert.match(outlineTracking, /scrollOutlineItemWithinList\(list, active\)/);
+  assert.match(outlineTracking, /list\.scrollTo\(\{ top \}\)/);
+  assert.doesNotMatch(outlineTracking, /scrollIntoView/);
+  assert.doesNotMatch(outlineTracking, /document\.querySelector<HTMLElement>/);
 });

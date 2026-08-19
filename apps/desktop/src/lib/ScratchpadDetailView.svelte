@@ -107,6 +107,7 @@
   let outlineScrollRequest = $state<{ key: number; line: number } | null>(null);
   let viewportLine = $state(1);
   let titleInput = $state<HTMLTextAreaElement | null>(null);
+  let desktopOutlineList = $state<HTMLElement | null>(null);
   let commentsOpen = $state(true);
   let mobileCommentsOpen = $state(false);
   let showResolvedComments = $state(false);
@@ -598,12 +599,31 @@
     const activeId = activeOutlineId;
     if (activeId === null) return;
     queueMicrotask(() => {
-      const list = document.querySelector<HTMLElement>('[data-scratchpad-outline="desktop"]');
-      const active = [...(list?.querySelectorAll<HTMLElement>('[data-outline-id]') ?? [])]
-        .find((item) => item.dataset.outlineId === activeId);
-      active?.scrollIntoView({ block: 'nearest' });
+      const list = desktopOutlineList;
+      const active = list?.querySelector<HTMLElement>(
+        `[data-outline-id="${CSS.escape(activeId)}"]`
+      );
+      if (list && active) scrollOutlineItemWithinList(list, active);
     });
   });
+
+  function registerOutlineList(node: HTMLElement, desktop: boolean) {
+    if (desktop) desktopOutlineList = node;
+    return {
+      destroy() {
+        if (desktop && desktopOutlineList === node) desktopOutlineList = null;
+      }
+    };
+  }
+
+  function scrollOutlineItemWithinList(list: HTMLElement, item: HTMLElement): void {
+    const listBounds = list.getBoundingClientRect();
+    const itemBounds = item.getBoundingClientRect();
+    let top = list.scrollTop;
+    if (itemBounds.top < listBounds.top) top -= listBounds.top - itemBounds.top;
+    else if (itemBounds.bottom > listBounds.bottom) top += itemBounds.bottom - listBounds.bottom;
+    if (top !== list.scrollTop) list.scrollTo({ top });
+  }
 
   $effect(() => () => clearSaveTimer());
 </script>
@@ -613,6 +633,7 @@
     class="outline-list"
     aria-label="On this page"
     data-scratchpad-outline={closeAfterSelect ? 'mobile' : 'desktop'}
+    use:registerOutlineList={!closeAfterSelect}
   >
     {#each outline as item (item.id)}
       <button
@@ -917,7 +938,7 @@
   .recovery-banner { border-color: var(--border); background: var(--card); color: var(--muted-foreground); }
   .recovery-banner span { min-width: 0; flex: 1; }
   .body-section { margin-top: 22px; overflow: visible; border-top: 1px solid var(--border); background: transparent; }
-  .outline-rail { position: sticky; top: 18px; display: grid; max-height: calc(100vh - 36px); min-height: 0; grid-template-rows: minmax(112px, 1fr) auto; gap: 16px; overflow: hidden; }
+  .outline-rail { position: sticky; top: 18px; display: grid; max-height: calc(100cqh - 48px); min-height: 0; grid-template-rows: minmax(112px, 1fr) auto; gap: 16px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .outline-section { display: grid; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
   .outline-section > span { color: var(--muted-foreground); font: 650 var(--font-size-xs)/1 var(--terminal-font-family); letter-spacing: 0.055em; text-transform: uppercase; }
   .outline-section h2 { margin: 5px 0 12px; color: var(--foreground); font-size: var(--font-size-base); line-height: 1.2; }
@@ -934,7 +955,7 @@
   :global(.comments-trigger > svg) { color: var(--muted-foreground); transition: transform 150ms ease; }
   :global(.comments-trigger > svg.open) { transform: rotate(180deg); }
   .comments-section { min-height: 0; overflow: hidden; }
-  .comments-panel { max-height: min(52vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); scrollbar-gutter: stable; }
+  .comments-panel { max-height: min(40cqh, 520px); overflow-y: auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: var(--card); scrollbar-gutter: stable; }
   .outline-list[data-scratchpad-outline='desktop'], .comments-panel { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
   .outline-list[data-scratchpad-outline='desktop']::-webkit-scrollbar, .comments-panel::-webkit-scrollbar { width: 6px; }
   .outline-list[data-scratchpad-outline='desktop']::-webkit-scrollbar-thumb, .comments-panel::-webkit-scrollbar-thumb { border-radius: var(--radius); background: var(--border-strong); }
