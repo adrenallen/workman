@@ -284,6 +284,7 @@
   let documentVisible = $state(true);
   let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
+  let autoKeepAwakeEnabled = $state(false);
   let keepAwakeSupported = $state(false);
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
@@ -369,7 +370,11 @@
   }));
   $effect(() => {
     if (connection.status !== 'connected') return;
-    const request = shouldSubscribeProcessStatuses(documentVisible, keepAwakeArmed)
+    const request = shouldSubscribeProcessStatuses(
+      documentVisible,
+      keepAwakeArmed,
+      autoKeepAwakeEnabled
+    )
       ? client.subscribeProcessStatuses()
       : client.unsubscribeProcessStatuses();
     void request.catch(reportError);
@@ -5092,6 +5097,7 @@
           visible={documentVisible}
           bind:open={keepAwakeOpen}
           bind:armed={keepAwakeArmed}
+          bind:autoEnabled={autoKeepAwakeEnabled}
           bind:supported={keepAwakeSupported}
         />
       </div>

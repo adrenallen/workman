@@ -36,6 +36,7 @@
   let snapshot = $state<QuickPromptsSnapshot>({ prompts: [], loading: false, error: null });
   let query = $state('');
   let selectedIndex = $state(0);
+  let promptList = $state<HTMLElement | null>(null);
   let editorOpen = $state(false);
   let insertFailed = $state(false);
   let filtered = $derived(filterQuickPrompts(snapshot.prompts, query));
@@ -53,6 +54,17 @@
 
   $effect(() => {
     if (selectedIndex >= filtered.length) selectedIndex = Math.max(0, filtered.length - 1);
+  });
+
+  $effect(() => {
+    const promptId = activePrompt?.id;
+    const list = promptList;
+    if (!promptId || !list) return;
+    queueMicrotask(() => {
+      list
+        .querySelector<HTMLElement>(`[data-quick-prompt-id="${promptId}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
   });
 
   function choose(prompt: QuickPrompt | null, submit: boolean): void {
@@ -82,12 +94,6 @@
   ): void {
     if (filtered.length === 0) return;
     selectedIndex = moveQuickPromptSelection(selectedIndex, filtered.length, action);
-    const prompt = filtered[selectedIndex];
-    if (prompt) {
-      queueMicrotask(() =>
-        document.getElementById(`quick-prompt-option-${prompt.id}`)?.scrollIntoView({ block: 'nearest' })
-      );
-    }
   }
 
   function message(cause: unknown): string {
@@ -150,22 +156,25 @@
           {#if snapshot.loading}<span>Refreshing…</span>{/if}
         </div>
 
-        <Command.List class="min-h-28 max-h-80 p-1.5">
+        <Command.List bind:ref={promptList} class="min-h-28 max-h-80 p-1.5">
           {#each filtered as prompt, index (prompt.id)}
             <Command.Item
               id={`quick-prompt-option-${prompt.id}`}
+              data-quick-prompt-id={prompt.id}
+              data-selected={index === selectedIndex ? '' : undefined}
+              aria-selected={index === selectedIndex}
               value={String(prompt.id)}
               keywords={[prompt.name, prompt.body]}
-              class="min-h-12 items-start gap-2 px-2 py-2"
+              class="quick-prompt-option min-h-12 items-start gap-2 px-2 py-2"
               onmouseenter={() => (selectedIndex = index)}
               onSelect={() => choose(prompt, false)}
             >
-              <span class="mt-0.5 grid size-6 shrink-0 place-items-center border border-border bg-card text-muted-foreground" aria-hidden="true">
+              <span class="quick-prompt-icon mt-0.5 grid size-6 shrink-0 place-items-center border border-border bg-card text-muted-foreground" aria-hidden="true">
                 <FileTextIcon size={13} strokeWidth={1.8} />
               </span>
               <span class="min-w-0 flex-1">
-                <strong class="block truncate text-sm font-semibold text-foreground">{prompt.name}</strong>
-                <small class="mt-0.5 block truncate font-mono text-xs text-muted-foreground">{quickPromptPreview(prompt.body)}</small>
+                <strong class="quick-prompt-name block truncate text-sm font-semibold text-foreground">{prompt.name}</strong>
+                <small class="quick-prompt-preview mt-0.5 block truncate font-mono text-xs text-muted-foreground">{quickPromptPreview(prompt.body)}</small>
               </span>
             </Command.Item>
           {:else}
@@ -207,3 +216,26 @@
     onClose={() => (editorOpen = false)}
   />
 {/if}
+
+<style>
+  :global(.quick-prompt-option[data-selected]) {
+    background: var(--ring);
+    color: var(--primary-foreground);
+    box-shadow: inset 3px 0 var(--foreground);
+  }
+
+  :global(.quick-prompt-option[data-selected] .quick-prompt-icon) {
+    border-color: currentColor;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--primary-foreground);
+  }
+
+  :global(.quick-prompt-option[data-selected] .quick-prompt-name) {
+    color: var(--primary-foreground);
+  }
+
+  :global(.quick-prompt-option[data-selected] .quick-prompt-preview) {
+    color: var(--primary-foreground);
+    opacity: 0.82;
+  }
+</style>

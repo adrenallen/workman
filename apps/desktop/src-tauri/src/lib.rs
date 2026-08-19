@@ -41,6 +41,7 @@ mod terminal_clipboard;
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
 const NATIVE_MENU_EVENT: &str = "menu://action";
+const KEEP_AWAKE_RESYNC_EVENT: &str = "keep-awake://resync";
 const MENU_ABOUT: &str = "workman.about";
 const MENU_SETTINGS: &str = "workman.settings";
 const MENU_CHECK_UPDATES: &str = "workman.check_updates";
@@ -116,6 +117,30 @@ impl KeepAwakeState {
 
     fn stop_silently(&self) {
         let _ = self.stop();
+    }
+
+    fn resync_after_power_event(&self) -> KeepAwakeStatus {
+        #[cfg(target_os = "macos")]
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Instant::now();
+            resync_keep_awake_child_with(&mut inner, now, || {
+                keep_awake_command(std::process::id())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            });
+            keep_awake_status_from(&inner, now)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            keep_awake_status_from(&KeepAwakeInner::default(), Instant::now())
+        }
     }
 }
 
@@ -614,6 +639,18 @@ fn sync_keep_awake_child_with(
     }
 }
 
+fn resync_keep_awake_child_with(
+    inner: &mut KeepAwakeInner,
+    now: Instant,
+    spawn: impl FnOnce() -> std::io::Result<Child>,
+) {
+    // `Instant` retry deadlines can pause while macOS sleeps. A power resume is
+    // an explicit re-verification edge, so retry immediately instead of carrying
+    // a pre-sleep deadline into the wake period.
+    inner.next_spawn_attempt_at = None;
+    sync_keep_awake_child_with(inner, now, spawn);
+}
+
 fn keep_awake_retry_delay(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(6);
     Duration::from_secs(1_u64 << exponent).min(KEEP_AWAKE_MAX_RETRY_DELAY)
@@ -789,6 +826,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build workman desktop")
         .run(|app, event| {
+            if matches!(&event, RunEvent::Resumed) {
+                let status = app.state::<KeepAwakeState>().resync_after_power_event();
+                let _ = app.emit(KEEP_AWAKE_RESYNC_EVENT, status);
+            }
             let should_stop = matches!(&event, RunEvent::Exit | RunEvent::ExitRequested { .. })
                 || matches!(
                     &event,
@@ -912,7 +953,7 @@ pub fn launch_environment(
     (data_dir, config, daemon_bin)
 }
 
-const NATIVE_VISUAL_QA_BUNDLE_PREFIX: &str = "com.workman.todo";
+const NATIVE_VISUAL_QA_BUNDLE_PREFIX: &str = "com.workman.";
 
 /// Fail closed before Tauri starts whenever a per-todo visual-QA bundle has lost its
 /// isolated launch environment. Computer-use clients may transparently reopen a closed
@@ -963,9 +1004,12 @@ fn macos_bundle_identifier_from_executable(executable: &Path) -> Result<Option<S
         .map(str::to_owned))
 }
 
-fn native_visual_qa_todo_id(identifier: &str) -> Option<&str> {
-    let todo_id = identifier.strip_prefix(NATIVE_VISUAL_QA_BUNDLE_PREFIX)?;
-    (!todo_id.is_empty() && todo_id.bytes().all(|byte| byte.is_ascii_digit())).then_some(todo_id)
+fn native_visual_qa_identity(identifier: &str) -> Option<&str> {
+    let identity = identifier.strip_prefix(NATIVE_VISUAL_QA_BUNDLE_PREFIX)?;
+    let digits = identity
+        .strip_prefix("todo")
+        .or_else(|| identity.strip_prefix("fix"))?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())).then_some(identity)
 }
 
 fn validate_native_visual_qa_environment(
@@ -974,19 +1018,18 @@ fn validate_native_visual_qa_environment(
     config: Option<&std::ffi::OsStr>,
     daemon_bin: Option<&std::ffi::OsStr>,
 ) -> Result<(), String> {
-    if !identifier.starts_with(NATIVE_VISUAL_QA_BUNDLE_PREFIX) {
+    let Some(suffix) = identifier.strip_prefix(NATIVE_VISUAL_QA_BUNDLE_PREFIX) else {
+        return Ok(());
+    };
+    if !suffix.starts_with("todo") && !suffix.starts_with("fix") {
         return Ok(());
     }
-    let todo_id = native_visual_qa_todo_id(identifier).ok_or_else(|| {
-        native_visual_qa_error(
-            identifier,
-            "bundle identifier must end with a numeric todo ID",
-        )
+    let identity = native_visual_qa_identity(identifier).ok_or_else(|| {
+        native_visual_qa_error(identifier, "QA bundle identity must be todoNNN or fixNNN")
     })?;
-    let token = format!("workman-todo{todo_id}");
     let data_dir =
-        required_native_visual_qa_path(identifier, "WORKMAN_DATA_DIR", data_dir, &token)?;
-    let config = required_native_visual_qa_path(identifier, "WORKMAN_CONFIG", config, &token)?;
+        required_native_visual_qa_path(identifier, "WORKMAN_DATA_DIR", data_dir, identity)?;
+    let config = required_native_visual_qa_path(identifier, "WORKMAN_CONFIG", config, identity)?;
     if data_dir == config {
         return Err(native_visual_qa_error(
             identifier,
@@ -1018,7 +1061,7 @@ fn required_native_visual_qa_path(
         return Err(native_visual_qa_error(
             identifier,
             &format!(
-                "{name} must be an absolute per-todo path under /tmp containing {token}; got {}",
+                "{name} must be an absolute isolated path under /tmp containing {token}; got {}",
                 path.display()
             ),
         ));
@@ -1034,7 +1077,7 @@ fn required_native_visual_qa_path(
         return Err(native_visual_qa_error(
             identifier,
             &format!(
-                "{name} must resolve to a per-todo path under /tmp containing {token}; got {}",
+                "{name} must resolve to an isolated path under /tmp containing {token}; got {}",
                 canonical.display()
             ),
         ));
@@ -1847,6 +1890,20 @@ mod tests {
         stop_keep_awake_child(&mut inner).unwrap();
     }
 
+    #[test]
+    fn power_resync_rechecks_immediately_instead_of_carrying_a_retry_deadline() {
+        let mut inner = KeepAwakeInner::default();
+        begin_keep_awake_session(&mut inner);
+        let now = Instant::now();
+        inner.next_spawn_attempt_at = now.checked_add(Duration::from_secs(60));
+
+        resync_keep_awake_child_with(&mut inner, now, test_keep_awake_child);
+
+        assert!(inner.child.is_some());
+        assert!(inner.next_spawn_attempt_at.is_none());
+        stop_keep_awake_child(&mut inner).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn stop_targets_only_the_state_owned_child() {
@@ -2003,6 +2060,27 @@ mod tests {
             Ok(())
         );
 
+        let fix_identifier = "com.workman.fix28";
+        let fix_root = tempfile::Builder::new()
+            .prefix("qa-fix28.")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let fix_data_path = fix_root.path().join("data");
+        let fix_config_path = fix_root.path().join("config.yml");
+        std::fs::create_dir(&fix_data_path).unwrap();
+        std::fs::write(&fix_config_path, b"agent_tools: []\n").unwrap();
+        let fix_data = fix_data_path.into_os_string();
+        let fix_config = fix_config_path.into_os_string();
+        assert_eq!(
+            validate_native_visual_qa_environment(
+                fix_identifier,
+                Some(&fix_data),
+                Some(&fix_config),
+                Some(&daemon)
+            ),
+            Ok(())
+        );
+
         for (data, config, expected) in [
             (
                 None,
@@ -2019,7 +2097,7 @@ mod tests {
                     "/Users/g/Library/Application Support/workman",
                 )),
                 Some(config.as_os_str()),
-                "must resolve to a per-todo path under /tmp",
+                "must resolve to an isolated path under /tmp",
             ),
             (
                 Some(std::ffi::OsStr::new("/tmp/other-qa/data")),
@@ -2048,7 +2126,12 @@ mod tests {
             None,
         )
         .expect_err("malformed QA identities must fail closed");
-        assert!(error.contains("must end with a numeric todo ID"));
+        assert!(error.contains("must be todoNNN or fixNNN"));
+
+        let error =
+            validate_native_visual_qa_environment("com.workman.fix-not-a-number", None, None, None)
+                .expect_err("malformed fix identities must fail closed");
+        assert!(error.contains("must be todoNNN or fixNNN"));
     }
 
     #[cfg(target_os = "macos")]

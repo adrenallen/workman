@@ -114,7 +114,7 @@
   .document-actions { display: flex; flex: none; align-items: center; gap: 2px; }
   .reference { display: inline-flex; min-height: 28px; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 7px; background: transparent; color: var(--muted-foreground); font: 600 var(--font-size-xs)/1 var(--terminal-font-family); cursor: pointer; }
   .reference:hover { border-color: var(--input); color: var(--foreground); }
-  .document-viewport { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .document-viewport { container-type: size; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .document-layout { display: grid; width: 100%; min-height: 100%; grid-template-columns: minmax(0, 780px); justify-content: center; }
   .document-layout.with-rail { grid-template-columns: minmax(0, 780px) minmax(168px, 220px); gap: 28px; }
   .document-column { min-width: 0; min-height: 100%; padding: 28px 28px 56px; }
