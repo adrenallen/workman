@@ -105,7 +105,9 @@ pub use user_config::{
     UserTerminalConfig, UserUpdateConfig, WORKMAN_CONFIG_ENV, parse_user_config,
     resolve_update_key, sync_user_agent_tools, sync_user_config_file, user_config_path,
 };
-pub use user_environment::{ResolvedUserEnvironment, UserEnvironmentInfo, UserEnvironmentResolver};
+pub use user_environment::{
+    EnvironmentCaptureMode, ResolvedUserEnvironment, UserEnvironmentInfo, UserEnvironmentResolver,
+};
 pub use version::{BUILD_ID, BUILD_VERSION, CONTROL_PROTOCOL_VERSION, DaemonVersion};
 
 pub type SharedProcessRegistry = Arc<Mutex<ProcessRegistry>>;

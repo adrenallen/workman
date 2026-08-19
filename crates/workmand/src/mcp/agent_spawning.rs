@@ -1829,17 +1829,21 @@ pub(crate) async fn deep_check_registered_agent(
         &user_environment,
     )
     .await;
-    if !health
-        .tools
-        .first()
-        .is_some_and(|health| health.found_on_path)
-    {
+    if !health.tools.first().is_some_and(|tool| tool.found_on_path) {
+        let diagnostic = health
+            .tools
+            .first()
+            .and_then(|tool| tool.path_diagnostic.as_deref())
+            .map(|diagnostic| format!(" {diagnostic}"))
+            .unwrap_or_default();
         return Ok(AgentToolDeepCheckResult {
             agent_tool_id,
             process_id: None,
             success: false,
             elapsed_ms: elapsed_millis(started),
-            message: "Runtime binary was not found on PATH; no process was spawned.".to_owned(),
+            message: format!(
+                "Runtime binary was not found on PATH; no process was spawned.{diagnostic}"
+            ),
         });
     }
 

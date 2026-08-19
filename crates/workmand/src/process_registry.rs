@@ -3315,13 +3315,21 @@ mod tests {
         let shell = temp.path().join("fixture-shell");
         std::fs::write(
             &shell,
-            concat!(
-                "#!/bin/sh\n",
-                "[ \"$1\" = -l ] || exit 91\n",
-                "[ \"$2\" = -c ] || exit 92\n",
-                ". \"$HOME/.profile\"\n",
-                "shift\n",
-                "exec /bin/sh \"$@\"\n",
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "[ \"$1\" = -l ] || exit 91\n",
+                    "shift\n",
+                    "if [ \"$1\" = -i ]; then\n",
+                    "  export PATH={:?}\n",
+                    "  shift\n",
+                    "fi\n",
+                    "[ \"$1\" = -c ] || exit 92\n",
+                    ". {:?}\n",
+                    "exec /bin/sh \"$@\"\n",
+                ),
+                "/opt/interactive/bin:/usr/bin:/bin",
+                temp.path().join(".profile"),
             ),
         )
         .unwrap();
@@ -3330,7 +3338,6 @@ mod tests {
             temp.path().join(".profile"),
             concat!(
                 "export PROFILE_VALUE='from login profile'\n",
-                "export PATH='/opt/homebrew/bin:/usr/bin:/bin'\n",
                 "export TMPDIR='/tmp/workman-env-fixture'\n",
             ),
         )
@@ -3417,7 +3424,7 @@ mod tests {
                     r#"printf 'AGENT_ENV:%s|%s|%s|%s|%s\n' "$TERM_PROGRAM" "$PATH" "$HOME" "$TMPDIR" "$LANG""#.into(),
                 ),
                 working_dir: temp.path().to_string_lossy().into_owned(),
-                env: environment,
+                env: environment.clone(),
                 auto_start: false,
                 auto_restart: false,
                 restart_when_changed: Vec::new(),
@@ -3447,10 +3454,51 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out: {output:?}");
             thread::sleep(Duration::from_millis(10));
         };
-        assert!(output.contains("AGENT_ENV:WezTerm|/opt/homebrew/bin:/usr/bin:/bin|"));
+        assert!(output.contains("AGENT_ENV:WezTerm|/opt/interactive/bin:/usr/bin:/bin|"));
         assert!(output.contains(temp.path().to_string_lossy().as_ref()));
         assert!(output.contains("|/tmp/workman-env-fixture|"));
         assert!(output.contains("C.UTF-8") || output.contains("en_US.UTF-8"));
+
+        environment.insert("PATH".to_owned(), "/per-process/bin".to_owned());
+        registry
+            .create(Process {
+                id: 43,
+                project_id: 1,
+                kind: ProcessKind::Command,
+                name: "process path override".into(),
+                command: Some(r#"printf 'OVERRIDE_PATH:%s\n' "$PATH""#.into()),
+                working_dir: temp.path().to_string_lossy().into_owned(),
+                env: environment,
+                auto_start: false,
+                auto_restart: false,
+                restart_when_changed: Vec::new(),
+                source: ProcessSource::Local,
+                trust_hash: None,
+                status: ProcessStatus::Stopped,
+                pid: None,
+                exit_code: None,
+                exit_signal: None,
+                exited_at: None,
+                agent_tool_id: None,
+                spawned_by_process_id: None,
+                sort_order: 0,
+            })
+            .unwrap();
+        registry.start(43).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let output = loop {
+            let output = registry.raw_output(43, None, usize::MAX).unwrap().data;
+            if output
+                .windows(b"OVERRIDE_PATH:".len())
+                .any(|window| window == b"OVERRIDE_PATH:")
+            {
+                break String::from_utf8_lossy(&output).into_owned();
+            }
+            assert!(Instant::now() < deadline, "timed out: {output:?}");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(output.contains("OVERRIDE_PATH:/per-process/bin"));
     }
 
     #[test]
