@@ -233,6 +233,17 @@ pub struct ProjectWorktree {
     pub managed: bool,
 }
 
+/// Minimal crash-recovery journal for one destructive project removal.
+///
+/// This deliberately does not persist general worktree-operation state. It only
+/// records enough to reconcile a removal that was active when the daemon exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveWorktreeRemoval {
+    pub project_id: ProjectId,
+    pub phase: String,
+    pub delete_from_disk: bool,
+}
+
 /// Configuration for one supported coding-agent command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTool {

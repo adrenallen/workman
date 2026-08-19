@@ -12,9 +12,9 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    Actor, AgentLaunchMode, AgentSession, AgentTemplate, AgentTool, Process, ProcessId,
-    ProcessKind, Profile, ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree, QuickPrompt,
-    Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
+    ActiveWorktreeRemoval, Actor, AgentLaunchMode, AgentSession, AgentTemplate, AgentTool, Process,
+    ProcessId, ProcessKind, Profile, ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree,
+    QuickPrompt, Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
     WorktreeRepositoryId,
 };
 
@@ -165,10 +165,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "scratchpad_comments",
         include_str!("../migrations/0030_scratchpad_comments.sql"),
     ),
+    (
+        31,
+        "active_worktree_removals",
+        include_str!("../migrations/0031_active_worktree_removals.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 30;
+pub const LATEST_SCHEMA_VERSION: i64 = 31;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -1094,6 +1099,58 @@ impl Store {
             .connection
             .execute("DELETE FROM projects WHERE id = ?1", [id])?
             > 0)
+    }
+
+    /// Persist the intentionally small restart journal for an active removal.
+    pub fn put_active_worktree_removal(&self, removal: &ActiveWorktreeRemoval) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT INTO active_worktree_removals
+                (project_id, phase, delete_from_disk, updated_at)
+             VALUES (?1, ?2, ?3, unixepoch())
+             ON CONFLICT(project_id) DO UPDATE SET
+                phase = excluded.phase,
+                delete_from_disk = excluded.delete_from_disk,
+                updated_at = excluded.updated_at",
+            params![removal.project_id, removal.phase, removal.delete_from_disk,],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_active_worktree_removal_phase(
+        &self,
+        project_id: ProjectId,
+        phase: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "UPDATE active_worktree_removals
+             SET phase = ?2, updated_at = unixepoch()
+             WHERE project_id = ?1",
+            params![project_id, phase],
+        )? > 0)
+    }
+
+    pub fn list_active_worktree_removals(&self) -> StoreResult<Vec<ActiveWorktreeRemoval>> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, phase, delete_from_disk
+             FROM active_worktree_removals
+             ORDER BY updated_at, project_id",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok(ActiveWorktreeRemoval {
+                    project_id: row.get(0)?,
+                    phase: row.get(1)?,
+                    delete_from_disk: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_active_worktree_removal(&self, project_id: ProjectId) -> StoreResult<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM active_worktree_removals WHERE project_id = ?1",
+            [project_id],
+        )? > 0)
     }
 
     pub fn put_worktree_repository(&self, repository: &WorktreeRepository) -> StoreResult<()> {

@@ -39,7 +39,7 @@ test('pending local work is listed and requires one explicit Delete anyway click
   assert.match(dialog, /Delete anyway/);
   assert.doesNotMatch(dialog, /confirmBranch|Type <code>|Allow forced deletion/);
   assert.match(dialog, /safety\.dependent_worktrees/);
-  assert.match(app, /cause\.code === 'dirty_worktree'/);
+  assert.match(app, /fallbackCause\.code === 'dirty_worktree'/);
   assert.match(app, /force_dirty: forceDirty/);
   assert.doesNotMatch(app, /confirm_branch: confirmBranch/);
 });
@@ -61,6 +61,7 @@ test('broken or duplicate registrations are unregistered with files untouched', 
   assert.match(dialog, /if \(knownMissingRegistration\) deleteFromDisk = false/);
   assert.match(dialog, /files stay untouched/);
   assert.match(app, /client\.control<WorktreeRemoval>\('projects\.remove'/);
+  assert.match(app, /client\.removeWorktreeAsync\(operationId/);
   assert.match(app, /removal\.registration_issue \|\| \(deleteFromDisk && removal\.files_untouched\)/);
   assert.match(app, /Files left untouched at \$\{removal\.path\}/);
   assert.match(app, /class="remove-worktree-notice"/);
@@ -73,14 +74,54 @@ test('project removal RPC is reachable only from the explicit in-app dialog conf
 
   assert.match(menuAction, /openRemoveWorktree\(project\)/);
   assert.doesNotMatch(menuAction, /client\.control|confirm_remove/);
-  assert.match(confirmation, /client\.control<WorktreeRemoval>\('projects\.remove'/);
+  assert.match(confirmation, /beginWorktreeOperation\(\{/);
+  assert.match(confirmation, /mode: 'remove'/);
+  assert.match(confirmation, /client\.removeWorktreeAsync\(operationId/);
   assert.match(confirmation, /confirm_remove: true/);
   assert.match(confirmation, /removeWorktreeDialog = null/);
   assert.match(confirmation, /catch \(cause\)/);
-  assert.match(confirmation, /removeWorktreeError = cause instanceof Error/);
+  assert.match(app, /failWorktreeOperation\([\s\S]*operationId/);
   assert.match(app, /<WorktreeRemoveDialog/);
   assert.match(app, /onConfirm=\{\(deleteFromDisk, forceDirty\)/);
   assert.equal((app.match(/client\.control<WorktreeRemoval>\('projects\.remove'/g) ?? []).length, 1);
+});
+
+test('async removal closes the dialog, stays visible in the operation rail, and reconciles ghost rows', async () => {
+  const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  const daemon = await readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8');
+
+  const close = app.indexOf('removeWorktreeDialog = null;', app.indexOf('async function confirmRemoveWorktree'));
+  const start = app.indexOf('await client.removeWorktreeAsync(operationId', close);
+  assert.ok(close > 0 && start > close, 'the dialog closes before awaiting the async acknowledgement');
+  assert.match(daemon, /request\('worktree\.remove_async'/);
+  assert.match(app, /operation\.status === 'completed'[\s\S]*\(operation\.project \|\| operation\.removal\)/);
+  assert.match(app, /if \(operation\.removal\)[\s\S]*projects = await client\.projects\(\)/);
+  assert.match(app, /function unattachedWorktreeOperations\(\)/);
+  assert.match(app, /\{#each unattachedWorktreeOperations\(\) as operation/);
+  assert.match(app, /openRemoveWorktree\(source, operation\.error_code === 'dirty_worktree'\)/);
+  assert.match(app, /class:empty=\{selectedProject === null && activeWorktreeOperation === null\}/);
+});
+
+test('async keep-files completion stays quiet and running removals cannot be dismissed', async () => {
+  const [app, panel] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/WorktreeProgressPanel.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(app, /operation\.removal\.registration_issue\s*\|\| \(operation\.removal\.delete_from_disk && operation\.removal\.files_untouched\)/);
+  assert.match(panel, /operation\.removal\?\.delete_from_disk && operation\.removal\.files_untouched/);
+  assert.match(panel, /operation\.mode === 'remove' && operation\.status === 'running'/);
+  assert.match(panel, /Removal continues in the background and can be closed after it finishes/);
+  assert.match(app, /cause\.code === 'worktree_operation_in_progress'/);
+  assert.match(app, /Removal already in progress for this project/);
+});
+
+test('legacy synchronous removal timeout copy says the operation may still complete', async () => {
+  const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  assert.match(app, /isDaemonRequestTimeoutError\(fallbackCause\)/);
+  assert.match(app, /is taking longer than the request window and may still complete/);
+  assert.match(app, /Workman will refresh the project list to reconcile the result/);
+  assert.doesNotMatch(app, /Removal of .*daemon did not respond/);
 });
 
 test('removal, confirmation, and quick jump dialogs use wider responsive bounds', async () => {

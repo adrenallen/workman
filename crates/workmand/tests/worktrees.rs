@@ -450,6 +450,7 @@ async fn broken_and_duplicate_registrations_unregister_without_touching_files()
 #[derive(Clone, Copy)]
 enum GitRemoveFixture {
     AlwaysFail,
+    FailPrune,
     SwapPathOnce,
     RecreateOnPrune,
     FailListAfterAdd,
@@ -463,6 +464,10 @@ impl GitFixture {
 
     fn new_with_failing_worktree_remove() -> Result<Self, Box<dyn Error>> {
         Self::new_with_remove_fixture(Some(GitRemoveFixture::AlwaysFail))
+    }
+
+    fn new_with_failing_worktree_prune() -> Result<Self, Box<dyn Error>> {
+        Self::new_with_remove_fixture(Some(GitRemoveFixture::FailPrune))
     }
 
     fn new_with_retryable_path_swap() -> Result<Self, Box<dyn Error>> {
@@ -561,11 +566,14 @@ impl GitFixture {
                     git = git_executable.display(),
                     marker = temp.path().join("removed-worktree-path").display(),
                 ),
-                GitRemoveFixture::FailListAfterAdd | GitRemoveFixture::BranchAppearsBeforeAdd => {
-                    ":".to_owned()
-                }
+                GitRemoveFixture::FailPrune
+                | GitRemoveFixture::FailListAfterAdd
+                | GitRemoveFixture::BranchAppearsBeforeAdd => ":".to_owned(),
             };
             let prune_script = match remove_fixture {
+                GitRemoveFixture::FailPrune => {
+                    "echo 'error: simulated worktree prune failure' >&2\nexit 86".to_owned()
+                }
                 GitRemoveFixture::RecreateOnPrune => format!(
                     "if [ -s '{marker}' ]; then\n  target=$(/bin/cat '{marker}')\n  /bin/mkdir -p \"$target\"\n  printf 'replacement created after initial verification\\n' > \"$target/reappeared.txt\"\n  /bin/rm '{marker}'\nfi",
                     marker = temp.path().join("removed-worktree-path").display(),
@@ -588,6 +596,7 @@ impl GitFixture {
                     counter = temp.path().join("pre-add-list-count").display(),
                 ),
                 GitRemoveFixture::AlwaysFail
+                | GitRemoveFixture::FailPrune
                 | GitRemoveFixture::SwapPathOnce
                 | GitRemoveFixture::RecreateOnPrune => ":".to_owned(),
             };
@@ -1811,6 +1820,54 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
         )?,
         remote_refs_before,
         "fallback deletion must leave every scratch-remote ref untouched"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn prune_failure_completes_removal_with_a_warning() -> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new_with_failing_worktree_prune()?;
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: 1,
+            branch: "feature/prune-warning".into(),
+            display_name: None,
+            from_ref: Some("main".into()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("copy_env".into(), "no".into()),
+                ("herd_enabled".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    let path = PathBuf::from(&created.worktree.path);
+
+    let removed = worktrees::remove(
+        &fixture.registry,
+        RemoveWorktree {
+            project_id: created.project.project.id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: true,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+    )
+    .await?;
+
+    assert!(removed.deleted_from_disk && removed.project_unregistered);
+    assert!(!removed.metadata_pruned);
+    assert!(!path.exists());
+    assert!(
+        removed
+            .post_delete_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("simulated worktree prune failure"))
     );
     Ok(())
 }

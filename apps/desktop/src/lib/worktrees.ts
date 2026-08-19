@@ -160,9 +160,11 @@ export interface WorktreeRemoval {
   deleted_from_disk: boolean;
   metadata_pruned: boolean;
   branch_kept: boolean;
+  delete_from_disk: boolean;
   files_removed?: boolean;
   files_untouched?: boolean;
   registration_issue?: string | null;
+  post_delete_warning?: string | null;
 }
 
 export interface CreateWorktreeInput {

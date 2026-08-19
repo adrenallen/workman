@@ -752,6 +752,13 @@ export class DaemonClient
     return this.request('worktree.remove', { ...input });
   }
 
+  removeWorktreeAsync(
+    operationId: string,
+    input: RemoveWorktreeInput
+  ): Promise<WorktreeOperationAck> {
+    return this.request('worktree.remove_async', { operation_id: operationId, ...input });
+  }
+
   previewAgentToolConfig(agentToolId: number): Promise<AgentToolConfigPreview> {
     return this.request('agent_tools.configure_preview', { agent_tool_id: agentToolId });
   }

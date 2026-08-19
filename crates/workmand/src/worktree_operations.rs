@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use workman_core::{Project, ProjectId};
+use workman_core::{ActiveWorktreeRemoval, Project, ProjectId};
 
 use crate::{SharedProcessRegistry, status_invalidation::StatusInvalidationHub, worktrees};
 
@@ -23,6 +23,7 @@ pub(crate) enum WorktreeOperationMode {
     Create,
     Fork,
     Adopt,
+    Remove,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -37,7 +38,10 @@ pub(crate) enum WorktreeOperationStatus {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorktreeStepId {
     Branch,
+    Processes,
     Worktree,
+    Files,
+    Prune,
     Environment,
     Herd,
     Registered,
@@ -73,7 +77,9 @@ pub(crate) struct WorktreeOperation {
     status: WorktreeOperationStatus,
     steps: Vec<WorktreeOperationStep>,
     error: Option<String>,
+    error_code: Option<String>,
     project: Option<worktrees::ProjectEnvelope>,
+    removal: Option<worktrees::WorktreeRemoval>,
     created_at: u64,
     updated_at: u64,
     #[serde(skip)]
@@ -132,19 +138,24 @@ impl WorktreeOperationHub {
         operations.iter().cloned().collect()
     }
 
-    pub(crate) fn dismiss(&self, id: &str) -> bool {
+    pub(crate) fn dismiss(&self, id: &str) -> Result<bool, StartError> {
         let mut operations = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let before = operations.len();
-        operations.retain(|operation| operation.id != id);
-        let dismissed = operations.len() != before;
-        drop(operations);
-        if dismissed {
-            self.status_invalidations.invalidate();
+        let Some(index) = operations.iter().position(|operation| operation.id == id) else {
+            return Ok(false);
+        };
+        if operations[index].status == WorktreeOperationStatus::Running {
+            return Err(StartError::new(
+                "worktree_operation_running",
+                "a running worktree operation cannot be dismissed; wait for its terminal result",
+            ));
         }
-        dismissed
+        operations.remove(index);
+        drop(operations);
+        self.status_invalidations.invalidate();
+        Ok(true)
     }
 
     fn begin(&self, operation: WorktreeOperation) -> Result<(), StartError> {
@@ -161,11 +172,39 @@ impl WorktreeOperationHub {
                 "that worktree operation is already running",
             ));
         }
+        if let Some(active) = operations.iter().find(|candidate| {
+            candidate.status == WorktreeOperationStatus::Running
+                && (same_target(candidate.source_project_id, operation.source_project_id)
+                    || same_target(candidate.repository_id, operation.repository_id))
+        }) {
+            let target = if same_target(active.source_project_id, operation.source_project_id) {
+                "project"
+            } else {
+                "repository"
+            };
+            return Err(StartError::new(
+                "worktree_operation_in_progress",
+                format!(
+                    "a worktree operation is already in progress for this {target} ({})",
+                    active.id
+                ),
+            ));
+        }
         operations.push_front(operation);
         operations.truncate(MAX_OPERATIONS);
         drop(operations);
         self.status_invalidations.invalidate();
         Ok(())
+    }
+
+    fn discard(&self, id: &str) {
+        let mut operations = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        operations.retain(|operation| operation.id != id);
+        drop(operations);
+        self.status_invalidations.invalidate();
     }
 
     fn update(&self, id: &str, mutate: impl FnOnce(&mut WorktreeOperation)) {
@@ -204,6 +243,10 @@ impl WorktreeOperationHub {
             self.status_invalidations.invalidate();
         }
     }
+}
+
+fn same_target<T: Copy + Eq>(left: Option<T>, right: Option<T>) -> bool {
+    left.is_some() && left == right
 }
 
 #[derive(Clone)]
@@ -252,12 +295,14 @@ impl WorktreeOperationReporter {
         });
     }
 
-    fn finish(&self, mutation: &worktrees::WorktreeMutation) {
+    fn finish_mutation(&self, mutation: &worktrees::WorktreeMutation) {
         let repository_id = mutation.repository.id;
         self.hub.update(&self.operation_id, |operation| {
             operation.status = WorktreeOperationStatus::Completed;
             operation.error = None;
+            operation.error_code = None;
             operation.project = Some(mutation.project.clone());
+            operation.removal = None;
             operation.repository_id = Some(mutation.repository.id);
             operation.path = Some(mutation.worktree.path.clone());
             for step in &mut operation.steps {
@@ -273,9 +318,30 @@ impl WorktreeOperationReporter {
             .clear_failed_for_repository(repository_id, &self.operation_id);
     }
 
-    fn fail(&self, message: String) {
+    fn finish_removal(&self, removal: worktrees::WorktreeRemoval) {
+        self.hub.update(&self.operation_id, |operation| {
+            operation.status = WorktreeOperationStatus::Completed;
+            operation.error = None;
+            operation.error_code = None;
+            operation.project = None;
+            operation.path = Some(removal.path.clone());
+            operation.branch = Some(removal.branch.clone());
+            operation.removal = Some(removal);
+            for step in &mut operation.steps {
+                if matches!(
+                    step.status,
+                    WorktreeStepStatus::Pending | WorktreeStepStatus::Running
+                ) {
+                    step.status = WorktreeStepStatus::Completed;
+                }
+            }
+        });
+    }
+
+    fn fail_with_code(&self, code: Option<String>, message: String) {
         self.hub.update(&self.operation_id, |operation| {
             operation.status = WorktreeOperationStatus::Failed;
+            operation.error_code = code;
             operation.error = Some(message.clone());
             if let Some(step) = operation
                 .steps
@@ -355,6 +421,20 @@ struct AdoptParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoveParams {
+    operation_id: String,
+    project_id: ProjectId,
+    #[serde(default)]
+    confirm_remove: bool,
+    #[serde(default)]
+    confirm_stop_running: bool,
+    #[serde(default)]
+    delete_from_disk: bool,
+    #[serde(default)]
+    force_dirty: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct DismissParams {
     operation_id: String,
 }
@@ -366,7 +446,7 @@ pub(crate) fn dismiss(
     let params: DismissParams = parse_params(params)?;
     validate_operation_id(&params.operation_id)?;
     Ok(WorktreeOperationDismissal {
-        dismissed: hub.dismiss(&params.operation_id),
+        dismissed: hub.dismiss(&params.operation_id)?,
         operation_id: params.operation_id,
     })
 }
@@ -465,11 +545,13 @@ pub(crate) async fn start(
             let params: AdoptParams = parse_params(params)?;
             validate_operation_id(&params.operation_id)?;
             let operation_id = params.operation_id.clone();
+            let repository_id =
+                worktrees::registered_repository_id_for_path(&registry, &params.path).await;
             let operation = new_operation(
                 operation_id.clone(),
                 WorktreeOperationMode::Adopt,
                 None,
-                None,
+                repository_id,
                 None,
                 Some(params.path.clone()),
             );
@@ -496,10 +578,221 @@ pub(crate) async fn start(
                 accepted: true,
             })
         }
+        "worktree.remove_async" => {
+            let params: RemoveParams = parse_params(params)?;
+            validate_operation_id(&params.operation_id)?;
+            let operation_id = params.operation_id.clone();
+            let (repository_id, branch, path) =
+                removal_operation_details(&registry, params.project_id).await;
+            let operation = new_operation(
+                operation_id.clone(),
+                WorktreeOperationMode::Remove,
+                Some(params.project_id),
+                repository_id,
+                branch,
+                path,
+            );
+            hub.begin(operation)?;
+            if let Err(error) =
+                registry
+                    .lock()
+                    .await
+                    .store()
+                    .put_active_worktree_removal(&ActiveWorktreeRemoval {
+                        project_id: params.project_id,
+                        phase: "processes".into(),
+                        delete_from_disk: params.delete_from_disk,
+                    })
+            {
+                hub.discard(&operation_id);
+                return Err(StartError::new(
+                    "store_error",
+                    format!("could not journal the project removal: {error}"),
+                ));
+            }
+            let reporter = WorktreeOperationReporter {
+                hub: hub.clone(),
+                operation_id: operation_id.clone(),
+            };
+            tokio::spawn(async move {
+                let result = worktrees::remove_with_progress(
+                    &registry,
+                    worktrees::RemoveWorktree {
+                        project_id: params.project_id,
+                        confirm_remove: params.confirm_remove,
+                        confirm_stop_running: params.confirm_stop_running,
+                        delete_from_disk: params.delete_from_disk,
+                        force_dirty: params.force_dirty,
+                        confirm_branch: None,
+                    },
+                    Some(&reporter),
+                )
+                .await;
+                let journal_result = registry
+                    .lock()
+                    .await
+                    .store()
+                    .delete_active_worktree_removal(params.project_id);
+                match journal_result {
+                    Ok(_) => finish_removal_operation(reporter, result),
+                    Err(error) => reporter.fail_with_code(
+                        Some("store_error".into()),
+                        format!("the removal reached a terminal state, but its restart journal could not be cleared: {error}"),
+                    ),
+                }
+            });
+            Ok(WorktreeOperationAck {
+                operation_id,
+                accepted: true,
+            })
+        }
         _ => Err(StartError::new(
             "method_not_found",
             "unknown async worktree operation",
         )),
+    }
+}
+
+/// Reconcile only the removal journal after a daemon restart.
+///
+/// Recovery intentionally uses the existing registration-only removal path. It
+/// never resumes filesystem deletion, so a partial checkout is surfaced and
+/// left for deliberate inspection while its stale Workman registration is
+/// cleaned up with the same broken-row rules as an ordinary retry.
+pub(crate) async fn resume_interrupted_removals(
+    registry: &SharedProcessRegistry,
+    hub: &WorktreeOperationHub,
+) -> Result<(), StartError> {
+    let journal = registry
+        .lock()
+        .await
+        .store()
+        .list_active_worktree_removals()
+        .map_err(|error| {
+            StartError::new(
+                "store_error",
+                format!("could not read the active-removal journal: {error}"),
+            )
+        })?;
+    for entry in journal {
+        resume_interrupted_removal(registry, hub, entry).await?;
+    }
+    Ok(())
+}
+
+async fn resume_interrupted_removal(
+    registry: &SharedProcessRegistry,
+    hub: &WorktreeOperationHub,
+    entry: ActiveWorktreeRemoval,
+) -> Result<(), StartError> {
+    let (repository_id, branch, path) = removal_operation_details(registry, entry.project_id).await;
+    let operation_id = format!("resumed-removal-{}-{}", entry.project_id, now_millis());
+    hub.begin(new_operation(
+        operation_id.clone(),
+        WorktreeOperationMode::Remove,
+        Some(entry.project_id),
+        repository_id,
+        branch,
+        path.clone(),
+    ))?;
+    let reporter = WorktreeOperationReporter {
+        hub: hub.clone(),
+        operation_id,
+    };
+    reporter.running(
+        journal_phase(&entry.phase),
+        Some(format!(
+            "Resuming removal after daemon restart from the {} phase",
+            entry.phase
+        )),
+    );
+
+    if path.is_none() {
+        clear_removal_journal(registry, entry.project_id).await?;
+        reporter.hub.update(&reporter.operation_id, |operation| {
+            operation.status = WorktreeOperationStatus::Completed;
+            operation.error = None;
+            operation.error_code = None;
+            for step in &mut operation.steps {
+                step.status = WorktreeStepStatus::Completed;
+            }
+            if let Some(step) = operation
+                .steps
+                .iter_mut()
+                .find(|step| step.id == WorktreeStepId::Registered)
+            {
+                step.detail = Some(
+                    "Removal resumed after daemon restart; the project was already unregistered"
+                        .into(),
+                );
+            }
+        });
+        return Ok(());
+    }
+
+    let result = worktrees::remove_with_progress(
+        registry,
+        worktrees::RemoveWorktree {
+            project_id: entry.project_id,
+            confirm_remove: true,
+            confirm_stop_running: true,
+            delete_from_disk: false,
+            force_dirty: false,
+            confirm_branch: None,
+        },
+        Some(&reporter),
+    )
+    .await;
+    clear_removal_journal(registry, entry.project_id).await?;
+    match result {
+        Ok(mut removal) => {
+            removal.delete_from_disk = entry.delete_from_disk;
+            removal.post_delete_warning = Some(if entry.delete_from_disk {
+                "Removal resumed after daemon restart. Workman reconciled the registration but did not resume local file deletion; inspect the remaining path before retrying cleanup."
+                    .into()
+            } else {
+                "Removal resumed after daemon restart and its registration-only cleanup completed."
+                    .into()
+            });
+            reporter.finish_removal(removal);
+            reporter.completed(
+                WorktreeStepId::Registered,
+                Some("Removal resumed after daemon restart".into()),
+            );
+        }
+        Err(error) => reporter.fail_with_code(
+            Some(error.code().into()),
+            format!("Removal resumed after daemon restart but reconciliation failed: {error}"),
+        ),
+    }
+    Ok(())
+}
+
+async fn clear_removal_journal(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+) -> Result<(), StartError> {
+    registry
+        .lock()
+        .await
+        .store()
+        .delete_active_worktree_removal(project_id)
+        .map_err(|error| {
+            StartError::new(
+                "store_error",
+                format!("could not clear the project-removal journal: {error}"),
+            )
+        })?;
+    Ok(())
+}
+
+fn journal_phase(phase: &str) -> WorktreeStepId {
+    match phase {
+        "worktree" => WorktreeStepId::Worktree,
+        "files" => WorktreeStepId::Files,
+        "prune" => WorktreeStepId::Prune,
+        "registered" => WorktreeStepId::Registered,
+        _ => WorktreeStepId::Processes,
     }
 }
 
@@ -508,8 +801,18 @@ fn finish_operation(
     result: worktrees::WorktreeResult<worktrees::WorktreeMutation>,
 ) {
     match result {
-        Ok(mutation) => reporter.finish(&mutation),
-        Err(error) => reporter.fail(error.to_string()),
+        Ok(mutation) => reporter.finish_mutation(&mutation),
+        Err(error) => reporter.fail_with_code(Some(error.code().into()), error.to_string()),
+    }
+}
+
+fn finish_removal_operation(
+    reporter: WorktreeOperationReporter,
+    result: worktrees::WorktreeResult<worktrees::WorktreeRemoval>,
+) {
+    match result {
+        Ok(removal) => reporter.finish_removal(removal),
+        Err(error) => reporter.fail_with_code(Some(error.code().into()), error.to_string()),
     }
 }
 
@@ -544,6 +847,30 @@ async fn repository_id_for(registry: &SharedProcessRegistry, project_id: Project
         .map(|link| link.repository_id)
 }
 
+async fn removal_operation_details(
+    registry: &SharedProcessRegistry,
+    project_id: ProjectId,
+) -> (Option<i64>, Option<String>, Option<String>) {
+    let registry = registry.lock().await;
+    let project = registry.store().get_project(project_id).ok().flatten();
+    let link = registry
+        .store()
+        .get_project_worktree(project_id)
+        .ok()
+        .flatten();
+    let repository_id = link.as_ref().map(|link| link.repository_id);
+    let branch = link.map(|link| link.branch).or_else(|| {
+        project.as_ref().map(|project| {
+            project
+                .display_name
+                .clone()
+                .unwrap_or_else(|| project.name.clone())
+        })
+    });
+    let path = project.map(|project| project.path);
+    (repository_id, branch, path)
+}
+
 fn new_operation(
     id: String,
     mode: WorktreeOperationMode,
@@ -553,7 +880,7 @@ fn new_operation(
     path: Option<String>,
 ) -> WorktreeOperation {
     let label = match mode {
-        WorktreeOperationMode::Adopt => path
+        WorktreeOperationMode::Adopt | WorktreeOperationMode::Remove => path
             .as_deref()
             .and_then(|path| {
                 PathBuf::from(path)
@@ -561,7 +888,10 @@ fn new_operation(
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Adopting worktree".into()),
+            .unwrap_or_else(|| match mode {
+                WorktreeOperationMode::Remove => "Removing project".into(),
+                _ => "Adopting worktree".into(),
+            }),
         WorktreeOperationMode::Create | WorktreeOperationMode::Fork => {
             branch.clone().unwrap_or_else(|| "Creating worktree".into())
         }
@@ -578,7 +908,9 @@ fn new_operation(
         status: WorktreeOperationStatus::Running,
         steps: initial_steps(mode),
         error: None,
+        error_code: None,
         project: None,
+        removal: None,
         created_at: now,
         updated_at: now,
         registration_completed: false,
@@ -594,6 +926,9 @@ fn operation_is_relevant(operation: &WorktreeOperation, projects: &[Project], no
         return false;
     }
     if operation.status == WorktreeOperationStatus::Completed || age < TERMINAL_RECONCILE_GRACE_MS {
+        return true;
+    }
+    if operation.mode == WorktreeOperationMode::Remove {
         return true;
     }
     if operation
@@ -621,6 +956,28 @@ fn project_registered_at_path(projects: &[Project], path: &str) -> bool {
 }
 
 fn initial_steps(mode: WorktreeOperationMode) -> Vec<WorktreeOperationStep> {
+    if mode == WorktreeOperationMode::Remove {
+        return [
+            (WorktreeStepId::Processes, "Processes stopped"),
+            (WorktreeStepId::Worktree, "Git worktree removed"),
+            (WorktreeStepId::Files, "Local files deleted"),
+            (WorktreeStepId::Prune, "Metadata pruned"),
+            (WorktreeStepId::Registered, "Project unregistered"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label))| WorktreeOperationStep {
+            id,
+            label,
+            status: if index == 0 {
+                WorktreeStepStatus::Running
+            } else {
+                WorktreeStepStatus::Pending
+            },
+            detail: None,
+        })
+        .collect();
+    }
     let labels = [
         (
             WorktreeStepId::Branch,
@@ -709,7 +1066,7 @@ mod tests {
         };
         reporter.completed(WorktreeStepId::Branch, Some("branch ready".into()));
         reporter.running(WorktreeStepId::Worktree, None);
-        reporter.fail("git worktree add failed".into());
+        reporter.fail_with_code(None, "git worktree add failed".into());
 
         let operation = hub.snapshot().pop().unwrap();
         assert_eq!(operation.status, WorktreeOperationStatus::Failed);
@@ -727,7 +1084,21 @@ mod tests {
     }
 
     #[test]
-    fn hub_dismisses_operations_and_prunes_expired_or_reconciled_failures() {
+    fn removal_without_project_details_has_a_truthful_fallback_label() {
+        let operation = new_operation(
+            "missing-removal".into(),
+            WorktreeOperationMode::Remove,
+            Some(999),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(operation.label, "Removing project");
+    }
+
+    #[test]
+    fn hub_refuses_running_dismissal_then_dismisses_terminal_operations() {
         let invalidations = StatusInvalidationHub::default();
         let hub = WorktreeOperationHub::new(invalidations.clone());
         hub.begin(new_operation(
@@ -739,8 +1110,15 @@ mod tests {
             None,
         ))
         .unwrap();
-        assert!(hub.dismiss("dismiss-me"));
-        assert!(!hub.dismiss("dismiss-me"));
+        let refusal = hub.dismiss("dismiss-me").unwrap_err();
+        assert_eq!(refusal.code, "worktree_operation_running");
+        let reporter = WorktreeOperationReporter {
+            hub: hub.clone(),
+            operation_id: "dismiss-me".into(),
+        };
+        reporter.fail_with_code(None, "fixture terminal result".into());
+        assert!(hub.dismiss("dismiss-me").unwrap());
+        assert!(!hub.dismiss("dismiss-me").unwrap());
         assert!(hub.snapshot().is_empty());
 
         let missing = new_operation(
@@ -756,7 +1134,7 @@ mod tests {
             hub: hub.clone(),
             operation_id: "missing-failure".into(),
         };
-        reporter.fail("fixture failure".into());
+        reporter.fail_with_code(None, "fixture failure".into());
         {
             let mut operations = hub.inner.lock().unwrap();
             operations[0].updated_at = now_millis() - TERMINAL_RECONCILE_GRACE_MS - 1;
@@ -791,22 +1169,142 @@ mod tests {
     }
 
     #[test]
-    fn successful_repository_operation_clears_older_failures() {
+    fn hub_serializes_running_operations_by_project_and_repository() {
         let hub = WorktreeOperationHub::default();
-        for id in ["older-failure", "successful"] {
-            hub.begin(new_operation(
-                id.into(),
+        hub.begin(new_operation(
+            "active".into(),
+            WorktreeOperationMode::Remove,
+            Some(1),
+            Some(7),
+            Some("feature/active".into()),
+            Some("/tmp/active".into()),
+        ))
+        .unwrap();
+
+        let same_project = hub
+            .begin(new_operation(
+                "same-project".into(),
                 WorktreeOperationMode::Create,
                 Some(1),
-                Some(7),
-                Some(format!("feature/{id}")),
+                Some(8),
+                Some("feature/same-project".into()),
                 None,
             ))
+            .unwrap_err();
+        assert_eq!(same_project.code, "worktree_operation_in_progress");
+        assert!(same_project.message.contains("project"));
+
+        let same_repository = hub
+            .begin(new_operation(
+                "same-repository".into(),
+                WorktreeOperationMode::Adopt,
+                None,
+                Some(7),
+                None,
+                Some("/tmp/adopt".into()),
+            ))
+            .unwrap_err();
+        assert_eq!(same_repository.code, "worktree_operation_in_progress");
+        assert!(same_repository.message.contains("repository"));
+
+        let reporter = WorktreeOperationReporter {
+            hub: hub.clone(),
+            operation_id: "active".into(),
+        };
+        reporter.fail_with_code(None, "fixture terminal result".into());
+        hub.begin(new_operation(
+            "after-terminal".into(),
+            WorktreeOperationMode::Create,
+            Some(1),
+            Some(7),
+            Some("feature/after".into()),
+            None,
+        ))
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_journal_reconciles_a_missing_project_path_and_emits_terminal_result() {
+        let store = workman_core::Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 42,
+                path: "/definitely/missing/workman-restart-removal".into(),
+                name: "restart-removal".into(),
+                display_name: Some("Restart removal".into()),
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
             .unwrap();
-        }
+        store
+            .put_active_worktree_removal(&ActiveWorktreeRemoval {
+                project_id: 42,
+                phase: "files".into(),
+                delete_from_disk: true,
+            })
+            .unwrap();
+        let registry = Arc::new(tokio::sync::Mutex::new(
+            crate::ProcessRegistry::new(store).unwrap(),
+        ));
+        let hub = WorktreeOperationHub::default();
+
+        resume_interrupted_removals(&registry, &hub).await.unwrap();
+
+        let registry = registry.lock().await;
+        assert!(registry.store().get_project(42).unwrap().is_none());
+        assert!(
+            registry
+                .store()
+                .list_active_worktree_removals()
+                .unwrap()
+                .is_empty()
+        );
+        drop(registry);
+        let operation = hub.snapshot().pop().unwrap();
+        assert_eq!(operation.status, WorktreeOperationStatus::Completed);
+        let removal = operation.removal.unwrap();
+        assert!(removal.project_unregistered && removal.files_untouched);
+        assert!(removal.delete_from_disk);
+        assert!(
+            removal
+                .post_delete_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("resumed after daemon restart"))
+        );
+        assert!(operation.steps.iter().any(|step| {
+            step.id == WorktreeStepId::Registered
+                && step
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("resumed after daemon restart"))
+        }));
+    }
+
+    #[test]
+    fn successful_repository_operation_clears_older_failures() {
+        let hub = WorktreeOperationHub::default();
+        hub.begin(new_operation(
+            "older-failure".into(),
+            WorktreeOperationMode::Create,
+            Some(1),
+            Some(7),
+            Some("feature/older-failure".into()),
+            None,
+        ))
+        .unwrap();
         hub.update("older-failure", |operation| {
             operation.status = WorktreeOperationStatus::Failed;
         });
+        hub.begin(new_operation(
+            "successful".into(),
+            WorktreeOperationMode::Create,
+            Some(1),
+            Some(7),
+            Some("feature/successful".into()),
+            None,
+        ))
+        .unwrap();
         hub.clear_failed_for_repository(7, "successful");
         assert_eq!(
             hub.snapshot()

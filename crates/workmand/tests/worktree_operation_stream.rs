@@ -19,7 +19,7 @@ struct TestServer {
     discovery: Discovery,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<std::io::Result<()>>,
-    _registry: SharedProcessRegistry,
+    registry: SharedProcessRegistry,
     _temp: TempDir,
     managed: std::path::PathBuf,
 }
@@ -74,7 +74,7 @@ impl TestServer {
             discovery,
             shutdown: Some(shutdown),
             task,
-            _registry: registry,
+            registry,
             _temp: temp,
             managed,
         })
@@ -94,6 +94,11 @@ impl TestServer {
     async fn stop(mut self) -> Result<(), Box<dyn Error>> {
         let _ = self.shutdown.take().unwrap().send(());
         self.task.await??;
+        Ok(())
+    }
+
+    async fn put_project(&self, project: &Project) -> Result<(), Box<dyn Error>> {
+        self.registry.lock().await.store().put_project(project)?;
         Ok(())
     }
 }
@@ -155,6 +160,9 @@ async fn async_worktree_rpc_streams_success_and_bad_branch_failure() -> Result<(
             .all(|step| matches!(step["status"].as_str(), Some("completed" | "skipped")))
     }));
     assert!(server.managed.join("feature-optimistic").is_dir());
+    let created_project_id = completed["project"]["id"]
+        .as_i64()
+        .expect("created project id");
 
     let failed_ack = rpc(
         &mut socket,
@@ -191,6 +199,111 @@ async fn async_worktree_rpc_streams_success_and_bad_branch_failure() -> Result<(
     assert_eq!(dismissed["operation_id"], "fixture-failure");
     assert_eq!(dismissed["dismissed"], true);
     next_snapshot_without(&mut socket, "fixture-failure").await?;
+
+    let remove_started = Instant::now();
+    let remove_ack = rpc(
+        &mut socket,
+        "remove",
+        "worktree.remove_async",
+        json!({
+            "operation_id": "fixture-remove",
+            "project_id": created_project_id,
+            "confirm_remove": true,
+            "confirm_stop_running": true,
+            "delete_from_disk": false,
+            "force_dirty": false
+        }),
+    )
+    .await?;
+    assert_eq!(remove_ack["accepted"], true);
+    assert!(remove_started.elapsed() < Duration::from_secs(1));
+    let removed = next_operation(&mut socket, "fixture-remove", |operation| {
+        operation["status"] == "completed"
+    })
+    .await?;
+    assert_eq!(removed["mode"], "remove");
+    assert_eq!(removed["removal"]["project_id"], created_project_id);
+    assert_eq!(removed["removal"]["files_untouched"], true);
+    assert_eq!(removed["removal"]["registration_issue"], Value::Null);
+    assert!(removed["steps"].as_array().is_some_and(|steps| {
+        steps
+            .iter()
+            .all(|step| matches!(step["status"].as_str(), Some("completed" | "skipped")))
+    }));
+    let projects = rpc(&mut socket, "projects", "projects.list", json!({})).await?;
+    assert!(projects.as_array().is_some_and(|projects| {
+        projects
+            .iter()
+            .all(|project| project["id"] != created_project_id)
+    }));
+    let remove_dismissed = rpc(
+        &mut socket,
+        "dismiss-remove",
+        "worktree.operation_dismiss",
+        json!({ "operation_id": "fixture-remove" }),
+    )
+    .await?;
+    assert_eq!(remove_dismissed["dismissed"], true);
+    next_snapshot_without(&mut socket, "fixture-remove").await?;
+
+    let missing = server.managed.join("missing-registration");
+    server
+        .put_project(&Project {
+            id: 99,
+            path: missing.to_string_lossy().into_owned(),
+            name: "missing-registration".into(),
+            display_name: None,
+            icon: None,
+            selected: false,
+            sort_order: 99,
+        })
+        .await?;
+    rpc(
+        &mut socket,
+        "remove-missing",
+        "worktree.remove_async",
+        json!({
+            "operation_id": "fixture-remove-missing",
+            "project_id": 99,
+            "confirm_remove": true,
+            "confirm_stop_running": true,
+            "delete_from_disk": true,
+            "force_dirty": true
+        }),
+    )
+    .await?;
+    let removed_missing = next_operation(&mut socket, "fixture-remove-missing", |operation| {
+        operation["status"] == "completed"
+    })
+    .await?;
+    assert_eq!(removed_missing["removal"]["files_untouched"], true);
+    assert!(
+        removed_missing["removal"]["registration_issue"]
+            .as_str()
+            .is_some_and(|issue| issue.contains("project path is missing"))
+    );
+
+    rpc(
+        &mut socket,
+        "remove-invalid",
+        "worktree.remove_async",
+        json!({
+            "operation_id": "fixture-remove-failure",
+            "project_id": 404,
+            "confirm_remove": true
+        }),
+    )
+    .await?;
+    let remove_failure = next_operation(&mut socket, "fixture-remove-failure", |operation| {
+        operation["status"] == "failed"
+    })
+    .await?;
+    assert_eq!(remove_failure["error_code"], "project_not_found");
+    assert!(
+        remove_failure["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("project 404 was not found"))
+    );
 
     socket.close(None).await?;
     server.stop().await?;

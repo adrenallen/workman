@@ -27,6 +27,13 @@ test('daemon request timeouts carry the method and deadline for quiet logging', 
   assert.equal(isDaemonRequestTimeoutError(new Error(timeout.message)), false);
 });
 
+test('synchronous project removal timeouts do not claim the daemon failed', () => {
+  const timeout = new DaemonRequestTimeoutError('projects.remove', 5_000);
+  assert.match(timeout.message, /may still complete/);
+  assert.match(timeout.message, /refresh the project list/);
+  assert.doesNotMatch(timeout.message, /daemon did not answer|daemon failed/i);
+});
+
 test('repeated daemon notices coalesce while preserving a bounded newest-first log', () => {
   let entries = appendDaemonLogEntry([], event(1, 1_000), 2);
   entries = appendDaemonLogEntry(entries, event(2, 2_000), 2);

@@ -23,7 +23,9 @@ function serverOperation(id, status = 'failed') {
     status,
     steps: [],
     error: status === 'failed' ? 'fixture failure' : null,
+    error_code: status === 'failed' ? 'fixture_failure' : null,
     project: null,
+    removal: null,
     created_at: now,
     updated_at: now
   };
@@ -47,6 +49,54 @@ test('dismiss masks reconnect snapshots immediately and requests daemon cleanup'
 
   assert.equal(remotelyDismissed, 'failed-create');
   assert.deepEqual(get(worktreeOperations), []);
+  resetWorktreeOperations();
+});
+
+test('remove operations use removal phases and preserve terminal removal details', () => {
+  resetWorktreeOperations();
+  const local = beginWorktreeOperation({
+    id: 'remove-project',
+    mode: 'remove',
+    sourceProjectId: 7,
+    repositoryId: null,
+    path: '/tmp/plain-project',
+    label: 'Plain project'
+  });
+  assert.equal(local.label, 'Plain project');
+  assert.deepEqual(local.steps.map((step) => step.id), [
+    'processes',
+    'worktree',
+    'files',
+    'prune',
+    'registered'
+  ]);
+
+  replaceWorktreeOperations([{
+    ...serverOperation('remove-project', 'completed'),
+    mode: 'remove',
+    source_project_id: 7,
+    repository_id: null,
+    path: '/tmp/plain-project',
+    label: 'plain-project',
+    removal: {
+      project_id: 7,
+      path: '/tmp/plain-project',
+      branch: 'Plain project',
+      removed: true,
+      project_unregistered: true,
+      deleted_from_disk: false,
+      metadata_pruned: false,
+      branch_kept: true,
+      delete_from_disk: true,
+      files_removed: false,
+      files_untouched: true,
+      registration_issue: 'broken registration',
+      post_delete_warning: null
+    }
+  }]);
+  assert.equal(get(worktreeOperations)[0].label, 'Plain project');
+  assert.equal(get(worktreeOperations)[0].removal.registration_issue, 'broken registration');
+  assert.equal(get(worktreeOperations)[0].removal.files_untouched, true);
   resetWorktreeOperations();
 });
 

@@ -396,6 +396,14 @@ impl DaemonServer {
         let timer_events = timer_events::TimerLifecycleHub::new(status_invalidations.clone());
         let worktree_operations =
             worktree_operations::WorktreeOperationHub::new(status_invalidations.clone());
+        worktree_operations::resume_interrupted_removals(&self.registry, &worktree_operations)
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "could not reconcile interrupted project removals ({}): {}",
+                    error.code, error.message
+                ))
+            })?;
         let timer_task = timers::spawn_timer_scheduler(
             self.registry.clone(),
             timer_events.clone(),
@@ -937,6 +945,7 @@ async fn handle_session_control(
             | "worktree.create_async"
             | "worktree.fork_async"
             | "worktree.adopt_async"
+            | "worktree.remove_async"
             | "worktree.operation_dismiss"
     ) {
         return None;
@@ -959,7 +968,10 @@ async fn handle_session_control(
     }
     if matches!(
         method,
-        "worktree.create_async" | "worktree.fork_async" | "worktree.adopt_async"
+        "worktree.create_async"
+            | "worktree.fork_async"
+            | "worktree.adopt_async"
+            | "worktree.remove_async"
     ) {
         let params = request.get("params").cloned().unwrap_or_default();
         return Some(
