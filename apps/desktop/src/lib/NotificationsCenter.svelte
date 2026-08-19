@@ -127,7 +127,7 @@
     side="bottom"
     align="start"
     sideOffset={6}
-    class="w-[360px] gap-0 overflow-hidden rounded-md border border-border bg-popover p-0 shadow-xl ring-0"
+    class="w-[360px] gap-0 rounded-md border border-border bg-popover p-0 shadow-xl ring-0"
   >
     <section class="notification-center" aria-label="Notifications center">
       <header>
