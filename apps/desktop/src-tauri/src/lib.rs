@@ -1927,8 +1927,21 @@ mod tests {
     }
 
     fn test_keep_awake_child() -> std::io::Result<Child> {
-        Command::new("/bin/sleep")
-            .arg("30")
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            command
+        };
+        // Windows has no sleep binary; a quiet ping holds a child alive the
+        // same way and dies cleanly when killed.
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
