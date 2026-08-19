@@ -2534,7 +2534,7 @@ fn stateless_mcp_url(mcp_url: &str) -> String {
 }
 
 fn kimi_deep_check_command(command: &str, extra_args: &[String]) -> Result<String, String> {
-    let mut words = shell_words::split(command)
+    let mut words = crate::command_line::split(command)
         .map_err(|error| format!("parse Kimi command for deep check: {error}"))?;
     let executable = words
         .first()
@@ -3294,7 +3294,13 @@ mod tests {
         let model = "provider/model with spaces and 'quotes'";
         let args = apply_model_override(&tool, Vec::new(), Some(model)).unwrap();
         let command = command_with_args(&tool.command, &args).unwrap();
-        assert_eq!(shell_words::split(&command).unwrap().last().unwrap(), model);
+        assert_eq!(
+            crate::command_line::split(&command)
+                .unwrap()
+                .last()
+                .unwrap(),
+            model
+        );
     }
 
     #[test]
