@@ -84,7 +84,7 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
   assert.match(source, /attachments: draft\.attachments\.length > 0/);
   assert.match(source, /onDragDropEvent\(\(event\) => handleNativePromptDrop\(event\.payload\)\)/);
-  assert.match(source, /function selectTemplate\(template: AgentTemplate\)[\s\S]*templateId: template\.id, agentToolId: template\.agent_tool_id/);
+  assert.match(source, /function selectTemplate\(template: AgentTemplate\)[\s\S]*agentTemplateSelectionChange\(selectedTemplate, template\)[\s\S]*templateId: selection\.id, agentToolId: selection\.agentToolId/);
   assert.match(source, /function selectStandaloneAgent\(tool: AgentTool\)[\s\S]*templateId: null, agentToolId: tool\.id/);
   assert.match(source, /function selectTemplateAgent\(tool: AgentTool\)[\s\S]*onChange\(\{ agentToolId: tool\.id \}\)/);
   assert.match(source, /Template launch args are skipped when using/);

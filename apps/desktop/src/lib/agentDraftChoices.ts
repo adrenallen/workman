@@ -43,6 +43,14 @@ export function isStandaloneAgentSelected(
     && choice.selectedTool?.id === agentToolId;
 }
 
+export function agentTemplateSelectionChange(
+  selectedTemplate: AgentTemplate | null,
+  template: AgentTemplate
+): Extract<AgentChoice, { kind: 'template' }> | null {
+  if (selectedTemplate?.id === template.id) return null;
+  return { kind: 'template', id: template.id, agentToolId: template.agent_tool_id };
+}
+
 /** Resolve display state without mutating persisted IDs while metadata is absent or stale. */
 export function resolveAgentDraftChoice(
   draft: AgentCreationDraft,

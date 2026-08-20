@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  agentTemplateSelectionChange,
   agentTemplateRosterChoices,
   isStandaloneAgentSelected,
   resolveAgentDraftChoice
@@ -87,4 +88,16 @@ test('template roster omits dangling tools without hiding disabled choices', () 
     [5, 2],
     [6, 3]
   ]);
+});
+
+test('reselecting the active template preserves its tool override without touching the draft', () => {
+  const activeTemplate = templates[0];
+  const otherTemplate = { ...activeTemplate, id: 6, agent_tool_id: 1 };
+
+  assert.equal(agentTemplateSelectionChange(activeTemplate, activeTemplate), null);
+  assert.deepEqual(agentTemplateSelectionChange(activeTemplate, otherTemplate), {
+    kind: 'template',
+    id: 6,
+    agentToolId: 1
+  });
 });

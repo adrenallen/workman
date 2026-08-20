@@ -58,10 +58,11 @@ test('a template keeps its default agent and reveals optional override choices',
     'function submit()',
     'template selection handler'
   );
+  assert.match(selectTemplate, /agentTemplateSelectionChange\(selectedTemplate, template\)/);
+  assert.match(selectTemplate, /if \(!selection\) return/);
   assert.match(
     selectTemplate,
-    /onChange\(\{ templateId: template\.id, agentToolId: template\.agent_tool_id \}\)/,
-    'choosing a template is immediately launchable with its default agent'
+    /onChange\(\{ templateId: selection\.id, agentToolId: selection\.agentToolId \}\)/
   );
 
   const standaloneLoop = source.indexOf('{#each enabledTools as tool');

@@ -15,6 +15,7 @@
     maxAgentDraftAttachments
   } from './agentAttachmentDrafts.ts';
   import {
+    agentTemplateSelectionChange,
     agentTemplateRosterChoices,
     isStandaloneAgentSelected,
     resolveAgentDraftChoice
@@ -159,8 +160,10 @@
   }
 
   function selectTemplate(template: AgentTemplate): void {
-    onChange({ templateId: template.id, agentToolId: template.agent_tool_id });
-    rememberChoice({ kind: 'template', id: template.id, agentToolId: template.agent_tool_id });
+    const selection = agentTemplateSelectionChange(selectedTemplate, template);
+    if (!selection) return;
+    onChange({ templateId: selection.id, agentToolId: selection.agentToolId });
+    rememberChoice(selection);
   }
 
   function selectStandaloneAgent(tool: AgentTool): void {
