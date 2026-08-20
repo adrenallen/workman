@@ -69,37 +69,45 @@ test('last agent choice is validated and otherwise falls back to the first enabl
   assert.equal(lastAgentChoiceStorageKey, 'workman.new-agent.last-choice.v1');
 });
 
-test('new-agent draft keeps template and agent choices independent and persistent', async () => {
+test('new-agent draft keeps template and agent roster choices independent and persistent', async () => {
   const [source, card, daemon] = await Promise.all([
     readFile(new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
   ]);
-  assert.match(source, /draft-agent-template-[\s\S]*Template/);
-  assert.match(source, /draft-agent-tool-[\s\S]*Agent/);
-  assert.match(source, /<Select\.Item value="none" label="None">None<\/Select\.Item>/);
+  assert.match(source, /<h2[^>]*>Templates<\/h2>/);
+  assert.match(source, /<h2[^>]*>Models &amp; tools<\/h2>/);
+  assert.match(source, /name={`draft-agent-launch-\$\{draft\.id\}`}/);
+  assert.match(source, /type="radio"/);
+  assert.doesNotMatch(source, /<Select\.(?:Root|Trigger|Content|Item)\b/);
   assert.match(source, /agent_template_id: selectedTemplate\.id, agent_tool_id: selectedTool\.id/);
   assert.match(source, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
   assert.match(source, /attachments: draft\.attachments\.length > 0/);
   assert.match(source, /onDragDropEvent\(\(event\) => handleNativePromptDrop\(event\.payload\)\)/);
-  assert.match(source, /onValueChange=\{selectTemplate\}/);
-  assert.match(source, /onValueChange=\{selectAgent\}/);
-  assert.match(source, /Template default: \{templateDefaultTool\.name\}\. Template launch args are skipped for other agents\./);
-  assert.match(source, /Template prompt is prepended/);
+  assert.match(source, /function selectTemplate\(template: AgentTemplate\)[\s\S]*agentTemplateSelectionChange\(selectedTemplate, template\)[\s\S]*templateId: selection\.id, agentToolId: selection\.agentToolId/);
+  assert.match(source, /function selectStandaloneAgent\(tool: AgentTool\)[\s\S]*templateId: null, agentToolId: tool\.id/);
+  assert.match(source, /function selectTemplateAgent\(tool: AgentTool\)[\s\S]*onChange\(\{ agentToolId: tool\.id \}\)/);
+  assert.match(source, /Template launch args are skipped when using/);
+  assert.match(source, /Template instructions/);
+  assert.match(source, /Added after \$\{selectedTemplate\.name\}'s instructions\./);
+  assert.match(source, /lastWordBoundary = excerpt\.lastIndexOf\(' '\)/);
+  assert.match(source, /agentOverridden \? 'Override' : 'Template default'/);
+  assert.match(source, /selectedTemplate \? 'Additional instructions' : 'Instructions'\} can be empty/);
+  assert.match(source, /let templateInstructionsOpen = \$state\(false\)/);
+  assert.match(source, /let templateAgentOpen = \$state\(false\)/);
   assert.match(source, /primaryModifier\(event\)/);
-  assert.match(source, /\{#each templates as template/);
+  assert.match(source, /\{#each templateChoices as templateChoice/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
   assert.match(source, /agent disabled/);
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
-  assert.match(source, /class="min-h-\[17rem\] resize-y text-sm leading-6"/);
+  assert.match(source, /class="prompt-textarea min-h-\[8rem\] resize-y text-sm leading-6"/);
   assert.doesNotMatch(source, /rows=\{11\}/);
   assert.match(source, /bind:ref=\{promptTextarea\}/);
   assert.match(source, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
-  assert.match(source, /<span>Template <small>optional<\/small><\/span>/);
-  assert.match(source, /<span>Prompt <small>optional<\/small><\/span>/);
-  assert.match(source, /class="text-xs text-muted-foreground"/);
-  assert.doesNotMatch(source, /class="truncate text-xs font-normal text-muted-foreground"/);
+  assert.match(source, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);
+  assert.match(source, /showFooterCreate=\{false\}/);
+  assert.match(source, /&& !choice\.missingTemplate[\s\S]*&& !choice\.missingTool/);
   assert.match(card, /find\(\(candidate\) => candidate\.enabled\)/);
   assert.doesNotMatch(card, /candidate\.enabled\) \?\? toolSnapshot\.tools\[0\]/);
   assert.match(card, /Agent disabled/);
@@ -121,8 +129,9 @@ test('desktop spawn entry surfaces route through the inline draft panel', async 
   assert.match(app, /<NewAgentDraftPanel/);
   assert.match(app, /await openAgentDraft\(tool\.id\)/);
   assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
-  assert.match(draftPanel, /Template prompt is prepended/);
+  assert.match(draftPanel, /Added after \$\{selectedTemplate\.name\}'s instructions\./);
   assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
-  assert.match(draftPanel, /metadataLoaded \? `Unavailable template #\$\{draft\.templateId\}` : 'Loading template…'/);
+  assert.match(draftPanel, /Template #\{draft\.templateId\} is no longer available/);
+  assert.match(draftPanel, /showFooterCreate=\{false\}/);
   assert.doesNotMatch(app, /NewAgentDialog|AgentsPanel/);
 });

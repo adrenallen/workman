@@ -16,6 +16,41 @@ export interface AgentDraftChoiceResolution {
   initialChoice: AgentChoice | null;
 }
 
+export interface AgentTemplateRosterChoice {
+  template: AgentTemplate;
+  tool: AgentTool;
+}
+
+export function agentTemplateRosterChoices(
+  templates: readonly AgentTemplate[],
+  tools: readonly AgentTool[]
+): AgentTemplateRosterChoice[] {
+  return templates.flatMap((template) => {
+    const tool = tools.find((candidate) => candidate.id === template.agent_tool_id);
+    return tool ? [{ template, tool }] : [];
+  });
+}
+
+export function isStandaloneAgentSelected(
+  choice: Pick<
+    AgentDraftChoiceResolution,
+    'selectedTool' | 'selectedTemplate' | 'missingTemplate'
+  >,
+  agentToolId: number
+): boolean {
+  return !choice.missingTemplate
+    && choice.selectedTemplate === null
+    && choice.selectedTool?.id === agentToolId;
+}
+
+export function agentTemplateSelectionChange(
+  selectedTemplate: AgentTemplate | null,
+  template: AgentTemplate
+): Extract<AgentChoice, { kind: 'template' }> | null {
+  if (selectedTemplate?.id === template.id) return null;
+  return { kind: 'template', id: template.id, agentToolId: template.agent_tool_id };
+}
+
 /** Resolve display state without mutating persisted IDs while metadata is absent or stale. */
 export function resolveAgentDraftChoice(
   draft: AgentCreationDraft,

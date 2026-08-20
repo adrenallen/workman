@@ -11,6 +11,7 @@
     createLabel: string;
     busy?: boolean;
     canCreate?: boolean;
+    showFooterCreate?: boolean;
     onCreate: () => void;
     onDiscard: () => void;
     secondaryAction?: Snippet;
@@ -24,6 +25,7 @@
     createLabel,
     busy = false,
     canCreate = true,
+    showFooterCreate = true,
     onCreate,
     onDiscard,
     secondaryAction,
@@ -63,9 +65,11 @@
     <div>{#if secondaryAction}{@render secondaryAction()}{/if}</div>
     <div class="footer-actions">
       <Button type="button" variant="ghost" disabled={busy} onclick={onDiscard}>Discard</Button>
-      <Button type="submit" disabled={busy || !canCreate}>
-        {busy ? 'Creating…' : createLabel}
-      </Button>
+      {#if showFooterCreate}
+        <Button type="submit" disabled={busy || !canCreate}>
+          {busy ? 'Creating…' : createLabel}
+        </Button>
+      {/if}
     </div>
   </footer>
 </form>

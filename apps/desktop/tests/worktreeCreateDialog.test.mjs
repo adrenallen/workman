@@ -2,9 +2,24 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { environmentPolicyFromPreferences } from '../src/lib/worktrees.ts';
+
 const dialogUrl = new URL('../src/lib/WorktreeDialog.svelte', import.meta.url);
 const appUrl = new URL('../src/App.svelte', import.meta.url);
 const daemonUrl = new URL('../src/lib/daemon.ts', import.meta.url);
+
+test('remembered repository environment choices seed every worktree dialog', async () => {
+  for (const preference of ['yes', 'true', 'copy', ' COPY ']) {
+    assert.equal(environmentPolicyFromPreferences({ copy_env: preference }), 'copy');
+  }
+  for (const preferences of [{}, { copy_env: 'no' }, { copy_env: 'false' }, { copy_env: 'skip' }]) {
+    assert.equal(environmentPolicyFromPreferences(preferences), 'skip');
+  }
+
+  const dialog = await readFile(dialogUrl, 'utf8');
+  assert.match(dialog, /let envPolicy = \$state<EnvironmentPolicy>/);
+  assert.match(dialog, /environmentPolicyFromPreferences\(repository\.preferences\)/);
+});
 
 test('new branch flow explains the starting ref and keeps free-text entry', async () => {
   const dialog = await readFile(dialogUrl, 'utf8');

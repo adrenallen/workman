@@ -14,7 +14,12 @@
     handleNativePromptDrop as resolveNativePromptDrop,
     maxAgentDraftAttachments
   } from './agentAttachmentDrafts.ts';
-  import { resolveAgentDraftChoice } from './agentDraftChoices';
+  import {
+    agentTemplateSelectionChange,
+    agentTemplateRosterChoices,
+    isStandaloneAgentSelected,
+    resolveAgentDraftChoice
+  } from './agentDraftChoices';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
   import {
@@ -28,7 +33,6 @@
   import IconButton from './components/ds/IconButton.svelte';
   import * as Collapsible from './components/ui/collapsible';
   import { Input } from './components/ui/input';
-  import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
   import { primaryModifier, primaryModifierLabel } from './primaryModifier';
 
@@ -80,7 +84,8 @@
   }: Props = $props();
 
   let advancedOpen = $state(false);
-  let previewOpen = $state(true);
+  let templateInstructionsOpen = $state(false);
+  let templateAgentOpen = $state(false);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   let promptField = $state<HTMLDivElement | null>(null);
   let attachmentSaving = $state(false);
@@ -99,6 +104,7 @@
   ));
   const enabledTools = $derived(choice.enabledTools);
   const availableTemplates = $derived(choice.availableTemplates);
+  const templateChoices = $derived(agentTemplateRosterChoices(templates, tools));
   const selectedTemplate = $derived(choice.selectedTemplate);
   const selectedTool = $derived(choice.selectedTool);
   const templateDefaultTool = $derived(
@@ -111,13 +117,13 @@
       && selectedTool !== null
       && selectedTool.id !== selectedTemplate.agent_tool_id
   );
-  const templateChoice = $derived(
-    draft.templateId !== null ? `template:${draft.templateId}` : 'none'
+  const canCreate = $derived(
+    !loading
+      && !attachmentSaving
+      && selectedTool !== null
+      && !choice.missingTemplate
+      && !choice.missingTool
   );
-  const agentChoice = $derived(
-    draft.agentToolId !== null ? `tool:${draft.agentToolId}` : ''
-  );
-
   $effect(() => {
     const initial = choice.initialChoice;
     if (!initial) return;
@@ -154,28 +160,41 @@
     }
   }
 
-  function selectTemplate(value: string | undefined): void {
-    const template = availableTemplates.find((candidate) => value === `template:${candidate.id}`);
-    if (!template) {
-      onChange({ templateId: null });
-      if (selectedTool) rememberChoice({ kind: 'tool', id: selectedTool.id });
-      return;
-    }
-    onChange({ templateId: template.id, agentToolId: template.agent_tool_id });
-    rememberChoice({ kind: 'template', id: template.id, agentToolId: template.agent_tool_id });
+  function selectTemplate(template: AgentTemplate): void {
+    const selection = agentTemplateSelectionChange(selectedTemplate, template);
+    if (!selection) return;
+    templateInstructionsOpen = false;
+    templateAgentOpen = false;
+    onChange({ templateId: selection.id, agentToolId: selection.agentToolId });
+    rememberChoice(selection);
   }
 
-  function selectAgent(value: string | undefined): void {
-    const tool = enabledTools.find((candidate) => value === `tool:${candidate.id}`);
-    if (!tool) return;
+  function selectStandaloneAgent(tool: AgentTool): void {
+    templateInstructionsOpen = false;
+    templateAgentOpen = false;
+    onChange({ templateId: null, agentToolId: tool.id });
+    rememberChoice({ kind: 'tool', id: tool.id });
+  }
+
+  function selectTemplateAgent(tool: AgentTool): void {
+    if (!selectedTemplate) return;
     onChange({ agentToolId: tool.id });
-    rememberChoice(selectedTemplate
-      ? { kind: 'template', id: selectedTemplate.id, agentToolId: tool.id }
-      : { kind: 'tool', id: tool.id });
+    rememberChoice({ kind: 'template', id: selectedTemplate.id, agentToolId: tool.id });
+    templateAgentOpen = false;
+  }
+
+  function templateInstructionsSummary(prompt: string): string {
+    const summary = prompt.replace(/\s+/g, ' ').trim();
+    if (!summary) return 'No template instructions';
+    const characters = Array.from(summary);
+    if (characters.length <= 92) return summary;
+    const excerpt = characters.slice(0, 92).join('').trimEnd();
+    const lastWordBoundary = excerpt.lastIndexOf(' ');
+    return `${(lastWordBoundary > 0 ? excerpt.slice(0, lastWordBoundary) : excerpt).trimEnd()}…`;
   }
 
   function submit(): void {
-    if (!selectedTool || busy || attachmentSaving) return;
+    if (!canCreate || !selectedTool || busy) return;
     let extraArgs: string[];
     try {
       extraArgs = parseExtraArgs(draft.extraArgs);
@@ -399,7 +418,8 @@
   title={draft.name.trim() || 'New agent'}
   createLabel="Create agent"
   {busy}
-  canCreate={!loading && !attachmentSaving && selectedTool !== null}
+  {canCreate}
+  showFooterCreate={false}
   onCreate={submit}
   {onDiscard}
 >
@@ -409,75 +429,155 @@
     {/if}
   {/snippet}
   <section class="agent-fields">
-    <div class="choice-grid">
-      <label for={`draft-agent-template-${draft.id}`}>
-        <span>Template <small>optional</small></span>
-        <Select.Root type="single" value={templateChoice} disabled={loading || busy} onValueChange={selectTemplate}>
-          <Select.Trigger id={`draft-agent-template-${draft.id}`} class="w-full text-left">
-            {selectedTemplate?.name
-              ?? (draft.templateId !== null
-                ? metadataLoaded ? `Unavailable template #${draft.templateId}` : 'Loading template…'
-                : 'None')}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Item value="none" label="None">None</Select.Item>
-            {#each templates as template (template.id)}
-              {@const tool = tools.find((candidate) => candidate.id === template.agent_tool_id)}
-              {#if tool}
-                <Select.Item value={`template:${template.id}`} label={template.name} disabled={!tool.enabled}>
-                  <AgentBrandMark {tool} size={16} />
-                  <span>{template.name}</span>
-                  <span class="text-xs text-muted-foreground">{tool.name}{#if !tool.enabled} · agent disabled{/if}</span>
-                </Select.Item>
-              {/if}
-            {/each}
-          </Select.Content>
-        </Select.Root>
-        {#if choice.missingTemplate}
-          <small class="choice-warning">Template #{draft.templateId} is no longer available. Choose another template or None.</small>
-        {/if}
-      </label>
+    <fieldset
+      class="launch-fieldset"
+      disabled={loading || busy}
+      aria-busy={loading}
+      aria-describedby={`draft-agent-choice-help-${draft.id}`}
+    >
+      <legend>Start from</legend>
+      <p id={`draft-agent-choice-help-${draft.id}`} class="selection-help">
+        Choose a template, or launch a model or tool directly.
+      </p>
+      <div class="launch-roster" class:roster-loading={loading}>
+        {#if loading}
+          <div class="loading-choice" role="status">Loading launch choices…</div>
+        {:else}
+          {#if templateChoices.length > 0}
+            <section class="roster-group" aria-labelledby={`draft-agent-templates-${draft.id}`}>
+              <div class="roster-heading">
+                <h2 id={`draft-agent-templates-${draft.id}`}>Templates</h2><span>Prompt and setup included</span>
+              </div>
+              <div class="roster-options">
+                {#each templateChoices as templateChoice (templateChoice.template.id)}
+                  {@const template = templateChoice.template}
+                  {@const tool = templateChoice.tool}
+                  <label class="launch-choice">
+                    <input
+                      class="choice-radio"
+                      type="radio"
+                      name={`draft-agent-launch-${draft.id}`}
+                      checked={selectedTemplate?.id === template.id}
+                      disabled={!tool.enabled}
+                      onclick={() => selectTemplate(template)}
+                    />
+                    <span class="choice-card">
+                      <AgentBrandMark {tool} size={18} />
+                      <span class="choice-copy">
+                        <strong>{template.name}</strong>
+                        <small>{tool.name}{#if !tool.enabled} · agent disabled{/if}</small>
+                      </span>
+                      <span class="choice-indicator" aria-hidden="true"></span>
+                    </span>
+                  </label>
+                {/each}
+              </div>
+            </section>
+          {/if}
 
-      <label for={`draft-agent-tool-${draft.id}`}>
-        <span>Agent</span>
-        <Select.Root type="single" value={agentChoice} disabled={loading || busy} onValueChange={selectAgent}>
-          <Select.Trigger id={`draft-agent-tool-${draft.id}`} class="w-full text-left">
-            {#if selectedTool}
-              <span class="flex min-w-0 items-center gap-1.5"><AgentBrandMark tool={selectedTool} size={16} /><span class="truncate">{selectedTool.name}</span></span>
-            {:else if draft.agentToolId !== null}
-              {metadataLoaded ? `Unavailable agent #${draft.agentToolId}` : 'Loading agent…'}
-            {:else}Select an agent{/if}
-          </Select.Trigger>
-          <Select.Content>
-            {#each enabledTools as tool (tool.id)}
-              <Select.Item value={`tool:${tool.id}`} label={tool.name}><AgentBrandMark {tool} size={16} /><span>{tool.name}</span></Select.Item>
-            {/each}
-          </Select.Content>
-        </Select.Root>
-        {#if choice.missingTool}
-          <small class="choice-warning">Agent #{draft.agentToolId} is no longer available. Choose another agent to create this draft.</small>
+          <section class="roster-group" aria-labelledby={`draft-agent-tools-${draft.id}`}>
+            <div class="roster-heading">
+              <h2 id={`draft-agent-tools-${draft.id}`}>Models &amp; tools</h2><span>Launch directly</span>
+            </div>
+            <div class="roster-options">
+              {#each enabledTools as tool (tool.id)}
+                <label class="launch-choice">
+                  <input
+                    class="choice-radio"
+                    type="radio"
+                    name={`draft-agent-launch-${draft.id}`}
+                    checked={isStandaloneAgentSelected(choice, tool.id)}
+                    onclick={() => selectStandaloneAgent(tool)}
+                  />
+                  <span class="choice-card">
+                    <AgentBrandMark {tool} size={16} />
+                    <span class="choice-copy"><span>{tool.name}</span><small>Standalone agent</small></span>
+                    <span class="choice-indicator" aria-hidden="true"></span>
+                  </span>
+                </label>
+              {/each}
+            </div>
+          </section>
         {/if}
-        {#if agentOverridden && templateDefaultTool}
-          <small>Template default: {templateDefaultTool.name}. Template launch args are skipped for other agents.</small>
-        {/if}
-      </label>
-    </div>
+      </div>
+      {#if choice.missingTemplate}
+        <small class="choice-warning">Template #{draft.templateId} is no longer available. Choose another template or a standalone agent.</small>
+      {/if}
+      {#if choice.missingTool}
+        <small class="choice-warning">Agent #{draft.agentToolId} is no longer available. Choose another agent to create this draft.</small>
+      {/if}
+    </fieldset>
 
     {#if selectedTemplate}
-      <Collapsible.Root bind:open={previewOpen} class="overflow-hidden rounded-md border border-border bg-muted/20">
-        <Collapsible.Trigger class="flex min-h-9 w-full items-center gap-2 px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-          <span class="min-w-0 flex-1"><strong class="block text-sm font-medium">Template prompt</strong><span class="block text-xs text-muted-foreground">Template prompt is prepended</span></span>
-          <ChevronDownIcon class={`text-muted-foreground ${previewOpen ? 'rotate-180' : ''}`} size={14} />
-        </Collapsible.Trigger>
-        <Collapsible.Content><div class="template-preview" aria-label="Template prompt preview">{selectedTemplate.prompt || 'No template prompt'}</div></Collapsible.Content>
-      </Collapsible.Root>
+      <section class="template-options" aria-labelledby={`draft-template-options-${draft.id}`}>
+        <div class="template-options-heading">
+          <span>Selected template</span>
+          <h2 id={`draft-template-options-${draft.id}`}>{selectedTemplate.name}</h2>
+        </div>
+
+        <div class="template-detail">
+          <Collapsible.Root bind:open={templateInstructionsOpen}>
+            <Collapsible.Trigger class="template-detail-trigger">
+              <span class="template-detail-copy">
+                <strong>Template instructions</strong>
+                <small>{templateInstructionsSummary(selectedTemplate.prompt)}</small>
+              </span>
+              <ChevronDownIcon class={`template-detail-chevron ${templateInstructionsOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
+            </Collapsible.Trigger>
+            <Collapsible.Content>
+              <div class="template-preview" aria-label="Template instructions preview">{selectedTemplate.prompt || 'No template instructions'}</div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        </div>
+
+        <div class="template-detail">
+          <Collapsible.Root bind:open={templateAgentOpen}>
+            <Collapsible.Trigger class="template-detail-trigger">
+              <span class="template-detail-copy">
+                <strong>Template agent</strong>
+                <small>{choice.missingTool ? 'Agent unavailable · choose another' : `${selectedTool?.name ?? 'Choose an agent'} · ${agentOverridden ? 'Override' : 'Template default'}`}</small>
+              </span>
+              <ChevronDownIcon class={`template-detail-chevron ${templateAgentOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
+            </Collapsible.Trigger>
+            <Collapsible.Content>
+              <fieldset class="override-fieldset" disabled={loading || busy}>
+                <legend class="sr-only">Choose a template agent override</legend>
+                <div class="override-options">
+                  {#each enabledTools as tool (tool.id)}
+                    <label class="override-choice">
+                      <input
+                        class="choice-radio"
+                        type="radio"
+                        name={`draft-agent-override-${draft.id}`}
+                        checked={selectedTool?.id === tool.id}
+                        onclick={() => selectTemplateAgent(tool)}
+                      />
+                      <span class="choice-card compact">
+                        <AgentBrandMark {tool} size={16} />
+                        <span class="choice-copy">
+                          <strong>{tool.name}</strong>
+                          <small>{tool.id === selectedTemplate.agent_tool_id ? 'Template default' : 'Override'}</small>
+                        </span>
+                        <span class="choice-indicator" aria-hidden="true"></span>
+                      </span>
+                    </label>
+                  {/each}
+                </div>
+                {#if agentOverridden && templateDefaultTool}
+                  <small class="override-note">Template launch args are skipped when using {selectedTool?.name} instead of {templateDefaultTool.name}.</small>
+                {/if}
+              </fieldset>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        </div>
+      </section>
     {/if}
 
     <div
       bind:this={promptField}
       class="prompt-field"
       role="group"
-      aria-label="Prompt and image attachments"
+      aria-label={selectedTemplate ? 'Additional instructions and image attachments' : 'Instructions and image attachments'}
       class:attachment-drop-active={attachmentDropActive}
       ondragover={(event) => {
         if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
@@ -487,44 +587,59 @@
       ondragleave={() => { attachmentDropActive = false; }}
       ondrop={handlePromptDrop}
     >
-      <label for={`draft-agent-prompt-${draft.id}`}><span>Prompt <small>optional</small></span></label>
-      <Textarea
-        id={`draft-agent-prompt-${draft.id}`}
-        class="min-h-[17rem] resize-y text-sm leading-6"
-        bind:ref={promptTextarea}
-        value={draft.prompt}
-        placeholder="What should this agent work on?"
-        disabled={busy}
-        oninput={(event) => onChange({ prompt: event.currentTarget.value })}
-        onkeydown={handleKeydown}
-        onpaste={handlePromptPaste}
-      />
-      {#if draft.attachments.length > 0}
-        <div class="attachment-list" role="group" aria-label="Attached images">
-          {#each draft.attachments as attachment, index (attachment)}
-            <div class="attachment-chip">
-              {#if attachmentPreview(attachment)}
-                <img
-                  src={attachmentPreview(attachment)}
-                  alt=""
-                  onerror={() => handleAttachmentPreviewError(attachment)}
-                />
-              {:else}
-                <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
-              {/if}
-              <span>{attachmentName(attachment)}</span>
-              <IconButton
-                class="size-6 rounded-sm"
-                label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
-                tooltip={false}
-                disabled={busy || attachmentSaving}
-                onclick={() => removeAttachment(attachment)}
-              >{#snippet icon()}<XIcon size={14} strokeWidth={1.8} />{/snippet}</IconButton>
-            </div>
-          {/each}
+      <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
+        <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
+        <small>{selectedTemplate ? `Added after ${selectedTemplate.name}'s instructions.` : 'Tell this agent what to do.'}</small>
+      </label>
+      <div class="prompt-composer">
+        <Textarea
+          id={`draft-agent-prompt-${draft.id}`}
+          class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
+          bind:ref={promptTextarea}
+          value={draft.prompt}
+          placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
+          disabled={busy}
+          oninput={(event) => onChange({ prompt: event.currentTarget.value })}
+          onkeydown={handleKeydown}
+          onpaste={handlePromptPaste}
+        />
+        {#if draft.attachments.length > 0}
+          <div class="attachment-list" role="group" aria-label="Attached images">
+            {#each draft.attachments as attachment, index (attachment)}
+              <div class="attachment-chip">
+                {#if attachmentPreview(attachment)}
+                  <img
+                    src={attachmentPreview(attachment)}
+                    alt=""
+                    onerror={() => handleAttachmentPreviewError(attachment)}
+                  />
+                {:else}
+                  <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
+                {/if}
+                <span>{attachmentName(attachment)}</span>
+                <IconButton
+                  class="size-6 rounded-sm"
+                  label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
+                  tooltip={false}
+                  disabled={busy || attachmentSaving}
+                  onclick={() => removeAttachment(attachment)}
+                >{#snippet icon()}<XIcon size={14} strokeWidth={1.8} />{/snippet}</IconButton>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <div class="prompt-actions">
+          <small id={`draft-agent-create-help-${draft.id}`}>
+            {selectedTemplate ? 'Additional instructions' : 'Instructions'} can be empty · {primaryModifierLabel}+Enter creates · Shift+Enter adds a line
+          </small>
+          <Button
+            type="submit"
+            disabled={busy || !canCreate}
+            aria-busy={busy}
+            aria-describedby={`draft-agent-create-help-${draft.id}`}
+          >{busy ? 'Creating…' : 'Create agent'}</Button>
         </div>
-      {/if}
-      <small>{primaryModifierLabel}+Enter creates. Shift+Enter adds a line.</small>
+      </div>
     </div>
 
     <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-md border border-border">
@@ -535,8 +650,8 @@
       </Collapsible.Trigger>
       <Collapsible.Content>
         <div class="advanced-grid">
-          <label for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
-          <label for={`draft-agent-args-${draft.id}`}><span>Extra launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder='--model "gpt-5"' disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
+          <label class="field-label" for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
+          <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Extra launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder='--model "gpt-5"' disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
         </div>
       </Collapsible.Content>
     </Collapsible.Root>
@@ -548,21 +663,88 @@
 </CreationDraftScaffold>
 
 <style>
-  .agent-fields { display: grid; gap: 13px; }
-  .choice-grid, .advanced-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
-  label > span { color: var(--text-soft); }
-  label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
-  .template-preview { max-height: 144px; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 12px; color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
+  .agent-fields { display: grid; gap: 11px; }
+  .advanced-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
+  .field-label > span { color: var(--text-soft); }
+  .field-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
+  .launch-fieldset, .override-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
+  .launch-fieldset > legend, .override-fieldset > legend { padding: 0; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
+  .selection-help { margin: 3px 0 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
+  .launch-roster { max-height: min(27vh, 230px); overflow-y: auto; overscroll-behavior: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .launch-roster.roster-loading { min-height: 94px; }
+  .loading-choice { display: grid; min-height: 92px; place-items: center; padding: 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .roster-group + .roster-group { border-top: 1px solid var(--border); }
+  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 5px 9px; background: var(--card); }
+  .roster-heading h2 { margin: 0; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
+  .roster-heading span { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .roster-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); }
+  .roster-options > .launch-choice:last-child:nth-child(odd),
+  .override-options > .override-choice:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .launch-choice, .override-choice { position: relative; min-width: 0; cursor: pointer; background: var(--background); }
+  .launch-choice:has(input:disabled), .override-choice:has(input:disabled) { cursor: not-allowed; opacity: .52; }
+  .choice-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .choice-card { display: flex; min-width: 0; min-height: 50px; align-items: center; gap: 9px; padding: 7px 10px; color: var(--foreground); transition: background-color 120ms ease, box-shadow 120ms ease; }
+  .choice-card.compact { min-height: 42px; padding: 5px 9px; }
+  .choice-copy { display: grid; min-width: 0; flex: 1; gap: 1px; }
+  .choice-copy strong, .choice-copy > span, .choice-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .choice-copy strong, .choice-copy > span { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 590; }
+  .choice-copy small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; }
+  .choice-indicator { width: 13px; height: 13px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--background); box-shadow: inset 0 0 0 3px var(--background); }
+  .choice-radio:checked + .choice-card { background: color-mix(in srgb, var(--primary) 7%, var(--background)); box-shadow: inset 2px 0 var(--primary); }
+  .choice-radio:checked + .choice-card .choice-indicator { border-color: var(--primary); background: var(--primary); }
+  .choice-radio:focus-visible + .choice-card { position: relative; z-index: 2; outline: 2px solid var(--ring); outline-offset: -2px; }
+  .launch-choice:hover .choice-card, .override-choice:hover .choice-card { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
+  .choice-radio:checked + .choice-card:hover { background: color-mix(in srgb, var(--primary) 10%, var(--background)); }
+  .choice-warning { display: block; margin-top: 6px; color: var(--warning-token); font-size: var(--font-size-xs); line-height: 1.4; }
+  .template-options { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); }
+  .template-options-heading { display: flex; min-height: 36px; align-items: baseline; gap: 8px; padding: 7px 10px; background: var(--card); }
+  .template-options-heading > span { flex: none; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .template-options-heading h2 { min-width: 0; overflow: hidden; margin: 0; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+  .template-detail { border-top: 1px solid var(--border); }
+  :global(.template-detail-trigger) { display: flex; width: 100%; min-height: 43px; align-items: center; gap: 10px; border: 0; padding: 6px 9px 6px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  :global(.template-detail-trigger:hover) { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
+  :global(.template-detail-trigger:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+  :global(.template-detail-trigger > .template-detail-chevron) { flex: none; color: var(--muted-foreground); transition: transform 120ms ease; }
+  :global(.template-detail-trigger > .template-detail-chevron.open) { transform: rotate(180deg); }
+  .template-detail-copy { display: grid; min-width: 0; flex: 1; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; gap: 9px; }
+  .template-detail-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
+  .template-detail-copy small { overflow: hidden; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .override-fieldset { padding: 8px 10px 10px; background: var(--card); }
+  .override-options { display: grid; max-height: 260px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 1px); background: var(--border); scrollbar-width: thin; }
+  .override-note { display: block; margin-top: 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
+  .template-preview { border-top: 1px solid var(--border); padding: 8px 10px 9px; background: var(--card); color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
   .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
   .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
-  .choice-warning { color: var(--warning-token); }
   .prompt-field { display: grid; align-content: start; gap: 6px; }
-  .prompt-field > small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
+  .prompt-composer { overflow: hidden; border: 1px solid var(--input); border-radius: var(--radius); background: var(--background); transition: border-color 120ms ease, box-shadow 120ms ease; }
+  .prompt-composer:focus-within { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent); }
+  .prompt-composer :global(.prompt-textarea) { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .prompt-composer :global(.prompt-textarea:focus-visible) { border-color: transparent; box-shadow: none; }
+  .instruction-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .instruction-label > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prompt-actions { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 7px 6px 10px; background: var(--card); }
+  .prompt-actions small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .attachment-drop-active { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: var(--radius); }
-  .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; }
+  .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; border-top: 1px solid var(--border); padding: 8px 10px; }
   .attachment-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 5px 3px 3px; background: var(--muted); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 500; }
   .attachment-chip img { width: 28px; height: 28px; flex: 0 0 auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
   .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  @media (max-width: 620px) { .choice-grid, .advanced-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 620px) {
+    .advanced-grid, .roster-options, .override-options { grid-template-columns: 1fr; }
+    .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }
+    .instruction-label { align-items: flex-start; flex-direction: column; gap: 2px; }
+    .prompt-actions { align-items: stretch; flex-direction: column; }
+    .prompt-actions :global(button) { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .choice-card, .prompt-composer, :global(.template-detail-trigger > .template-detail-chevron) { transition: none; }
+  }
+  @media (forced-colors: active) {
+    .launch-choice, .override-choice { display: flex; align-items: center; }
+    .choice-radio { position: static; width: 16px; height: 16px; flex: none; margin-left: 9px; opacity: 1; }
+    .choice-card { flex: 1; }
+    .choice-indicator { display: none; }
+    .choice-radio:checked + .choice-card { outline: 2px solid Highlight; outline-offset: -2px; background: Canvas; box-shadow: none; }
+  }
 </style>
