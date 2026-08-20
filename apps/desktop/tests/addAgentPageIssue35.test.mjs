@@ -71,11 +71,13 @@ test('a template keeps its default agent and reveals optional override choices',
   assert.ok(overrideGate > standaloneLoop, 'override controls are gated by a selected template');
   assert.ok(overrideLoop > overrideGate, 'enabled agents are offered as template overrides');
 
-  const promptSurface = source.indexOf('aria-label="Prompt and image attachments"', overrideLoop);
-  assert.ok(promptSurface > overrideLoop, 'override controls precede the prompt surface');
-  const overrideChoices = source.slice(overrideGate, promptSurface);
+  const instructionSurface = source.indexOf('bind:this={promptField}', overrideLoop);
+  assert.ok(instructionSurface > overrideLoop, 'override controls precede the instruction surface');
+  const overrideChoices = source.slice(overrideGate, instructionSurface);
   assert.match(overrideChoices, /override/i);
-  assert.match(overrideChoices, /optional/i);
+  assert.match(overrideChoices, /bind:open={templateAgentOpen}/);
+  assert.match(source, /let templateAgentOpen = \$state\(false\)/);
+  assert.match(source, /let templateInstructionsOpen = \$state\(false\)/);
   assert.match(overrideChoices, /<input\b[\s\S]*?\btype="radio"/);
   assert.match(overrideChoices, /\{tool\.name\}/);
   assert.match(overrideChoices, /checked=\{selectedTool\?\.id === tool\.id\}/);
@@ -95,19 +97,21 @@ test('a template keeps its default agent and reveals optional override choices',
   );
 });
 
-test('the prompt surface owns Create and an empty prompt remains submittable', async () => {
+test('the additional-instructions surface owns Create and remains optional', async () => {
   const [source, scaffold] = await Promise.all([
     readFile(panelUrl, 'utf8'),
     readFile(scaffoldUrl, 'utf8')
   ]);
-  const promptSurface = sourceBetween(
+  const instructionSurface = sourceBetween(
     source,
-    'aria-label="Prompt and image attachments"',
+    'bind:this={promptField}',
     '<Collapsible.Root bind:open={advancedOpen}',
-    'prompt surface'
+    'additional instructions surface'
   );
-  assert.match(promptSurface, /<Textarea\b/);
-  const createButton = promptSurface.match(/<Button\b([\s\S]*?)>[\s\S]*?Creat(?:e|ing)/);
+  assert.match(instructionSurface, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);
+  assert.match(instructionSurface, /Added after \$\{selectedTemplate\.name\}'s instructions\./);
+  assert.match(instructionSurface, /<Textarea\b/);
+  const createButton = instructionSurface.match(/<Button\b([\s\S]*?)>[\s\S]*?Creat(?:e|ing)/);
   assert.ok(createButton, 'Create is rendered beside the prompt controls');
   assert.match(createButton[0], /(?:type="submit"|onclick=\{submit\})/);
   assert.doesNotMatch(createButton[1], /draft\.prompt|prompt\.trim/);

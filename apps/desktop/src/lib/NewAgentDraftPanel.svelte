@@ -84,7 +84,8 @@
   }: Props = $props();
 
   let advancedOpen = $state(false);
-  let previewOpen = $state(true);
+  let templateInstructionsOpen = $state(false);
+  let templateAgentOpen = $state(false);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   let promptField = $state<HTMLDivElement | null>(null);
   let attachmentSaving = $state(false);
@@ -162,11 +163,15 @@
   function selectTemplate(template: AgentTemplate): void {
     const selection = agentTemplateSelectionChange(selectedTemplate, template);
     if (!selection) return;
+    templateInstructionsOpen = false;
+    templateAgentOpen = false;
     onChange({ templateId: selection.id, agentToolId: selection.agentToolId });
     rememberChoice(selection);
   }
 
   function selectStandaloneAgent(tool: AgentTool): void {
+    templateInstructionsOpen = false;
+    templateAgentOpen = false;
     onChange({ templateId: null, agentToolId: tool.id });
     rememberChoice({ kind: 'tool', id: tool.id });
   }
@@ -175,6 +180,17 @@
     if (!selectedTemplate) return;
     onChange({ agentToolId: tool.id });
     rememberChoice({ kind: 'template', id: selectedTemplate.id, agentToolId: tool.id });
+    templateAgentOpen = false;
+  }
+
+  function templateInstructionsSummary(prompt: string): string {
+    const summary = prompt.replace(/\s+/g, ' ').trim();
+    if (!summary) return 'No template instructions';
+    const characters = Array.from(summary);
+    if (characters.length <= 92) return summary;
+    const excerpt = characters.slice(0, 92).join('').trimEnd();
+    const lastWordBoundary = excerpt.lastIndexOf(' ');
+    return `${(lastWordBoundary > 0 ? excerpt.slice(0, lastWordBoundary) : excerpt).trimEnd()}…`;
   }
 
   function submit(): void {
@@ -495,49 +511,63 @@
     {#if selectedTemplate}
       <section class="template-options" aria-labelledby={`draft-template-options-${draft.id}`}>
         <div class="template-options-heading">
-          <div>
-            <h2 id={`draft-template-options-${draft.id}`}>{selectedTemplate.name}</h2>
-            <p>Template selected. Its prompt and setup will be included.</p>
-          </div>
-          <span>Template</span>
+          <span>Selected template</span>
+          <h2 id={`draft-template-options-${draft.id}`}>{selectedTemplate.name}</h2>
         </div>
 
-        <fieldset class="override-fieldset" disabled={loading || busy}>
-          <legend>Model / tool override <small>optional</small></legend>
-          <p>Keep {templateDefaultTool?.name ?? 'the template default'}, or choose another enabled agent.</p>
-          <div class="override-options">
-            {#each enabledTools as tool (tool.id)}
-              <label class="override-choice">
-                <input
-                  class="choice-radio"
-                  type="radio"
-                  name={`draft-agent-override-${draft.id}`}
-                  checked={selectedTool?.id === tool.id}
-                  onclick={() => selectTemplateAgent(tool)}
-                />
-                <span class="choice-card compact">
-                  <AgentBrandMark {tool} size={16} />
-                  <span class="choice-copy">
-                    <strong>{tool.name}</strong>
-                    <small>{tool.id === selectedTemplate.agent_tool_id ? 'Template default' : 'Override'}</small>
-                  </span>
-                  <span class="choice-indicator" aria-hidden="true"></span>
-                </span>
-              </label>
-            {/each}
-          </div>
-          {#if agentOverridden && templateDefaultTool}
-            <small class="override-note">Template launch args are skipped when using {selectedTool?.name} instead of {templateDefaultTool.name}.</small>
-          {/if}
-        </fieldset>
-
-        <div class="template-prompt">
-          <Collapsible.Root bind:open={previewOpen}>
-            <Collapsible.Trigger class="flex min-h-9 w-full items-center gap-2 px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-              <span class="min-w-0 flex-1"><strong class="block text-sm font-medium">Template prompt</strong><span class="block text-xs text-muted-foreground">Prepended to your optional prompt</span></span>
-              <ChevronDownIcon class={`text-muted-foreground ${previewOpen ? 'rotate-180' : ''}`} size={14} />
+        <div class="template-detail">
+          <Collapsible.Root bind:open={templateInstructionsOpen}>
+            <Collapsible.Trigger class="template-detail-trigger">
+              <span class="template-detail-copy">
+                <strong>Template instructions</strong>
+                <small>{templateInstructionsSummary(selectedTemplate.prompt)}</small>
+              </span>
+              <ChevronDownIcon class={`template-detail-chevron ${templateInstructionsOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
             </Collapsible.Trigger>
-            <Collapsible.Content><div class="template-preview" aria-label="Template prompt preview">{selectedTemplate.prompt || 'No template prompt'}</div></Collapsible.Content>
+            <Collapsible.Content>
+              <div class="template-preview" aria-label="Template instructions preview">{selectedTemplate.prompt || 'No template instructions'}</div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        </div>
+
+        <div class="template-detail">
+          <Collapsible.Root bind:open={templateAgentOpen}>
+            <Collapsible.Trigger class="template-detail-trigger">
+              <span class="template-detail-copy">
+                <strong>Template agent</strong>
+                <small>{choice.missingTool ? 'Agent unavailable · choose another' : `${selectedTool?.name ?? 'Choose an agent'} · ${agentOverridden ? 'Override' : 'Template default'}`}</small>
+              </span>
+              <ChevronDownIcon class={`template-detail-chevron ${templateAgentOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
+            </Collapsible.Trigger>
+            <Collapsible.Content>
+              <fieldset class="override-fieldset" disabled={loading || busy}>
+                <legend class="sr-only">Choose a template agent override</legend>
+                <div class="override-options">
+                  {#each enabledTools as tool (tool.id)}
+                    <label class="override-choice">
+                      <input
+                        class="choice-radio"
+                        type="radio"
+                        name={`draft-agent-override-${draft.id}`}
+                        checked={selectedTool?.id === tool.id}
+                        onclick={() => selectTemplateAgent(tool)}
+                      />
+                      <span class="choice-card compact">
+                        <AgentBrandMark {tool} size={16} />
+                        <span class="choice-copy">
+                          <strong>{tool.name}</strong>
+                          <small>{tool.id === selectedTemplate.agent_tool_id ? 'Template default' : 'Override'}</small>
+                        </span>
+                        <span class="choice-indicator" aria-hidden="true"></span>
+                      </span>
+                    </label>
+                  {/each}
+                </div>
+                {#if agentOverridden && templateDefaultTool}
+                  <small class="override-note">Template launch args are skipped when using {selectedTool?.name} instead of {templateDefaultTool.name}.</small>
+                {/if}
+              </fieldset>
+            </Collapsible.Content>
           </Collapsible.Root>
         </div>
       </section>
@@ -547,7 +577,7 @@
       bind:this={promptField}
       class="prompt-field"
       role="group"
-      aria-label="Prompt and image attachments"
+      aria-label={selectedTemplate ? 'Additional instructions and image attachments' : 'Instructions and image attachments'}
       class:attachment-drop-active={attachmentDropActive}
       ondragover={(event) => {
         if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
@@ -557,14 +587,17 @@
       ondragleave={() => { attachmentDropActive = false; }}
       ondrop={handlePromptDrop}
     >
-      <label class="field-label" for={`draft-agent-prompt-${draft.id}`}><span>Prompt <small>optional</small></span></label>
+      <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
+        <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
+        <small>{selectedTemplate ? `Added after ${selectedTemplate.name}'s instructions.` : 'Tell this agent what to do.'}</small>
+      </label>
       <div class="prompt-composer">
         <Textarea
           id={`draft-agent-prompt-${draft.id}`}
-          class="prompt-textarea min-h-[12rem] resize-y text-sm leading-6"
+          class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
           bind:ref={promptTextarea}
           value={draft.prompt}
-          placeholder="Add instructions, or create with no prompt."
+          placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
           disabled={busy}
           oninput={(event) => onChange({ prompt: event.currentTarget.value })}
           onkeydown={handleKeydown}
@@ -597,7 +630,7 @@
         {/if}
         <div class="prompt-actions">
           <small id={`draft-agent-create-help-${draft.id}`}>
-            Prompt can be empty · {primaryModifierLabel}+Enter creates · Shift+Enter adds a line
+            {selectedTemplate ? 'Additional instructions' : 'Instructions'} can be empty · {primaryModifierLabel}+Enter creates · Shift+Enter adds a line
           </small>
           <Button
             type="submit"
@@ -630,49 +663,57 @@
 </CreationDraftScaffold>
 
 <style>
-  .agent-fields { display: grid; gap: 13px; }
+  .agent-fields { display: grid; gap: 11px; }
   .advanced-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
   .field-label > span { color: var(--text-soft); }
-  .field-label small, legend small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
+  .field-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
   .launch-fieldset, .override-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
   .launch-fieldset > legend, .override-fieldset > legend { padding: 0; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
-  .selection-help, .override-fieldset > p, .template-options-heading p { margin: 3px 0 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
-  .launch-roster { max-height: min(30vh, 260px); overflow-y: auto; overscroll-behavior: auto; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 14%, transparent); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .selection-help { margin: 3px 0 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
+  .launch-roster { max-height: min(27vh, 230px); overflow-y: auto; overscroll-behavior: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .launch-roster.roster-loading { min-height: 94px; }
   .loading-choice { display: grid; min-height: 92px; place-items: center; padding: 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .roster-group + .roster-group { border-top: 1px solid var(--border); }
-  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 6px 9px; background: var(--card); }
+  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 5px 9px; background: var(--card); }
   .roster-heading h2 { margin: 0; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
   .roster-heading span { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .roster-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); }
+  .roster-options > .launch-choice:last-child:nth-child(odd),
+  .override-options > .override-choice:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .launch-choice, .override-choice { position: relative; min-width: 0; cursor: pointer; background: var(--background); }
   .launch-choice:has(input:disabled), .override-choice:has(input:disabled) { cursor: not-allowed; opacity: .52; }
   .choice-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .choice-card { display: flex; min-width: 0; min-height: 55px; align-items: center; gap: 9px; padding: 8px 10px; color: var(--foreground); transition: background-color 120ms ease, box-shadow 120ms ease; }
-  .choice-card.compact { min-height: 46px; padding: 6px 9px; }
+  .choice-card { display: flex; min-width: 0; min-height: 50px; align-items: center; gap: 9px; padding: 7px 10px; color: var(--foreground); transition: background-color 120ms ease, box-shadow 120ms ease; }
+  .choice-card.compact { min-height: 42px; padding: 5px 9px; }
   .choice-copy { display: grid; min-width: 0; flex: 1; gap: 1px; }
   .choice-copy strong, .choice-copy > span, .choice-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .choice-copy strong, .choice-copy > span { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 590; }
   .choice-copy small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; }
   .choice-indicator { width: 13px; height: 13px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--background); box-shadow: inset 0 0 0 3px var(--background); }
-  .choice-radio:checked + .choice-card { background: color-mix(in srgb, var(--accent) 70%, var(--background)); box-shadow: inset 2px 0 var(--primary); }
+  .choice-radio:checked + .choice-card { background: color-mix(in srgb, var(--primary) 7%, var(--background)); box-shadow: inset 2px 0 var(--primary); }
   .choice-radio:checked + .choice-card .choice-indicator { border-color: var(--primary); background: var(--primary); }
   .choice-radio:focus-visible + .choice-card { position: relative; z-index: 2; outline: 2px solid var(--ring); outline-offset: -2px; }
-  .launch-choice:hover .choice-card, .override-choice:hover .choice-card { background: var(--muted); }
-  .choice-radio:checked + .choice-card:hover { background: color-mix(in srgb, var(--accent) 78%, var(--background)); }
+  .launch-choice:hover .choice-card, .override-choice:hover .choice-card { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
+  .choice-radio:checked + .choice-card:hover { background: color-mix(in srgb, var(--primary) 10%, var(--background)); }
   .choice-warning { display: block; margin-top: 6px; color: var(--warning-token); font-size: var(--font-size-xs); line-height: 1.4; }
-  .template-options { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 12%, transparent); }
-  .template-options-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px 8px; }
-  .template-options-heading h2 { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; }
-  .template-options-heading p { margin-bottom: 0; }
-  .template-options-heading > span { flex: none; border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; color: var(--muted-foreground); font: 620 var(--font-size-xs)/1.2 var(--terminal-font-family); }
-  .override-fieldset { border-top: 1px solid var(--border); padding: 9px 12px 11px; background: var(--background); }
-  .override-fieldset > p { margin-bottom: 7px; }
-  .override-options { display: grid; max-height: 148px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 1px); background: var(--border); scrollbar-width: thin; }
+  .template-options { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); }
+  .template-options-heading { display: flex; min-height: 36px; align-items: baseline; gap: 8px; padding: 7px 10px; background: var(--card); }
+  .template-options-heading > span { flex: none; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .template-options-heading h2 { min-width: 0; overflow: hidden; margin: 0; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+  .template-detail { border-top: 1px solid var(--border); }
+  :global(.template-detail-trigger) { display: flex; width: 100%; min-height: 43px; align-items: center; gap: 10px; border: 0; padding: 6px 9px 6px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  :global(.template-detail-trigger:hover) { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
+  :global(.template-detail-trigger:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+  :global(.template-detail-trigger > .template-detail-chevron) { flex: none; color: var(--muted-foreground); transition: transform 120ms ease; }
+  :global(.template-detail-trigger > .template-detail-chevron.open) { transform: rotate(180deg); }
+  .template-detail-copy { display: grid; min-width: 0; flex: 1; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; gap: 9px; }
+  .template-detail-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
+  .template-detail-copy small { overflow: hidden; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .override-fieldset { padding: 8px 10px 10px; background: var(--card); }
+  .override-options { display: grid; max-height: 260px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 1px); background: var(--border); scrollbar-width: thin; }
   .override-note { display: block; margin-top: 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
-  .template-prompt { overflow: hidden; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--muted) 20%, transparent); }
-  .template-preview { max-height: 144px; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 12px; color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
+  .template-preview { border-top: 1px solid var(--border); padding: 8px 10px 9px; background: var(--card); color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
   .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
   .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .prompt-field { display: grid; align-content: start; gap: 6px; }
@@ -680,7 +721,9 @@
   .prompt-composer:focus-within { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent); }
   .prompt-composer :global(.prompt-textarea) { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
   .prompt-composer :global(.prompt-textarea:focus-visible) { border-color: transparent; box-shadow: none; }
-  .prompt-actions { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 7px 8px 7px 10px; background: color-mix(in srgb, var(--muted) 20%, transparent); }
+  .instruction-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .instruction-label > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prompt-actions { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 7px 6px 10px; background: var(--card); }
   .prompt-actions small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .attachment-drop-active { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: var(--radius); }
   .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; border-top: 1px solid var(--border); padding: 8px 10px; }
@@ -689,11 +732,13 @@
   .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 620px) {
     .advanced-grid, .roster-options, .override-options { grid-template-columns: 1fr; }
+    .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }
+    .instruction-label { align-items: flex-start; flex-direction: column; gap: 2px; }
     .prompt-actions { align-items: stretch; flex-direction: column; }
     .prompt-actions :global(button) { width: 100%; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .choice-card, .prompt-composer { transition: none; }
+    .choice-card, .prompt-composer, :global(.template-detail-trigger > .template-detail-chevron) { transition: none; }
   }
   @media (forced-colors: active) {
     .launch-choice, .override-choice { display: flex; align-items: center; }
