@@ -75,8 +75,8 @@ test('new-agent draft keeps template and agent roster choices independent and pe
     readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
   ]);
-  assert.match(source, /<strong>Templates<\/strong>/);
-  assert.match(source, /<strong>Models &amp; tools<\/strong>/);
+  assert.match(source, /<h2[^>]*>Templates<\/h2>/);
+  assert.match(source, /<h2[^>]*>Models &amp; tools<\/h2>/);
   assert.match(source, /name={`draft-agent-launch-\$\{draft\.id\}`}/);
   assert.match(source, /type="radio"/);
   assert.doesNotMatch(source, /<Select\.(?:Root|Trigger|Content|Item)\b/);
@@ -90,12 +90,12 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /Template launch args are skipped when using/);
   assert.match(source, /Prepended to your optional prompt/);
   assert.match(source, /primaryModifier\(event\)/);
-  assert.match(source, /\{#each templates as template/);
+  assert.match(source, /\{#each templateChoices as templateChoice/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
   assert.match(source, /agent disabled/);
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
-  assert.match(source, /class="prompt-textarea min-h-\[14rem\] resize-y text-sm leading-6"/);
+  assert.match(source, /class="prompt-textarea min-h-\[12rem\] resize-y text-sm leading-6"/);
   assert.doesNotMatch(source, /rows=\{11\}/);
   assert.match(source, /bind:ref=\{promptTextarea\}/);
   assert.match(source, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);

@@ -14,7 +14,11 @@
     handleNativePromptDrop as resolveNativePromptDrop,
     maxAgentDraftAttachments
   } from './agentAttachmentDrafts.ts';
-  import { resolveAgentDraftChoice } from './agentDraftChoices';
+  import {
+    agentTemplateRosterChoices,
+    isStandaloneAgentSelected,
+    resolveAgentDraftChoice
+  } from './agentDraftChoices';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
   import {
@@ -98,6 +102,7 @@
   ));
   const enabledTools = $derived(choice.enabledTools);
   const availableTemplates = $derived(choice.availableTemplates);
+  const templateChoices = $derived(agentTemplateRosterChoices(templates, tools));
   const selectedTemplate = $derived(choice.selectedTemplate);
   const selectedTool = $derived(choice.selectedTool);
   const templateDefaultTool = $derived(
@@ -419,42 +424,41 @@
         {#if loading}
           <div class="loading-choice" role="status">Loading launch choices…</div>
         {:else}
-          {#if templates.length > 0}
-            <div class="roster-group" role="group" aria-labelledby={`draft-agent-templates-${draft.id}`}>
-              <div class="roster-heading" id={`draft-agent-templates-${draft.id}`}>
-                <strong>Templates</strong><span>Prompt and setup included</span>
+          {#if templateChoices.length > 0}
+            <section class="roster-group" aria-labelledby={`draft-agent-templates-${draft.id}`}>
+              <div class="roster-heading">
+                <h2 id={`draft-agent-templates-${draft.id}`}>Templates</h2><span>Prompt and setup included</span>
               </div>
               <div class="roster-options">
-                {#each templates as template (template.id)}
-                  {@const tool = tools.find((candidate) => candidate.id === template.agent_tool_id)}
-                  {#if tool}
-                    <label class="launch-choice">
-                      <input
-                        class="choice-radio"
-                        type="radio"
-                        name={`draft-agent-launch-${draft.id}`}
-                        checked={selectedTemplate?.id === template.id}
-                        disabled={!tool.enabled}
-                        onchange={() => selectTemplate(template)}
-                      />
-                      <span class="choice-card">
-                        <AgentBrandMark {tool} size={18} />
-                        <span class="choice-copy">
-                          <strong>{template.name}</strong>
-                          <small>{tool.name}{#if !tool.enabled} · agent disabled{/if}</small>
-                        </span>
-                        <span class="choice-indicator" aria-hidden="true"></span>
+                {#each templateChoices as templateChoice (templateChoice.template.id)}
+                  {@const template = templateChoice.template}
+                  {@const tool = templateChoice.tool}
+                  <label class="launch-choice">
+                    <input
+                      class="choice-radio"
+                      type="radio"
+                      name={`draft-agent-launch-${draft.id}`}
+                      checked={selectedTemplate?.id === template.id}
+                      disabled={!tool.enabled}
+                      onclick={() => selectTemplate(template)}
+                    />
+                    <span class="choice-card">
+                      <AgentBrandMark {tool} size={18} />
+                      <span class="choice-copy">
+                        <strong>{template.name}</strong>
+                        <small>{tool.name}{#if !tool.enabled} · agent disabled{/if}</small>
                       </span>
-                    </label>
-                  {/if}
+                      <span class="choice-indicator" aria-hidden="true"></span>
+                    </span>
+                  </label>
                 {/each}
               </div>
-            </div>
+            </section>
           {/if}
 
-          <div class="roster-group" role="group" aria-labelledby={`draft-agent-tools-${draft.id}`}>
-            <div class="roster-heading" id={`draft-agent-tools-${draft.id}`}>
-              <strong>Models &amp; tools</strong><span>Launch directly</span>
+          <section class="roster-group" aria-labelledby={`draft-agent-tools-${draft.id}`}>
+            <div class="roster-heading">
+              <h2 id={`draft-agent-tools-${draft.id}`}>Models &amp; tools</h2><span>Launch directly</span>
             </div>
             <div class="roster-options">
               {#each enabledTools as tool (tool.id)}
@@ -463,8 +467,8 @@
                     class="choice-radio"
                     type="radio"
                     name={`draft-agent-launch-${draft.id}`}
-                    checked={selectedTemplate === null && selectedTool?.id === tool.id}
-                    onchange={() => selectStandaloneAgent(tool)}
+                    checked={isStandaloneAgentSelected(choice, tool.id)}
+                    onclick={() => selectStandaloneAgent(tool)}
                   />
                   <span class="choice-card">
                     <AgentBrandMark {tool} size={16} />
@@ -474,7 +478,7 @@
                 </label>
               {/each}
             </div>
-          </div>
+          </section>
         {/if}
       </div>
       {#if choice.missingTemplate}
@@ -506,7 +510,7 @@
                   type="radio"
                   name={`draft-agent-override-${draft.id}`}
                   checked={selectedTool?.id === tool.id}
-                  onchange={() => selectTemplateAgent(tool)}
+                  onclick={() => selectTemplateAgent(tool)}
                 />
                 <span class="choice-card compact">
                   <AgentBrandMark {tool} size={16} />
@@ -554,7 +558,7 @@
       <div class="prompt-composer">
         <Textarea
           id={`draft-agent-prompt-${draft.id}`}
-          class="prompt-textarea min-h-[14rem] resize-y text-sm leading-6"
+          class="prompt-textarea min-h-[12rem] resize-y text-sm leading-6"
           bind:ref={promptTextarea}
           value={draft.prompt}
           placeholder="Add instructions, or create with no prompt."
@@ -631,12 +635,12 @@
   .launch-fieldset, .override-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
   .launch-fieldset > legend, .override-fieldset > legend { padding: 0; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
   .selection-help, .override-fieldset > p, .template-options-heading p { margin: 3px 0 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
-  .launch-roster { max-height: min(36vh, 310px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 14%, transparent); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .launch-roster { max-height: min(30vh, 260px); overflow-y: auto; overscroll-behavior: auto; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 14%, transparent); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .launch-roster.roster-loading { min-height: 94px; }
   .loading-choice { display: grid; min-height: 92px; place-items: center; padding: 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .roster-group + .roster-group { border-top: 1px solid var(--border); }
-  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 6px 9px; background: color-mix(in srgb, var(--card) 94%, transparent); }
-  .roster-heading strong { color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
+  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 6px 9px; background: var(--card); }
+  .roster-heading h2 { margin: 0; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
   .roster-heading span { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .roster-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); }
   .launch-choice, .override-choice { position: relative; min-width: 0; cursor: pointer; background: var(--background); }
@@ -687,5 +691,12 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .choice-card, .prompt-composer { transition: none; }
+  }
+  @media (forced-colors: active) {
+    .launch-choice, .override-choice { display: flex; align-items: center; }
+    .choice-radio { position: static; width: 16px; height: 16px; flex: none; margin-left: 9px; opacity: 1; }
+    .choice-card { flex: 1; }
+    .choice-indicator { display: none; }
+    .choice-radio:checked + .choice-card { outline: 2px solid Highlight; outline-offset: -2px; background: Canvas; box-shadow: none; }
   }
 </style>

@@ -15,7 +15,7 @@ function sourceBetween(source, start, end, description) {
 
 test('add-agent launch choices expose templates and standalone agents directly', async () => {
   const source = await readFile(panelUrl, 'utf8');
-  const templateLoopMatch = source.match(/\{#each (?:availableTemplates|templates) as template/);
+  const templateLoopMatch = source.match(/\{#each templateChoices as templateChoice/);
   const templateLoop = templateLoopMatch?.index ?? -1;
   const standaloneLoop = source.indexOf('{#each enabledTools as tool', templateLoop);
   const overrideGate = source.indexOf('{#if selectedTemplate}', standaloneLoop);
@@ -35,10 +35,10 @@ test('add-agent launch choices expose templates and standalone agents directly',
   }
   assert.match(templateChoices, /\{template\.name\}/);
   assert.match(templateChoices, /checked=\{selectedTemplate\?\.id === template\.id\}/);
-  assert.match(templateChoices, /onchange=\{\(\) => selectTemplate\(template\)\}/);
+  assert.match(templateChoices, /onclick=\{\(\) => selectTemplate\(template\)\}/);
   assert.match(standaloneChoices, /\{tool\.name\}/);
-  assert.match(standaloneChoices, /checked=\{selectedTemplate === null && selectedTool\?\.id === tool\.id\}/);
-  assert.match(standaloneChoices, /onchange=\{\(\) => selectStandaloneAgent\(tool\)\}/);
+  assert.match(standaloneChoices, /checked=\{isStandaloneAgentSelected\(choice, tool\.id\)\}/);
+  assert.match(standaloneChoices, /onclick=\{\(\) => selectStandaloneAgent\(tool\)\}/);
 
   const standaloneHandler = sourceBetween(
     source,
@@ -78,7 +78,7 @@ test('a template keeps its default agent and reveals optional override choices',
   assert.match(overrideChoices, /<input\b[\s\S]*?\btype="radio"/);
   assert.match(overrideChoices, /\{tool\.name\}/);
   assert.match(overrideChoices, /checked=\{selectedTool\?\.id === tool\.id\}/);
-  assert.match(overrideChoices, /onchange=\{\(\) => selectTemplateAgent\(tool\)\}/);
+  assert.match(overrideChoices, /onclick=\{\(\) => selectTemplateAgent\(tool\)\}/);
 
   const overrideHandler = sourceBetween(
     source,
@@ -133,4 +133,16 @@ test('the prompt surface owns Create and an empty prompt remains submittable', a
   assert.doesNotMatch(submit, /if\s*\([^)]*(?:draft\.)?prompt/);
   assert.match(submit, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
   assert.match(submit, /void onCreate\(/);
+});
+
+test('other creation drafts retain their scaffold footer action', async () => {
+  const [command, todo] = await Promise.all([
+    readFile(new URL('../src/lib/NewCommandDraftPanel.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/NewTodoDraftPanel.svelte', import.meta.url), 'utf8')
+  ]);
+
+  for (const [label, source] of [['command', command], ['todo', todo]]) {
+    assert.match(source, /<CreationDraftScaffold\b/, `${label} uses the shared creation scaffold`);
+    assert.doesNotMatch(source, /showFooterCreate=\{false\}/, `${label} keeps the default footer Create`);
+  }
 });

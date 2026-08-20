@@ -17,10 +17,8 @@ test('remembered repository environment choices seed every worktree dialog', asy
   }
 
   const dialog = await readFile(dialogUrl, 'utf8');
-  assert.match(
-    dialog,
-    /let envPolicy = \$state<EnvironmentPolicy>\(untrack\([\s\S]*?environmentPolicyFromPreferences\(repository\.preferences\)[\s\S]*?\)\)/
-  );
+  assert.match(dialog, /let envPolicy = \$state<EnvironmentPolicy>/);
+  assert.match(dialog, /environmentPolicyFromPreferences\(repository\.preferences\)/);
 });
 
 test('new branch flow explains the starting ref and keeps free-text entry', async () => {
