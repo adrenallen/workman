@@ -38,6 +38,15 @@ export interface WorktreeRepository {
   herd: HerdStatus;
 }
 
+export function environmentPolicyFromPreferences(
+  preferences: Record<string, string>
+): EnvironmentPolicy {
+  const preference = preferences.copy_env?.trim().toLowerCase();
+  return preference === 'yes' || preference === 'true' || preference === 'copy'
+    ? 'copy'
+    : 'skip';
+}
+
 export interface PullRequestStatus {
   number: number;
   title: string;

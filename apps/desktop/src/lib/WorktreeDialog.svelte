@@ -11,7 +11,7 @@
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Badge } from '$lib/components/ui/badge';
@@ -42,6 +42,7 @@
     WorktreeRefValidation,
     WorktreeRepository
   } from './worktrees';
+  import { environmentPolicyFromPreferences } from './worktrees';
 
   interface Props {
     mode: 'create' | 'fork' | 'adopt';
@@ -101,7 +102,9 @@
   let adoptPath = $state('');
   let projectTitle = $state('');
   let projectTitleTouched = $state(false);
-  let envPolicy = $state<EnvironmentPolicy>('skip');
+  let envPolicy = $state<EnvironmentPolicy>(untrack(
+    () => environmentPolicyFromPreferences(repository.preferences)
+  ));
   let rememberEnvPolicy = $state(true);
   let advancedOpen = $state(false);
   let branchInput = $state<HTMLInputElement | null>(null);

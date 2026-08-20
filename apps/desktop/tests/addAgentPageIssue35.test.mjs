@@ -1,0 +1,136 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+const panelUrl = new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url);
+const scaffoldUrl = new URL('../src/lib/CreationDraftScaffold.svelte', import.meta.url);
+
+function sourceBetween(source, start, end, description) {
+  const startIndex = source.indexOf(start);
+  assert.ok(startIndex >= 0, `${description} start is present`);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert.ok(endIndex > startIndex, `${description} end is present after its start`);
+  return source.slice(startIndex, endIndex);
+}
+
+test('add-agent launch choices expose templates and standalone agents directly', async () => {
+  const source = await readFile(panelUrl, 'utf8');
+  const templateLoopMatch = source.match(/\{#each (?:availableTemplates|templates) as template/);
+  const templateLoop = templateLoopMatch?.index ?? -1;
+  const standaloneLoop = source.indexOf('{#each enabledTools as tool', templateLoop);
+  const overrideGate = source.indexOf('{#if selectedTemplate}', standaloneLoop);
+
+  assert.ok(templateLoop >= 0, 'available templates are rendered');
+  assert.ok(standaloneLoop > templateLoop, 'standalone agents follow templates in the launch roster');
+  assert.ok(overrideGate > standaloneLoop, 'the primary launch roster precedes template-only controls');
+
+  const templateChoices = source.slice(templateLoop, standaloneLoop);
+  const standaloneChoices = source.slice(standaloneLoop, overrideGate);
+  for (const [label, choices] of [
+    ['template', templateChoices],
+    ['standalone agent', standaloneChoices]
+  ]) {
+    assert.match(choices, /<input\b[\s\S]*?\btype="radio"/, `${label} choices use direct semantic controls`);
+    assert.doesNotMatch(choices, /<Select\.(?:Root|Trigger|Content|Item)\b/, `${label} choices are not hidden in a select menu`);
+  }
+  assert.match(templateChoices, /\{template\.name\}/);
+  assert.match(templateChoices, /checked=\{selectedTemplate\?\.id === template\.id\}/);
+  assert.match(templateChoices, /onchange=\{\(\) => selectTemplate\(template\)\}/);
+  assert.match(standaloneChoices, /\{tool\.name\}/);
+  assert.match(standaloneChoices, /checked=\{selectedTemplate === null && selectedTool\?\.id === tool\.id\}/);
+  assert.match(standaloneChoices, /onchange=\{\(\) => selectStandaloneAgent\(tool\)\}/);
+
+  const standaloneHandler = sourceBetween(
+    source,
+    'function selectStandaloneAgent',
+    'function selectTemplateAgent',
+    'standalone agent selection handler'
+  );
+  assert.match(standaloneHandler, /onChange\(\{ templateId: null, agentToolId: tool\.id \}\)/);
+  assert.match(standaloneHandler, /rememberChoice\(\{ kind: 'tool', id: tool\.id \}\)/);
+});
+
+test('a template keeps its default agent and reveals optional override choices', async () => {
+  const source = await readFile(panelUrl, 'utf8');
+  const selectTemplate = sourceBetween(
+    source,
+    'function selectTemplate',
+    'function submit()',
+    'template selection handler'
+  );
+  assert.match(
+    selectTemplate,
+    /onChange\(\{ templateId: template\.id, agentToolId: template\.agent_tool_id \}\)/,
+    'choosing a template is immediately launchable with its default agent'
+  );
+
+  const standaloneLoop = source.indexOf('{#each enabledTools as tool');
+  const overrideGate = source.indexOf('{#if selectedTemplate}', standaloneLoop);
+  const overrideLoop = source.indexOf('{#each enabledTools as tool', overrideGate);
+  assert.ok(overrideGate > standaloneLoop, 'override controls are gated by a selected template');
+  assert.ok(overrideLoop > overrideGate, 'enabled agents are offered as template overrides');
+
+  const promptSurface = source.indexOf('aria-label="Prompt and image attachments"', overrideLoop);
+  assert.ok(promptSurface > overrideLoop, 'override controls precede the prompt surface');
+  const overrideChoices = source.slice(overrideGate, promptSurface);
+  assert.match(overrideChoices, /override/i);
+  assert.match(overrideChoices, /optional/i);
+  assert.match(overrideChoices, /<input\b[\s\S]*?\btype="radio"/);
+  assert.match(overrideChoices, /\{tool\.name\}/);
+  assert.match(overrideChoices, /checked=\{selectedTool\?\.id === tool\.id\}/);
+  assert.match(overrideChoices, /onchange=\{\(\) => selectTemplateAgent\(tool\)\}/);
+
+  const overrideHandler = sourceBetween(
+    source,
+    'function selectTemplateAgent',
+    'function submit()',
+    'template override selection handler'
+  );
+  assert.match(overrideHandler, /if \(!selectedTemplate\) return/);
+  assert.match(overrideHandler, /onChange\(\{ agentToolId: tool\.id \}\)/);
+  assert.match(
+    overrideHandler,
+    /rememberChoice\(\{ kind: 'template', id: selectedTemplate\.id, agentToolId: tool\.id \}\)/
+  );
+});
+
+test('the prompt surface owns Create and an empty prompt remains submittable', async () => {
+  const [source, scaffold] = await Promise.all([
+    readFile(panelUrl, 'utf8'),
+    readFile(scaffoldUrl, 'utf8')
+  ]);
+  const promptSurface = sourceBetween(
+    source,
+    'aria-label="Prompt and image attachments"',
+    '<Collapsible.Root bind:open={advancedOpen}',
+    'prompt surface'
+  );
+  assert.match(promptSurface, /<Textarea\b/);
+  const createButton = promptSurface.match(/<Button\b([\s\S]*?)>[\s\S]*?Creat(?:e|ing)/);
+  assert.ok(createButton, 'Create is rendered beside the prompt controls');
+  assert.match(createButton[0], /(?:type="submit"|onclick=\{submit\})/);
+  assert.doesNotMatch(createButton[1], /draft\.prompt|prompt\.trim/);
+
+  const scaffoldInvocation = sourceBetween(
+    source,
+    '<CreationDraftScaffold',
+    '>',
+    'creation draft scaffold invocation'
+  );
+  const disabledPrimaryProp = scaffoldInvocation.match(/\b([\w-]*(?:primary|create)[\w-]*)=\{false\}/i);
+  assert.ok(disabledPrimaryProp, 'the detached scaffold Create action is explicitly disabled');
+  assert.match(
+    scaffold,
+    new RegExp(`\\{#if ${disabledPrimaryProp[1]}\\}[\\s\\S]*?<Button type="submit"`),
+    'the scaffold only renders its primary submit action when enabled'
+  );
+
+  const canCreate = sourceBetween(source, 'const canCreate = $derived(', '$effect', 'create eligibility');
+  assert.match(canCreate, /selectedTool !== null/);
+  assert.doesNotMatch(canCreate, /draft\.prompt|prompt\.trim/);
+
+  const submit = sourceBetween(source, 'function submit()', 'function handleKeydown', 'submit handler');
+  assert.doesNotMatch(submit, /if\s*\([^)]*(?:draft\.)?prompt/);
+  assert.match(submit, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
+  assert.match(submit, /void onCreate\(/);
+});
