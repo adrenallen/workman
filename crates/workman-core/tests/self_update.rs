@@ -192,12 +192,41 @@ impl Fixture {
         )
     }
 
+    fn start_public(archive: Vec<u8>, checksum: String) -> Self {
+        Self::start_named_with_key(
+            archive,
+            checksum,
+            "workman-fixture.tar.gz",
+            "workman-desktop-fixture.zip",
+            2,
+            None,
+        )
+    }
+
     fn start_named(
         archive: Vec<u8>,
         checksum: String,
         binary_asset: &str,
         desktop_asset: &str,
         request_count: usize,
+    ) -> Self {
+        Self::start_named_with_key(
+            archive,
+            checksum,
+            binary_asset,
+            desktop_asset,
+            request_count,
+            Some(TEST_UPDATE_KEY),
+        )
+    }
+
+    fn start_named_with_key(
+        archive: Vec<u8>,
+        checksum: String,
+        binary_asset: &str,
+        desktop_asset: &str,
+        request_count: usize,
+        expected_key: Option<&'static str>,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -244,7 +273,7 @@ impl Fixture {
         ]));
         let thread = thread::spawn(move || {
             for stream in listener.incoming().flatten().take(request_count) {
-                respond(stream, &responses, Some(TEST_UPDATE_KEY));
+                respond(stream, &responses, expected_key);
             }
         });
         Self {
@@ -283,6 +312,19 @@ fn respond(
             stream.write_all(body).unwrap();
             return;
         }
+    } else if request
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+    {
+        let body = b"unexpected authorization header";
+        write!(
+            stream,
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+        return;
     }
     let (status, body) = responses
         .get(path)
@@ -364,6 +406,29 @@ async fn bearer_authenticated_manifest_and_artifact_are_verified_and_installed()
     assert!(report.restart_plan.daemon);
     assert!(!report.restart_plan.app);
     assert_eq!(report.installed_app_bundle, None);
+}
+
+#[tokio::test]
+async fn public_manifest_and_artifact_are_fetched_without_an_authorization_header() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_public(archive, checksum);
+    let install = seed_install();
+    let client =
+        UpdateClient::with_target(format!("{}/latest", fixture.base), fixture_target()).unwrap();
+
+    let check = client.check("0.1.0").await.unwrap();
+    assert!(check.available);
+    client.install(&check, install.path()).await.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(install.path().join("wrk")).unwrap(),
+        "new wrk"
+    );
+    assert_eq!(
+        fs::read_to_string(install.path().join("workmand")).unwrap(),
+        "new workmand"
+    );
 }
 
 #[tokio::test]

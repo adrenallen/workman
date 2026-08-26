@@ -86,10 +86,18 @@ impl UpdateService {
         let update_key = resolve_update_key(None).map_err(|error| {
             UpdateError::InvalidRelease(format!("update key configuration: {error}"))
         })?;
-        let stable_client = UpdateClient::new_for_channel(stable_api_url, UpdateChannel::Stable)?
-            .with_key(&update_key)?;
-        let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?
-            .with_key(&update_key)?;
+        let stable_client = UpdateClient::new_for_channel(stable_api_url, UpdateChannel::Stable)?;
+        let latest_client = UpdateClient::new_for_channel(latest_api_url, UpdateChannel::Latest)?;
+        let stable_client = update_key
+            .as_deref()
+            .map(|key| stable_client.clone().with_key(key))
+            .transpose()?
+            .unwrap_or(stable_client);
+        let latest_client = update_key
+            .as_deref()
+            .map(|key| latest_client.clone().with_key(key))
+            .transpose()?
+            .unwrap_or(latest_client);
         let install_target = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
             Some(path) => UpdateInstallTarget::binary_directory(PathBuf::from(path)),
             None => UpdateInstallTarget::discover(env::current_exe()?)?,

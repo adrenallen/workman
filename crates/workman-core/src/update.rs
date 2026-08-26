@@ -25,12 +25,7 @@ use sha2::{Digest, Sha256};
 pub const DEFAULT_RELEASES_API: &str = "https://workman.userdefined.io/releases.json";
 /// Latest-channel compatibility alias; the hosted manifest contains both channel pointers.
 pub const LATEST_RELEASES_API: &str = DEFAULT_RELEASES_API;
-/// Shared application download key embedded in shipped clients.
-///
-/// This is intentionally a lightweight download gate, not a user credential. The release host
-/// keeps a separate friends key, while explicit/configured keys can override this application key.
-pub const DEFAULT_UPDATE_KEY: &str = "2d0bc1d424deae875c3b3ec80fee422942b59c0b0b10ac8b";
-/// Environment fallback used when config.yml does not define `update.key`.
+/// Optional environment credential for private, self-hosted update services.
 pub const WORKMAN_UPDATE_KEY_ENV: &str = "WORKMAN_UPDATE_KEY";
 /// Courtesy interval used by the optional startup checker.
 pub const UPDATE_CHECK_INTERVAL_SECS: i64 = 7 * 24 * 60 * 60;
@@ -166,7 +161,7 @@ impl From<semver::Error> for UpdateError {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
-    /// Hosted artifact URL shown in update reports and used for authenticated downloads.
+    /// Hosted artifact URL shown in update reports and used for downloads.
     pub url: String,
     /// Expected SHA256 from the signed-off release manifest.
     #[serde(default)]
@@ -314,7 +309,7 @@ pub struct UpdateClient {
     api_url: String,
     target: ReleaseTarget,
     channel: UpdateChannel,
-    key: String,
+    key: Option<String>,
 }
 
 impl UpdateClient {
@@ -346,11 +341,11 @@ impl UpdateClient {
             api_url: api_url.into(),
             target,
             channel,
-            key: DEFAULT_UPDATE_KEY.to_owned(),
+            key: None,
         })
     }
 
-    /// Override the shared download key for every request made by this client.
+    /// Add an optional Bearer credential for a private, self-hosted update service.
     pub fn with_key(mut self, key: impl Into<String>) -> UpdateResult<Self> {
         let key = key.into();
         let key = key.trim();
@@ -359,8 +354,16 @@ impl UpdateClient {
                 "update key must not be empty".to_owned(),
             ));
         }
-        self.key = key.to_owned();
+        self.key = Some(key.to_owned());
         Ok(self)
+    }
+
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        let request = self.http.get(url);
+        match &self.key {
+            Some(key) => request.bearer_auth(key),
+            None => request,
+        }
     }
 
     pub fn api_url(&self) -> &str {
@@ -388,13 +391,7 @@ impl UpdateClient {
         let manifest_url = Url::parse(&self.api_url).map_err(|error| {
             UpdateError::InvalidRelease(format!("manifest URL is not valid: {error}"))
         })?;
-        let response = self.successful_response(
-            self.http
-                .get(&self.api_url)
-                .bearer_auth(&self.key)
-                .send()
-                .await?,
-        )?;
+        let response = self.successful_response(self.get(&self.api_url).send().await?)?;
         if response
             .content_length()
             .is_some_and(|length| length > MAX_MANIFEST_BYTES)
@@ -933,13 +930,7 @@ impl UpdateClient {
             0,
             asset.size,
         ));
-        let mut response = self.successful_response(
-            self.http
-                .get(&asset.url)
-                .bearer_auth(&self.key)
-                .send()
-                .await?,
-        )?;
+        let mut response = self.successful_response(self.get(&asset.url).send().await?)?;
         if response
             .content_length()
             .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)

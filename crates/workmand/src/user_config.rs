@@ -10,9 +10,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use workman_core::{
-    AgentTool, AgentToolSource, DEFAULT_UPDATE_KEY, Store, StoreError, WORKMAN_UPDATE_KEY_ENV,
-};
+use workman_core::{AgentTool, AgentToolSource, Store, StoreError, WORKMAN_UPDATE_KEY_ENV};
 
 use crate::RuntimeIdentity;
 
@@ -233,8 +231,8 @@ pub fn parse_user_config(yaml: &str) -> Result<UserConfig, UserConfigError> {
     Ok(serde_yaml::from_str(yaml)?)
 }
 
-/// Resolve the update key in command-line, config file, environment, application order.
-pub fn resolve_update_key(explicit: Option<&str>) -> Result<String, UserConfigError> {
+/// Resolve an optional private-host credential in command-line, config file, environment order.
+pub fn resolve_update_key(explicit: Option<&str>) -> Result<Option<String>, UserConfigError> {
     if explicit.is_some() {
         return select_update_key(explicit, None, None);
     }
@@ -265,17 +263,17 @@ fn select_update_key(
     explicit: Option<&str>,
     configured: Option<&str>,
     environment: Option<&str>,
-) -> Result<String, UserConfigError> {
+) -> Result<Option<String>, UserConfigError> {
     if let Some(key) = explicit {
-        return nonempty_update_key(key, "--key");
+        return nonempty_update_key(key, "--key").map(Some);
     }
     if let Some(key) = configured {
-        return nonempty_update_key(key, "config.yml update.key");
+        return nonempty_update_key(key, "config.yml update.key").map(Some);
     }
     if let Some(key) = environment {
-        return nonempty_update_key(key, WORKMAN_UPDATE_KEY_ENV);
+        return nonempty_update_key(key, WORKMAN_UPDATE_KEY_ENV).map(Some);
     }
-    nonempty_update_key(DEFAULT_UPDATE_KEY, "compiled-in update key")
+    Ok(None)
 }
 
 fn nonempty_update_key(key: &str, source: &str) -> Result<String, UserConfigError> {
@@ -1072,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn update_key_prefers_config_then_environment_then_application_default() {
+    fn update_key_prefers_explicit_then_config_then_environment_and_is_otherwise_optional() {
         let config = parse_user_config("update:\n  key: config-key\n").unwrap();
         assert_eq!(config.update.key.as_deref(), Some("config-key"));
         assert_eq!(
@@ -1082,20 +1080,17 @@ mod tests {
                 Some("environment-key")
             )
             .unwrap(),
-            "cli-key"
+            Some("cli-key".to_owned())
         );
         assert_eq!(
             select_update_key(None, config.update.key.as_deref(), Some("environment-key")).unwrap(),
-            "config-key"
+            Some("config-key".to_owned())
         );
         assert_eq!(
             select_update_key(None, None, Some("environment-key")).unwrap(),
-            "environment-key"
+            Some("environment-key".to_owned())
         );
-        assert_eq!(
-            select_update_key(None, None, None).unwrap(),
-            workman_core::DEFAULT_UPDATE_KEY
-        );
+        assert_eq!(select_update_key(None, None, None).unwrap(), None);
         assert!(select_update_key(None, Some("  "), Some("fallback")).is_err());
     }
 

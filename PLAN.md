@@ -7,8 +7,8 @@ the workspace itself — processes, todos, scratchpads, timers, locks, and each 
 Product name: **Workman** (daemon `workmand`, CLI `wrk`). Its compatibility chain migrates the most
 recent pre-Workman data first and `gbuild` data only when no newer predecessor directory exists;
 repository config resolves `workman.yml`, then the deprecated predecessor filename, then
-deprecated `gbuild.yml`. The live checkout path `/Users/g/Code/gbuild` is intentionally unchanged
-because active terminal and agent sessions depend on it.
+deprecated `gbuild.yml`. Existing checkout paths are intentionally unchanged because active
+terminal and agent sessions may depend on them.
 
 ## Why
 

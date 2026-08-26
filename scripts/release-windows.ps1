@@ -66,11 +66,15 @@ $archivePath = Join-Path $outputDir 'workman-windows-x86_64.zip'
 if (Test-Path $archivePath) { Remove-Item $archivePath -Force }
 
 $distDir = Join-Path $repo 'target\dist'
+$thirdPartyNotices = Join-Path $distDir 'THIRD_PARTY_NOTICES.md'
+node (Join-Path $repo 'scripts\generate-third-party-notices.mjs') $thirdPartyNotices
+if ($LASTEXITCODE -ne 0) { throw 'third-party notice generation failed' }
 $entries = @(
     @{ source = Join-Path $distDir 'wrk.exe'; entry = 'bin/wrk.exe' },
     @{ source = Join-Path $distDir 'workmand.exe'; entry = 'bin/workmand.exe' },
     @{ source = Join-Path $distDir 'workman-desktop.exe'; entry = 'bin/workman-desktop.exe' },
-    @{ source = Join-Path $repo 'install.ps1'; entry = 'install.ps1' }
+    @{ source = Join-Path $repo 'install.ps1'; entry = 'install.ps1' },
+    @{ source = $thirdPartyNotices; entry = 'THIRD_PARTY_NOTICES.md' }
 )
 foreach ($item in $entries) {
     if (-not (Test-Path $item.source)) { throw "release input is missing: $($item.source)" }

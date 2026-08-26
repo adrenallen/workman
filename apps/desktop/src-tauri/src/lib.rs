@@ -3207,9 +3207,7 @@ mod tests {
                 "WORKMAN_CONFIG is missing",
             ),
             (
-                Some(std::ffi::OsStr::new(
-                    "/Users/g/Library/Application Support/workman",
-                )),
+                Some(std::ffi::OsStr::new("/Applications")),
                 Some(config.as_os_str()),
                 "must resolve to an isolated path under /tmp",
             ),

@@ -5,7 +5,6 @@ import worker from "../src/index.ts";
 const artifact = Uint8Array.from({ length: 64 }, (_, index) => index);
 const logo = new TextEncoder().encode("fixture-logo");
 const installer = new TextEncoder().encode("#!/usr/bin/env bash\necho installer\n");
-const basicAuthorization = `Basic ${Buffer.from("friend:friend-key").toString("base64")}`;
 function releaseAsset(name, target, size) {
   return {
     name,
@@ -72,7 +71,6 @@ function storedObject(key) {
 }
 
 const env = {
-  DOWNLOAD_KEYS: "app-key, friend-key",
   SITE_NOINDEX: "true",
   RELEASES: {
     async get(key, options = {}) {
@@ -112,11 +110,8 @@ test("keeps the black logo lander and its R2 image public", async () => {
   assert.deepEqual(new Uint8Array(await image.arrayBuffer()), logo);
 });
 
-test("renders the Basic-authenticated stable download page entirely from its channel manifest", async () => {
-  const response = await worker.fetch(
-    request("/download", { headers: { authorization: basicAuthorization } }),
-    env,
-  );
+test("renders the public stable download page entirely from its channel manifest", async () => {
+  const response = await worker.fetch(request("/download"), env);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy"), /default-src 'none'/);
@@ -127,51 +122,39 @@ test("renders the Basic-authenticated stable download page entirely from its cha
   assert.match(html, /Current stable/);
   assert.match(html, /Workman <span>v1\.2\.3<\/span>/);
   assert.match(html, /Aug 6, 2026/);
-  assert.match(html, /Access granted/);
-  assert.match(html, /reuse this browser session's access credentials/);
+  assert.match(html, /Public release/);
+  assert.match(html, /available without an access key/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-macos-arm64\.zip"/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-x86_64\.AppImage"/);
   assert.match(html, /href="\/versions\/1\.2\.3\/workman-linux-arm64\.deb"/);
   assert.match(html, /href="\/versions\/1\.2\.3\/SHA256SUMS"/);
   assert.match(html, /80 MB/);
-  assert.match(html, /WORKMAN_KEY='your-password'/);
+  assert.match(html, /install\.sh \| sh/);
   assert.match(html, /First launch on macOS/);
   assert.match(html, /Developer ID signed and notarized/);
   assert.match(html, /should pass Gatekeeper and open normally/);
   assert.match(html, /Versions 0\.1\.4 and earlier were unsigned/);
   assert.doesNotMatch(html, /xattr -dr com\.apple\.quarantine/);
-  assert.doesNotMatch(html, /app-key|friend-key/);
+  assert.doesNotMatch(html, /WORKMAN_KEY|download key/i);
 
-  const head = await worker.fetch(
-    request("/download", { method: "HEAD", headers: { authorization: basicAuthorization } }),
-    env,
-  );
+  const head = await worker.fetch(request("/download", { method: "HEAD" }), env);
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
 });
 
-test("requires interactive Basic auth for the download page regardless of URL or API credentials", async () => {
+test("keeps the download page public when legacy credentials or query values are present", async () => {
   for (const [path, headers] of [
     ["/download", {}],
     ["/download?key=friend-key", {}],
     ["/download", { authorization: "Bearer app-key" }],
     ["/download", { "x-workman-key": "friend-key" }],
+    ["/download", { authorization: `Basic ${Buffer.from("anyone:old-key").toString("base64")}` }],
   ]) {
     const response = await worker.fetch(request(path, { headers }), env);
-    assert.equal(response.status, 401, `${path} ${JSON.stringify(headers)}`);
-    assert.equal(response.headers.get("www-authenticate"), 'Basic realm="workman"');
-    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
-    assert.doesNotMatch(await response.text(), /<title>Download Workman/);
+    assert.equal(response.status, 200, `${path} ${JSON.stringify(headers)}`);
+    assert.equal(response.headers.get("www-authenticate"), null);
+    assert.match(await response.text(), /<title>Download Workman/);
   }
-
-  const wrongPassword = await worker.fetch(
-    request("/download", {
-      headers: { authorization: `Basic ${Buffer.from("anyone:wrong-key").toString("base64")}` },
-    }),
-    env,
-  );
-  assert.equal(wrongPassword.status, 401);
-  assert.equal(wrongPassword.headers.get("www-authenticate"), 'Basic realm="workman"');
 });
 
 test("keeps the Gatekeeper workaround on legacy unsigned release pages", async () => {
@@ -190,10 +173,7 @@ test("keeps the Gatekeeper workaround on legacy unsigned release pages", async (
     },
   };
 
-  const response = await worker.fetch(
-    request("/download", { headers: { authorization: basicAuthorization } }),
-    legacyEnv,
-  );
+  const response = await worker.fetch(request("/download"), legacyEnv);
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Gatekeeper blocks the unsigned app/);
@@ -202,36 +182,22 @@ test("keeps the Gatekeeper workaround on legacy unsigned release pages", async (
   assert.match(html, /CLI installer path does not apply browser quarantine/);
 });
 
-test("returns contract-specific 401 responses before reading protected objects", async () => {
-  const api = await worker.fetch(
-    request("/releases.json", { headers: { accept: "application/json" } }),
-    env,
-  );
-  assert.equal(api.status, 401);
-  assert.equal(api.headers.get("www-authenticate"), null);
-  assert.deepEqual(await api.json(), { error: "invalid or missing download key" });
+test("serves release metadata and artifacts anonymously", async () => {
+  const api = await worker.fetch(request("/releases.json"), env);
+  assert.equal(api.status, 200);
+  assert.deepEqual(await api.json(), { channels: { stable: release, latest: release } });
 
-  const browser = await worker.fetch(
-    request("/versions/1.2.3/fixture.zip", { headers: { accept: "text/html,application/xhtml+xml" } }),
-    env,
-  );
-  assert.equal(browser.status, 401);
-  assert.equal(browser.headers.get("www-authenticate"), 'Basic realm="workman"');
-  assert.match(await browser.text(), /download key is required/i);
-
-  const secondAsset = await worker.fetch(
-    request("/versions/1.2.3/workman-linux-x86_64.AppImage", { headers: { accept: "text/html" } }),
-    env,
-  );
-  assert.equal(secondAsset.status, 401);
-  assert.equal(secondAsset.headers.get("www-authenticate"), 'Basic realm="workman"');
+  const browser = await worker.fetch(request("/versions/1.2.3/fixture.zip"), env);
+  assert.equal(browser.status, 200);
+  assert.deepEqual(new Uint8Array(await browser.arrayBuffer()), artifact);
 });
 
-test("accepts Bearer, X-Workman-Key, and Basic credentials for artifacts", async () => {
+test("ignores legacy credential headers on public artifacts", async () => {
   const mechanisms = [
+    { headers: {} },
     { headers: { authorization: "Bearer app-key" } },
     { headers: { "x-workman-key": "friend-key" } },
-    { headers: { authorization: basicAuthorization } },
+    { headers: { authorization: `Basic ${Buffer.from("friend:friend-key").toString("base64")}` } },
   ];
 
   for (const mechanism of mechanisms) {
@@ -244,14 +210,15 @@ test("accepts Bearer, X-Workman-Key, and Basic credentials for artifacts", async
   }
 });
 
-test("does not accept a URL query key for protected artifacts", async () => {
+test("does not interpret a legacy URL query key", async () => {
   const response = await worker.fetch(request("/versions/1.2.3/fixture.zip?key=app-key"), env);
-  assert.equal(response.status, 401);
-  assert.deepEqual(await response.json(), { error: "invalid or missing download key" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), artifact);
 });
 
-test("keeps Bearer and X-Workman-Key manifest authorization compatible", async () => {
+test("keeps old clients compatible when they send former credential headers", async () => {
   for (const headers of [
+    {},
     { authorization: "Bearer app-key" },
     { "x-workman-key": "app-key" },
   ]) {
@@ -278,12 +245,12 @@ test("serves robots.txt and applies noindex to every response class", async () =
   const cases = [
     request("/"),
     request("/download"),
-    request("/download", { headers: { authorization: basicAuthorization } }),
+    request("/download"),
     request("/robots.txt"),
     request("/workman-logo-wide-transparent.png"),
     request("/install.sh"),
-    request("/releases.json", { headers: { authorization: "Bearer app-key" } }),
-    request("/versions/1.2.3/fixture.zip", { headers: { authorization: "Bearer app-key" } }),
+    request("/releases.json"),
+    request("/versions/1.2.3/fixture.zip"),
     request("/missing"),
     request("/", { method: "POST" }),
   ];
@@ -303,10 +270,7 @@ test("disables every search-engine block with the single config flag", async () 
   assert.equal(lander.headers.get("x-robots-tag"), null);
   assert.doesNotMatch(await lander.text(), /<meta name="robots"/);
 
-  const download = await worker.fetch(
-    request("/download", { headers: { authorization: basicAuthorization } }),
-    indexingEnv,
-  );
+  const download = await worker.fetch(request("/download"), indexingEnv);
   assert.equal(download.headers.get("x-robots-tag"), null);
   assert.doesNotMatch(await download.text(), /<meta name="robots"/);
 
@@ -315,10 +279,10 @@ test("disables every search-engine block with the single config flag", async () 
   assert.equal(await robots.text(), "User-agent: *\nAllow: /\n");
 });
 
-test("serves authorized byte ranges with exact response headers", async () => {
+test("serves public byte ranges with exact response headers", async () => {
   const response = await worker.fetch(
     request("/versions/1.2.3/fixture.zip", {
-      headers: { authorization: "Bearer app-key", range: "bytes=8-23" },
+      headers: { range: "bytes=8-23" },
     }),
     env,
   );
@@ -328,11 +292,11 @@ test("serves authorized byte ranges with exact response headers", async () => {
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), artifact.slice(8, 24));
 });
 
-test("rejects malformed and unsatisfiable authorized byte ranges", async () => {
+test("rejects malformed and unsatisfiable public byte ranges", async () => {
   for (const range of ["bytes=20-10", "bytes=80-"]) {
     const response = await worker.fetch(
       request("/versions/1.2.3/fixture.zip", {
-        headers: { authorization: "Bearer app-key", range },
+        headers: { range },
       }),
       env,
     );
