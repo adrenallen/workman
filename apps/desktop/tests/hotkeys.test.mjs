@@ -125,6 +125,12 @@ test('app and terminal route configured shortcuts through the shared action reso
   assert.match(app, /'new-command': \{ type: 'add-command', projectId \}/);
   assert.match(app, /'new-scratchpad': \{ type: 'new-scratchpad', projectId \}/);
   assert.match(app, /'new-todo': \{ type: 'new-todo', projectId \}/);
+  assert.match(app, /projectHotkeyHintsVisible = primaryModifier\(event\)/);
+  assert.match(app, /onkeyup=\{handleShortcutKeyup\}/);
+  assert.match(app, /onblur=\{hideProjectHotkeyHints\}/);
+  assert.match(app, /class:visible=\{projectHotkeyHintsVisible\}/);
+  assert.match(app, /\.project-hotkey\.visible \{/);
+  assert.match(app, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.project-hotkey/);
 
   const terminal = await readFile(
     new URL('../src/lib/TerminalView.svelte', import.meta.url),

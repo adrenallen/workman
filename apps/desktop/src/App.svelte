@@ -416,6 +416,7 @@
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let projectHotkeyHintsVisible = $state(false);
   let keepAwakeOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
@@ -923,6 +924,7 @@
   }
 
   function handleShortcut(event: KeyboardEvent): void {
+    projectHotkeyHintsVisible = primaryModifier(event);
     const target = event.target as HTMLElement | null;
     if (folderMenuRequest) {
       if (event.key === 'Escape') closeProjectFolderMenu();
@@ -1018,6 +1020,14 @@
       else if (selection?.kind === 'scratchpad') openScratchpadsBrowser();
       else clearSelection();
     }
+  }
+
+  function handleShortcutKeyup(event: KeyboardEvent): void {
+    projectHotkeyHintsVisible = primaryModifier(event);
+  }
+
+  function hideProjectHotkeyHints(): void {
+    projectHotkeyHintsVisible = false;
   }
 
   function handleConfiguredHotkey(event: KeyboardEvent): boolean {
@@ -4861,7 +4871,11 @@
   }
 </script>
 
-<svelte:window onkeydown={handleShortcut} />
+<svelte:window
+  onkeydown={handleShortcut}
+  onkeyup={handleShortcutKeyup}
+  onblur={hideProjectHotkeyHints}
+/>
 
 <svelte:head>
   <title>{windowTitle}</title>
@@ -5021,7 +5035,13 @@
               <span class="project-copy"><strong>{rowLabel}</strong></span>
               {#if hotkeyLabel || unreadAgentCount > 0}
                 <span class="project-row-badges">
-                  {#if hotkeyLabel}<kbd class="project-hotkey" aria-hidden="true">{hotkeyLabel}</kbd>{/if}
+                  {#if hotkeyLabel}
+                    <kbd
+                      class:visible={projectHotkeyHintsVisible}
+                      class="project-hotkey"
+                      aria-hidden="true"
+                    >{hotkeyLabel}</kbd>
+                  {/if}
                   {#if unreadAgentCount > 0}
                     <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
                       <span aria-hidden="true"></span>{unreadAgentCount}
@@ -5822,8 +5842,9 @@
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
   :global(.project-rail-tooltip) { pointer-events: none; }
-  .project-row-badges { display: inline-flex; min-width: 0; grid-column: 3; grid-row: 1; align-items: center; justify-content: flex-end; gap: 4px; }
-  .project-hotkey { display: inline-grid; min-width: 24px; height: 18px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; background: var(--night); color: var(--muted-foreground); font: 600 9px/1 'JetBrains Mono Variable', monospace; }
+  .project-row-badges { position: relative; display: inline-flex; min-width: 0; grid-column: 3; grid-row: 1; align-items: center; justify-content: flex-end; gap: 4px; }
+  .project-hotkey { position: absolute; top: 50%; right: calc(100% + 4px); display: inline-grid; min-width: 24px; height: 18px; place-items: center; visibility: hidden; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; opacity: 0; background: var(--night); color: var(--muted-foreground); font: 600 9px/1 'JetBrains Mono Variable', monospace; transform: translateY(calc(-50% + 2px)); transition: opacity 80ms ease-out, transform 80ms ease-out, visibility 0s linear 80ms; pointer-events: none; }
+  .project-hotkey.visible { visibility: visible; opacity: 1; transform: translateY(-50%); transition-delay: 0s; }
   .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
@@ -5853,10 +5874,14 @@
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }
   .project-rail.collapsed .project-row-badges { position: absolute; z-index: 2; top: 2px; right: 2px; }
-  .project-rail.collapsed .project-hotkey { display: none; }
+  .project-rail.collapsed .project-hotkey { top: 18px; right: -2px; min-width: 14px; height: 14px; padding: 0 2px; font-size: 8px; }
   .project-rail.collapsed .project-unread-rollup { min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .project-hotkey { transform: translateY(-50%); transition: none; }
+  }
 
   .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }
   .main-frame.has-error { grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); }
