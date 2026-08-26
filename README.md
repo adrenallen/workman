@@ -117,9 +117,9 @@ scripts/release.sh 0.1.0
 ```
 
 The command builds one portable archive per platform. `workman-macos-arm64.zip` contains the app,
-CLI, daemon, installer, and a human getting-started guide. Each `workman-linux-<arch>.tar.gz`
-contains the same pieces with an experimental AppImage; matching `.AppImage` and `.deb` files are
-also emitted as standalone alternatives.
+CLI, daemon, installer, a human getting-started guide, and third-party notices. Each
+`workman-linux-<arch>.tar.gz` contains the same pieces with an experimental AppImage; matching
+`.AppImage` and `.deb` files are also emitted as standalone alternatives.
 
 Artifacts and release notes are written under `release/vX.Y.Z` and checksummed before the tag
 or GitHub prerelease is created. Re-running is safe and resumes from Cargo, npm, and container
@@ -129,9 +129,8 @@ caches. After installing and accepting the prerelease, promote it to stable with
 The manually dispatched Release workflow remains only as an emergency build-only fallback; it
 cannot publish a release.
 
-The checkout itself may still be located at `/Users/g/Code/gbuild`. The product and GitHub
-repository are named Workman, but that live working-directory path is intentionally not moved by
-the rename.
+An existing checkout may still use a legacy directory name. The product and GitHub repository are
+named Workman, but upgrading does not rename a developer's working directory.
 
 ## User agent tools
 

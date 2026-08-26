@@ -35,9 +35,10 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - id: release
         name: Validate tag and version files
@@ -79,22 +80,24 @@ jobs:
     needs: metadata
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      # This immutable action revision is the generated dtolnay/rust-toolchain 1.88.0 branch.
-      - name: Install pinned Rust 1.88.0
-        uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b
+      # This immutable action revision is the generated dtolnay/rust-toolchain 1.90.0 branch.
+      - name: Install pinned Rust 1.90.0
+        uses: dtolnay/rust-toolchain@06e5a564a0556e338780f5aecf2e7dcc9b267f07
         with:
           targets: ${{ env.MACOS_TARGET }}
 
       - name: Restore shared Rust release cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: release-${{ env.MACOS_TARGET }}
           workspaces: . -> target
@@ -142,6 +145,7 @@ jobs:
           install -m 755 "$BIN_TARGET_DIR/workmand" "$PACKAGE_DIR/bin/workmand"
           install -m 755 scripts/release-assets/install.sh "$PACKAGE_DIR/install.sh"
           install -m 644 scripts/release-assets/GETTING-STARTED-macos.md "$PACKAGE_DIR/GETTING-STARTED.md"
+          node scripts/generate-third-party-notices.mjs "$PACKAGE_DIR/THIRD_PARTY_NOTICES.md"
           ditto "$APP" "$PACKAGE_DIR/Workman.app"
           (
             cd "$PACKAGE_DIR"
@@ -149,7 +153,7 @@ jobs:
           )
           unzip -l "$RELEASE_DIR/$MACOS_ARCHIVE"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workman-release-macos-arm64
           path: |
@@ -163,7 +167,9 @@ jobs:
     needs: metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Tauri system dependencies
         shell: bash
@@ -182,20 +188,20 @@ jobs:
             patchelf \
             wget
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      # This immutable action revision is the generated dtolnay/rust-toolchain 1.88.0 branch.
-      - name: Install pinned Rust 1.88.0
-        uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b
+      # This immutable action revision is the generated dtolnay/rust-toolchain 1.90.0 branch.
+      - name: Install pinned Rust 1.90.0
+        uses: dtolnay/rust-toolchain@06e5a564a0556e338780f5aecf2e7dcc9b267f07
         with:
           targets: ${{ env.LINUX_TARGET }}
 
       - name: Restore shared Rust release cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: release-${{ env.LINUX_TARGET }}
           workspaces: . -> target
@@ -241,8 +247,9 @@ jobs:
           install -m 755 "$APPIMAGE" "$PACKAGE_DIR/Workman.AppImage"
           install -m 755 scripts/release-assets/install.sh "$PACKAGE_DIR/install.sh"
           install -m 644 scripts/release-assets/GETTING-STARTED-linux.md "$PACKAGE_DIR/GETTING-STARTED.md"
+          node scripts/generate-third-party-notices.mjs "$PACKAGE_DIR/THIRD_PARTY_NOTICES.md"
           tar -C "$PACKAGE_DIR" -czf "$RELEASE_DIR/$LINUX_ARCHIVE" \
-            GETTING-STARTED.md install.sh bin Workman.AppImage
+            GETTING-STARTED.md THIRD_PARTY_NOTICES.md install.sh bin Workman.AppImage
           install -m 755 "$APPIMAGE" "$RELEASE_DIR/$LINUX_APPIMAGE"
           install -m 644 "$DEB" "$RELEASE_DIR/$LINUX_DEB"
 
@@ -250,7 +257,7 @@ jobs:
           file "$RELEASE_DIR/$LINUX_APPIMAGE"
           dpkg-deb --info "$RELEASE_DIR/$LINUX_DEB"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workman-release-linux-x86_64
           path: |
@@ -266,9 +273,11 @@ jobs:
     needs: [metadata, macos, linux]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: workman-release-*
           path: release
@@ -339,7 +348,7 @@ jobs:
           cat release/release-notes.md
 
       - name: Preserve assembled dry-run candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: workman-release-candidate-${{ needs.metadata.outputs.tag }}
           path: |

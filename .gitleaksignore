@@ -1,0 +1,3 @@
+# This historical value is a localStorage namespace, not a credential. Keep the exception scoped
+# to the exact commit, file, rule, and line so any future finding in this file still fails CI.
+4586e134aaa21008d75e2f6901aae07b335541ec:apps/desktop/src/lib/navigation.ts:generic-api-key:41

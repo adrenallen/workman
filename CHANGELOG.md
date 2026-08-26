@@ -4,6 +4,18 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+### Security and public distribution
+
+- Remove the shared update key from shipped clients and make the Cloudflare-backed release
+  manifest, download page, and artifacts public while accepting legacy clients that still send the
+  retired header.
+- Add private vulnerability-reporting guidance, secret scanning, dependency update automation,
+  code ownership, contribution safeguards, and immutable GitHub Action pins.
+- Replace third-party provider artwork with neutral text monograms so the project does not
+  redistribute unverified trademarks or imply provider endorsement.
+- Add public-source contribution guidance and generated third-party license notices to platform
+  release archives.
+
 ## 0.1.11 - 2026-08-19
 
 Workman 0.1.11 makes launched tools inherit the user's real shell environment, keeps automatic

@@ -7,26 +7,24 @@ Install Workman from the stable channel (default) or latest channel.
 
 Usage:
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    sh -s -- --key <download-key> [--channel stable|latest] [--yes]
+    sh -s -- [--channel stable|latest] [--yes]
 
   curl -fsSL https://workman.userdefined.io/install.sh | \
-    WORKMAN_KEY=<download-key> WORKMAN_CHANNEL=latest sh
+    WORKMAN_CHANNEL=latest sh
 
 Options:
-  --key <download-key>  Shared Workman download key (overrides WORKMAN_KEY)
+  --key <legacy-key>    Deprecated compatibility option; ignored
   --channel <channel>   Release channel: stable (default) or latest
   --yes                 Replace superseded launchers without prompting
   --help, -h            Show this help
 
 Environment:
-  WORKMAN_KEY          Shared Workman download key
   WORKMAN_CHANNEL      Release channel: stable (default) or latest
   WORKMAN_INSTALL_DIR  Extracted versioned bundle destination; CLI binaries
                        remain in HOME/.local/share/workman/dist/VERSION/bin
 EOF
 }
 
-download_key="${WORKMAN_KEY:-}"
 channel="${WORKMAN_CHANNEL:-stable}"
 assume_yes=0
 while [ "$#" -gt 0 ]; do
@@ -37,11 +35,9 @@ while [ "$#" -gt 0 ]; do
         usage >&2
         exit 2
       fi
-      download_key="$2"
       shift 2
       ;;
     --key=*)
-      download_key="${1#--key=}"
       shift
       ;;
     --channel)
@@ -82,12 +78,6 @@ case "$channel" in
     ;;
 esac
 
-if [ -z "$download_key" ]; then
-  echo "a Workman download key is required; pass --key or set WORKMAN_KEY" >&2
-  usage >&2
-  exit 2
-fi
-
 for command in curl python3 bash ps; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required command not found: $command" >&2
@@ -116,13 +106,12 @@ inventory_path="$temporary_dir/install-inventory.json"
 reconciler_path="$temporary_dir/reconcile-installs.py"
 mkdir -p "$stage_dir"
 
-fetch_with_key() {
-  curl --fail --silent --show-error --location --retry 3 \
-    --header "Authorization: Bearer $download_key" "$@"
+fetch_release() {
+  curl --fail --silent --show-error --location --retry 3 "$@"
 }
 
 echo "Reading the Workman $channel channel..."
-fetch_with_key "$base_url/releases.json" --output "$manifest_path"
+fetch_release "$base_url/releases.json" --output "$manifest_path"
 
 python3 - "$manifest_path" "$target" "$base_url" "$channel" > "$release_metadata_path" <<'PY'
 import json
@@ -177,7 +166,7 @@ fi
 
 printf 'Selected Workman %s from the %s channel.\n' "$version" "$channel"
 echo "Downloading Workman $version for $target..."
-fetch_with_key "$artifact_url" --output "$archive_path"
+fetch_release "$artifact_url" --output "$archive_path"
 
 if command -v sha256sum >/dev/null 2>&1; then
   actual_sha256="$(sha256sum "$archive_path" | awk '{print $1}')"

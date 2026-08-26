@@ -24,6 +24,8 @@ grep -q 'bin/workmand' "$RELEASE_SCRIPT"
 grep -q 'Workman.app' "$RELEASE_SCRIPT"
 grep -q 'package_linux_bundles' "$RELEASE_SCRIPT"
 grep -q 'verify_bundle_layouts' "$RELEASE_SCRIPT"
+grep -q 'generate-third-party-notices.mjs' "$RELEASE_SCRIPT"
+grep -q 'THIRD_PARTY_NOTICES.md' "$RELEASE_SCRIPT"
 grep -q -- '--prerelease' "$RELEASE_SCRIPT"
 grep -q -- '--latest=false' "$RELEASE_SCRIPT"
 grep -q 'scripts/promote.sh' "$RELEASE_SCRIPT"
@@ -42,6 +44,7 @@ if awk '
 fi
 
 test -x "$REPO_ROOT/scripts/release-assets/install.sh"
+test -f "$REPO_ROOT/THIRD_PARTY_NOTICES.md"
 grep -q 'never run `workmand` by hand' \
   "$REPO_ROOT/scripts/release-assets/GETTING-STARTED-macos.md"
 grep -Fq 'Developer ID signed and notarized' \

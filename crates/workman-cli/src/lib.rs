@@ -211,7 +211,7 @@ Usage: wrk update [OPTIONS]
 Options
   --check                  Check without installing
   --channel stable|latest  Select stable or prerelease updates
-  --key KEY                Override the configured download key
+  --key KEY                Credential for a private update service
   -h, --help               Show help and exit
 
 Examples
@@ -2562,7 +2562,12 @@ async fn self_update(
             .unwrap_or_else(|_| LATEST_RELEASES_API.to_owned()),
     };
     let update_key = workmand::resolve_update_key(explicit_key)?;
-    let updater = UpdateClient::new_for_channel(api_url, channel)?.with_key(&update_key)?;
+    let updater = UpdateClient::new_for_channel(api_url, channel)?;
+    let updater = update_key
+        .as_deref()
+        .map(|key| updater.clone().with_key(key))
+        .transpose()?
+        .unwrap_or(updater);
     let mut daemon_client = if let Ok(discovery) = Discovery::read(data_dir)
         && workmand::probe(&discovery).await
     {
@@ -2577,7 +2582,7 @@ async fn self_update(
         client
             .rpc::<UpdateStatus>(
                 "daemon.update_check",
-                json!({ "force": true, "key": &update_key }),
+                json!({ "force": true, "key": update_key.as_deref() }),
             )
             .await?
             .check

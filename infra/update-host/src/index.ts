@@ -7,9 +7,7 @@ const LOGO_PATH = "/workman-logo-wide-transparent.png";
 const LOGO_KEY = "branding/workman-logo-wide-transparent.png";
 const NOINDEX_HEADER = "noindex, nofollow";
 
-type WorkerEnv = Env & {
-  DOWNLOAD_KEYS: string;
-};
+type WorkerEnv = Env;
 
 interface ReleaseAsset {
   name: string;
@@ -111,86 +109,6 @@ function pageResponse(
       "x-content-type-options": "nosniff",
     },
   });
-  return request.method === "HEAD" ? new Response(null, response) : response;
-}
-
-function basicPassword(request: Request): string | null {
-  const authorization = request.headers.get("authorization");
-  if (authorization === null) return null;
-  const basic = /^Basic\s+(.+)$/i.exec(authorization);
-  if (basic === null) return null;
-  try {
-    const decoded = atob(basic[1]);
-    const separator = decoded.indexOf(":");
-    return separator === -1 ? null : decoded.slice(separator + 1);
-  } catch {
-    return null;
-  }
-}
-
-function apiCandidateKeys(request: Request): string[] {
-  const candidates: string[] = [];
-  const authorization = request.headers.get("authorization");
-  if (authorization !== null) {
-    const bearer = /^Bearer\s+(.+)$/i.exec(authorization);
-    if (bearer !== null) candidates.push(bearer[1].trim());
-  }
-
-  const password = basicPassword(request);
-  if (password !== null) candidates.push(password);
-  const headerKey = request.headers.get("x-workman-key");
-  if (headerKey !== null) candidates.push(headerKey.trim());
-  return candidates;
-}
-
-async function matchesDownloadKey(candidates: string[], env: WorkerEnv): Promise<boolean> {
-  const validKeys = env.DOWNLOAD_KEYS.split(",")
-    .map((key) => key.trim())
-    .filter((key) => key.length > 0);
-  if (validKeys.length === 0 || candidates.length === 0) return false;
-
-  const encoder = new TextEncoder();
-  const [candidateHashes, validHashes] = await Promise.all([
-    Promise.all(candidates.map((key) => crypto.subtle.digest("SHA-256", encoder.encode(key)))),
-    Promise.all(validKeys.map((key) => crypto.subtle.digest("SHA-256", encoder.encode(key)))),
-  ]);
-  let match = 0;
-  for (const candidateHash of candidateHashes) {
-    const candidateBytes = new Uint8Array(candidateHash);
-    for (const validHash of validHashes) {
-      const validBytes = new Uint8Array(validHash);
-      let difference = 0;
-      for (let index = 0; index < candidateBytes.length; index += 1) {
-        difference |= candidateBytes[index] ^ validBytes[index];
-      }
-      match |= Number(difference === 0);
-    }
-  }
-  return match !== 0;
-}
-
-function isBasicAuthorized(request: Request, env: WorkerEnv): Promise<boolean> {
-  const password = basicPassword(request);
-  return matchesDownloadKey(password === null ? [] : [password], env);
-}
-
-function isApiAuthorized(request: Request, env: WorkerEnv): Promise<boolean> {
-  return matchesDownloadKey(apiCandidateKeys(request), env);
-}
-
-function unauthorized(request: Request, requireBasicChallenge = false): Response {
-  const browserRequest = requireBasicChallenge
-    || (request.headers.get("accept")?.toLowerCase().includes("text/html") ?? false);
-  const response = browserRequest
-    ? new Response("A Workman download key is required.\n", {
-        status: 401,
-        headers: {
-          "content-type": "text/plain; charset=utf-8",
-          "www-authenticate": 'Basic realm="workman"',
-        },
-      })
-    : errorResponse(401, "invalid or missing download key");
-  response.headers.set("cache-control", "no-store");
   return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
@@ -421,7 +339,7 @@ ${noindexMeta(env)}  <title>Download Workman ${version}</title>
           ${checksumLink}
         </div>
       </section>
-      <p class="notice"><b>Access granted</b><span>Download links reuse this browser session's access credentials.</span></p>
+      <p class="notice"><b>Public release</b><span>Downloads are available without an access key.</span></p>
       <div class="downloads">${groups}</div>
       <section class="install" aria-labelledby="install-title">
         <h2 id="install-title">Install notes</h2>
@@ -437,7 +355,7 @@ ${noindexMeta(env)}  <title>Download Workman ${version}</title>
           <section>
             <h3>CLI + daemon</h3>
             <p>Install or update <code>wrk</code> and <code>workmand</code> from the stable channel:</p>
-            <pre><code>curl -fsSL https://workman.userdefined.io/install.sh | WORKMAN_KEY='your-password' sh</code></pre>
+            <pre><code>curl -fsSL https://workman.userdefined.io/install.sh | sh</code></pre>
           </section>
           <section>
             <h3>Linux</h3>
@@ -581,19 +499,9 @@ async function routeRequest(request: Request, env: WorkerEnv): Promise<Response>
   const pathname = new URL(request.url).pathname;
   if (pathname === "/") return serveLander(request, env);
   if (pathname === "/robots.txt") return serveRobots(request, env);
-  if (pathname === "/download") {
-    if (!(await isBasicAuthorized(request, env))) return unauthorized(request, true);
-    return serveDownload(request, env);
-  }
+  if (pathname === "/download") return serveDownload(request, env);
   if (pathname === LOGO_PATH) {
     return serveObject(request, env, LOGO_KEY, IMMUTABLE_CACHE);
-  }
-
-  if (
-    (pathname === "/releases.json" || pathname.startsWith("/versions/")) &&
-    !(await isApiAuthorized(request, env))
-  ) {
-    return unauthorized(request);
   }
 
   if (pathname === "/releases.json") return serveManifest(request, env);

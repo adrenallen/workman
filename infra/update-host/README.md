@@ -16,40 +16,24 @@ install.sh
 ```
 
 `GET /` is a public black lander whose centered logo is served from the R2 branding object with an
-immutable cache policy. `/install.sh` is also public, but the bootstrap requires a key when it
-fetches `/releases.json` and `/versions/*`. Versioned responses keep their one-year immutable cache
-policy and byte-range support.
+immutable cache policy. `/download`, `/install.sh`, `/releases.json`, and `/versions/*` are public.
+Versioned responses keep their one-year immutable cache policy and byte-range support.
 
 Search indexing is temporarily disabled by the single `SITE_NOINDEX` variable in `wrangler.jsonc`.
 While it is `"true"`, every response carries `X-Robots-Tag: noindex, nofollow`, HTML pages include a
 robots meta tag, and `/robots.txt` disallows the entire site. Change that one value to `"false"` to
 remove all three blocks.
 
-## Download keys
+## Public download contract
 
-The `DOWNLOAD_KEYS` Worker secret is a comma-separated list. Production currently uses one key
-compiled into the app updater and a second key that can be shared with friends. The updater API
-(`/releases.json` and `/versions/*`) accepts either of these header forms:
+Release metadata and artifacts are intentionally anonymous because the canonical GitHub Releases
+are public. Older Workman clients still send their former shared Bearer key; the Worker ignores
+that header, so already-installed versions continue to update during the transition. New clients
+send no credential by default. `--key`, `WORKMAN_UPDATE_KEY`, and `config.yml`'s `update.key` remain
+available only for private, self-hosted update services.
 
-```text
-Authorization: Bearer <key>
-X-Workman-Key: <key>
-```
-
-Browser navigation to `/download` accepts only Basic authentication and always challenges with
-`401` and `WWW-Authenticate: Basic realm="workman"` until valid credentials are entered. The
-username may be anything and the password is the shared key. Query-string keys, Bearer headers, and
-`X-Workman-Key` do not render the page. Once authenticated, the browser resends the Basic credentials
-for the page's `/versions/*` links. Unauthenticated API requests receive a JSON 401 unless they are
-browser artifact navigations, which receive the same Basic challenge.
-Keep the two keys in the Cloudflare secret rather than `wrangler.jsonc` or git:
-
-```sh
-printf '%s' '<app-key>,<friends-key>' | npx wrangler secret put DOWNLOAD_KEYS
-```
-
-The app updater sends its key as a Bearer token on both the manifest and artifact request. The
-other accepted forms are for manual testing and friend downloads.
+Do not add another shared key to source or a shipped binary. Anything embedded in a distributed
+client must be treated as public and cannot enforce download authorization.
 
 ## First deploy
 
@@ -83,7 +67,7 @@ show the expected account, or deploy cannot access that zone, stop instead of ch
 ## Publish and promote
 
 Normal publishing is driven by `scripts/release.sh`. It retains GitHub Releases as the durable
-archive, uploads the same checksum-verified files to R2, refreshes the keyed bootstrap at
+archive, uploads the same checksum-verified files to R2, refreshes the public bootstrap at
 `infra/update-host/install.sh`, and moves the `latest` pointer. After validation,
 `scripts/promote.sh vX.Y.Z` moves the R2 `stable` pointer and promotes the corresponding GitHub
 release.
@@ -130,37 +114,31 @@ fail-safe there: a failure emits a loud warning but cannot fail or roll back the
 Cloudflare currently prices Standard R2 storage at $0.015/GB-month with an account-wide 10
 GB-month free tier; see https://developers.cloudflare.com/r2/pricing/ for current pricing.
 
-## Friend flow
+## Public install flow
 
-To download in a browser, open `https://workman.userdefined.io/download`. At the browser prompt, use
-any username and the friends key as the password. The authenticated page shows the current stable
-release, and its artifact links reuse those credentials.
+To download in a browser, open `https://workman.userdefined.io/download`. The page and its stable
+release links are anonymous.
 
-To install the stable bundle from a terminal, pass the same key without putting it in the URL:
+To install the stable bundle from a terminal:
 
 ```sh
 curl -fsSL https://workman.userdefined.io/install.sh | \
-  sh -s -- --key '<friends-key>'
-
-# Equivalent environment-variable form:
-curl -fsSL https://workman.userdefined.io/install.sh | \
-  WORKMAN_KEY='<friends-key>' sh
+  sh
 
 # Skip the interactive replacement/restart confirmations:
 curl -fsSL https://workman.userdefined.io/install.sh | \
-  sh -s -- --key '<friends-key>' --yes
+  sh -s -- --yes
 ```
 
 Before a prerelease is promoted, install it from the latest channel explicitly:
 
 ```sh
 curl -fsSL https://workman.userdefined.io/install.sh | \
-  sh -s -- --key '<friends-key>' --channel latest
+  sh -s -- --channel latest
 ```
 
-The bootstrap prints the selected channel and the exact version that channel currently serves,
-sends the key as a Bearer token to both `/releases.json` and the selected artifact, and checks the
-manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand`, and obsolete
+The bootstrap prints the selected channel and the exact version that channel currently serves and
+checks the manifest SHA-256 before extracting. It inventories deduplicated `wrk`, `workmand`, and obsolete
 pre-Workman launchers from PATH and known install locations. Versioned bundle directories remain
 available as rollback files; superseded launchers are backed up before being replaced.
 

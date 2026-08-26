@@ -272,6 +272,8 @@ add_bundle_guides() {
   install -m 644 \
     "$RELEASE_ASSETS_DIR/GETTING-STARTED-${platform}.md" \
     "$package_dir/GETTING-STARTED.md"
+  node "$REPO_ROOT/scripts/generate-third-party-notices.mjs" \
+    "$package_dir/THIRD_PARTY_NOTICES.md"
 }
 
 ensure_linux_tools() {
@@ -342,13 +344,13 @@ verify_macos_bundle_layout() {
   local roots expected mac_entries
   mac_entries="$(unzip -Z1 "$OUTPUT_DIR/workman-macos-arm64.zip")"
   roots="$(printf '%s\n' "$mac_entries" | awk -F/ 'NF { print $1 }' | sort -u)"
-  expected="$(printf '%s\n' GETTING-STARTED.md Workman.app bin install.sh | sort)"
+  expected="$(printf '%s\n' GETTING-STARTED.md THIRD_PARTY_NOTICES.md Workman.app bin install.sh | sort)"
   [[ "$roots" == "$expected" ]] || {
     echo "macOS bundle has unexpected top-level entries:" >&2
     printf '%s\n' "$roots" >&2
     exit 1
   }
-  for entry in GETTING-STARTED.md install.sh bin/wrk bin/workmand; do
+  for entry in GETTING-STARTED.md THIRD_PARTY_NOTICES.md install.sh bin/wrk bin/workmand; do
     grep -qx "$entry" <<<"$mac_entries"
   done
   grep -q '^Workman\.app/' <<<"$mac_entries"
@@ -446,7 +448,7 @@ package_linux_bundles() {
     install -m 755 "$REPO_ROOT/target/$target/dist/workmand" "$package_dir/bin/workmand"
     add_bundle_guides "$package_dir" linux
     install -m 755 "$desktop_dir/Workman.AppImage" "$package_dir/Workman.AppImage"
-    entries=(GETTING-STARTED.md install.sh bin Workman.AppImage)
+    entries=(GETTING-STARTED.md THIRD_PARTY_NOTICES.md install.sh bin Workman.AppImage)
     tar -C "$package_dir" -czf "$OUTPUT_DIR/workman-linux-${label}.tar.gz" "${entries[@]}"
   done
   record_stage packaging "$started"
@@ -462,13 +464,13 @@ verify_bundle_layouts() {
   for label in x86_64 arm64; do
     entries="$(tar -tzf "$OUTPUT_DIR/workman-linux-${label}.tar.gz")"
     roots="$(printf '%s\n' "$entries" | awk -F/ 'NF { print $1 }' | sort -u)"
-    expected="$(printf '%s\n' GETTING-STARTED.md Workman.AppImage bin install.sh | sort)"
+    expected="$(printf '%s\n' GETTING-STARTED.md THIRD_PARTY_NOTICES.md Workman.AppImage bin install.sh | sort)"
     [[ "$roots" == "$expected" ]] || {
       echo "Linux $label bundle has unexpected top-level entries:" >&2
       printf '%s\n' "$roots" >&2
       exit 1
     }
-    for entry in GETTING-STARTED.md install.sh Workman.AppImage bin/wrk bin/workmand; do
+    for entry in GETTING-STARTED.md THIRD_PARTY_NOTICES.md install.sh Workman.AppImage bin/wrk bin/workmand; do
       grep -qx "$entry" <<<"$entries"
     done
   done

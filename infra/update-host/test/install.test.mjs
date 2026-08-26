@@ -151,7 +151,7 @@ esac
 }
 
 function executeInstallFixture(fixture, shell, extraArguments = ["--yes"], extraEnv = {}) {
-  const result = spawnSync(shell, [installer, "--key", "fixture-key", ...extraArguments], {
+  const result = spawnSync(shell, [installer, ...extraArguments], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -175,15 +175,15 @@ function runInstallFixture(shell, extraArguments = ["--yes"]) {
   return { fixture, result };
 }
 
-test("bootstrap installer has valid shell syntax and documents key and channel forms", () => {
+test("bootstrap installer has valid shell syntax and documents public channel forms", () => {
   for (const shell of availableShells()) {
     const syntax = spawnSync(shell, ["-n", installer], { encoding: "utf8" });
     assert.equal(syntax.status, 0, `${shell}: ${syntax.stderr}`);
 
     const help = spawnSync(shell, [installer, "--help"], { encoding: "utf8" });
     assert.equal(help.status, 0, `${shell}: ${help.stderr}`);
-    assert.match(help.stdout, /--key <download-key>/);
-    assert.match(help.stdout, /WORKMAN_KEY=<download-key>/);
+    assert.match(help.stdout, /--key <legacy-key>.*Deprecated compatibility option/);
+    assert.doesNotMatch(help.stdout, /WORKMAN_KEY/);
     assert.match(help.stdout, /--channel <channel>/);
     assert.match(help.stdout, /WORKMAN_CHANNEL=latest/);
     assert.match(help.stdout, /--yes/);
@@ -193,6 +193,7 @@ test("bootstrap installer has valid shell syntax and documents key and channel f
   assert.doesNotMatch(source, /\[\[/);
   assert.doesNotMatch(source, /<\s*<\(/);
   assert.doesNotMatch(source, /\$'[^']*'/);
+  assert.doesNotMatch(source, /Authorization: Bearer|WORKMAN_KEY/);
 });
 
 test("bootstrap follows the bundled installer's durable dist layout while replacing launchers", () => {
@@ -301,7 +302,7 @@ test("bootstrap installer rejects unknown release channels before fetching", () 
   for (const shell of availableShells()) {
     const result = spawnSync(
       shell,
-      [installer, "--key", "test-key", "--channel", "nightly"],
+      [installer, "--channel", "nightly"],
       { encoding: "utf8" },
     );
     assert.equal(result.status, 2, `${shell}: ${result.stderr}`);
@@ -309,12 +310,16 @@ test("bootstrap installer rejects unknown release channels before fetching", () 
   }
 });
 
-test("bootstrap installer refuses to fetch without a key", () => {
-  const environment = { ...process.env };
-  delete environment.WORKMAN_KEY;
+test("bootstrap accepts the deprecated key option without requiring or transmitting it", () => {
   for (const shell of availableShells()) {
-    const result = spawnSync(shell, [installer], { encoding: "utf8", env: environment });
-    assert.equal(result.status, 2, `${shell}: ${result.stderr}`);
-    assert.match(result.stderr, /download key is required/i);
+    const fixture = createInstallFixture(shell);
+    const result = executeInstallFixture(fixture, shell, ["--key", "legacy-key", "--yes"]);
+    try {
+      assert.equal(result.status, 0, `${shell}: ${result.stderr}\n${result.stdout}`);
+      assert.doesNotMatch(result.stdout, /legacy-key/);
+      assert.doesNotMatch(result.stderr, /legacy-key/);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
