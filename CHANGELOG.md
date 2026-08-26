@@ -11,10 +11,19 @@ All notable changes to Workman are recorded here.
   retired header.
 - Add private vulnerability-reporting guidance, secret scanning, dependency update automation,
   code ownership, contribution safeguards, and immutable GitHub Action pins.
-- Replace third-party provider artwork with neutral text monograms so the project does not
-  redistribute unverified trademarks or imply provider endorsement.
+- Keep routine GitHub Actions limited to secret scanning; desktop builds, tests, signing, and
+  notarization remain part of the local release workflow.
+- Update the transitive desktop build dependency `nanoid` to its patched release.
 - Add public-source contribution guidance and generated third-party license notices to platform
   release archives.
+
+### Projects and keyboard workflow
+
+- Add configurable shortcuts for the first nine projects in rail order and for creating an agent,
+  terminal, command, scratchpad, or todo in the current project; default to Command/Ctrl+1–9 and
+  Command/Ctrl+N, persist changes locally, and expose assignments in Settings and the project rail.
+- Restore recognizable OpenAI, Anthropic, DeepSeek, Grok, and Kimi marks across agent surfaces
+  while preserving custom per-tool icons as the highest-priority display source.
 
 ## 0.1.11 - 2026-08-19
 

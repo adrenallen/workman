@@ -30,7 +30,7 @@ export const settingsSections: SettingsSectionDefinition[] = [
   { id: 'profiles', label: 'Profiles', icon: '▤', description: 'Switch project and config sets', local: false },
   { id: 'terminal', label: 'Terminal', icon: '>_', description: 'Shell, type, and color', local: true },
   { id: 'sidebar', label: 'Sidebar', icon: '▥', description: 'Rails and project tree', local: true },
-  { id: 'hotkeys', label: 'Hotkeys', icon: '⌘', description: 'Keyboard reference', local: true },
+  { id: 'hotkeys', label: 'Hotkeys', icon: '⌘', description: 'Keyboard shortcuts and project jumps', local: true },
   { id: 'notifications', label: 'Notifications', icon: '○', description: 'OS banners and attention', local: true },
   { id: 'templates', label: 'Templates', icon: 'A+', description: 'Reusable agent launches', local: false },
   { id: 'agents', label: 'Agents', icon: '◎', description: 'Runtimes and tools', local: false },

@@ -64,6 +64,7 @@
     onStart,
     onError,
     onContextMenu,
+    onAppShortcut,
     onQuickPrompts,
     onCycleProcess,
     onUnfocus
@@ -76,6 +77,7 @@
     onStart?: (process: ProcessView) => void;
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
+    onAppShortcut?: (event: KeyboardEvent) => boolean;
     onQuickPrompts?: () => void;
     onCycleProcess?: (direction: -1 | 1) => void;
     onUnfocus?: () => void;
@@ -261,6 +263,11 @@
     window.addEventListener('focus', recoverVisibleRenderer);
 
     instance.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && onAppShortcut?.(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return false;
+      }
       if (onQuickPrompts && isQuickPromptPaletteShortcut(event)) {
         event.preventDefault();
         event.stopPropagation();
