@@ -153,6 +153,14 @@
     type AppNavigationTarget,
     type NavigationProjectSnapshot
   } from './lib/navigation';
+  import {
+    findHotkeyAction,
+    hotkeyDisplayLabel,
+    hotkeyPreferences,
+    projectHotkeyActions,
+    projectHotkeyIndex,
+    type CreationHotkeyAction
+  } from './lib/hotkeys';
   import { liveStats } from './lib/liveStats';
   import {
     beginOptimisticNavigation,
@@ -408,6 +416,7 @@
   let quickJumpOpen = $state(false);
   let quickPromptOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let projectHotkeyHintsVisible = $state(false);
   let keepAwakeOpen = $state(false);
   let quickJumpLoading = $state(false);
   let quickJumpRecentKeys = $state<string[]>([]);
@@ -485,6 +494,11 @@
 
   let selectedProject = $derived(projects.find((project) => project.selected) ?? null);
   let projectRailLayout = $derived(buildProjectRailLayout(projects, projectFolders));
+  let projectHotkeyProjectIds = $derived(
+    projectRailLayout.flatMap((entry) =>
+      entry.kind === 'project' ? [entry.id] : entry.project_ids
+    )
+  );
   let visibleProcesses = $derived([
     ...processes,
     ...optimisticProcesses.map((optimistic) => optimistic.process)
@@ -910,6 +924,7 @@
   }
 
   function handleShortcut(event: KeyboardEvent): void {
+    projectHotkeyHintsVisible = primaryModifier(event);
     const target = event.target as HTMLElement | null;
     if (folderMenuRequest) {
       if (event.key === 'Escape') closeProjectFolderMenu();
@@ -919,6 +934,7 @@
       if (event.key === 'Escape') closeContextMenu();
       return;
     }
+    if (handleConfiguredHotkey(event)) return;
     if (isTerminalInputTarget(target)) return;
     if (primaryModifier(event) && !event.altKey && !secondaryModifier(event) && event.key === '/') {
       event.preventDefault();
@@ -1004,6 +1020,50 @@
       else if (selection?.kind === 'scratchpad') openScratchpadsBrowser();
       else clearSelection();
     }
+  }
+
+  function handleShortcutKeyup(event: KeyboardEvent): void {
+    projectHotkeyHintsVisible = primaryModifier(event);
+  }
+
+  function hideProjectHotkeyHints(): void {
+    projectHotkeyHintsVisible = false;
+  }
+
+  function handleConfiguredHotkey(event: KeyboardEvent): boolean {
+    if (quickJumpOpen || quickPromptOpen || shortcutsOpen) return false;
+    const action = findHotkeyAction(event, $hotkeyPreferences);
+    if (!action) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return true;
+
+    const projectIndex = projectHotkeyIndex(action);
+    if (projectIndex !== null) {
+      const projectId = projectHotkeyProjectIds[projectIndex];
+      if (projectId !== undefined) {
+        appNavigation.navigate({ type: 'project', projectId }, 'keyboard');
+      }
+      return true;
+    }
+
+    const projectId = selectedProject?.id;
+    if (projectId === undefined) return true;
+    const targetByAction: Record<CreationHotkeyAction, AppNavigationTarget> = {
+      'new-agent': { type: 'new-agent', projectId },
+      'new-terminal': { type: 'new-terminal', projectId },
+      'new-command': { type: 'add-command', projectId },
+      'new-scratchpad': { type: 'new-scratchpad', projectId },
+      'new-todo': { type: 'new-todo', projectId }
+    };
+    appNavigation.navigate(targetByAction[action as CreationHotkeyAction], 'keyboard');
+    return true;
+  }
+
+  function projectHotkeyLabel(projectId: number): string | null {
+    const index = projectHotkeyProjectIds.indexOf(projectId);
+    const action = projectHotkeyActions[index];
+    return action ? hotkeyDisplayLabel($hotkeyPreferences[action]) || null : null;
   }
 
   function openQuickJump(): void {
@@ -4811,7 +4871,11 @@
   }
 </script>
 
-<svelte:window onkeydown={handleShortcut} />
+<svelte:window
+  onkeydown={handleShortcut}
+  onkeyup={handleShortcutKeyup}
+  onblur={hideProjectHotkeyHints}
+/>
 
 <svelte:head>
   <title>{windowTitle}</title>
@@ -4892,6 +4956,7 @@
   {@const projectProcesses = projectRailProcesses(project)}
   {@const activity = projectKindActivity(projectProcesses, $liveStats.processes)}
   {@const activityLabel = projectRailActivityLabel(project, activity)}
+  {@const hotkeyLabel = projectHotkeyLabel(project.id)}
   <article
     class:active={project.selected}
     class:has-unread={unreadAgentCount > 0}
@@ -4910,7 +4975,7 @@
               class="project-select"
               type="button"
               aria-current={project.selected ? 'page' : undefined}
-              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${hotkeyLabel ? ` · Shortcut ${hotkeyLabel}` : ''}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
               use:reorderItem={{
                 id: project.id,
                 group: 'projects',
@@ -4968,9 +5033,20 @@
                 </TooltipLabel>
               </span>
               <span class="project-copy"><strong>{rowLabel}</strong></span>
-              {#if unreadAgentCount > 0}
-                <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
-                  <span aria-hidden="true"></span>{unreadAgentCount}
+              {#if hotkeyLabel || unreadAgentCount > 0}
+                <span class="project-row-badges">
+                  {#if hotkeyLabel}
+                    <kbd
+                      class:visible={projectHotkeyHintsVisible}
+                      class="project-hotkey"
+                      aria-hidden="true"
+                    >{hotkeyLabel}</kbd>
+                  {/if}
+                  {#if unreadAgentCount > 0}
+                    <span class="project-unread-rollup" aria-label={`${unreadAgentCount} unread agents`}>
+                      <span aria-hidden="true"></span>{unreadAgentCount}
+                    </span>
+                  {/if}
                 </span>
               {/if}
         </button>
@@ -5382,6 +5458,7 @@
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}
                 onContextMenu={showContextMenu}
+                onAppShortcut={handleConfiguredHotkey}
                 onQuickPrompts={openQuickPrompts}
                 onCycleProcess={(direction) => cycleProcess(direction, 'main')}
                 onUnfocus={unfocusSelectedProcess}
@@ -5765,7 +5842,10 @@
   .project-tooltip-parent { display: flex !important; align-items: center; gap: var(--space-1); }
   .project-tooltip-parent :global(svg) { flex: none; }
   :global(.project-rail-tooltip) { pointer-events: none; }
-  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; grid-column: 3; grid-row: 1; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
+  .project-row-badges { position: relative; display: inline-flex; min-width: 0; grid-column: 3; grid-row: 1; align-items: center; justify-content: flex-end; gap: 4px; }
+  .project-hotkey { position: absolute; top: 50%; right: calc(100% + 4px); display: inline-grid; min-width: 24px; height: 18px; place-items: center; visibility: hidden; border: 1px solid var(--border-strong); border-radius: 3px; padding: 0 4px; opacity: 0; background: var(--night); color: var(--muted-foreground); font: 600 9px/1 'JetBrains Mono Variable', monospace; transform: translateY(calc(-50% + 2px)); transition: opacity 80ms ease-out, transform 80ms ease-out, visibility 0s linear 80ms; pointer-events: none; }
+  .project-hotkey.visible { visibility: visible; opacity: 1; transform: translateY(-50%); transition-delay: 0s; }
+  .project-unread-rollup { display: inline-flex; min-width: 20px; height: 18px; flex: none; align-items: center; justify-content: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--notification-unread) 45%, var(--border)); border-radius: 999px; padding: 0 5px; color: var(--notification-unread-foreground); background: color-mix(in srgb, var(--notification-unread) 9%, var(--popover)); font: 650 var(--font-size-xs)/1 'JetBrains Mono Variable', monospace; }
   .project-unread-rollup > span { width: 5px; height: 5px; border-radius: 999px; background: var(--notification-unread); }
   .rename-form { display: flex; width: 100%; grid-column: 1 / -1; align-items: center; gap: 4px; padding: 4px; }
   .rename-form input { min-width: 0; flex: 1; border: 1px solid var(--border-strong); padding: 5px; background: var(--background); color: var(--text); font-size: var(--font-size-sm); }
@@ -5793,9 +5873,15 @@
   .project-rail.collapsed .project-select { position: relative; inset: auto; display: flex; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
   .project-rail.collapsed :global(.project-actions) { display: none; }
-  .project-rail.collapsed .project-unread-rollup { position: absolute; z-index: 2; top: 2px; right: 2px; min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
+  .project-rail.collapsed .project-row-badges { position: absolute; z-index: 2; top: 2px; right: 2px; }
+  .project-rail.collapsed .project-hotkey { top: 18px; right: -2px; min-width: 14px; height: 14px; padding: 0 2px; font-size: 8px; }
+  .project-rail.collapsed .project-unread-rollup { min-width: 14px; height: 14px; gap: 0; padding: 0 3px; border-color: var(--notification-unread); font-size: 9px; }
   .project-rail.collapsed .project-unread-rollup > span { display: none; }
   .project-rail.collapsed .project-footer { padding: 5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .project-hotkey { transform: translateY(-50%); transition: none; }
+  }
 
   .main-frame { position: relative; display: grid; width: 100%; height: 100%; max-height: 100%; grid-template-rows: minmax(0, 1fr) minmax(0, auto); overflow: hidden; background: var(--night); }
   .main-frame.has-error { grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto); }

@@ -4,6 +4,11 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import {
+    hotkeyDefinitions,
+    hotkeyDisplayParts,
+    hotkeyPreferences
+  } from './hotkeys';
+  import {
     altModifierLabel as alt,
     primaryModifier,
     primaryModifierLabel as mod,
@@ -53,6 +58,15 @@
         { keys: [mod, 'F'], label: 'Search the focused terminal buffer' },
         { keys: ['Tab', '↵'], label: 'Use Unfocus, Previous, and Next in the process bar' }
       ]
+    },
+    {
+      title: 'Projects and creation',
+      shortcuts: hotkeyDefinitions.map((definition) => ({
+        keys: hotkeyDisplayParts($hotkeyPreferences[definition.id]).length > 0
+          ? hotkeyDisplayParts($hotkeyPreferences[definition.id])
+          : ['Not set'],
+        label: definition.label
+      }))
     }
   ]);
 

@@ -1,9 +1,14 @@
 import type { AgentTool } from './agentTools';
 
+export type BundledAgentGlyph = 'anthropic' | 'openai';
+export type BundledAgentAsset = 'deepseek' | 'grok' | 'kimi';
+
 export interface AgentBrand {
   id: string;
   label: string;
   monogram: string;
+  glyph: BundledAgentGlyph | null;
+  asset: BundledAgentAsset | null;
 }
 
 interface AgentBrandDefinition extends AgentBrand {
@@ -20,6 +25,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'grok',
     label: 'xAI Grok',
     monogram: 'GR',
+    glyph: null,
+    asset: 'grok',
     toolTypes: ['grok', 'grok_cli', 'grok_build', 'xai'],
     searchTerms: ['grok', 'xai', 'x.ai']
   },
@@ -27,6 +34,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'deepseek',
     label: 'DeepSeek',
     monogram: 'DS',
+    glyph: null,
+    asset: 'deepseek',
     toolTypes: ['deepseek', 'deepseek_cli'],
     searchTerms: ['deepseek']
   },
@@ -34,6 +43,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'anthropic',
     label: 'Anthropic',
     monogram: 'AN',
+    glyph: 'anthropic',
+    asset: null,
     toolTypes: ['claude', 'claude_code', 'anthropic'],
     searchTerms: ['claude', 'anthropic']
   },
@@ -41,6 +52,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'openai',
     label: 'OpenAI',
     monogram: 'OA',
+    glyph: 'openai',
+    asset: null,
     toolTypes: ['codex', 'openai'],
     searchTerms: ['codex', 'openai']
   },
@@ -48,6 +61,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'google',
     label: 'Google Gemini',
     monogram: 'GM',
+    glyph: null,
+    asset: null,
     toolTypes: ['gemini', 'gemini_cli', 'google'],
     searchTerms: ['gemini', 'google']
   },
@@ -55,6 +70,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'moonshot',
     label: 'Moonshot Kimi',
     monogram: 'KM',
+    glyph: null,
+    asset: 'kimi',
     toolTypes: ['kimi', 'kimi_code', 'moonshot'],
     searchTerms: ['kimi', 'moonshot']
   },
@@ -62,6 +79,8 @@ export const AGENT_BRANDS: readonly AgentBrandDefinition[] = [
     id: 'opencode',
     label: 'OpenCode',
     monogram: 'OC',
+    glyph: null,
+    asset: null,
     toolTypes: ['opencode', 'open_code'],
     searchTerms: ['opencode', 'open code']
   }
@@ -88,7 +107,9 @@ export function resolveAgentBrand(
   return {
     id: 'custom',
     label: source,
-    monogram: monogram(source)
+    monogram: monogram(source),
+    glyph: null,
+    asset: null
   };
 }
 

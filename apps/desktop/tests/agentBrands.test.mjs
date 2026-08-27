@@ -21,15 +21,14 @@ test('maps every bundled preset brand from declarative preset metadata', () => {
     ].map((candidate) => resolveAgentBrand(candidate).id),
     ['anthropic', 'openai', 'google', 'moonshot', 'deepseek', 'grok', 'opencode']
   );
-  assert.deepEqual(AGENT_BRANDS.map((brand) => brand.monogram), [
-    'GR',
-    'DS',
-    'AN',
-    'OA',
-    'GM',
-    'KM',
-    'OC'
-  ]);
+  assert.deepEqual(
+    AGENT_BRANDS.filter((brand) => brand.glyph).map((brand) => brand.id),
+    ['anthropic', 'openai']
+  );
+  assert.deepEqual(
+    AGENT_BRANDS.filter((brand) => brand.asset).map((brand) => [brand.id, brand.asset]),
+    [['grok', 'grok'], ['deepseek', 'deepseek'], ['moonshot', 'kimi']]
+  );
 });
 
 test('provider identity outranks a generic host tool type', () => {
@@ -40,13 +39,13 @@ test('provider identity outranks a generic host tool type', () => {
   assert.equal(brand.monogram, 'DS');
 });
 
-test('provider brands use neutral monograms while custom icons keep highest priority', async () => {
+test('the official Grok asset keeps custom tool icons at highest priority', async () => {
   const source = await readFile(
     new URL('../src/lib/AgentBrandMark.svelte', import.meta.url),
     'utf8'
   );
-  assert.doesNotMatch(source, /agent-(?:grok|deepseek|kimi)\.png|Official (?:Anthropic|OpenAI)/);
-  assert.ok(source.indexOf('{#if tool?.icon_data_url}') < source.indexOf('{brand.monogram}'));
+  assert.match(source, /agent-grok\.png/);
+  assert.ok(source.indexOf('{#if tool?.icon_data_url}') < source.indexOf('{:else if assetSource}'));
 });
 
 test('settings suggests the first-class Grok tool type', async () => {
