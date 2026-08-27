@@ -228,6 +228,14 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     let rotated_owner = ClientInfo::default().serve(rotated_owner_transport).await?;
 
     let advertised_tools = owner.list_all_tools().await?;
+    let timer_set_tool = advertised_tools
+        .iter()
+        .find(|tool| tool.name == "timer_set")
+        .expect("timer_set tool is present");
+    let timer_set_description = timer_set_tool.description.as_deref().unwrap_or_default();
+    assert!(timer_set_description.contains("one-shot or repeating"));
+    assert!(timer_set_description.contains("delivers to you"));
+    assert!(timer_set_description.contains("do not poll while waiting"));
     for name in ["timer_fire_when_idle_any", "timer_fire_when_idle_all"] {
         let tool = advertised_tools
             .iter()
@@ -237,6 +245,13 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         assert!(description.contains("no-poll wake-up"));
         assert!(description.contains("end the current turn"));
         assert!(description.contains("fresh user turn"));
+        assert!(description.contains("only when this timer delivers back to you"));
+        assert!(description.contains("do not poll while waiting"));
+        if name == "timer_fire_when_idle_any" {
+            assert!(description.contains("fresh non-idle-to-idle transition"));
+        } else {
+            assert!(description.contains("idle at arm time or later reaches idle"));
+        }
         assert!(
             tool.input_schema["properties"]["body"]["description"]
                 .as_str()
@@ -297,11 +312,10 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     assert_eq!(already["already_satisfied"], true);
     assert_eq!(already["delivered_immediately"], true);
     assert_eq!(already["delivery_process_id"], DELIVERY_ID);
-    assert!(
-        already["next_action"]
-            .as_str()
-            .is_some_and(|message| message.contains("Do not create another timer"))
-    );
+    assert!(already["next_action"].as_str().is_some_and(|message| {
+        message.contains("Do not create another timer")
+            && message.contains("end your current turn now")
+    }));
     assert_eq!(already["timer"], Value::Null);
     wait_for_output(&registry, DELIVERY_ID, "received:[already idle]").await?;
 
@@ -319,7 +333,8 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     assert_eq!(any["delivered_immediately"], false);
     assert!(any["next_action"].as_str().is_some_and(|message| {
         message.contains("end the current turn now")
-            && message.contains("No additional wait call is needed")
+            && message.contains("no additional wait call is needed")
+            && message.contains("inspect the watched processes before assuming they finished")
     }));
     let any_timer_id = any["timer"]["id"].as_i64().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

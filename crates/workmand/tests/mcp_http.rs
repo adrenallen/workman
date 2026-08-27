@@ -259,6 +259,18 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         ClientInfo::default().serve(transport).await?
     };
 
+    let server_instructions = process_client
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .expect("Workman advertises MCP server instructions");
+    assert!(server_instructions.contains("timer delivers back to you"));
+    assert!(
+        server_instructions.contains("Do not loop on timer_list or process status while waiting")
+    );
+    assert!(
+        server_instructions.contains("inspect the watched processes before assuming they finished")
+    );
+
     let tool_names: Vec<_> = process_client
         .list_all_tools()
         .await?
