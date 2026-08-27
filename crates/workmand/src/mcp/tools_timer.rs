@@ -30,7 +30,7 @@ struct TimerSetArgs {
     project_id: Option<ProjectId>,
     /// Delay before the first delivery.
     delay_ms: u64,
-    /// Prompt text submitted to the delivery agent as a fresh user turn.
+    /// Single-line prompt text submitted unmodified to the delivery agent as a fresh user turn. Keep it on one line so the target CLI processes it as one turn.
     body: String,
     /// Repeat using delay_ms when repeat_every_ms is omitted.
     #[serde(default, rename = "loop")]
@@ -51,7 +51,7 @@ struct IdleTimerArgs {
     processes: Vec<ProcessReference>,
     /// Hard deadline before body is delivered even if the idle condition is not met.
     max_wait_ms: u64,
-    /// Prompt text submitted to the delivery agent as a fresh user turn. After arming a timer for yourself, end your current turn instead of polling.
+    /// Single-line prompt text submitted unmodified to the delivery agent as a fresh user turn. Keep it on one line so the target CLI processes it as one turn. After arming a timer for yourself, end your current turn instead of polling.
     body: String,
     /// Agent process receiving the fresh prompt. Defaults to the calling process.
     #[serde(default)]
@@ -284,7 +284,7 @@ impl WorkmanMcp {
                     "project_id": project.id,
                     "already_satisfied": false,
                     "delivered_immediately": false,
-                    "next_action": "Timer armed. If this timer delivers back to you (the default), finish your response and end the current turn now. Do not call timer_list, inspect process status, sleep, or poll while waiting; no additional wait call is needed. Workman will submit body as a fresh user turn when the idle condition or max_wait_ms is reached. When that turn arrives, inspect the watched processes before assuming they finished because the deadline may have fired.",
+                    "next_action": "Timer armed. If this timer delivers back to you (the default), finish your response and end the current turn now. Do not call timer_list, inspect process status, sleep, or poll while waiting; no additional wait call is needed. Workman will submit body as a fresh user turn when the idle condition or max_wait_ms is reached. When that turn arrives, inspect the watched processes before assuming they finished because the deadline may have fired or an agent may only be waiting on its own timer.",
                     "timer": timer,
                 }))
             }

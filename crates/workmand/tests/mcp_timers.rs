@@ -236,6 +236,14 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     assert!(timer_set_description.contains("one-shot or repeating"));
     assert!(timer_set_description.contains("delivers to you"));
     assert!(timer_set_description.contains("do not poll while waiting"));
+    assert!(
+        timer_set_tool.input_schema["properties"]["body"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("submitted unmodified")
+                    && description.contains("Keep it on one line")
+            })
+    );
     for name in ["timer_fire_when_idle_any", "timer_fire_when_idle_all"] {
         let tool = advertised_tools
             .iter()
@@ -257,6 +265,8 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
                 .as_str()
                 .is_some_and(|description| {
                     description.contains("fresh user turn")
+                        && description.contains("submitted unmodified")
+                        && description.contains("Keep it on one line")
                         && description.contains("instead of polling")
                 })
         );
@@ -335,6 +345,7 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         message.contains("end the current turn now")
             && message.contains("no additional wait call is needed")
             && message.contains("inspect the watched processes before assuming they finished")
+            && message.contains("waiting on its own timer")
     }));
     let any_timer_id = any["timer"]["id"].as_i64().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
