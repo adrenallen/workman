@@ -4,6 +4,20 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.12 - 2026-08-27
+
+Workman 0.1.12 streamlines agent and project navigation, opens release downloads for public use,
+and strengthens the repository for outside contributors.
+
+### Agent and worktree creation
+
+- Replace the add-agent dropdowns with a compact template and model/tool roster, keep template
+  details and overrides available on demand, and make additional instructions clearly optional.
+- Preserve valid template overrides across reselection, fail closed for stale choices, and allow
+  agents to launch without extra instructions.
+- Reuse each repository's remembered environment-file preference when creating, forking, or
+  adopting worktrees.
+
 ### Security and public distribution
 
 - Remove the shared update key from shipped clients and make the Cloudflare-backed release
