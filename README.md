@@ -11,6 +11,19 @@ working, which ones need you, and where you left off without juggling a pile of 
 Workman manages the workspace and its processes on your computer. Open the app and it takes care of
 its background service for you.
 
+<p align="center">
+  <a href="assets/screenshots/workman-workspace.png">
+    <img
+      src="assets/screenshots/workman-workspace.png"
+      alt="Workman showing projects, agents, terminals, todos, scratchpads, and a live agent session"
+      width="1200"
+    >
+  </a>
+</p>
+<p align="center">
+  <sub>A Workman workspace with several projects and agents running side by side.</sub>
+</p>
+
 ## What you can do
 
 - Keep several coding projects in one sidebar and jump between them quickly.
