@@ -259,6 +259,23 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         ClientInfo::default().serve(transport).await?
     };
 
+    let server_instructions = process_client
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .expect("Workman advertises MCP server instructions");
+    assert!(server_instructions.contains("timer delivers back to you"));
+    assert!(
+        server_instructions.contains("timer_fire_when_idle_any ignores processes already idle")
+    );
+    assert!(server_instructions.contains("timer_fire_when_idle_all counts already-idle processes"));
+    assert!(
+        server_instructions.contains("Do not loop on timer_list or process status while waiting")
+    );
+    assert!(
+        server_instructions.contains("inspect the watched processes before assuming they finished")
+    );
+    assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
+
     let tool_names: Vec<_> = process_client
         .list_all_tools()
         .await?
@@ -336,6 +353,19 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("pick agent_tool_id from list_agent_tools")
     );
+    let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
+    assert!(
+        timer_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("immediately finish your response and end the current turn")
+    );
+    assert!(
+        timer_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("no additional wait call is needed")
+    );
     let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
     assert!(tools_summary["count"].as_u64().unwrap() >= 13);
     assert!(
@@ -343,6 +373,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .as_str()
             .unwrap()
             .contains("Prefer model for a per-launch override")
+    );
+    assert!(
+        tools_summary["idle_timer_wait_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Do not loop on timer_list or process status")
     );
     assert_eq!(
         call(&process_client, "list_projects", json!({})).await["projects"]

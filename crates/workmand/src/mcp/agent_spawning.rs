@@ -26,8 +26,8 @@ use workman_core::{
 };
 
 use super::{
-    SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp, ensure_actor, failure,
-    process_project_id, scoped_project, success,
+    IDLE_TIMER_LAUNCH_GUIDANCE, SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp,
+    ensure_actor, failure, process_project_id, scoped_project, success,
 };
 use crate::{
     ProcessRegistry,
@@ -2996,6 +2996,7 @@ fn agent_instructions(
          ${{WORKMAN_MCP_TOKEN}}. Use the MCP server named workman, never a globally configured Solo \
          or unrelated workman server. {identity_guidance} \
          {worktree_agent_guidance} \
+         {idle_timer_wait_guidance} \
          {scratchpad_handoff_guidance} \
          [END WORKMAN CONTEXT]",
         process_id = process.id,
@@ -3005,6 +3006,7 @@ fn agent_instructions(
         project_path = project.path,
         client_wiring = client_wiring,
         identity_guidance = identity_guidance,
+        idle_timer_wait_guidance = IDLE_TIMER_LAUNCH_GUIDANCE,
         mcp_url = mcp_url,
         scratchpad_handoff_guidance = SCRATCHPAD_HANDOFF_GUIDANCE,
         worktree_agent_guidance = WORKTREE_AGENT_GUIDANCE,
@@ -4039,6 +4041,9 @@ mod tests {
         assert!(preamble.contains("Call whoami() through workman first"));
         assert!(preamble.contains("Never call identify_session to claim or change identity"));
         assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
+        assert!(preamble.contains(IDLE_TIMER_LAUNCH_GUIDANCE));
+        assert!(preamble.contains("finish your response and end the turn after arming it"));
+        assert!(preamble.contains("help(topic=\"timers\")"));
         assert!(preamble.contains(
             "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with \
              scratchpad_write so they are visible in the app and verifiable; do not create \

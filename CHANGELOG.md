@@ -4,6 +4,12 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+### Agent orchestration
+
+- Teach waiting parent agents to end their turn after arming an idle timer instead of polling, and
+  repeat the no-poll wake-up contract in MCP server guidance, tool schemas, help, launch context,
+  and timer results while preserving delivery overrides and requiring a fresh status check on wake.
+
 ## 0.1.12 - 2026-08-27
 
 Workman 0.1.12 streamlines agent and project navigation, opens release downloads for public use,
