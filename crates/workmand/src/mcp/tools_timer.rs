@@ -46,10 +46,13 @@ struct TimerSetArgs {
 struct IdleTimerArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
+    /// Agent processes to watch for the idle condition.
     processes: Vec<ProcessReference>,
+    /// Hard deadline before body is delivered even if the idle condition is not met.
     max_wait_ms: u64,
+    /// Prompt injected verbatim into the delivery agent as a fresh user turn. After arming a timer for yourself, end your current turn instead of polling.
     body: String,
-    /// Agent process receiving the prompt. Defaults to the calling process.
+    /// Agent process receiving the fresh prompt. Defaults to the calling process.
     #[serde(default)]
     delivery_process_id: Option<ProcessId>,
 }
@@ -87,7 +90,9 @@ struct TimerListArgs {
 
 #[tool_router(router = timer_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
-    #[tool(description = "Set a one-shot or repeating delayed prompt delivery")]
+    #[tool(
+        description = "Set a one-shot or repeating delayed prompt delivery. When using a one-shot timer to wake yourself, end your current turn after success; Workman injects body as a fresh user turn later, so do not poll."
+    )]
     async fn timer_set(
         &self,
         Extension(parts): Extension<Parts>,
@@ -136,7 +141,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Wake when any watched process makes a fresh transition into idle, with a hard timeout"
+        description = "Create a no-poll wake-up when any watched process makes a fresh transition into idle or the hard timeout expires. Workman injects body as a fresh user turn. After a non-immediate success, finish your response and end the current turn; do not poll."
     )]
     async fn timer_fire_when_idle_any(
         &self,
@@ -146,7 +151,9 @@ impl WorkmanMcp {
         self.set_idle_timer(&parts, args, TimerKind::IdleAny).await
     }
 
-    #[tool(description = "Wake when every watched process is or becomes idle, with a hard timeout")]
+    #[tool(
+        description = "Create a no-poll wake-up when every watched process is or becomes idle or the hard timeout expires. Workman injects body as a fresh user turn. After a non-immediate success, finish your response and end the current turn; do not poll."
+    )]
     async fn timer_fire_when_idle_all(
         &self,
         Extension(parts): Extension<Parts>,
@@ -276,6 +283,7 @@ impl WorkmanMcp {
                     "project_id": project.id,
                     "already_satisfied": false,
                     "delivered_immediately": false,
+                    "next_action": "Timer armed. If this timer delivers back to you (the default), finish your response and end the current turn now. Do not call timer_list, inspect process status, sleep, or poll. No additional wait call is needed; Workman will inject body as a fresh user turn when the idle condition or max_wait_ms is reached.",
                     "timer": timer,
                 }))
             }
@@ -298,6 +306,7 @@ impl WorkmanMcp {
                     "delivered_immediately": true,
                     "delivery_process_id": delivery_process_id,
                     "delivered_at": delivered_at,
+                    "next_action": "The idle condition was already satisfied and body was delivered immediately. Do not create another timer; continue when the injected user turn is processed.",
                     "timer": null,
                     "watch_process_ids": watch_process_ids,
                 }))

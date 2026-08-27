@@ -227,6 +227,26 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     );
     let rotated_owner = ClientInfo::default().serve(rotated_owner_transport).await?;
 
+    let advertised_tools = owner.list_all_tools().await?;
+    for name in ["timer_fire_when_idle_any", "timer_fire_when_idle_all"] {
+        let tool = advertised_tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} tool is present"));
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(description.contains("no-poll wake-up"));
+        assert!(description.contains("end the current turn"));
+        assert!(description.contains("fresh user turn"));
+        assert!(
+            tool.input_schema["properties"]["body"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("fresh user turn")
+                        && description.contains("instead of polling")
+                })
+        );
+    }
+
     let delayed = call(
         &owner,
         "timer_set",
@@ -277,6 +297,11 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     assert_eq!(already["already_satisfied"], true);
     assert_eq!(already["delivered_immediately"], true);
     assert_eq!(already["delivery_process_id"], DELIVERY_ID);
+    assert!(
+        already["next_action"]
+            .as_str()
+            .is_some_and(|message| message.contains("Do not create another timer"))
+    );
     assert_eq!(already["timer"], Value::Null);
     wait_for_output(&registry, DELIVERY_ID, "received:[already idle]").await?;
 
@@ -292,6 +317,10 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     .await;
     assert_eq!(any["already_satisfied"], false);
     assert_eq!(any["delivered_immediately"], false);
+    assert!(any["next_action"].as_str().is_some_and(|message| {
+        message.contains("end the current turn now")
+            && message.contains("No additional wait call is needed")
+    }));
     let any_timer_id = any["timer"]["id"].as_i64().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!output_contains(&registry, DELIVERY_ID, "fresh idle wake").await?);

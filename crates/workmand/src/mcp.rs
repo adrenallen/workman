@@ -46,6 +46,7 @@ pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, b
 pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate Workman project.";
 pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
 pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while retaining the template prompt and skipping its launch args. Prefer model for a per-launch override: it replaces existing long and short model flags in the registered command, template args, and caller args for supported tool_type values; reserve extra_args for other raw flags. attachments accepts up to 8 absolute paths to raster images of at most 32 MiB each; Workman copies them into daemon-owned storage and appends those saved paths to the initial prompt.";
+pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "To wait for subagents without polling, call timer_fire_when_idle_any or timer_fire_when_idle_all once. When it returns with already_satisfied=false, immediately finish your response and end the current turn; no additional wait call is needed. Do not loop on timer_list or process status. Workman keeps the timer in the daemon and injects its body into the delivery agent as a fresh user turn when the idle condition or max_wait_ms is reached, which wakes that agent to continue. If already_satisfied=true, the body was delivered immediately; do not create another timer.";
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -179,7 +180,7 @@ struct IdentifySessionArgs {
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct HelpArgs {
-    /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, tools, or spawning.
+    /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, timers, tools, or spawning.
     #[serde(default)]
     topic: Option<String>,
 }
@@ -343,6 +344,7 @@ impl WorkmanMcp {
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
             "worktrees" => WORKTREE_AGENT_GUIDANCE,
+            "timers" => IDLE_TIMER_WAIT_GUIDANCE,
             "tools" => "Use mcp_tools_summary for the complete core tool list.",
             "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
@@ -368,6 +370,7 @@ impl WorkmanMcp {
             "count": tools.len(),
             "tools": tools,
             "spawn_agent_guidance": SPAWN_AGENT_GUIDANCE,
+            "idle_timer_wait_guidance": IDLE_TIMER_WAIT_GUIDANCE,
         }))
     }
 
@@ -626,7 +629,7 @@ impl ServerHandler for WorkmanMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("workman", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "Workman workspace control. Call whoami first. Agent identities are authenticated by their launch credential and daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions cannot claim a process identity or perform project-scoped work. {HUMAN_HANDOFF_GUIDANCE}"
+                "Workman workspace control. Call whoami first. Agent identities are authenticated by their launch credential and daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions cannot claim a process identity or perform project-scoped work. {IDLE_TIMER_WAIT_GUIDANCE} {HUMAN_HANDOFF_GUIDANCE}"
             ))
     }
 }
