@@ -16,12 +16,12 @@ harness = false
 [dependencies]
 workman-core.workspace = true
 workmand = { path = "../workmand" }
-base64 = "0.22.1"
+base64 = "0.23.1"
 futures-util = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.177"
