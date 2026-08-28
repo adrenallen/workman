@@ -86,7 +86,7 @@ test('project removal RPC is reachable only from the explicit in-app dialog conf
   assert.equal((app.match(/client\.control<WorktreeRemoval>\('projects\.remove'/g) ?? []).length, 1);
 });
 
-test('async removal closes the dialog, stays visible in the operation rail, and reconciles ghost rows', async () => {
+test('async removal closes the dialog, stays on its project row, and reconciles ghost rows', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
   const daemon = await readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8');
 
@@ -96,6 +96,9 @@ test('async removal closes the dialog, stays visible in the operation rail, and 
   assert.match(daemon, /request\('worktree\.remove_async'/);
   assert.match(app, /operation\.status === 'completed'[\s\S]*\(operation\.project \|\| operation\.removal\)/);
   assert.match(app, /if \(operation\.removal\)[\s\S]*projects = await client\.projects\(\)/);
+  assert.match(app, /worktreeOperationForProject\(\$worktreeOperations, project\)/);
+  assert.match(app, /<ProjectOperationStatus operation=\{projectOperation\}/);
+  assert.match(app, /dismissTrackedWorktreeOperation\(operation\.id\);\s*if \(activeWorktreeOperationId === operation\.id\) activeWorktreeOperationId = null;/);
   assert.match(app, /function unattachedWorktreeOperations\(\)/);
   assert.match(app, /\{#each unattachedWorktreeOperations\(\) as operation/);
   assert.match(app, /openRemoveWorktree\(source, operation\.error_code === 'dirty_worktree'\)/);

@@ -32,6 +32,7 @@
   import ProcessOverview from './lib/ProcessOverview.svelte';
   import ProcessStatusBar from './lib/ProcessStatusBar.svelte';
   import ProjectIcon from './lib/ProjectIcon.svelte';
+  import ProjectOperationStatus from './lib/ProjectOperationStatus.svelte';
   import { PROJECT_RAIL_TOOLTIP_DELAY_MS } from './lib/projectRailTooltip';
   import ProjectKindIndicators from './lib/ProjectKindIndicators.svelte';
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
@@ -272,7 +273,10 @@
     beginWorktreeOperation,
     dismissWorktreeOperation,
     failWorktreeOperation,
+    standaloneWorktreeOperations,
     worktreeOperations,
+    worktreeOperationForProject,
+    worktreeOperationStateLabel,
     type WorktreeOperation
   } from './lib/worktreeProgress';
 
@@ -528,7 +532,7 @@
   );
   let projectRailCount = $derived(
     projects.length
-      + $worktreeOperations.filter((operation) =>
+      + standaloneWorktreeOperations($worktreeOperations, projects).filter((operation) =>
         operation.status === 'pending' || operation.status === 'running'
       ).length
   );
@@ -1818,18 +1822,13 @@
 
   function worktreeOperationsFor(repositoryId: number | null): WorktreeOperation[] {
     if (repositoryId === null) return [];
-    return $worktreeOperations.filter((operation) =>
+    return standaloneWorktreeOperations($worktreeOperations, projects).filter((operation) =>
       operation.repository_id === repositoryId
-      && (
-        operation.status !== 'completed'
-        || !operation.project
-        || !projects.some((project) => project.id === operation.project?.id)
-      )
     );
   }
 
   function unattachedWorktreeOperations(): WorktreeOperation[] {
-    return $worktreeOperations.filter((operation) =>
+    return standaloneWorktreeOperations($worktreeOperations, projects).filter((operation) =>
       operation.repository_id === null
       || !projects.some((project) =>
         project.parent_project_id === null
@@ -1850,6 +1849,8 @@
         ) {
           removeWorktreeNotice = `Files left untouched at ${operation.removal.path}.${operation.removal.registration_issue ? ` ${operation.removal.registration_issue}` : ''}`;
         }
+        dismissTrackedWorktreeOperation(operation.id);
+        if (activeWorktreeOperationId === operation.id) activeWorktreeOperationId = null;
         if (
           operation.repository_id !== null
           && projects.some((project) => project.repository_id === operation.repository_id)
@@ -4945,6 +4946,8 @@
 />
 
 {#snippet projectRailRow(project: Project, nested: boolean)}
+  {@const projectOperation = worktreeOperationForProject($worktreeOperations, project)}
+  {@const operationLabel = projectOperation ? worktreeOperationStateLabel(projectOperation) : null}
   {@const repository = worktreeRepositoryFor(project)}
   {@const worktree = worktreeEntryFor(project)}
   {@const rowLabel = projectLabel(project)}
@@ -4960,8 +4963,11 @@
   <article
     class:active={project.selected}
     class:has-unread={unreadAgentCount > 0}
+    class:has-operation={projectOperation !== null}
+    class:operation-active={projectOperation?.id === activeWorktreeOperationId}
     class:nested
     class="project-row group/project group/repository"
+    data-operation-status={projectOperation?.status}
     use:closeProjectRailTooltipOnUnmount={project.id}
   >
     {#if renameId === project.id}
@@ -4975,18 +4981,18 @@
               class="project-select"
               type="button"
               aria-current={project.selected ? 'page' : undefined}
-              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${hotkeyLabel ? ` · Shortcut ${hotkeyLabel}` : ''}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
+              aria-label={`${tooltipLabel} · ${projectKind} · ${activityLabel}${operationLabel ? ` · ${operationLabel}` : ''}${hotkeyLabel ? ` · Shortcut ${hotkeyLabel}` : ''}${unreadAgentCount > 0 ? ` · ${unreadAgentCount} unread agents` : ''}`}
               use:reorderItem={{
                 id: project.id,
                 group: 'projects',
-                disabled: busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
+                disabled: projectOperation !== null || busy || projectReorderBusy || renameId !== null || folderRenameId !== null || projects.length + projectFolders.length < 2,
                 label: fullTitle,
                 onDrop: handleProjectDrop,
                 onKeyboardMove: moveProjectRailFromKeyboard
               }}
-              onclick={() => selectProject(project)}
-              oncontextmenu={(event) => showProjectPointerMenu(event, project)}
-              onkeydown={(event) => showProjectKeyboardMenu(event, project)}
+              onclick={() => projectOperation ? showWorktreeOperation(projectOperation) : selectProject(project)}
+              oncontextmenu={(event) => { if (!projectOperation) showProjectPointerMenu(event, project); }}
+              onkeydown={(event) => { if (!projectOperation) showProjectKeyboardMenu(event, project); }}
               data-context-kind="project"
               data-context-id={project.id}
             >
@@ -5053,74 +5059,84 @@
       </span>
       {#if !projectRailCollapsed}
         <span class="project-meta-strip" data-project-meta-strip>
-          <ProjectKindIndicators
-            {activity}
-            processes={projectProcesses}
-            projectId={project.id}
-            projectTitle={fullTitle}
-            openPopoverKey={projectRailPopoverKey}
-            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-            onSelect={(process) => openProjectRailProcess(project, process)}
-            onShowAll={(kind) => openProjectRailOverview(project, kind)}
-          />
-          {#if repository}
-            <WorktreeRowMeta
-              entry={worktree}
-              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+          {#if projectOperation}
+            <ProjectOperationStatus operation={projectOperation} />
+          {:else}
+            <ProjectKindIndicators
+              {activity}
+              processes={projectProcesses}
               projectId={project.id}
-              repositoryName={repository.name}
+              projectTitle={fullTitle}
               openPopoverKey={projectRailPopoverKey}
               onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-              refreshing={worktreeRefreshingRepositoryId === repository.id}
-              showNoPullRequest={false}
-              onRefresh={() => void refreshWorktreeRepository(project, true)}
+              onSelect={(process) => openProjectRailProcess(project, process)}
+              onShowAll={(kind) => openProjectRailOverview(project, kind)}
             />
+            {#if repository}
+              <WorktreeRowMeta
+                entry={worktree}
+                pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+                projectId={project.id}
+                repositoryName={repository.name}
+                openPopoverKey={projectRailPopoverKey}
+                onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+                refreshing={worktreeRefreshingRepositoryId === repository.id}
+                showNoPullRequest={false}
+                onRefresh={() => void refreshWorktreeRepository(project, true)}
+              />
+            {/if}
           {/if}
         </span>
       {:else}
         <span class="project-compact-meta" data-project-compact-meta>
-          <ProjectKindIndicators
-            {activity}
-            processes={projectProcesses}
-            projectId={project.id}
-            projectTitle={fullTitle}
-            openPopoverKey={projectRailPopoverKey}
-            onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-            compact
-            onSelect={(process) => openProjectRailProcess(project, process)}
-            onShowAll={(kind) => openProjectRailOverview(project, kind)}
-          />
-          {#if repository}
-            <WorktreeRowMeta
-              entry={worktree}
-              pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+          {#if projectOperation}
+            <ProjectOperationStatus operation={projectOperation} compact />
+          {:else}
+            <ProjectKindIndicators
+              {activity}
+              processes={projectProcesses}
               projectId={project.id}
-              repositoryName={repository.name}
+              projectTitle={fullTitle}
               openPopoverKey={projectRailPopoverKey}
               onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
-              refreshing={worktreeRefreshingRepositoryId === repository.id}
-              showNoPullRequest={false}
               compact
-              onRefresh={() => void refreshWorktreeRepository(project, true)}
+              onSelect={(process) => openProjectRailProcess(project, process)}
+              onShowAll={(kind) => openProjectRailOverview(project, kind)}
             />
+            {#if repository}
+              <WorktreeRowMeta
+                entry={worktree}
+                pullRequestCache={worktreeListFor(project)?.pull_requests ?? null}
+                projectId={project.id}
+                repositoryName={repository.name}
+                openPopoverKey={projectRailPopoverKey}
+                onOpenPopoverChange={(key) => (projectRailPopoverKey = key)}
+                refreshing={worktreeRefreshingRepositoryId === repository.id}
+                showNoPullRequest={false}
+                compact
+                onRefresh={() => void refreshWorktreeRepository(project, true)}
+              />
+            {/if}
           {/if}
         </span>
       {/if}
-      <IconButton
-        class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
-        label={`Actions for ${fullTitle}`}
-        onclick={(event) => {
-          const bounds = event.currentTarget.getBoundingClientRect();
-          showContextMenu({
-            target: projectContextTarget(project),
-            x: bounds.right,
-            y: bounds.bottom,
-            restoreFocus: event.currentTarget
-          });
-        }}
-      >
-        {#snippet icon()}<MoreHorizontalIcon size={14} />{/snippet}
-      </IconButton>
+      {#if !projectOperation}
+        <IconButton
+          class="project-actions size-7 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100"
+          label={`Actions for ${fullTitle}`}
+          onclick={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            showContextMenu({
+              target: projectContextTarget(project),
+              x: bounds.right,
+              y: bounds.bottom,
+              restoreFocus: event.currentTarget
+            });
+          }}
+        >
+          {#snippet icon()}<MoreHorizontalIcon size={14} />{/snippet}
+        </IconButton>
+      {/if}
     {/if}
   </article>
   {#if project.parent_project_id === null}
@@ -5817,6 +5833,11 @@
   .project-row.nested { min-height: 42px; }
   .project-row:hover { --project-icon-badge-background: var(--popover); background: var(--popover); }
   .project-row.active { --project-icon-badge-background: var(--accent); border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .project-row.has-operation { border-color: color-mix(in srgb, var(--agent-state-working) 34%, var(--border)); background: color-mix(in srgb, var(--agent-state-working) 6%, var(--card)); box-shadow: inset 2px 0 var(--agent-state-working); }
+  .project-row.has-operation:hover, .project-row.operation-active { background: color-mix(in srgb, var(--agent-state-working) 10%, var(--card)); }
+  .project-row[data-operation-status='failed'] { border-color: color-mix(in srgb, var(--destructive) 38%, var(--border)); background: color-mix(in srgb, var(--destructive) 7%, var(--card)); box-shadow: inset 2px 0 var(--destructive); }
+  .project-row[data-operation-status='failed']:hover, .project-row[data-operation-status='failed'].operation-active { background: color-mix(in srgb, var(--destructive) 11%, var(--card)); }
+  .project-row[data-operation-status='completed'] { border-color: color-mix(in srgb, var(--success) 34%, var(--border)); background: color-mix(in srgb, var(--success) 5%, var(--card)); box-shadow: inset 2px 0 var(--success); }
   .project-content { position: relative; display: block; width: 100%; min-width: 0; min-height: 42px; grid-column: 1; grid-row: 1; align-self: stretch; }
   .project-select { position: relative; display: grid; width: 100%; min-height: 42px; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: minmax(20px, auto) 20px; align-items: center; column-gap: 7px; border: 0; padding: 3px 7px; background: transparent; text-align: left; cursor: pointer; }
   .project-select:focus-visible { --project-icon-badge-background: var(--border); outline: 1px solid #737b84; outline-offset: -2px; background: var(--border); }
@@ -5872,6 +5893,7 @@
   .project-rail.collapsed .project-content { min-height: 40px; }
   .project-rail.collapsed .project-select { position: relative; inset: auto; display: flex; width: 100%; height: 100%; flex: 0 0 100%; justify-content: center; gap: 0; padding: 4px; }
   .project-rail.collapsed .project-kind-icon { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 3px; color: var(--foreground); background: var(--popover); }
+  .project-rail.collapsed .project-row.has-operation .project-compact-meta { right: 2px; bottom: 2px; height: 14px; }
   .project-rail.collapsed :global(.project-actions) { display: none; }
   .project-rail.collapsed .project-row-badges { position: absolute; z-index: 2; top: 2px; right: 2px; }
   .project-rail.collapsed .project-hotkey { top: 18px; right: -2px; min-width: 14px; height: 14px; padding: 0 2px; font-size: 8px; }

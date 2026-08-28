@@ -121,6 +121,24 @@ test('project errors stay in the accessible row summary without adding an idle i
   assert.doesNotMatch(app, /project\.status === 'error'[\s\S]{0,180}<ProjectKindIndicators/);
 });
 
+test('worktree progress is folded into a matching project row', async () => {
+  const [row, app, status] = await Promise.all([
+    projectRowSource(),
+    readFile(appUrl, 'utf8'),
+    readFile(new URL('../src/lib/ProjectOperationStatus.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(row, /worktreeOperationForProject\(\$worktreeOperations, project\)/);
+  assert.match(row, /class:has-operation=\{projectOperation !== null\}/);
+  assert.match(row, /onclick=\{\(\) => projectOperation \? showWorktreeOperation\(projectOperation\) : selectProject\(project\)\}/);
+  assert.match(row, /\{#if projectOperation\}\s*<ProjectOperationStatus operation=\{projectOperation\} \/>/);
+  assert.match(row, /<ProjectOperationStatus operation=\{projectOperation\} compact \/>/);
+  assert.match(app, /standaloneWorktreeOperations\(\$worktreeOperations, projects\)/);
+  assert.match(app, /dismissTrackedWorktreeOperation\(operation\.id\);\s*if \(activeWorktreeOperationId === operation\.id\) activeWorktreeOperationId = null;/);
+  assert.match(status, /worktreeOperationStateLabel\(operation\)/);
+  assert.match(status, /LoaderCircleIcon class="spinner"/);
+});
+
 test('show-all process navigation is serialized and contributes the project to recents', async () => {
   const app = await readFile(appUrl, 'utf8');
 
