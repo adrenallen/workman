@@ -7,7 +7,9 @@
 
   import { Button } from '$lib/components/ui/button';
   import IconButton from './components/ds/IconButton.svelte';
+  import ProjectIcon from './ProjectIcon.svelte';
   import TooltipLabel from './components/ds/TooltipLabel.svelte';
+  import { sidebarIdentityColorValue } from './projectAppearance';
   import {
     folderDragId,
     type ProjectFolder,
@@ -129,11 +131,21 @@
             {#if folder.collapsed}<ChevronRightIcon size={14} />{:else}<ChevronDownIcon size={14} />{/if}
           </span>
         {/if}
-        <span class="folder-icon" aria-hidden="true">
-          {#if folder.collapsed}<FolderClosedIcon size={15} strokeWidth={1.8} />{:else}<FolderOpenIcon size={15} strokeWidth={1.8} />{/if}
+        <span
+          class="folder-icon"
+          style:color={sidebarIdentityColorValue(folder.name_color)}
+          aria-hidden="true"
+        >
+          {#if folder.icon}
+            <ProjectIcon icon={folder.icon} color={folder.name_color} size={15} />
+          {:else if folder.collapsed}
+            <FolderClosedIcon size={15} strokeWidth={1.8} />
+          {:else}
+            <FolderOpenIcon size={15} strokeWidth={1.8} />
+          {/if}
         </span>
         {#if !railCollapsed}
-          <strong>{folder.name}</strong>
+          <strong style:color={sidebarIdentityColorValue(folder.name_color)}>{folder.name}</strong>
           <small>{projectCount}</small>
         {/if}
       </button>

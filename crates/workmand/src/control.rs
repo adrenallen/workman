@@ -203,6 +203,8 @@ struct UpdateProjectSettingsParams {
     icon: Option<String>,
     #[serde(default)]
     icon_color: Option<String>,
+    #[serde(default)]
+    name_color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +227,16 @@ struct ProjectFolderNameParams {
 struct ProjectFolderRenameParams {
     folder_id: i64,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectFolderSettingsParams {
+    folder_id: i64,
+    name: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    name_color: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +348,7 @@ struct ProjectSummary {
     #[serde(flatten)]
     project: Project,
     icon_color: Option<String>,
+    name_color: Option<String>,
     icon_image: Option<project_icons::ProjectIconImage>,
     repository_id: Option<i64>,
     repository_root: Option<String>,
@@ -1166,6 +1179,45 @@ async fn dispatch(
             }
             return project_rail_result(registry.store());
         }
+        "project_folders.update_settings" => {
+            let params: ProjectFolderSettingsParams = params_as(params)?;
+            if params
+                .icon
+                .as_deref()
+                .is_some_and(|icon| !valid_lucide_icon(icon))
+            {
+                return Err((
+                    "invalid_project_folder_icon",
+                    "folder icon must be a Lucide icon name".to_owned(),
+                ));
+            }
+            if params
+                .name_color
+                .as_deref()
+                .is_some_and(|color| !SIDEBAR_COLORS.contains(&color))
+            {
+                return Err((
+                    "invalid_project_folder_name_color",
+                    "folder name color is not one of the supported choices".to_owned(),
+                ));
+            }
+            let updated = registry
+                .store()
+                .update_project_folder_settings(
+                    params.folder_id,
+                    &params.name,
+                    params.icon.as_deref(),
+                    params.name_color.as_deref(),
+                )
+                .map_err(project_folder_store_error)?;
+            if updated.is_none() {
+                return Err((
+                    "project_folder_not_found",
+                    "project folder not found".to_owned(),
+                ));
+            }
+            return project_rail_result(registry.store());
+        }
         "project_folders.set_collapsed" => {
             let params: ProjectFolderCollapseParams = params_as(params)?;
             if !registry
@@ -1861,8 +1913,6 @@ fn update_project_settings(
     store: &Store,
     params: UpdateProjectSettingsParams,
 ) -> Result<(), (&'static str, String)> {
-    const COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
-
     let Some(display_name) = normalized_project_title(&params.display_name) else {
         return Err((
             "invalid_project_name",
@@ -1882,11 +1932,21 @@ fn update_project_settings(
     if params
         .icon_color
         .as_deref()
-        .is_some_and(|color| !COLORS.contains(&color))
+        .is_some_and(|color| !SIDEBAR_COLORS.contains(&color))
     {
         return Err((
             "invalid_project_icon_color",
             "project icon color is not one of the supported choices".to_owned(),
+        ));
+    }
+    if params
+        .name_color
+        .as_deref()
+        .is_some_and(|color| !SIDEBAR_COLORS.contains(&color))
+    {
+        return Err((
+            "invalid_project_name_color",
+            "project name color is not one of the supported choices".to_owned(),
         ));
     }
 
@@ -1898,9 +1958,15 @@ fn update_project_settings(
         .connection()
         .execute(
             "UPDATE projects
-             SET display_name = ?1, icon = ?2, icon_color = ?3
-             WHERE id = ?4",
-            (display_name, icon, icon_color, params.project_id),
+             SET display_name = ?1, icon = ?2, icon_color = ?3, name_color = ?4
+             WHERE id = ?5",
+            (
+                display_name,
+                icon,
+                icon_color,
+                params.name_color.as_deref(),
+                params.project_id,
+            ),
         )
         .map_err(project_store_error)?;
     if changed == 0 {
@@ -1937,15 +2003,20 @@ fn set_custom_project_icon(
 }
 
 fn valid_project_icon(icon: &str) -> bool {
-    project_icons::is_custom_reference(icon)
-        || (icon.len() <= 80
-            && !icon.is_empty()
-            && !icon.starts_with('-')
-            && !icon.ends_with('-')
-            && icon
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+    project_icons::is_custom_reference(icon) || valid_lucide_icon(icon)
 }
+
+fn valid_lucide_icon(icon: &str) -> bool {
+    icon.len() <= 80
+        && !icon.is_empty()
+        && !icon.starts_with('-')
+        && !icon.ends_with('-')
+        && icon
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+const SIDEBAR_COLORS: &[&str] = &["amber", "blue", "rose", "slate", "teal", "violet"];
 
 fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, String)> {
     let projects = store.list_projects().map_err(project_store_error)?;
@@ -1953,12 +2024,12 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
     projects
         .into_iter()
         .map(|project| {
-            let icon_color = store
+            let (icon_color, name_color) = store
                 .connection()
                 .query_row(
-                    "SELECT icon_color FROM projects WHERE id = ?1",
+                    "SELECT icon_color, name_color FROM projects WHERE id = ?1",
                     [project.id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(project_store_error)?;
             let processes = store
@@ -1988,6 +2059,7 @@ fn list_projects(store: &Store) -> Result<Vec<ProjectSummary>, (&'static str, St
             Ok(ProjectSummary {
                 project: envelope.project,
                 icon_color,
+                name_color,
                 icon_image,
                 repository_id: envelope.repository_id,
                 repository_root: envelope.repository_root,

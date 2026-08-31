@@ -103,6 +103,7 @@ export interface Project {
   display_name: string | null;
   icon: string | null;
   icon_color: string | null;
+  name_color: string | null;
   icon_image: ProjectIconImage | null;
   selected: boolean;
   sort_order: number;
@@ -433,13 +434,15 @@ export class DaemonClient
     projectId: number,
     displayName: string,
     icon: string | null,
-    iconColor: string | null
+    iconColor: string | null,
+    nameColor: string | null
   ): Promise<Project[]> {
     return this.request('projects.update_settings', {
       project_id: projectId,
       display_name: displayName,
       icon,
-      icon_color: iconColor
+      icon_color: iconColor,
+      name_color: nameColor
     });
   }
 
@@ -863,7 +866,13 @@ export class DaemonClient
 
   attachTerminal(
     processId: number,
-    offset = 0
+    offset = 0,
+    geometry?: {
+      rows: number;
+      cols: number;
+      pixel_width: number;
+      pixel_height: number;
+    }
   ): Promise<{
     process_id: number;
     offset: number;
@@ -875,7 +884,7 @@ export class DaemonClient
       modify_other_keys: number;
     };
   }> {
-    return this.request('terminal.attach', { process_id: processId, offset });
+    return this.request('terminal.attach', { process_id: processId, offset, ...geometry });
   }
 
   detachTerminal(): Promise<{ process_id: null }> {

@@ -21,7 +21,7 @@ test('project rows order agent, terminal, command, then PR in expanded and colla
     row.indexOf('</span>', row.indexOf('<span class="project-meta-strip"'))
   );
 
-  assert.match(row, /class="project-copy"><strong>\{rowLabel\}<\/strong><\/span>/);
+  assert.match(row, /class="project-copy"><strong style:color=\{sidebarIdentityColorValue\(project\.name_color\)\}>\{rowLabel\}<\/strong><\/span>/);
   assert.match(row, /\{#if !projectRailCollapsed\}\s*<span class="project-meta-strip" data-project-meta-strip>/);
   const pullRequestIndex = strip.indexOf('<WorktreeRowMeta');
   const processKindsIndex = strip.indexOf('<ProjectKindIndicators');

@@ -1,20 +1,14 @@
 <script lang="ts">
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
-  import type { ConnectionStatus, Project } from '../daemon';
+  import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo } from '../settings';
-  import { projectDisplayName } from '../worktrees';
 
   interface Props {
-    project: Project | null;
     connection: ConnectionStatus;
     info: DaemonSettingsInfo | null;
   }
 
-  let { project, connection, info }: Props = $props();
-
-  let projectName = $derived(project
-    ? projectDisplayName(project, project.path.split('/').filter(Boolean).at(-1) || 'Project')
-    : 'No project loaded');
+  let { connection, info }: Props = $props();
   let daemonLabel = $derived(
     connection.status === 'connected'
       ? `Daemon ${info?.version ?? connection.daemon_version ?? ''}`.trim()
@@ -31,10 +25,10 @@
 </script>
 
 <div class="status-strip" aria-label="Settings status">
-  <span class="context"><strong>Settings</strong><i aria-hidden="true">/</i>{projectName}</span>
+  <span class="context"><strong>Application settings</strong></span>
   <span class="saved">
-    <StatusIndicator tone="success" label="Preferences saved locally on this Mac" />
-    Preferences saved on this Mac
+    <StatusIndicator tone="success" label="Preferences saved locally" />
+    Preferences saved locally
   </span>
   <span class="daemon" title={connection.message ?? daemonLabel}>
     <StatusIndicator
@@ -50,7 +44,6 @@
   .status-strip { display: flex; min-height: 31px; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 4px; padding: 5px 9px; background: color-mix(in srgb, var(--night) 72%, var(--surface)); color: var(--muted); font: var(--font-size-xs)/1.2 'JetBrains Mono Variable', monospace; }
   .context, .saved, .daemon { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .context strong { color: var(--text-soft); font-weight: 700; }
-  .context > i { color: var(--border-strong); font-style: normal; }
   .saved { margin-left: auto; }
   .daemon { overflow: hidden; padding-left: 11px; border-left: 1px solid var(--border); text-overflow: ellipsis; white-space: nowrap; }
   .daemon small { color: var(--muted); font: inherit; }

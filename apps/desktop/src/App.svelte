@@ -38,6 +38,7 @@
   import ProjectFolderCreateRow from './lib/ProjectFolderCreateRow.svelte';
   import ProjectFolderHeader from './lib/ProjectFolderHeader.svelte';
   import ProjectFolderMenu from './lib/ProjectFolderMenu.svelte';
+  import ProjectFolderSettingsDialog from './lib/ProjectFolderSettingsDialog.svelte';
   import ProjectOverview from './lib/ProjectOverview.svelte';
   import RegisterProjectDialog from './lib/RegisterProjectDialog.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
@@ -181,7 +182,10 @@
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
-  import type { ProjectSettingsInput } from './lib/projectAppearance';
+  import {
+    sidebarIdentityColorValue,
+    type ProjectSettingsInput
+  } from './lib/projectAppearance';
   import { registrationTitleForPath, resolvedProjectTitle } from './lib/projectTitles';
   import {
     createProjectFolder,
@@ -189,6 +193,7 @@
     loadProjectRail,
     renameProjectFolder,
     setProjectFolderCollapsed,
+    updateProjectFolderSettings,
     updateProjectLayout,
     type ProjectRailSnapshot
   } from './lib/projectFolderClient';
@@ -199,7 +204,8 @@
     moveProjectRailEntryFromKeyboard,
     projectRailLayoutSignature,
     type ProjectFolder,
-    type ProjectFolderMenuRequest
+    type ProjectFolderMenuRequest,
+    type ProjectFolderSettingsInput
   } from './lib/projectFolders';
   import {
     NATIVE_MENU_EVENT,
@@ -339,6 +345,8 @@
   let folderRenameId = $state<number | null>(null);
   let folderRenameValue = $state('');
   let folderMenuRequest = $state<ProjectFolderMenuRequest | null>(null);
+  let folderSettingsFolder = $state<ProjectFolder | null>(null);
+  let folderSettingsBusy = $state(false);
   let projectSettingsProject = $state<Project | null>(null);
   let projectSettingsBusy = $state(false);
   let settingsOpen = $state(false);
@@ -587,11 +595,13 @@
                 : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
-    selectedProject && (selectedProcess || selectedDraft)
-      ? `${projectLabel(selectedProject)}: ${selectedProcess?.name ?? creationDraftLabel(selectedDraft!)}`
-      : projectOverviewOpen && selectedProject
-        ? projectLabel(selectedProject)
-        : 'workman'
+    settingsOpen
+      ? 'Settings — Workman'
+      : selectedProject && (selectedProcess || selectedDraft)
+        ? `${projectLabel(selectedProject)}: ${selectedProcess?.name ?? creationDraftLabel(selectedDraft!)}`
+        : projectOverviewOpen && selectedProject
+          ? projectLabel(selectedProject)
+          : 'workman'
   );
   let contextMenuDescriptor = $derived(
     contextRequest ? describeContextMenu(contextRequest.target, $openerSettings) : null
@@ -912,11 +922,11 @@
         appNavigation.navigate({ type: 'settings' }, 'api');
         return;
       case 'about':
-        openSettingsSection('about', selectedProject?.id);
+        openSettingsSection('about');
         return;
       case 'check_updates':
         requestNativeUpdateCheck();
-        openSettingsSection('about', selectedProject?.id);
+        openSettingsSection('about');
         return;
       case 'toggle_project_rail':
         toggleProjectRail();
@@ -2311,7 +2321,7 @@
         treeMultiSelection = null;
         agentCascadeRequest = null;
       } else {
-        const actionLabel = request.action === 'close' ? 'close' : request.action === 'kill' ? 'kill' : 'stop';
+        const actionLabel = request.action === 'close' ? 'remove' : request.action === 'kill' ? 'force stop' : 'stop';
         const message = `Bulk ${actionLabel} finished with ${failures.length} failure${failures.length === 1 ? '' : 's'} for ${request.processes.length} selected ${request.processes[0]?.kind ?? 'process'}${request.processes.length === 1 ? '' : 's'}. ${failures.map((failure) => `${failure.label}: ${failure.message}`).join(' · ')}`;
         if (request.processes.length === 1) {
           agentCascadeError = message;
@@ -3840,6 +3850,29 @@
     folderRenameValue = folder.name;
   }
 
+  function openProjectFolderSettings(folder: ProjectFolder): void {
+    folderMenuRequest = null;
+    folderSettingsFolder = folder;
+  }
+
+  async function saveProjectFolderSettings(
+    settings: ProjectFolderSettingsInput
+  ): Promise<void> {
+    const folder = folderSettingsFolder;
+    if (!folder || folderSettingsBusy) return;
+    folderSettingsBusy = true;
+    try {
+      applyProjectRailSnapshot(
+        await updateProjectFolderSettings(client, folder.id, settings)
+      );
+      folderSettingsFolder = null;
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      folderSettingsBusy = false;
+    }
+  }
+
   async function commitRenameProjectFolder(): Promise<void> {
     const folderId = folderRenameId;
     const name = folderRenameValue.trim();
@@ -4025,7 +4058,8 @@
         project.id,
         settings.displayName,
         settings.icon,
-        settings.iconColor
+        settings.iconColor,
+        settings.nameColor
       );
       projectSettingsProject = null;
     } catch (cause) {
@@ -4300,9 +4334,9 @@
       case 'kill':
         if (openAgentCascadeDialog(process, 'kill')) return;
         if (!(await confirmInApp({
-          title: `Kill ${process.name} immediately?`,
-          description: 'Unsaved terminal state may be lost.',
-          confirmLabel: 'Kill process'
+          title: `Force stop ${process.name}?`,
+          description: 'This ends the process immediately without a graceful shutdown. Unsaved terminal state may be lost.',
+          confirmLabel: 'Force stop'
         }))) return;
         await client.control('process.kill', { process_id: process.id, confirm_kill: true });
         await refreshProcesses(process.project_id);
@@ -4310,9 +4344,11 @@
       case 'close':
         if (openAgentCascadeDialog(process, 'close')) return;
         if (!(await confirmInApp({
-          title: `Close ${process.name}?`,
-          description: 'Its saved terminal entry will be removed.',
-          confirmLabel: 'Close process'
+          title: `Remove ${process.name} from Workman?`,
+          description: process.status === 'running' || process.status === 'starting'
+            ? 'This stops the process first, then removes its saved sidebar entry from Workman.'
+            : 'This removes its saved sidebar entry from Workman.',
+          confirmLabel: `Remove ${process.kind}`
         }))) return;
         await client.closeProcess(process.id);
         if (selection?.id === process.id && isProcessSelection(selection)) clearSelection();
@@ -5038,7 +5074,7 @@
                   {/snippet}
                 </TooltipLabel>
               </span>
-              <span class="project-copy"><strong>{rowLabel}</strong></span>
+              <span class="project-copy"><strong style:color={sidebarIdentityColorValue(project.name_color)}>{rowLabel}</strong></span>
               {#if hotkeyLabel || unreadAgentCount > 0}
                 <span class="project-row-badges">
                   {#if hotkeyLabel}
@@ -5635,9 +5671,19 @@
   {@const request = folderMenuRequest}
   <ProjectFolderMenu
     {request}
+    onSettings={() => openProjectFolderSettings(request.folder)}
     onRename={() => beginRenameProjectFolder(request.folder)}
     onDelete={() => void confirmDeleteProjectFolder(request)}
     onClose={closeProjectFolderMenu}
+  />
+{/if}
+
+{#if folderSettingsFolder}
+  <ProjectFolderSettingsDialog
+    folder={folderSettingsFolder}
+    busy={folderSettingsBusy}
+    onSave={(settings) => void saveProjectFolderSettings(settings)}
+    onClose={() => { if (!folderSettingsBusy) folderSettingsFolder = null; }}
   />
 {/if}
 

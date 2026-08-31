@@ -34,7 +34,7 @@
       </span>
       <AlertDialog.Description class="text-sm leading-relaxed">{description}</AlertDialog.Description>
     </AlertDialog.Header>
-    <AlertDialog.Footer class="border-t border-border px-4 py-3">
+    <AlertDialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
       <Button variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
       <Button variant={destructive ? 'destructive' : 'default'} disabled={busy} onclick={onConfirm}>
         {confirmLabel}

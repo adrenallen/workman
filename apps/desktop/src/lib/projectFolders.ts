@@ -1,10 +1,19 @@
 import type { Project } from './daemon';
+import type { SidebarIdentityColor } from './projectAppearance';
 
 export interface ProjectFolder {
   id: number;
   name: string;
+  icon: string | null;
+  name_color: string | null;
   collapsed: boolean;
   sort_order: number;
+}
+
+export interface ProjectFolderSettingsInput {
+  name: string;
+  icon: string | null;
+  nameColor: SidebarIdentityColor | null;
 }
 
 export interface ProjectFolderMenuRequest {

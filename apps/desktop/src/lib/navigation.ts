@@ -8,7 +8,7 @@ export type AppNavigationTarget =
   | { type: 'project'; projectId: number }
   | { type: 'processes'; projectId: number; kind: ProcessKind }
   | { type: 'item'; selection: ProjectTreeSelection }
-  | { type: 'settings'; projectId?: number }
+  | { type: 'settings' }
   | { type: 'keep-awake' }
   | { type: 'new-worktree'; projectId: number }
   | { type: 'new-agent'; projectId: number }
@@ -76,7 +76,7 @@ export function navigationTargetKey(target: AppNavigationTarget): string {
     case 'item':
       return `item:${target.selection.projectId}:${target.selection.kind}:${target.selection.id}`;
     case 'settings':
-      return `settings:${target.projectId ?? 'current'}`;
+      return 'settings';
     case 'keep-awake':
       return 'keep-awake';
     case 'new-terminal':

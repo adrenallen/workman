@@ -155,7 +155,7 @@
 
     </section>
 
-    <AlertDialog.Footer class="border-t border-border px-4 py-3">
+    <AlertDialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
       <Button variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
       <Button variant={deleteFromDisk ? 'destructive' : 'default'} disabled={!canRemove} onclick={() => onConfirm(deleteFromDisk, forceRequired)}>
         {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{forceRequired ? 'Delete anyway' : deleteFromDisk ? 'Delete project' : 'Remove from Workman'}

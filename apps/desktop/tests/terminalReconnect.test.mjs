@@ -35,11 +35,26 @@ test('reconnect preserves xterm state, accepts input, and resumes replay at its 
     terminal.indexOf('const resumingConnection')
   );
 
-  assert.match(disconnected, /inputEnabled = true/);
+  assert.match(disconnected, /inputEnabled = processStatus === 'running'/);
   assert.doesNotMatch(disconnected, /instance\.reset\(\)/);
-  assert.match(terminal, /client\.attachTerminal\(processId, requestedOffset\)/);
-  assert.match(terminal, /if \(!resumingConnection\) \{\s*replayPreviewAllowed = true/);
-  assert.match(terminal, /if \(!resumingConnection\) \{\s*await client\.resizeTerminal/);
+  assert.match(terminal, /attachTerminalWithRetry\(state, instance\)/);
+  assert.match(terminal, /client\.attachTerminal\(state\.processId, requestedOffset, \{/);
+  assert.match(terminal, /if \(!resumingConnection && processStatus === 'running'\) \{\s*replayPreviewAllowed = true/);
   assert.match(terminal, /Keystrokes are queued/);
   assert.match(app, /if \(!connected\) return;/);
+});
+
+test('a transient attach timeout retries without requiring sidebar reselection', async () => {
+  const terminal = await readFile(
+    new URL('../src/lib/TerminalView.svelte', import.meta.url),
+    'utf8'
+  );
+  const retry = terminal.slice(
+    terminal.indexOf('async function attachTerminalWithRetry'),
+    terminal.indexOf('function setKeyboardProtocol')
+  );
+
+  assert.match(retry, /isDaemonRequestTimeoutError\(cause\)/);
+  assert.match(retry, /retryDelays = \[150, 500\]/);
+  assert.match(retry, /replayState !== state \|\| !connected/);
 });

@@ -39,7 +39,8 @@ test('command row activation selects without spawning a process', async () => {
   assert.doesNotMatch(selection, /startProcess|startOrReviewProcess|client\.startProcess/);
   assert.match(processPanel, /onclick=\{\(\) => selectProcess\(process\)\}/);
   assert.doesNotMatch(processPanel, /function runOrSelect/);
-  assert.match(terminal, /<h2>Not run yet<\/h2>/);
+  assert.match(terminal, /processNeverRun \? 'Run command' : 'Run again'/);
+  assert.match(terminal, /class="process-ended-bar"/);
 });
 
 test('command rows bind an explicit cancellable contextmenu handler for WKWebView', async () => {

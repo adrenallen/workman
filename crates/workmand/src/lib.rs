@@ -1225,6 +1225,28 @@ async fn handle_session_control(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
+    // Opening a terminal is latency-sensitive and runs on the socket pump instead of the
+    // ordered control lane. Apply geometry carried by terminal.attach opportunistically so the
+    // desktop never has to wait for a queued process.resize before it can attach and accept
+    // input. A concurrently held lifecycle lock only postpones the ordinary best-effort resize;
+    // it must never postpone attachment.
+    let geometry = ["rows", "cols", "pixel_width", "pixel_height"].map(|field| {
+        params
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+    });
+    if let [
+        Some(rows),
+        Some(cols),
+        Some(pixel_width),
+        Some(pixel_height),
+    ] = geometry
+        && let Ok(mut registry) = registry.try_lock()
+    {
+        let _ = registry.resize(process_id, rows, cols, pixel_width, pixel_height);
+    }
+
     let (process, output, terminal_output, replay_start_offset, replay_end_offset) =
         match input_router.terminal_attachment(process_id, offset) {
             Ok(attachment) => {
@@ -2397,7 +2419,8 @@ mod tests {
                         "project_id": first_id,
                         "display_name": "Frontend studio",
                         "icon": "code-2",
-                        "icon_color": "violet"
+                        "icon_color": "violet",
+                        "name_color": "teal"
                     }
                 })
                 .to_string()
@@ -2409,6 +2432,7 @@ mod tests {
         assert_eq!(response["result"][0]["display_name"], "Frontend studio");
         assert_eq!(response["result"][0]["icon"], "code-2");
         assert_eq!(response["result"][0]["icon_color"], "violet");
+        assert_eq!(response["result"][0]["name_color"], "teal");
 
         socket
             .send(Message::Text(

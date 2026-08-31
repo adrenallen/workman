@@ -36,9 +36,13 @@ test('project creation actions use their matching section icons', () => {
   );
 });
 
-test('trash is reserved for destructive actions', () => {
+test('force stop is visually distinct from removal actions', () => {
   const trashActions = CONTEXT_ACTION_IDS.filter((id) => contextActionIcon(id) === 'trash-2');
-  assert.deepEqual(trashActions, [...DESTRUCTIVE_CONTEXT_ACTION_IDS]);
+  assert.equal(contextActionIcon('kill'), 'octagon-x');
+  assert.deepEqual(
+    trashActions,
+    [...DESTRUCTIVE_CONTEXT_ACTION_IDS].filter((id) => id !== 'kill')
+  );
 });
 
 test('terminal surface menu is distinct from the sidebar process menu', () => {

@@ -210,13 +210,13 @@
 <section class="settings-panel" aria-label="Settings controls">
   <header class="settings-header">
     <div>
-      <span class="eyebrow">Workspace preferences</span>
+      <span class="eyebrow">Application preferences</span>
       <h2>Settings</h2>
     </div>
     <p><strong>{activeDefinition?.label}</strong><span>{activeDefinition?.description}</span></p>
   </header>
 
-  <SettingsStatusStrip {project} {connection} {info} />
+  <SettingsStatusStrip {connection} {info} />
   <SettingsSectionNav />
 
   <ScrollArea class="min-h-0 min-w-0 w-full overflow-hidden px-0.5 pb-3" bind:viewportRef={viewport}>

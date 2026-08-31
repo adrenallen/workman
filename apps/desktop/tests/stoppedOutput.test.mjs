@@ -2,42 +2,39 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { stoppedOutputSnapshotKey } from '../src/lib/stoppedOutput.ts';
-
 const terminalViewUrl = new URL('../src/lib/TerminalView.svelte', import.meta.url);
 
-function process(overrides = {}) {
-  return {
-    id: 7,
-    status: 'stopped',
-    exited_at: 1_000,
-    ...overrides
-  };
-}
+test('stopped, exited, and crashed processes replay through the styled xterm surface', async () => {
+  const source = await readFile(terminalViewUrl, 'utf8');
 
-test('repeated stopped-process broadcasts resolve to one immutable output snapshot', () => {
-  const first = process();
-  const refreshed = process({
-    agent_state: { state: 'exited', idle_seconds: 30 },
-    claimed_todos: [{ id: 67 }]
-  });
-
-  assert.equal(stoppedOutputSnapshotKey(first, true), '7:1000');
-  assert.equal(stoppedOutputSnapshotKey(refreshed, true), '7:1000');
-  assert.equal(stoppedOutputSnapshotKey(process({ status: 'running' }), true), null);
-  assert.equal(stoppedOutputSnapshotKey(first, false), null);
-  assert.equal(stoppedOutputSnapshotKey(process({ exited_at: 2_000 }), true), '7:2000');
+  assert.match(
+    source,
+    /return status === 'running' \|\| status === 'stopped' \|\| status === 'exited' \|\| status === 'crashed'/
+  );
+  assert.match(source, /!supportsTerminalPlayback\(processStatus\)/);
+  assert.match(source, /client\.attachTerminal\(state\.processId, requestedOffset/);
+  assert.match(source, /!supportsTerminalPlayback\(process\.status\)/);
+  assert.doesNotMatch(source, /client\.renderedProcessOutput\(processId\)/);
 });
 
-test('stopped output is gated before state is cleared or fetched', async () => {
+test('ended processes keep xterm read only and expose a lifecycle-specific bottom action bar', async () => {
   const source = await readFile(terminalViewUrl, 'utf8');
-  const effectStart = source.indexOf('const snapshotKey = stoppedOutputSnapshotKey(process, connected);');
-  const effectEnd = source.indexOf('function handleTerminalFrame', effectStart);
-  const effect = source.slice(effectStart, effectEnd);
 
-  assert.ok(effectStart >= 0 && effectEnd > effectStart);
-  const guard = effect.indexOf('if (snapshotKey === retainedOutputSnapshotKey) return;');
-  const clear = effect.indexOf("retainedOutput = '';");
-  const fetch = effect.indexOf('client.renderedProcessOutput(processId)');
-  assert.ok(guard >= 0 && clear > guard && fetch > clear);
+  assert.match(source, /class="terminal-host"[\s\S]*class:is-hidden=\{processStarting\}/);
+  assert.match(source, /class="process-ended-bar"/);
+  assert.match(source, /processNeverRun \? 'Run command' : 'Run again'/);
+  assert.match(source, /process\.agent_session_id \? 'Resume agent' : 'Start agent'/);
+  assert.match(source, /return 'Start terminal'/);
+  assert.match(source, /terminalInput\.readOnly = processStatus !== 'running'/);
+  assert.match(source, /terminal output, read only/);
+  assert.match(source, /inputEnabled = process\.status === 'running'/);
+  assert.match(source, /shouldForwardTerminalInput\(inputEnabled, userInitiated\) \|\| process\.status !== 'running'/);
+});
+
+test('a live terminal buffer is preserved across the transition to read-only output', async () => {
+  const source = await readFile(terminalViewUrl, 'utf8');
+
+  assert.match(source, /const transitionedToReadOnly = attachedProcessId === processId/);
+  assert.match(source, /const resumingConnection = sameProcessSession \|\| transitionedToReadOnly/);
+  assert.match(source, /if \(!resumingConnection\) \{[\s\S]*instance\.reset\(\)/);
 });

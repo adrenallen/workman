@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('project menu enables mark as read only when that project has unread state', async () => {
+test('project menu only shows mark as read when that project has unread state', async () => {
   const menu = await readFile(new URL('../src/lib/contextMenu.ts', import.meta.url), 'utf8');
 
   assert.match(menu, /hasUnread\?: boolean/);
-  assert.match(menu, /id: 'mark-read',[\s\S]*label: 'Mark as read',[\s\S]*disabled: !target\.hasUnread/);
+  assert.match(menu, /\.\.\(target\.hasUnread[\s\S]*id: 'mark-read',[\s\S]*label: 'Mark as read'/);
+  assert.doesNotMatch(menu, /disabled: !target\.hasUnread/);
 });
 
 test('project mark as read uses one bulk RPC and clears only project-local UI state', async () => {

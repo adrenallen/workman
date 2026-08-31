@@ -82,7 +82,7 @@ export function selectSettingsSection(section: SettingsSectionId): void {
  * Public deep-link seam for cards and future navigation surfaces. Selection is
  * committed before App resolves the existing settings navigation request.
  */
-export function openSettingsSection(section: SettingsSectionId, projectId?: number): number {
+export function openSettingsSection(section: SettingsSectionId): number {
   selectSettingsSection(section);
-  return appNavigation.navigate({ type: 'settings', projectId }, 'api');
+  return appNavigation.navigate({ type: 'settings' }, 'api');
 }

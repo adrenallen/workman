@@ -170,10 +170,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "active_worktree_removals",
         include_str!("../migrations/0031_active_worktree_removals.sql"),
     ),
+    (
+        32,
+        "sidebar_identity",
+        include_str!("../migrations/0032_sidebar_identity.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 31;
+pub const LATEST_SCHEMA_VERSION: i64 = 32;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -555,7 +560,7 @@ impl Store {
 
             let folders = {
                 let mut statement = transaction.prepare(
-                    "SELECT id, name, collapsed, sort_order
+                    "SELECT id, name, icon, name_color, collapsed, sort_order
                      FROM project_folders WHERE profile_id = ?1 ORDER BY sort_order, id",
                 )?;
                 statement
@@ -563,8 +568,10 @@ impl Store {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, bool>(2)?,
-                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, bool>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -574,18 +581,22 @@ impl Store {
                 [],
                 |row| row.get(0),
             )?;
-            for (offset, (source_folder_id, folder_name, collapsed, sort_order)) in
-                folders.into_iter().enumerate()
+            for (
+                offset,
+                (source_folder_id, folder_name, icon, name_color, collapsed, sort_order),
+            ) in folders.into_iter().enumerate()
             {
                 let target_folder_id = first_folder_id + offset as i64;
                 transaction.execute(
                     "INSERT INTO project_folders (
-                        id, profile_id, name, collapsed, sort_order
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        id, profile_id, name, icon, name_color, collapsed, sort_order
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         target_folder_id,
                         profile_id,
                         folder_name,
+                        icon,
+                        name_color,
                         collapsed,
                         sort_order
                     ],

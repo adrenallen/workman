@@ -13,6 +13,8 @@ pub type ProjectFolderId = i64;
 pub struct ProjectFolder {
     pub id: ProjectFolderId,
     pub name: String,
+    pub icon: Option<String>,
+    pub name_color: Option<String>,
     pub collapsed: bool,
     pub sort_order: i64,
 }
@@ -20,6 +22,8 @@ pub struct ProjectFolder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedProjectFolder {
     pub name: String,
+    pub icon: Option<String>,
+    pub name_color: Option<String>,
     pub collapsed: bool,
     pub sort_order: i64,
 }
@@ -55,7 +59,7 @@ impl Store {
         profile_id: ProfileId,
     ) -> StoreResult<Vec<ProjectFolder>> {
         let mut statement = self.connection().prepare(
-            "SELECT id, name, collapsed, sort_order
+            "SELECT id, name, icon, name_color, collapsed, sort_order
              FROM project_folders
              WHERE profile_id = ?1
              ORDER BY sort_order, id",
@@ -65,8 +69,10 @@ impl Store {
                 Ok(ProjectFolder {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    collapsed: row.get(2)?,
-                    sort_order: row.get(3)?,
+                    icon: row.get(2)?,
+                    name_color: row.get(3)?,
+                    collapsed: row.get(4)?,
+                    sort_order: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -112,6 +118,8 @@ impl Store {
         Ok(ProjectFolder {
             id,
             name,
+            icon: None,
+            name_color: None,
             collapsed: false,
             sort_order,
         })
@@ -127,6 +135,27 @@ impl Store {
         let changed = self.connection().execute(
             "UPDATE project_folders SET name = ?1 WHERE id = ?2 AND profile_id = ?3",
             params![name, folder_id, profile_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.project_folder_for_profile(profile_id, folder_id)
+    }
+
+    pub fn update_project_folder_settings(
+        &self,
+        folder_id: ProjectFolderId,
+        name: &str,
+        icon: Option<&str>,
+        name_color: Option<&str>,
+    ) -> StoreResult<Option<ProjectFolder>> {
+        let name = normalized_folder_name(name)?;
+        let profile_id = self.active_profile_id()?;
+        let changed = self.connection().execute(
+            "UPDATE project_folders
+             SET name = ?1, icon = ?2, name_color = ?3
+             WHERE id = ?4 AND profile_id = ?5",
+            params![name, icon, name_color, folder_id, profile_id],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -334,9 +363,25 @@ impl Store {
         let mut folder_names = HashSet::new();
         for folder in folders {
             let normalized = normalized_folder_name(&folder.name)?;
-            if folder.sort_order < 0 || !folder_names.insert(normalized.to_lowercase()) {
+            let valid_icon = folder.icon.as_deref().is_none_or(|icon| {
+                icon.len() <= 80
+                    && !icon.is_empty()
+                    && !icon.starts_with('-')
+                    && !icon.ends_with('-')
+                    && icon.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            });
+            let valid_color = folder.name_color.as_deref().is_none_or(|color| {
+                ["amber", "blue", "rose", "slate", "teal", "violet"].contains(&color)
+            });
+            if folder.sort_order < 0
+                || !folder_names.insert(normalized.to_lowercase())
+                || !valid_icon
+                || !valid_color
+            {
                 return invalid_layout(
-                    "imported project folders must have unique names and valid order",
+                    "imported project folders must have valid names, appearance, and order",
                 );
             }
         }
@@ -371,12 +416,15 @@ impl Store {
             let folder_id = first_folder_id + offset as i64;
             let name = normalized_folder_name(&folder.name)?;
             transaction.execute(
-                "INSERT INTO project_folders (id, profile_id, name, collapsed, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO project_folders (
+                    id, profile_id, name, icon, name_color, collapsed, sort_order
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     folder_id,
                     profile_id,
                     name,
+                    folder.icon.as_deref(),
+                    folder.name_color.as_deref(),
                     folder.collapsed,
                     folder.sort_order
                 ],
@@ -412,15 +460,17 @@ impl Store {
         Ok(self
             .connection()
             .query_row(
-                "SELECT id, name, collapsed, sort_order
+                "SELECT id, name, icon, name_color, collapsed, sort_order
                  FROM project_folders WHERE profile_id = ?1 AND id = ?2",
                 params![profile_id, folder_id],
                 |row| {
                     Ok(ProjectFolder {
                         id: row.get(0)?,
                         name: row.get(1)?,
-                        collapsed: row.get(2)?,
-                        sort_order: row.get(3)?,
+                        icon: row.get(2)?,
+                        name_color: row.get(3)?,
+                        collapsed: row.get(4)?,
+                        sort_order: row.get(5)?,
                     })
                 },
             )

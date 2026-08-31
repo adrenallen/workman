@@ -164,14 +164,14 @@
       {#if advanced === 'terminal'}
         <div class="advanced">
           {#if $openerSettings.config.terminal.selection === 'system'}
-            <span class="resolved" title="Terminal opener detected · macOS Terminal"><i aria-hidden="true"></i>macOS Terminal · system application</span>
+            <span class="resolved" title="System terminal opener detected"><i aria-hidden="true"></i>Use the system terminal application</span>
           {:else}
             <label for="terminal-template">Command template</label>
             <input
               id="terminal-template"
               class:invalid={terminalError !== null}
               value={$openerSettings.config.terminal.customTemplate}
-              placeholder={'open -a iTerm {path}'}
+              placeholder={'terminal-app {path}'}
               autocapitalize="off"
               autocorrect="off"
               spellcheck={false}
@@ -213,14 +213,14 @@
       {#if advanced === 'browser'}
         <div class="advanced">
           {#if $openerSettings.config.browser.selection === 'system'}
-            <span class="resolved" title="Browser opener detected · macOS default browser"><i aria-hidden="true"></i>Use the macOS default browser</span>
+            <span class="resolved" title="System browser opener detected"><i aria-hidden="true"></i>Use the system default browser</span>
           {:else}
             <label for="browser-template">Command template</label>
             <input
               id="browser-template"
               class:invalid={browserError !== null}
               value={$openerSettings.config.browser.customTemplate}
-              placeholder={'open -a Safari {path}'}
+              placeholder={'browser-app {path}'}
               autocapitalize="off"
               autocorrect="off"
               spellcheck={false}

@@ -19,7 +19,7 @@ test('frequent project actions stay pinned in the requested order', () => {
   assert.deepEqual(items.map((item) => item.label), [
     'Open PR #47 on GitHub',
     'Open in Visual Studio Code',
-    'Open in Finder',
+    'Show in file browser',
     'Open app'
   ]);
 });
@@ -39,7 +39,7 @@ test('closed PR links remain available and truthfully report their state', () =>
       pullRequestState: 'closed'
     },
     { id: 'open-in-editor', label: 'Open in Zed' },
-    { id: 'open-in-finder', label: 'Open in Finder' }
+    { id: 'open-in-finder', label: 'Show in file browser' }
   ]);
 });
 

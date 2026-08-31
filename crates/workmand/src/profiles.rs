@@ -21,7 +21,7 @@ use workman_core::{
 use crate::{ProcessRegistry, control::agent_icons};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
-const ARCHIVE_VERSION: u32 = 2;
+const ARCHIVE_VERSION: u32 = 3;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -68,6 +68,10 @@ struct ArchiveProject {
 #[serde(deny_unknown_fields)]
 struct ArchiveFolder {
     name: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    name_color: Option<String>,
     collapsed: bool,
     sort_order: i64,
 }
@@ -269,6 +273,8 @@ pub(crate) fn export(
         .into_iter()
         .map(|folder| ArchiveFolder {
             name: folder.name,
+            icon: folder.icon,
+            name_color: folder.name_color,
             collapsed: folder.collapsed,
             sort_order: folder.sort_order,
         })
@@ -403,6 +409,18 @@ pub(crate) fn import(
             || folder.name.chars().any(char::is_control)
             || folder.sort_order < 0
             || !folder_names.insert(folded)
+            || folder.icon.as_deref().is_some_and(|icon| {
+                icon.len() > 80
+                    || icon.is_empty()
+                    || icon.starts_with('-')
+                    || icon.ends_with('-')
+                    || !icon.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+            || folder.name_color.as_deref().is_some_and(|color| {
+                !["amber", "blue", "rose", "slate", "teal", "violet"].contains(&color)
+            })
         {
             return Err((
                 "profile_import_invalid",
@@ -411,6 +429,8 @@ pub(crate) fn import(
         }
         imported_folders.push(ImportedProjectFolder {
             name: folder.name,
+            icon: folder.icon,
+            name_color: folder.name_color,
             collapsed: folder.collapsed,
             sort_order: folder.sort_order,
         });

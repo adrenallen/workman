@@ -13,19 +13,25 @@ test('terminal reattachment is keyed by the live PTY generation', async () => {
   assert.match(source, /attachedProcessPid = processPid;/);
 });
 
-test('current geometry is published before attach and while stopped', async () => {
+test('current geometry travels with fast attach and is still published while stopped', async () => {
   const source = await readFile(terminalViewUrl, 'utf8');
   const attachStart = source.indexOf('void (async () => {');
-  const resizeBeforeAttach = source.indexOf('await client.resizeTerminal(', attachStart);
-  const attach = source.indexOf('await client.attachTerminal(processId,', attachStart);
-  assert.ok(attachStart >= 0 && resizeBeforeAttach > attachStart && attach > resizeBeforeAttach);
+  const attach = source.indexOf('await attachTerminalWithRetry(state, instance)', attachStart);
+  assert.ok(attachStart >= 0 && attach > attachStart);
+  assert.match(source, /client\.attachTerminal\(state\.processId, requestedOffset, \{[\s\S]*rows: instance\.rows,[\s\S]*pixel_height:/);
+  assert.match(source, /attachedToDaemon = true;[\s\S]*scheduleFit\(\);/);
+  assert.doesNotMatch(
+    source.slice(attachStart, attach),
+    /await client\.resizeTerminal/,
+    'ordinary resize traffic must not block terminal attachment'
+  );
 
   const scheduleStart = source.indexOf('function scheduleFit(): void');
   const scheduleEnd = source.indexOf('function fitTerminal()', scheduleStart);
   const schedule = source.slice(scheduleStart, scheduleEnd);
   assert.match(schedule, /if \(!instance \|\| !fitTerminal\(\)\) return;/);
   assert.match(schedule, /if \(!connected\) return;/);
-  assert.doesNotMatch(schedule, /process\.status !== 'running'/);
+  assert.match(schedule, /process\.status === 'running' && !attachedToDaemon/);
   assert.match(schedule, /\.resizeTerminal\(/);
 
   const hiddenHost = source.match(/\.terminal-host\.is-hidden \{(?<rules>[\s\S]*?)\}/)?.groups?.rules;

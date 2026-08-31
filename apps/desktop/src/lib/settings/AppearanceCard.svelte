@@ -46,7 +46,7 @@
   </header>
 
   <div class="setting-row theme-row">
-    <div class="setting-copy"><strong>Theme</strong><small>Follow macOS or keep one palette.</small></div>
+    <div class="setting-copy"><strong>Theme</strong><small>Follow the system setting or keep one palette.</small></div>
     <div class="segmented" role="radiogroup" aria-label="Theme">
       {#each themes as theme}
         <button
@@ -63,7 +63,7 @@
   <label class="setting-row">
     <span class="setting-copy">
       <strong>Interface font family</strong>
-      <small>Bundled faces and fonts available on this Mac.</small>
+      <small>Bundled faces and fonts available locally.</small>
     </span>
     <span class="select-wrap">
       <select
@@ -124,7 +124,7 @@
   </div>
 
   <footer>
-    <span>Changes apply immediately and are stored on this Mac.</span>
+    <span>Changes apply immediately and are stored locally.</span>
     <button
       type="button"
       disabled={JSON.stringify($appearance) === JSON.stringify(DEFAULT_APPEARANCE)}

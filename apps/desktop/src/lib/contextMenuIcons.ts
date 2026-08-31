@@ -59,6 +59,7 @@ export type ContextActionIcon =
   | 'clipboard-paste'
   | 'clipboard'
   | 'copy'
+  | 'ellipsis'
   | 'external-link'
   | 'file-code'
   | 'folder'
@@ -69,8 +70,10 @@ export type ContextActionIcon =
   | 'link'
   | 'message-square'
   | 'notebook-text'
+  | 'octagon-x'
   | 'pencil'
   | 'play'
+  | 'plus'
   | 'refresh-cw'
   | 'settings'
   | 'square'
@@ -93,7 +96,7 @@ const CONTEXT_ACTION_ICONS: Record<ContextActionId, ContextActionIcon> = {
   start: 'play',
   stop: 'square',
   restart: 'refresh-cw',
-  kill: 'trash-2',
+  kill: 'octagon-x',
   close: 'trash-2',
   'edit-command': 'pencil',
   'remove-command': 'trash-2',

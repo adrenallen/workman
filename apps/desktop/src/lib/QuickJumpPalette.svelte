@@ -94,9 +94,9 @@
       kind: 'action',
       label: 'Open Settings',
       detail: 'Application and daemon settings',
-      projectName: currentProject ? projectLabel(currentProject) : null,
+      projectName: null,
       searchText: 'open settings preferences configuration',
-      target: { type: 'settings', projectId: currentProject?.id },
+      target: { type: 'settings' },
       creation: false
     });
     if (keepAwakeSupported) {

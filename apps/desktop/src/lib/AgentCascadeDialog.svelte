@@ -3,7 +3,9 @@
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import NetworkIcon from '@lucide/svelte/icons/network';
   import OctagonXIcon from '@lucide/svelte/icons/octagon-x';
+  import SquareIcon from '@lucide/svelte/icons/square';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
@@ -30,7 +32,7 @@
     onClose
   }: Props = $props();
 
-  let actionLabel = $derived(action === 'kill' ? 'Kill' : action === 'close' ? 'Close' : 'Stop');
+  let actionLabel = $derived(action === 'kill' ? 'Force stop' : action === 'close' ? 'Remove' : 'Stop');
   let kind = $derived(processes.every((process) => process.kind === 'terminal') ? 'terminal' : 'agent');
   let subject = $derived(
     processes.length === 1
@@ -40,18 +42,24 @@
   let affectedCount = $derived(processes.length + descendants.length);
   let description = $derived(
     action === 'kill'
-      ? `${processes.length === 1 ? 'The selected process' : 'The selected processes'} will be killed immediately. Unsaved terminal state may be lost.`
+      ? `${processes.length === 1 ? 'The selected process' : 'The selected processes'} will end immediately without a graceful shutdown. Unsaved terminal state may be lost.`
       : action === 'close'
-        ? `${processes.length === 1 ? 'The selected entry' : 'The selected entries'} will be removed.${descendants.length > 0 ? ' Descendant entries will also be removed, stopping any that are still running.' : ''}`
-        : `${processes.length === 1 ? 'The selected process' : 'The selected processes'} will stop gracefully.${descendants.length > 0 ? ' Their child processes will stop first.' : ''}`
+        ? `${processes.length === 1 ? 'The selected entry' : 'The selected entries'} will be removed from Workman.${descendants.length > 0 ? ' Descendant entries will also be removed, stopping any that are still running.' : ' Running processes stop first.'}`
+        : `${processes.length === 1 ? 'The selected process' : 'The selected processes'} will stop gracefully and remain available to start again.${descendants.length > 0 ? ' Their child processes will stop first.' : ''}`
   );
 </script>
 
 <AlertDialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <AlertDialog.Content class="w-[min(500px,calc(100vw-32px))] max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 rounded-lg border border-border bg-popover p-0">
     <AlertDialog.Header class="gap-2 border-b border-border px-4 py-4 text-left">
-      <span class="flex items-center gap-2 text-destructive">
-        <OctagonXIcon size={16} />
+      <span class:warning={action === 'stop'} class:danger={action !== 'stop'} class="flex items-center gap-2">
+        {#if action === 'stop'}
+          <SquareIcon size={16} />
+        {:else if action === 'kill'}
+          <OctagonXIcon size={16} />
+        {:else}
+          <Trash2Icon size={16} />
+        {/if}
         <AlertDialog.Title>{actionLabel} {subject}?</AlertDialog.Title>
       </span>
       <AlertDialog.Description class="text-sm leading-relaxed">{description}</AlertDialog.Description>
@@ -103,9 +111,9 @@
       {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
     </section>
 
-    <AlertDialog.Footer class="border-t border-border px-4 py-3">
+    <AlertDialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
       <Button variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
-      <Button variant="destructive" disabled={busy} onclick={onConfirm}>
+      <Button variant={action === 'stop' ? 'default' : 'destructive'} disabled={busy} onclick={onConfirm}>
         {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{actionLabel} {affectedCount} {kind}{affectedCount === 1 ? '' : 's'}
       </Button>
     </AlertDialog.Footer>
@@ -114,6 +122,8 @@
 
 <style>
   code { font-family: 'JetBrains Mono Variable', monospace; }
+  .warning { color: var(--warning); }
+  .danger { color: var(--destructive); }
   :global(.spin) { animation: agent-cascade-spin 800ms linear infinite; }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }
   @keyframes agent-cascade-spin { to { transform: rotate(360deg); } }

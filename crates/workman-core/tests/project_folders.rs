@@ -25,6 +25,12 @@ fn project_folders_move_reorder_collapse_delete_and_persist() -> Result<(), Box<
         store.put_project(&project(3, 2))?;
         let first = store.create_project_folder("Worktrees")?;
         let second = store.create_project_folder("Clients")?;
+        store.update_project_folder_settings(
+            first.id,
+            "Worktrees",
+            Some("git-branch"),
+            Some("violet"),
+        )?;
         store.update_project_layout(&[
             ProjectLayoutEntry::Folder {
                 id: second.id,
@@ -43,6 +49,8 @@ fn project_folders_move_reorder_collapse_delete_and_persist() -> Result<(), Box<
     let folders = store.list_project_folders()?;
     assert_eq!(folders[0].name, "Clients");
     assert_eq!(folders[1].name, "Worktrees");
+    assert_eq!(folders[1].icon.as_deref(), Some("git-branch"));
+    assert_eq!(folders[1].name_color.as_deref(), Some("violet"));
     assert!(folders[1].collapsed);
     assert_eq!(
         store.project_layout()?,
@@ -148,6 +156,46 @@ fn migration_0025_preserves_existing_flat_profile_order() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn migration_0032_adds_optional_sidebar_identity_without_changing_existing_rows()
+-> Result<(), Box<dyn Error>> {
+    let connection = rusqlite::Connection::open_in_memory()?;
+    connection.execute_batch(
+        "CREATE TABLE projects (id INTEGER PRIMARY KEY);
+         CREATE TABLE project_folders (id INTEGER PRIMARY KEY);
+         INSERT INTO projects VALUES (1);
+         INSERT INTO project_folders VALUES (2);",
+    )?;
+    connection.execute_batch(include_str!("../migrations/0032_sidebar_identity.sql"))?;
+    let project_color =
+        connection.query_row("SELECT name_color FROM projects WHERE id = 1", [], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
+    let folder_appearance = connection.query_row(
+        "SELECT icon, name_color FROM project_folders WHERE id = 2",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    )?;
+    assert_eq!(project_color, None);
+    assert_eq!(folder_appearance, (None, None));
+    assert!(
+        connection
+            .execute("UPDATE projects SET name_color = 'green'", [])
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute("UPDATE project_folders SET icon = ''", [])
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn copying_a_profile_remaps_folder_identity_and_membership() -> Result<(), Box<dyn Error>> {
     let store = Store::open_in_memory()?;
     store.put_project(&project(1, 0))?;
@@ -158,12 +206,20 @@ fn copying_a_profile_remaps_folder_identity_and_membership() -> Result<(), Box<d
         project_ids: vec![2, 1],
     }])?;
     store.set_project_folder_collapsed(source_folder.id, true)?;
+    store.update_project_folder_settings(
+        source_folder.id,
+        "Clients",
+        Some("briefcase-business"),
+        Some("amber"),
+    )?;
 
     let (copy, _) = store.create_profile("Copy", true)?;
     store.switch_profile(copy.id)?;
     let copied_folder = store.list_project_folders()?.remove(0);
     assert_ne!(copied_folder.id, source_folder.id);
     assert_eq!(copied_folder.name, source_folder.name);
+    assert_eq!(copied_folder.icon.as_deref(), Some("briefcase-business"));
+    assert_eq!(copied_folder.name_color.as_deref(), Some("amber"));
     assert!(copied_folder.collapsed);
     assert_eq!(
         store.project_layout()?,

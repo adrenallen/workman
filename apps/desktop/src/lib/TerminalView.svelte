@@ -24,10 +24,9 @@
     type TerminalContextActionDetail
   } from './contextMenu';
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
-  import { Button } from './components/ui/button';
+  import { isDaemonRequestTimeoutError } from './daemonLog';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { primaryModifier, terminalUnfocusChord } from './primaryModifier';
-  import { stoppedOutputSnapshotKey } from './stoppedOutput';
   import {
     hasRetainedTerminalOutput,
     isUnstyledRetainedSnapshot,
@@ -120,6 +119,7 @@
   let attachedConnected = false;
   let attachedStatus = '';
   let attachedVisible = true;
+  let attachedToDaemon = false;
   let attachmentGeneration = 0;
   let terminalOffset = 0;
   let inputEnabled = false;
@@ -127,10 +127,6 @@
   let kittyKeyboardFlags = 0;
   let modifyOtherKeys = 0;
   let appliedThemeSignature = '';
-  let retainedOutput = $state('');
-  let retainedOutputLoading = $state(false);
-  let retainedOutputSnapshotKey: string | null = null;
-  let retainedOutputGeneration = 0;
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
   let processDead = $derived(
@@ -144,7 +140,10 @@
       && process.exit_signal === null
   );
   let processStarting = $derived(process.status === 'starting');
-  let retainedTail = $derived(outputTail(retainedOutput));
+
+  function supportsTerminalPlayback(status: ProcessView['status']): boolean {
+    return status === 'running' || status === 'stopped' || status === 'exited' || status === 'crashed';
+  }
 
   interface TerminalReplayState {
     generation: number;
@@ -418,6 +417,15 @@
     const processStatus = process.status;
     const isVisible = visible;
     if (!instance) return;
+    const terminalInput = instance.element?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+    if (terminalInput) {
+      terminalInput.readOnly = processStatus !== 'running';
+      terminalInput.setAttribute('aria-readonly', String(processStatus !== 'running'));
+      terminalInput.setAttribute(
+        'aria-label',
+        processStatus === 'running' ? `${process.name} terminal input` : `${process.name} terminal output, read only`
+      );
+    }
     if (isVisible && webglAddon === null && !webglUnavailable) {
       webglRecovering = true;
       scheduleWebglRecovery(instance);
@@ -425,6 +433,11 @@
     const sameProcessSession = attachedProcessId === processId
       && attachedProcessPid === processPid
       && attachedStatus === processStatus
+      && attachedVisible === isVisible;
+    const transitionedToReadOnly = attachedProcessId === processId
+      && attachedStatus === 'running'
+      && processStatus !== 'running'
+      && supportsTerminalPlayback(processStatus)
       && attachedVisible === isVisible;
     if (
       sameProcessSession
@@ -437,9 +450,10 @@
     attachedStatus = processStatus;
     attachedVisible = isVisible;
 
-    if (!isVisible || processStatus !== 'running') {
+    if (!isVisible || !supportsTerminalPlayback(processStatus)) {
       flushInput();
       attachmentGeneration += 1;
+      attachedToDaemon = false;
       inputEnabled = false;
       replayState = null;
       clearReplayWatchdog();
@@ -467,16 +481,20 @@
       // Preserve xterm, focus, protocol state, and the parsed offset. Physical input remains
       // accepted and DaemonClient retains it until the native bridge reconnects.
       attachmentGeneration += 1;
+      attachedToDaemon = false;
       replayState = null;
       clearReplayWatchdog();
       clearReplayWarning();
       replayUnavailableMessage = null;
-      inputEnabled = true;
+      inputEnabled = processStatus === 'running';
       return;
     }
 
-    const resumingConnection = sameProcessSession;
+    // Keep the already-rendered xterm buffer when a live process stops. A process opened after
+    // it stopped still replays the retained raw PTY stream, including ANSI and cursor state.
+    const resumingConnection = sameProcessSession || transitionedToReadOnly;
     flushInput();
+    attachedToDaemon = false;
     inputEnabled = false;
     replayState = null;
     clearReplayWatchdog();
@@ -509,12 +527,12 @@
       kittyKeyboardFlags: 0,
       modifyOtherKeys: 0,
       finishing: false,
-      focusRequested: true,
+      focusRequested: processStatus === 'running',
       gapDetected: false
     };
     replayState = state;
-    instance.focus();
-    if (!resumingConnection) {
+    if (processStatus === 'running') instance.focus();
+    if (!resumingConnection && processStatus === 'running') {
       replayPreviewAllowed = true;
       void loadLiveOutputPreview(state);
     }
@@ -525,21 +543,14 @@
       await nextAnimationFrame();
       if (replayState !== state) return;
       fitTerminal();
-      if (!resumingConnection) {
-        await client.resizeTerminal(
-          processId,
-          instance.rows,
-          instance.cols,
-          Math.round(host.clientWidth),
-          Math.round(host.clientHeight)
-        );
-        if (replayState !== state) return;
-      }
-
-      const requestedOffset = terminalOffset;
       armReplayWatchdog(state);
-      const attached = await client.attachTerminal(processId, requestedOffset);
-      if (replayState !== state) return;
+      const result = await attachTerminalWithRetry(state, instance);
+      if (!result || replayState !== state) return;
+      const { attached, requestedOffset } = result;
+      attachedToDaemon = true;
+      // If lifecycle work held the registry during the fast attach, this ordinary resize applies
+      // the same geometry later without holding up replay or keyboard readiness.
+      scheduleFit();
       state.gapDetected = requestedOffset > 0
         && rawReplayHasGap(requestedOffset, attached.replay_start_offset);
       state.replayEndOffset = attached.replay_end_offset;
@@ -555,33 +566,8 @@
       clearReplayWatchdog();
       replayPreviewAllowed = retainedSnapshotOnly;
       replayComplete = true;
-      replayUnavailableMessage = 'Styled terminal replay is unavailable. Reopen this agent to retry.';
+      replayUnavailableMessage = 'Styled terminal replay is unavailable. Reopen this process to retry.';
       onError(cause instanceof Error ? cause.message : String(cause));
-    });
-  });
-
-  $effect(() => {
-    const processId = process.id;
-    const snapshotKey = stoppedOutputSnapshotKey(process, connected);
-    if (snapshotKey === retainedOutputSnapshotKey) return;
-    retainedOutputSnapshotKey = snapshotKey;
-
-    const shouldLoad = snapshotKey !== null;
-    const generation = ++retainedOutputGeneration;
-    retainedOutput = '';
-    retainedOutputLoading = shouldLoad;
-    if (!shouldLoad) return;
-
-    void client.renderedProcessOutput(processId).then((output) => {
-      if (generation !== retainedOutputGeneration || process.id !== processId) return;
-      retainedOutput = output.text;
-    }).catch((cause) => {
-      if (generation !== retainedOutputGeneration || process.id !== processId) return;
-      onError(cause instanceof Error ? cause.message : String(cause));
-    }).finally(() => {
-      if (generation === retainedOutputGeneration && process.id === processId) {
-        retainedOutputLoading = false;
-      }
     });
   });
 
@@ -589,7 +575,7 @@
     if (
       !visible
       || frame.process_id !== process.id
-      || process.status !== 'running'
+      || !supportsTerminalPlayback(process.status)
       || !terminal
     ) return;
     const state = replayState;
@@ -799,6 +785,10 @@
       const instance = terminal;
       if (!instance || !fitTerminal()) return;
       if (!connected) return;
+      // The initial terminal.attach carries this geometry on the socket's latency-sensitive
+      // lane. Do not put a resize RPC in front of that attach while project hydration is using
+      // the ordinary control lane. Stopped processes still publish their next launch size here.
+      if (process.status === 'running' && !attachedToDaemon) return;
       void client
         .resizeTerminal(
           process.id,
@@ -828,6 +818,34 @@
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
   }
 
+  async function attachTerminalWithRetry(
+    state: TerminalReplayState,
+    instance: Terminal
+  ): Promise<{
+    attached: Awaited<ReturnType<DaemonClient['attachTerminal']>>;
+    requestedOffset: number;
+  } | null> {
+    const retryDelays = [150, 500] as const;
+    for (let attempt = 0; ; attempt += 1) {
+      const requestedOffset = terminalOffset;
+      try {
+        const attached = await client.attachTerminal(state.processId, requestedOffset, {
+          rows: instance.rows,
+          cols: instance.cols,
+          pixel_width: Math.round(host.clientWidth),
+          pixel_height: Math.round(host.clientHeight)
+        });
+        return { attached, requestedOffset };
+      } catch (cause) {
+        const delay = isDaemonRequestTimeoutError(cause) ? retryDelays[attempt] : undefined;
+        if (delay === undefined) throw cause;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (replayState !== state || !connected || !supportsTerminalPlayback(process.status)) return null;
+        armReplayWatchdog(state);
+      }
+    }
+  }
+
   function setKeyboardProtocol(kittyFlags: number, modifyOtherKeysLevel: number): void {
     kittyKeyboardFlags = kittyFlags & 1;
     modifyOtherKeys = modifyOtherKeysLevel === 1 || modifyOtherKeysLevel === 2
@@ -855,7 +873,7 @@
       replayPreviewAllowed = false;
       replayComplete = true;
       const alreadyFocused = document.activeElement !== null && host.contains(document.activeElement);
-      inputEnabled = true;
+      inputEnabled = process.status === 'running';
       if (state.gapDetected) {
         showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
       }
@@ -915,25 +933,33 @@
     replayWarningTimer = null;
   }
 
-  function outputTail(output: string): string {
-    const rows = output.replaceAll('\r', '').split('\n');
-    while (rows.length > 0 && rows.at(-1)?.trim() === '') rows.pop();
-    return rows.slice(-24).join('\n');
-  }
-
   function processNoun(): 'agent' | 'command' | 'terminal' {
     return process.kind;
   }
 
-  function deadTitle(): string {
+  function endedTitle(): string {
     const noun = processNoun();
     const label = `${noun[0].toUpperCase()}${noun.slice(1)}`;
+    if (processNeverRun) return `${label} ready`;
     if (process.status === 'crashed') return `${label} crashed`;
     if (process.status === 'stopped') return `${label} stopped`;
     return `${label} exited`;
   }
 
+  function startActionLabel(): string {
+    if (process.kind === 'command') return processNeverRun ? 'Run command' : 'Run again';
+    if (process.kind === 'agent') return process.agent_session_id ? 'Resume agent' : 'Start agent';
+    return 'Start terminal';
+  }
+
+  function busyActionLabel(): string {
+    if (process.kind === 'command') return 'Running…';
+    if (process.kind === 'agent' && process.agent_session_id) return 'Resuming…';
+    return 'Starting…';
+  }
+
   function exitSummary(): string {
+    if (processNeverRun) return 'No output yet';
     if (process.exit_signal !== null) return `Terminated by signal ${process.exit_signal}`;
     if (process.exit_code !== null) {
       return process.exit_code === 0
@@ -958,14 +984,14 @@
 <section
   bind:this={frame}
   class="terminal-frame"
-  class:is-dead={processDead}
+  class:has-ended-bar={processDead}
   class:is-drop-target={transferDropActive}
 >
   <div
     class="terminal-host"
-    class:is-hidden={process.status !== 'running'}
+    class:is-hidden={processStarting}
     bind:this={host}
-    aria-hidden={process.status !== 'running'}
+    aria-hidden={processStarting}
     aria-label={`${process.name} terminal`}
     oncontextmenu={showTerminalContextMenu}
   ></div>
@@ -988,7 +1014,7 @@
       <strong>Waiting for first output…</strong>
     </div>
   {/if}
-  {#if process.status === 'running' && replayComplete && replayUnavailableMessage}
+  {#if supportsTerminalPlayback(process.status) && replayComplete && replayUnavailableMessage}
     <div class="terminal-replay-warning" role="status">{replayUnavailableMessage}</div>
   {/if}
   {#if process.status === 'running' && !connected}
@@ -1004,73 +1030,31 @@
       <strong>Starting {processNoun()}…</strong>
       <small>The live terminal will appear when the process is ready.</small>
     </div>
-  {:else if processNeverRun}
-    <div class="not-run-pane" aria-label={`${process.name} not run`}>
-      <div class="not-run-empty">
-        <span class="not-run-icon" aria-hidden="true">
-          <SquareTerminalIcon size={22} strokeWidth={1.7} />
-        </span>
-        <span class="dead-kicker">Command output</span>
-        <h2>Not run yet</h2>
-        <p>Selecting a command only opens its output. Run it explicitly when you are ready.</p>
-        {#if onStart}
-          <Button
-            size="sm"
-            disabled={!connected || busy}
-            aria-busy={busy}
-            onclick={() => onStart?.(process)}
-          >
-            <PlayIcon size={14} strokeWidth={1.8} aria-hidden="true" />
-            {busy ? 'Starting…' : 'Run command'}
-          </Button>
-        {/if}
-      </div>
-    </div>
-  {:else if processDead}
+  {/if}
+  {#if processDead}
     {@const ProcessIcon = process.kind === 'agent' ? BotIcon : SquareTerminalIcon}
     {@const stoppedAt = exitedAtLabel()}
-    <div class="dead-pane" aria-label={`${process.name} ${process.status}`}>
-      <div class="dead-document">
-        <header class="dead-summary">
-          <span class="dead-icon" class:is-crashed={process.status === 'crashed'} aria-hidden="true">
-            <ProcessIcon size={20} strokeWidth={1.7} />
-          </span>
-          <div class="dead-copy">
-            <span class="dead-kicker">Session ended</span>
-            <h2>{deadTitle()}</h2>
-            <p>{exitSummary()}{#if stoppedAt}<span> · {stoppedAt}</span>{/if}</p>
-          </div>
-          {#if onStart}
-            <span class="dead-start">
-              <Button
-                class="w-full"
-                size="sm"
-                disabled={!connected || busy}
-                aria-busy={busy}
-                onclick={() => onStart?.(process)}
-              >
-                <PlayIcon size={14} strokeWidth={1.8} aria-hidden="true" />
-                {busy ? 'Starting…' : `Start ${processNoun()}`}
-              </Button>
-            </span>
-          {/if}
-        </header>
-
-        <section class="output-card" aria-label={`Last output from ${process.name}`}>
-          <header>
-            <strong>Last output</strong>
-            <span>Read only</span>
-          </header>
-          {#if retainedOutputLoading}
-            <p class="output-empty">Loading retained output…</p>
-          {:else if retainedTail}
-            <pre>{retainedTail}</pre>
-          {:else}
-            <p class="output-empty">No output was retained for this session.</p>
-          {/if}
-        </section>
-      </div>
-    </div>
+    <button
+      type="button"
+      class="process-ended-bar"
+      class:is-crashed={process.status === 'crashed'}
+      disabled={!onStart || !connected || busy}
+      aria-busy={busy}
+      aria-label={`${endedTitle()}. ${exitSummary()}. ${busy ? busyActionLabel() : startActionLabel()}`}
+      onclick={() => onStart?.(process)}
+    >
+      <span class="ended-status">
+        <span class="ended-icon" aria-hidden="true"><ProcessIcon size={15} strokeWidth={1.8} /></span>
+        <span class="ended-copy">
+          <strong>{endedTitle()}</strong>
+          <small>{exitSummary()}{#if stoppedAt}<span> · {stoppedAt}</span>{/if} · Read only</small>
+        </span>
+      </span>
+      <span class="ended-action">
+        <span>{busy ? busyActionLabel() : startActionLabel()}</span>
+        <PlayIcon size={14} strokeWidth={2} aria-hidden="true" />
+      </span>
+    </button>
   {/if}
   {#if linkHintVisible}
     <div class="terminal-link-hint" role="tooltip">{EXTERNAL_LINK_TOOLTIP}</div>
@@ -1086,16 +1070,12 @@
   .terminal-frame {
     position: relative;
     display: grid;
-    grid-template-rows: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
     min-height: 0;
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--terminal-background);
-  }
-
-  .terminal-frame.is-dead {
-    background: var(--background);
   }
 
   .terminal-frame.is-drop-target {
@@ -1288,169 +1268,86 @@
     font-size: var(--font-size-sm);
   }
 
-  .dead-pane {
-    position: absolute;
-    inset: 0;
-    overflow: auto;
-    padding: clamp(var(--space-4), 4vw, 40px);
-    color: var(--foreground);
-    background: var(--background);
-  }
-
-  .not-run-pane {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    overflow: auto;
-    padding: clamp(var(--space-4), 4vw, 40px);
-    color: var(--foreground);
-    background: var(--background);
-  }
-
-  .not-run-empty {
-    display: grid;
-    width: min(440px, 100%);
-    justify-items: center;
-    gap: var(--space-2);
-    text-align: center;
-  }
-
-  .not-run-icon {
-    display: grid;
-    width: 44px;
-    height: 44px;
-    margin-bottom: var(--space-1);
-    place-items: center;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--muted-foreground);
-    background: var(--card);
-  }
-
-  .not-run-empty h2 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 650;
-  }
-
-  .not-run-empty p {
-    max-width: 400px;
-    margin: 0 0 var(--space-2);
-    color: var(--muted-foreground);
-    font-size: var(--font-size-sm);
-    line-height: 1.45;
-  }
-
-  .dead-document {
-    display: grid;
-    width: min(760px, 100%);
-    min-height: 100%;
-    align-content: center;
-    gap: var(--space-4);
-    margin: 0 auto;
-  }
-
-  .dead-summary {
-    display: grid;
-    grid-template-columns: 40px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-3);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: var(--space-4);
-    background: var(--card);
-  }
-
-  .dead-icon {
-    display: grid;
-    width: 40px;
-    height: 40px;
-    place-items: center;
-    border: 1px solid color-mix(in srgb, var(--agent-state-exited) 34%, var(--border));
-    border-radius: var(--radius);
-    color: var(--agent-state-exited);
-    background: color-mix(in srgb, var(--agent-state-exited) 6%, var(--card));
-  }
-
-  .dead-icon.is-crashed {
-    border-color: color-mix(in srgb, var(--destructive) 44%, var(--border));
-    color: var(--destructive);
-    background: color-mix(in srgb, var(--destructive) 7%, var(--card));
-  }
-
-  .dead-copy {
-    min-width: 0;
-  }
-
-  .dead-kicker {
-    display: block;
-    margin-bottom: var(--space-1);
-    color: var(--muted-foreground);
-    font: 650 var(--font-size-xs)/1 var(--terminal-font-family);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .dead-copy h2 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 650;
-    line-height: 1.25;
-  }
-
-  .dead-copy p {
-    margin: var(--space-1) 0 0;
-    color: var(--muted-foreground);
-    font-size: var(--font-size-sm);
-  }
-
-  .dead-start {
-    min-width: 116px;
-  }
-
-  .output-card {
-    min-height: 132px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--terminal-background);
-  }
-
-  .output-card > header {
+  .process-ended-bar {
     display: flex;
-    min-height: 32px;
+    width: 100%;
+    min-width: 0;
+    min-height: 50px;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 1px solid color-mix(in srgb, var(--terminal-foreground) 18%, var(--terminal-background));
-    padding: 0 var(--space-3);
-    color: color-mix(in srgb, var(--terminal-foreground) 70%, var(--terminal-background));
-    font: var(--font-size-xs)/1 var(--terminal-font-family);
+    gap: var(--space-3);
+    appearance: none;
+    border: 0;
+    border-top: 1px solid color-mix(in srgb, var(--agent-state-exited) 38%, var(--border));
+    padding: 7px 9px 7px 10px;
+    color: var(--terminal-foreground);
+    background: color-mix(in srgb, var(--terminal-background) 91%, var(--agent-state-exited));
+    font-family: var(--terminal-font-family);
+    text-align: left;
+    cursor: pointer;
   }
 
-  .output-card > header strong {
-    color: color-mix(in srgb, var(--terminal-foreground) 86%, var(--terminal-background));
-    font-weight: 600;
+  .process-ended-bar:hover:not(:disabled) {
+    border-top-color: color-mix(in srgb, var(--signal) 55%, var(--border));
+    background: color-mix(in srgb, var(--terminal-background) 88%, var(--signal));
   }
 
-  .output-card pre {
-    max-height: min(44vh, 440px);
-    overflow: auto;
-    margin: 0;
-    padding: var(--space-3);
-    color: color-mix(in srgb, var(--terminal-foreground) 86%, var(--terminal-background));
-    font: var(--font-size-sm)/1.45 var(--terminal-font-family);
-    tab-size: 4;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+  .process-ended-bar:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
   }
 
-  .output-empty {
-    margin: 0;
-    padding: var(--space-4) var(--space-3);
-    color: color-mix(in srgb, var(--terminal-foreground) 55%, var(--terminal-background));
-    font: var(--font-size-sm)/1.4 var(--terminal-font-family);
+  .process-ended-bar:disabled { cursor: default; }
+
+  .process-ended-bar.is-crashed {
+    border-top-color: color-mix(in srgb, var(--destructive) 44%, var(--border));
   }
+
+  .ended-status {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 9px;
+  }
+
+  .ended-icon {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: none;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--agent-state-exited) 38%, var(--border));
+    border-radius: 4px;
+    color: var(--agent-state-exited);
+    background: color-mix(in srgb, var(--agent-state-exited) 9%, var(--terminal-background));
+  }
+
+  .is-crashed .ended-icon {
+    border-color: color-mix(in srgb, var(--destructive) 45%, var(--border));
+    color: var(--destructive);
+    background: color-mix(in srgb, var(--destructive) 9%, var(--terminal-background));
+  }
+
+  .ended-copy { display: grid; min-width: 0; gap: 3px; }
+  .ended-copy strong { overflow: hidden; font-size: var(--font-size-sm); line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+  .ended-copy small { overflow: hidden; color: color-mix(in srgb, var(--terminal-foreground) 62%, var(--terminal-background)); font-size: var(--font-size-xs); line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+
+  .ended-action {
+    display: inline-flex;
+    min-height: 30px;
+    flex: none;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid color-mix(in srgb, var(--signal) 45%, var(--border));
+    border-radius: 4px;
+    padding: 0 10px;
+    color: color-mix(in srgb, var(--signal) 76%, var(--terminal-foreground));
+    background: color-mix(in srgb, var(--signal) 10%, var(--terminal-background));
+    font-size: var(--font-size-xs);
+    font-weight: 650;
+  }
+
+  .process-ended-bar:disabled .ended-action { opacity: .48; }
 
   .terminal-link-hint {
     position: absolute;
@@ -1464,6 +1361,8 @@
     font: 500 11px/1.2 var(--terminal-font-family);
     pointer-events: none;
   }
+
+  .terminal-frame.has-ended-bar .terminal-link-hint { bottom: 59px; }
 
   .terminal-transfer-hint {
     position: absolute;
@@ -1479,14 +1378,12 @@
   }
 
   @media (max-width: 720px) {
-    .dead-summary {
-      grid-template-columns: 40px minmax(0, 1fr);
-    }
+    .ended-copy small { display: none; }
+  }
 
-    .dead-start {
-      grid-column: 1 / -1;
-      justify-self: stretch;
-    }
+  @media (max-width: 460px) {
+    .ended-action span { display: none; }
+    .ended-action { width: 30px; justify-content: center; padding: 0; }
   }
 
   @media (prefers-reduced-motion: reduce) {

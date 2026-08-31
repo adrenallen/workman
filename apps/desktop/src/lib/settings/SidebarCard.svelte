@@ -25,7 +25,7 @@
     <div>
       <span class="eyebrow">Workspace</span>
       <h2 id="sidebar-settings-title">Sidebar</h2>
-      <p>Rails remember their width and collapsed state on this Mac.</p>
+      <p>Rails remember their width and collapsed state locally.</p>
     </div>
     <span class="saved"><StatusIndicator tone="success" label="Sidebar preferences saved locally" />Saved locally</span>
   </header>

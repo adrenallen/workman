@@ -34,11 +34,13 @@ export const PROJECT_ICON_COLOR_CHOICES = [
 
 export type ProjectIconName = string;
 export type ProjectIconColor = (typeof PROJECT_ICON_COLOR_CHOICES)[number]['id'];
+export type SidebarIdentityColor = ProjectIconColor;
 
 export interface ProjectSettingsInput {
   displayName: string;
   icon: ProjectIconName | null;
   iconColor: ProjectIconColor | null;
+  nameColor: SidebarIdentityColor | null;
 }
 
 const projectIcons = new Map(PROJECT_ICON_CHOICES.map((choice) => [choice.id, choice.component]));
@@ -62,4 +64,17 @@ export function normalizeProjectIconColor(value: string | null | undefined): Pro
 
 export function projectIconColorValue(value: string | null | undefined): string {
   return `var(--project-icon-${normalizeProjectIconColor(value)})`;
+}
+
+export function normalizeSidebarIdentityColor(
+  value: string | null | undefined
+): SidebarIdentityColor | null {
+  return value && projectIconColors.has(value) ? value as SidebarIdentityColor : null;
+}
+
+export function sidebarIdentityColorValue(
+  value: string | null | undefined
+): string | undefined {
+  const normalized = normalizeSidebarIdentityColor(value);
+  return normalized ? `var(--project-icon-${normalized})` : undefined;
 }

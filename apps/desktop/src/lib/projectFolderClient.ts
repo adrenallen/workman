@@ -2,6 +2,7 @@ import type { DaemonClient } from './daemon';
 import type {
   FolderedProject,
   ProjectFolder,
+  ProjectFolderSettingsInput,
   ProjectRailLayoutEntry
 } from './projectFolders';
 
@@ -28,6 +29,19 @@ export function renameProjectFolder(
   name: string
 ): Promise<ProjectRailSnapshot> {
   return client.control('project_folders.rename', { folder_id: folderId, name });
+}
+
+export function updateProjectFolderSettings(
+  client: DaemonClient,
+  folderId: number,
+  settings: ProjectFolderSettingsInput
+): Promise<ProjectRailSnapshot> {
+  return client.control('project_folders.update_settings', {
+    folder_id: folderId,
+    name: settings.name,
+    icon: settings.icon,
+    name_color: settings.nameColor
+  });
 }
 
 export function deleteProjectFolder(

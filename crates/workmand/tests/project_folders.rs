@@ -130,6 +130,18 @@ async fn folder_layout_and_collapse_survive_daemon_restart_and_delete_lifts_chil
         json!({ "folder_id": later, "collapsed": true }),
     )
     .await;
+    rpc(
+        &mut socket,
+        8,
+        "project_folders.update_settings",
+        json!({
+            "folder_id": later,
+            "name": "Later",
+            "icon": "boxes",
+            "name_color": "violet"
+        }),
+    )
+    .await;
     socket.close(None).await.unwrap();
     task.abort();
     let _ = task.await;
@@ -157,6 +169,14 @@ async fn folder_layout_and_collapse_survive_daemon_restart_and_delete_lifts_chil
             .unwrap()["collapsed"],
         true
     );
+    let restored_later = restored["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|folder| folder["id"] == later)
+        .unwrap();
+    assert_eq!(restored_later["icon"], "boxes");
+    assert_eq!(restored_later["name_color"], "violet");
 
     let lifted = rpc(
         &mut socket,
@@ -213,6 +233,8 @@ async fn folder_layout_and_collapse_survive_daemon_restart_and_delete_lifts_chil
     assert_eq!(imported_rail["folders"].as_array().unwrap().len(), 1);
     assert_eq!(imported_rail["folders"][0]["name"], "Later");
     assert_eq!(imported_rail["folders"][0]["collapsed"], true);
+    assert_eq!(imported_rail["folders"][0]["icon"], "boxes");
+    assert_eq!(imported_rail["folders"][0]["name_color"], "violet");
     assert_eq!(imported_rail["layout"][2]["kind"], "folder");
     assert_eq!(imported_rail["layout"][2]["project_ids"], json!([ids[1]]));
 

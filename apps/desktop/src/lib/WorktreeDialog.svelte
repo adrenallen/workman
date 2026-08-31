@@ -713,7 +713,7 @@
         {#if error}<p class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
       </section>
 
-      <Dialog.Footer class="flex-row justify-end border-t border-border bg-card px-4 py-2.5">
+      <Dialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
         <Button type="button" variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
         <Button type="submit" disabled={!canSubmit}>
           {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{actionLabel}

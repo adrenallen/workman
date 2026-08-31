@@ -145,6 +145,28 @@ test('folder header keeps collapse, rename, context, pointer, and keyboard paths
     'utf8'
   );
   assert.match(menu, /Rename folder/);
+  assert.match(menu, /Folder settings…/);
+  assert.match(menu, /Name, color, and icon/);
   assert.match(menu, /Delete folder…/);
   assert.match(menu, /Projects return to top level/);
+});
+
+test('folder identity supports a colored name, default folder glyph, and custom Lucide icon', async () => {
+  const [app, header, dialog, client] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectFolderHeader.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectFolderSettingsDialog.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/projectFolderClient.ts', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(header, /folder\.icon[\s\S]*<ProjectIcon icon=\{folder\.icon\} color=\{folder\.name_color\}/);
+  assert.match(header, /style:color=\{sidebarIdentityColorValue\(folder\.name_color\)\}/);
+  assert.match(dialog, /Folder name color/);
+  assert.match(dialog, /Use the standard open and closed folder icons/);
+  assert.match(dialog, /title="Choose another icon"/);
+  assert.match(dialog, /ariaLabel="Lucide folder icons"/);
+  assert.match(client, /project_folders\.update_settings/);
+  assert.match(client, /name_color: settings\.nameColor/);
+  assert.match(app, /<ProjectFolderSettingsDialog/);
+  assert.match(app, /updateProjectFolderSettings\(client, folder\.id, settings\)/);
 });

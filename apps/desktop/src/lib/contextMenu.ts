@@ -12,7 +12,7 @@ import type { ProjectTreeSelection } from './projectTree';
 import { projectFrequentActions } from './projectMenu';
 import type { PullRequestState, WorktreeEntry, WorktreeRepository } from './worktrees';
 import { projectRepositoryTitle } from './worktrees';
-import type { ContextActionId } from './contextMenuIcons';
+import type { ContextActionIcon, ContextActionId } from './contextMenuIcons';
 import {
   terminalContextMenuItems,
   type TerminalContextActionId
@@ -33,9 +33,23 @@ export interface ContextMenuItem {
   shortcut?: string;
   disabled?: boolean;
   destructive?: boolean;
+  tone?: ContextMenuTone;
   separatorBefore?: boolean;
   pullRequestState?: PullRequestState;
 }
+
+export type ContextMenuTone = 'default' | 'positive' | 'warning' | 'info' | 'danger';
+
+export interface ContextMenuSubmenu {
+  kind: 'submenu';
+  label: string;
+  detail?: string;
+  icon: ContextActionIcon;
+  items: ContextMenuItem[];
+  separatorBefore?: boolean;
+}
+
+export type ContextMenuEntry = ContextMenuItem | ContextMenuSubmenu;
 
 export type ContextMenuTarget =
   | {
@@ -68,7 +82,7 @@ export interface ContextMenuRequest {
 export interface ContextMenuDescriptor {
   title: string;
   subtitle: string;
-  items: ContextMenuItem[];
+  items: ContextMenuEntry[];
 }
 
 export type ShellOpenTarget = 'editor' | 'finder' | 'reveal';
@@ -229,7 +243,7 @@ function terminalItems(
 function projectItems(
   target: Extract<ContextMenuTarget, { kind: 'project' }>,
   openers: OpenersState | null
-): ContextMenuItem[] {
+): ContextMenuEntry[] {
   const { project, repository, worktree } = target;
   const frequentItems: ContextMenuItem[] = projectFrequentActions({
     editorLabel: openers
@@ -239,7 +253,7 @@ function projectItems(
     siteUrl: worktree?.site_url
   });
   const customOpenerItem: ContextMenuItem[] = openers?.config.sidebar.customEnabled
-    ? [{ id: 'open-custom', label: customActionLabel(openers.config), separatorBefore: true }]
+    ? [{ id: 'open-custom', label: customActionLabel(openers.config) }]
     : [];
 
   const worktreeItems: ContextMenuItem[] = [];
@@ -271,44 +285,114 @@ function projectItems(
     label: 'Remove project…',
     detail: 'Keeps files unless local deletion is selected',
     destructive: true,
+    tone: 'danger',
     separatorBefore: true
   };
 
-  return [
-    ...frequentItems,
-    { id: 'select', label: project.selected ? 'Selected project' : 'Select project', disabled: project.selected, separatorBefore: true },
-    {
-      id: 'mark-read',
-      label: 'Mark as read',
-      detail: 'Clears notifications for this project',
-      disabled: !target.hasUnread
-    },
-    { id: 'project-settings', label: 'Project settings…' },
-    { id: 'rename', label: 'Rename' },
-    { id: 'new-agent', label: 'New agent…', separatorBefore: true },
+  const createItems: ContextMenuItem[] = [
     { id: 'new-terminal', label: 'New terminal' },
     { id: 'add-command', label: 'Add command…' },
     { id: 'new-todo', label: 'New todo…' },
-    { id: 'new-scratchpad', label: 'New scratchpad' },
-    ...worktreeItems.map((item, index) => ({ ...item, separatorBefore: index === 0 })),
-    { id: 'start-all-commands', label: 'Start all commands', separatorBefore: true },
-    { id: 'stop-all-commands', label: 'Stop all commands' },
+    { id: 'new-scratchpad', label: 'New scratchpad' }
+  ];
+
+  const commandItems: ContextMenuItem[] = [
+    {
+      id: 'start-all-commands',
+      label: 'Start all commands',
+      detail: 'Runs every command in this project',
+      tone: 'positive'
+    },
+    {
+      id: 'stop-all-commands',
+      label: 'Stop all commands',
+      detail: 'Requests a graceful stop',
+      tone: 'warning'
+    }
+  ];
+  const projectMoreItems: ContextMenuItem[] = [
+    { id: 'project-settings', label: 'Project settings…' },
+    { id: 'rename', label: 'Rename project' },
+    ...(target.hasUnread
+      ? [{
+          id: 'mark-read',
+          label: 'Mark as read',
+          detail: 'Clears notifications for this project'
+        } satisfies ContextMenuItem]
+      : []),
+    { id: 'copy-path', label: 'Copy path' }
+  ];
+
+  return [
+    ...frequentItems,
     ...customOpenerItem,
-    { id: 'copy-path', label: 'Copy path', separatorBefore: customOpenerItem.length === 0 },
+    ...(!project.selected
+      ? [{ id: 'select', label: 'Select project', separatorBefore: true } satisfies ContextMenuItem]
+      : []),
+    {
+      id: 'new-agent',
+      label: 'New agent…',
+      detail: 'Start a coding agent in this project',
+      tone: 'positive',
+      separatorBefore: project.selected
+    },
+    {
+      kind: 'submenu',
+      label: 'Create',
+      icon: 'plus',
+      items: createItems
+    },
+    ...(worktreeItems.length > 0
+      ? [{
+          kind: 'submenu',
+          label: 'Worktrees',
+          icon: 'git-branch',
+          items: worktreeItems
+        } satisfies ContextMenuSubmenu]
+      : []),
+    {
+      kind: 'submenu',
+      label: 'Commands',
+      icon: 'square-terminal',
+      items: commandItems
+    },
+    {
+      kind: 'submenu',
+      label: 'More',
+      icon: 'ellipsis',
+      items: projectMoreItems,
+      separatorBefore: true
+    },
     removal
   ];
 }
 
-function processItems(process: ProcessView): ContextMenuItem[] {
+function processItems(process: ProcessView): ContextMenuEntry[] {
   const running = process.status === 'running' || process.status === 'starting';
-  const items: ContextMenuItem[] = [];
+  const items: ContextMenuEntry[] = [];
 
   if (running) {
-    items.push({ id: 'stop', label: 'Stop' });
-    items.push({ id: 'restart', label: 'Restart' });
-    items.push({ id: 'kill', label: 'Kill immediately…', destructive: true });
+    items.push({
+      id: 'stop',
+      label: 'Stop',
+      detail: 'Graceful · stays in the sidebar',
+      tone: 'warning'
+    });
+    items.push({ id: 'restart', label: 'Restart', tone: 'info' });
+    items.push({
+      id: 'kill',
+      label: 'Force stop…',
+      detail: 'Use if Stop is not responding',
+      destructive: true,
+      tone: 'danger'
+    });
   } else {
-    items.push({ id: 'start', label: process.kind === 'command' ? 'Run' : 'Start' });
+    items.push({
+      id: 'start',
+      label: process.kind === 'command' ? 'Run' : 'Start',
+      detail: 'Starts this process again',
+      tone: 'positive'
+    });
   }
 
   if (process.kind === 'agent') {
@@ -318,9 +402,6 @@ function processItems(process: ProcessView): ContextMenuItem[] {
       disabled: !running,
       separatorBefore: true
     });
-    if (process.spawned_by_process_id !== null) {
-      items.push({ id: 'view-parent', label: 'View parent' });
-    }
     if (process.agent_state.unread) {
       items.push({
         id: 'mark-read',
@@ -332,22 +413,34 @@ function processItems(process: ProcessView): ContextMenuItem[] {
 
   if (process.kind === 'command') {
     items.push({ id: 'edit-command', label: 'Edit command…', separatorBefore: true });
-    if (process.source === 'yml') {
-      items.push({ id: 'reveal-config', label: 'Reveal in workman.yml' });
-    }
   }
 
-  if (process.kind !== 'command') {
-    items.push({ id: 'rename', label: 'Rename', separatorBefore: true });
+  const moreItems: ContextMenuItem[] = [];
+  if (process.kind === 'agent' && process.spawned_by_process_id !== null) {
+    moreItems.push({ id: 'view-parent', label: 'View parent' });
   }
-  items.push({ id: 'copy-name', label: 'Copy name' });
-  items.push({ id: 'copy-id', label: 'Copy process ID' });
+  if (process.kind !== 'command') {
+    moreItems.push({ id: 'rename', label: 'Rename' });
+  }
+  if (process.kind === 'command' && process.source === 'yml') {
+    moreItems.push({ id: 'reveal-config', label: 'Reveal in workman.yml' });
+  }
+  moreItems.push({ id: 'copy-name', label: 'Copy name' });
+  moreItems.push({ id: 'copy-id', label: 'Copy process ID' });
+  items.push({
+    kind: 'submenu',
+    label: 'More',
+    icon: 'ellipsis',
+    items: moreItems,
+    separatorBefore: process.kind !== 'command'
+  });
 
   if (process.kind === 'command') {
     items.push({
       id: 'remove-command',
       label: 'Remove command…',
       destructive: true,
+      tone: 'danger',
       separatorBefore: true
     });
   }
@@ -355,8 +448,12 @@ function processItems(process: ProcessView): ContextMenuItem[] {
   if (process.kind === 'agent' || process.kind === 'terminal') {
     items.push({
       id: 'close',
-      label: `Close ${process.kind}…`,
+      label: `Remove ${process.kind}…`,
+      detail: running
+        ? 'Stops it first, then removes it from the sidebar'
+        : 'Removes its saved sidebar entry',
       destructive: true,
+      tone: 'danger',
       separatorBefore: true
     });
   }

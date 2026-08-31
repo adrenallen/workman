@@ -49,7 +49,7 @@
 
     {#if error}<p class="mx-3 mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
 
-    <Dialog.Footer class="flex-row justify-end border-t border-border bg-card px-4 py-2.5">
+    <Dialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
       <Button variant="ghost" disabled={busyPath !== null} onclick={onClose}>Later</Button>
       <Button disabled={busyPath !== null || entries.length === 0} onclick={onAdoptAll}>
         {#if busyPath === '*'}<LoaderCircleIcon class="spin" size={14} />{/if}Import all

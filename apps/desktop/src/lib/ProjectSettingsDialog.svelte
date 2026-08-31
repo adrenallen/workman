@@ -7,14 +7,17 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
   import type { Project, ProjectIconImage } from './daemon';
+  import NameColorPicker from './NameColorPicker.svelte';
   import ProjectIconPicker from './ProjectIconPicker.svelte';
   import {
     PROJECT_ICON_COLOR_CHOICES,
     isProjectImageReference,
     normalizeProjectIcon,
     normalizeProjectIconColor,
+    normalizeSidebarIdentityColor,
     projectIconColorValue,
     type ProjectIconColor,
+    type SidebarIdentityColor,
     type ProjectSettingsInput
   } from './projectAppearance';
   import { projectDisplayName } from './worktrees';
@@ -50,9 +53,14 @@
     return normalizeProjectIconColor(project.icon_color);
   }
 
+  function initialNameColor(): SidebarIdentityColor | null {
+    return normalizeSidebarIdentityColor(project.name_color);
+  }
+
   let displayName = $state(initialDisplayName());
   let icon = $state<string | null>(initialIcon());
   let iconColor = $state<ProjectIconColor>(initialIconColor());
+  let nameColor = $state<SidebarIdentityColor | null>(initialNameColor());
   let canSave = $derived(!busy && displayName.trim().length > 0);
   let usesIconColor = $derived(icon !== null && !isProjectImageReference(icon));
   let repositoryLabel = $derived(project.repository_root ?? 'Not linked to a Git repository');
@@ -63,7 +71,8 @@
     onSave({
       displayName: displayName.trim(),
       icon,
-      iconColor: usesIconColor ? iconColor : null
+      iconColor: usesIconColor ? iconColor : null,
+      nameColor
     });
   }
 </script>
@@ -97,6 +106,11 @@
           <span>Project name</span>
           <Input bind:value={displayName} autocomplete="off" aria-label="Project name" />
         </label>
+
+        <fieldset>
+          <legend>Project name color</legend>
+          <NameColorPicker value={nameColor} disabled={busy} onChange={(value) => (nameColor = value)} />
+        </fieldset>
 
         <fieldset>
           <legend>Icon</legend>
@@ -138,7 +152,7 @@
         </section>
       </div>
 
-      <Dialog.Footer class="border-t border-border bg-card px-4 py-2.5">
+      <Dialog.Footer class="mx-0 mb-0 flex-row flex-wrap justify-end rounded-none rounded-b-lg border-t border-border bg-card px-4 py-3">
         <Button type="button" variant="outline" disabled={busy} onclick={onClose}>Cancel</Button>
         <Button type="submit" disabled={!canSave}>{busy ? 'Saving…' : 'Save changes'}</Button>
       </Dialog.Footer>

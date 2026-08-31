@@ -31,7 +31,7 @@ export function projectFrequentActions(input: {
 
   items.push(
     { id: 'open-in-editor', label: input.editorLabel },
-    { id: 'open-in-finder', label: 'Open in Finder' }
+    { id: 'open-in-finder', label: 'Show in file browser' }
   );
 
   if (input.siteUrl) {

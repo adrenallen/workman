@@ -319,7 +319,7 @@
             onclick={() => void runAction('finder', () => openProjectFinder(project.path))}
           >
             <FolderOpenIcon size={14} aria-hidden="true" />
-            {actionBusy === 'finder' ? 'Opening…' : 'Open in Finder'}
+            {actionBusy === 'finder' ? 'Opening…' : 'Show in file browser'}
           </Button>
         </div>
         {#if actionError}

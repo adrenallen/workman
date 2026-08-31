@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FolderCogIcon from '@lucide/svelte/icons/folder-cog';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
@@ -7,12 +8,13 @@
 
   interface Props {
     request: ProjectFolderMenuRequest;
+    onSettings: () => void;
     onRename: () => void;
     onDelete: () => void;
     onClose: () => void;
   }
 
-  let { request, onRename, onDelete, onClose }: Props = $props();
+  let { request, onSettings, onRename, onDelete, onClose }: Props = $props();
 </script>
 
 <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -37,6 +39,13 @@
       </strong>
     </DropdownMenu.Label>
     <DropdownMenu.Separator />
+    <DropdownMenu.Item class="min-h-8 gap-2 px-2 py-1.5" onclick={onSettings}>
+      <FolderCogIcon class="size-4" aria-hidden="true" />
+      <span class="grid min-w-0 flex-1">
+        <span class="truncate text-sm">Folder settings…</span>
+        <span class="truncate font-mono text-xs text-muted-foreground">Name, color, and icon</span>
+      </span>
+    </DropdownMenu.Item>
     <DropdownMenu.Item class="min-h-8 gap-2 px-2 py-1.5" onclick={onRename}>
       <PencilIcon class="size-4" aria-hidden="true" />
       <span class="text-sm">Rename folder</span>
