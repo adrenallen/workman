@@ -7,6 +7,9 @@ import {
   dismissWorktreeOperation,
   replaceWorktreeOperations,
   resetWorktreeOperations,
+  standaloneWorktreeOperations,
+  worktreeOperationForProject,
+  worktreeOperationStateLabel,
   worktreeOperations
 } from '../src/lib/worktreeProgress.ts';
 
@@ -115,4 +118,53 @@ test('a new operation id clears only its own optimistic dismissal mask', () => {
   assert.equal(get(worktreeOperations).length, 1);
   assert.equal(get(worktreeOperations)[0].id, 'retry-id');
   resetWorktreeOperations();
+});
+
+test('remove operations attach to their existing project instead of adding a rail row', () => {
+  const project = {
+    id: 7,
+    path: '/tmp/plain-project'
+  };
+  const removal = {
+    ...serverOperation('remove-project', 'running'),
+    mode: 'remove',
+    source_project_id: project.id,
+    repository_id: 9,
+    path: project.path
+  };
+
+  assert.equal(worktreeOperationForProject([removal], project)?.id, removal.id);
+  assert.deepEqual(standaloneWorktreeOperations([removal], [project]), []);
+  assert.equal(worktreeOperationStateLabel(removal), 'Removing…');
+});
+
+test('create operations become part of the project row once the target path is registered', () => {
+  const source = { id: 1, path: '/tmp/repository' };
+  const created = { id: 8, path: '/tmp/repository-feature' };
+  const creation = {
+    ...serverOperation('create-project', 'running'),
+    mode: 'create',
+    source_project_id: source.id,
+    repository_id: 9,
+    path: `${created.path}/`
+  };
+
+  assert.equal(worktreeOperationForProject([creation], source), null);
+  assert.equal(worktreeOperationForProject([creation], created)?.id, creation.id);
+  assert.deepEqual(standaloneWorktreeOperations([creation], [source, created]), []);
+  assert.equal(worktreeOperationStateLabel(creation), 'Creating…');
+});
+
+test('operations without a registered target remain one temporary rail row', () => {
+  const source = { id: 1, path: '/tmp/repository' };
+  const creation = {
+    ...serverOperation('create-project', 'running'),
+    mode: 'fork',
+    source_project_id: source.id,
+    repository_id: 9,
+    path: '/tmp/repository-feature'
+  };
+
+  assert.deepEqual(standaloneWorktreeOperations([creation], [source]), [creation]);
+  assert.equal(worktreeOperationStateLabel(creation), 'Forking…');
 });

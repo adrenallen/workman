@@ -155,6 +155,51 @@ export function resetWorktreeOperations(): void {
   store.set([]);
 }
 
+export function worktreeOperationMatchesProject(
+  operation: WorktreeOperation,
+  project: Project
+): boolean {
+  if (operation.mode === 'remove') {
+    return operation.source_project_id === project.id
+      || operation.removal?.project_id === project.id;
+  }
+  if (operation.project?.id === project.id) return true;
+  return operation.path !== null
+    && normalizePath(operation.path) === normalizePath(project.path);
+}
+
+export function worktreeOperationForProject(
+  operations: readonly WorktreeOperation[],
+  project: Project
+): WorktreeOperation | null {
+  return operations.find((operation) => worktreeOperationMatchesProject(operation, project)) ?? null;
+}
+
+export function standaloneWorktreeOperations(
+  operations: readonly WorktreeOperation[],
+  projects: readonly Project[]
+): WorktreeOperation[] {
+  return operations.filter((operation) =>
+    !projects.some((project) => worktreeOperationMatchesProject(operation, project))
+  );
+}
+
+export function worktreeOperationStateLabel(operation: WorktreeOperation): string {
+  if (operation.status === 'failed') {
+    if (operation.mode === 'remove') return 'Removal failed';
+    if (operation.mode === 'fork') return 'Fork failed';
+    if (operation.mode === 'adopt') return 'Adoption failed';
+    return 'Creation failed';
+  }
+  if (operation.status === 'completed') {
+    return operation.mode === 'remove' ? 'Removed' : 'Ready';
+  }
+  if (operation.mode === 'remove') return 'Removing…';
+  if (operation.mode === 'fork') return 'Forking…';
+  if (operation.mode === 'adopt') return 'Adopting…';
+  return 'Creating…';
+}
+
 function initialSteps(mode: WorktreeOperationMode): WorktreeOperationStep[] {
   if (mode === 'remove') {
     return [
@@ -180,4 +225,9 @@ function initialSteps(mode: WorktreeOperationMode): WorktreeOperationStep[] {
 
 function basename(path: string): string {
   return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+}
+
+function normalizePath(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  return normalized || '/';
 }
