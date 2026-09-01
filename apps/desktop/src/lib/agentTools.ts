@@ -90,6 +90,7 @@ export interface SpawnAgentInput {
   agent_tool_id?: number;
   agent_template_id?: number;
   name?: string;
+  model?: string;
   extra_args: string[];
   prompt?: string;
   attachments?: string[];

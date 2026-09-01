@@ -90,8 +90,10 @@ while (1) {
     for my $character (split //, $chunk) {
         if ($character eq "\r") {
             print "\r\nagent-answer:$prompt\r\n";
-            sleep 30;
-            exit 0;
+            select undef, undef, undef, 0.25;
+            print "agent-ready\r\n\$";
+            $prompt = '';
+            next;
         }
         $prompt .= $character;
     }
@@ -541,23 +543,31 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     let template_process_id = template_spawn["result"]["process_id"].as_i64().unwrap();
     let saved_attachment = data_dir.join(format!("agent-attachments/{template_process_id}/01.png"));
     assert!(saved_attachment.is_file());
-    let expected_template_prompt = format!(
-        "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.\n\nAttached image files were saved locally at these paths:\n- {}",
+    let expected_caller_prompt = format!(
+        "agent-answer:Review line one.\nReview line two.\n\nAttached image files were saved locally at these paths:\n- {}",
         saved_attachment.display()
     );
-    let template_deadline = Instant::now() + Duration::from_secs(8);
+    let template_deadline = Instant::now() + Duration::from_secs(12);
     loop {
         let raw = registry
             .lock()
             .await
             .raw_output(template_process_id, None, usize::MAX)?;
         let output = String::from_utf8_lossy(&raw.data);
-        if output.contains(&expected_template_prompt) {
-            assert_eq!(output.matches("agent-answer:").count(), 1);
+        if output.contains(&expected_caller_prompt) {
+            assert!(output.contains("agent-answer:You are a careful reviewer."));
+            assert_eq!(output.matches("agent-answer:").count(), 2);
             assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
             assert!(
                 output.find("agent-ready").unwrap() < output.find("agent-answer:").unwrap(),
                 "initial prompt arrived before the delayed readiness marker: {output}"
+            );
+            assert!(
+                output
+                    .find("agent-answer:You are a careful reviewer.")
+                    .unwrap()
+                    < output.find(&expected_caller_prompt).unwrap(),
+                "caller direction arrived before template setup completed: {output}"
             );
             let status = registry.lock().await.get_status(template_process_id)?;
             assert!(
@@ -567,6 +577,10 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             assert!(status.events.iter().any(|event| {
                 event.kind == "initial_prompt_delivered"
                     && event.message.contains("initial prompt delivered")
+            }));
+            assert!(status.events.iter().any(|event| {
+                event.kind == "initial_prompt_delivered"
+                    && event.message.contains("follow-up launch prompt delivered")
             }));
             break;
         }
@@ -594,14 +608,16 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     .await;
     assert!(overridden["ok"].as_bool().unwrap());
     let override_process_id = overridden["result"]["process_id"].as_i64().unwrap();
-    let override_deadline = Instant::now() + Duration::from_secs(8);
+    let override_deadline = Instant::now() + Duration::from_secs(12);
     loop {
         let raw = registry
             .lock()
             .await
             .raw_output(override_process_id, None, usize::MAX)?;
         let output = String::from_utf8_lossy(&raw.data);
-        if output.contains("agent-answer:You are a careful reviewer.\n\nUse the selected agent.") {
+        if output.contains("agent-answer:Use the selected agent.") {
+            assert!(output.contains("agent-answer:You are a careful reviewer."));
+            assert_eq!(output.matches("agent-answer:").count(), 2);
             assert!(output.contains("agent-args:--caller|override"));
             assert!(!output.contains("--template"));
             assert_eq!(

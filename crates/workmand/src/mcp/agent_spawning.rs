@@ -142,7 +142,9 @@ struct SpawnAgentArgs {
     /// for model selection; use model instead.
     #[serde(default)]
     extra_args: Vec<String>,
-    /// Optional first prompt delivered once the agent reaches a safe input state.
+    /// Optional caller prompt delivered once the agent reaches a safe input state. When a
+    /// template is selected, its setup prompt is delivered first and this follows as a separate
+    /// turn after the agent finishes setup.
     #[serde(default)]
     initial_prompt: Option<String>,
     /// Optional local image paths. Workman copies them into daemon-owned per-process storage and
@@ -220,7 +222,8 @@ struct ResolvedAgentSpawn {
     agent_tool_type: String,
     extra_args: Vec<String>,
     model: Option<String>,
-    initial_prompt: Option<String>,
+    template_prompt: Option<String>,
+    caller_prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -568,7 +571,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while keeping the prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, its setup prompt is delivered first; initial_prompt follows as a separate turn after setup completes. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,
@@ -1141,22 +1144,31 @@ pub(crate) async fn spawn_registered_agent(
             }
         }
     };
-    let initial_prompt = compose_attachment_prompt(
+    let caller_prompt = compose_attachment_prompt(
         &resolved.agent_tool_type,
-        resolved.initial_prompt,
+        resolved.caller_prompt,
         &saved_attachments,
     );
-    let initial_prompt = match initial_prompt {
+    let caller_prompt = match caller_prompt {
         Ok(prompt) => prompt,
         Err(error) => {
             return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
         }
     };
-    if let Some(prompt) = initial_prompt {
-        schedule_initial_prompt(
+    let launch_prompts = compose_launch_prompts(
+        resolved.template_prompt.as_deref(),
+        caller_prompt.as_deref(),
+    );
+    for prompt in &launch_prompts {
+        if let Err(error) = validate_initial_prompt(Some(prompt)) {
+            return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
+        }
+    }
+    if !launch_prompts.is_empty() {
+        schedule_initial_prompts(
             registry,
             result.process_id,
-            prompt,
+            launch_prompts,
             is_kimi_tool_type(&resolved.agent_tool_type),
         );
     }
@@ -1249,7 +1261,8 @@ fn resolve_agent_spawn(
             agent_tool_type: tool.tool_type.clone(),
             extra_args: apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?,
             model: requested_model,
-            initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
+            template_prompt: None,
+            caller_prompt: normalize_prompt(caller_prompt.as_deref()),
         });
     };
     let template = registry
@@ -1273,7 +1286,8 @@ fn resolve_agent_spawn(
         agent_tool_type: tool.tool_type.clone(),
         extra_args: apply_model_override(&tool, extra_args, requested_model.as_deref())?,
         model: requested_model,
-        initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
+        template_prompt: normalize_prompt(Some(&template.prompt)),
+        caller_prompt: normalize_prompt(caller_prompt.as_deref()),
     })
 }
 
@@ -1399,160 +1413,199 @@ fn detected_model(arguments: &[String], flag: ModelFlag) -> DetectedModel {
     detected
 }
 
-pub(crate) fn compose_initial_prompt(
-    template_prompt: Option<&str>,
-    caller_prompt: Option<&str>,
-) -> Option<String> {
-    let template_prompt = template_prompt
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty());
-    let caller_prompt = caller_prompt
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty());
-    match (template_prompt, caller_prompt) {
-        (Some(template), Some(caller)) => Some(format!("{template}\n\n{caller}")),
-        (Some(template), None) => Some(template.to_owned()),
-        (None, Some(caller)) => Some(caller.to_owned()),
+pub(crate) fn compose_initial_prompt(first: Option<&str>, second: Option<&str>) -> Option<String> {
+    let first = first.map(str::trim).filter(|prompt| !prompt.is_empty());
+    let second = second.map(str::trim).filter(|prompt| !prompt.is_empty());
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}\n\n{second}")),
+        (Some(first), None) => Some(first.to_owned()),
+        (None, Some(second)) => Some(second.to_owned()),
         (None, None) => None,
     }
 }
 
-fn schedule_initial_prompt(
+fn normalize_prompt(prompt: Option<&str>) -> Option<String> {
+    prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(str::to_owned)
+}
+
+pub(crate) fn compose_launch_prompts(
+    template_prompt: Option<&str>,
+    caller_prompt: Option<&str>,
+) -> Vec<String> {
+    [
+        normalize_prompt(template_prompt),
+        normalize_prompt(caller_prompt),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn schedule_initial_prompts(
     registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
-    prompt: String,
+    prompts: Vec<String>,
     verify_kimi_submission: bool,
 ) {
     tokio::spawn(async move {
-        let started = Instant::now();
-        let ready_deadline = started + INITIAL_PROMPT_READY_TIMEOUT;
-        let hard_deadline = started + INITIAL_PROMPT_HARD_TIMEOUT;
-        loop {
-            let delivery = {
-                let mut registry = registry.lock().await;
-                let now = Instant::now();
-                if now >= hard_deadline {
-                    let _ = registry.record_process_event(
-                        process_id,
-                        "initial_prompt_dropped",
-                        format!(
-                            "initial prompt dropped (reason: hard_cap) after {}s without a safe delivery point",
-                            INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
-                        ),
-                    );
-                    return;
-                }
-                // Keep this hot poll on the tracker snapshot. `get_status` observes durable
-                // attention state and would perform database work on every 50 ms tick.
-                let agent_state = match registry.agent_attention_snapshot(process_id) {
-                    Ok(agent_state) => agent_state,
-                    Err(error) => {
-                        let _ = registry.record_process_event(
-                            process_id,
-                            "initial_prompt_dropped",
-                            format!(
-                                "initial prompt dropped (reason: submit_failed): attention unavailable: {error}"
-                            ),
-                        );
-                        return;
-                    }
-                };
-                if agent_state.state == AttentionState::Exited {
-                    let _ = registry.record_process_event(
-                        process_id,
-                        "initial_prompt_dropped",
-                        "initial prompt dropped (reason: exited) before a safe delivery point",
-                    );
-                    return;
-                }
-                let dialog = match registry.pending_dialog(process_id) {
-                    Ok(dialog) => dialog,
-                    Err(error) => {
-                        let _ = registry.record_process_event(
-                            process_id,
-                            "initial_prompt_dropped",
-                            format!(
-                                "initial prompt dropped (reason: submit_failed): dialog state unavailable: {error}"
-                            ),
-                        );
-                        return;
-                    }
-                };
-                if dialog.is_some() {
-                    None
-                } else {
-                    let output_observed = agent_state.last_output_at.is_some();
-                    let ready = matches!(
-                        agent_state.state,
-                        AttentionState::Idle | AttentionState::NeedsInput
-                    ) && output_observed;
-                    let quiet_fallback = now >= ready_deadline
-                        && output_observed
-                        && agent_state
-                            .last_output_seconds
-                            .is_some_and(|seconds| seconds >= DEFAULT_IDLE_AFTER.as_secs_f64());
-                    (ready || quiet_fallback).then(|| {
-                        let used_fallback = !ready;
-                        let result = if verify_kimi_submission {
-                            registry.submit_initial_prompt(process_id, prompt.as_bytes())
-                        } else {
-                            registry.submit_input(process_id, prompt.as_bytes())
-                        }
-                        .map_err(|error| error.to_string());
-                        match &result {
-                            Ok(_) if verify_kimi_submission => {
-                                let _ = registry.record_process_event(
-                                    process_id,
-                                    "initial_prompt_queued",
-                                    "initial prompt queued; waiting for Kimi session creation",
-                                );
-                            }
-                            Ok(_) => {
-                                let suffix = if used_fallback {
-                                    " using the observed-output quiet fallback"
-                                } else {
-                                    ""
-                                };
-                                let _ = registry.record_process_event(
-                                    process_id,
-                                    "initial_prompt_delivered",
-                                    format!("initial prompt delivered{suffix}"),
-                                );
-                            }
-                            Err(error) => {
-                                let _ = registry.record_process_event(
-                                    process_id,
-                                    "initial_prompt_dropped",
-                                    format!(
-                                        "initial prompt dropped (reason: submit_failed): {error}"
-                                    ),
-                                );
-                            }
-                        }
-                        (result, used_fallback)
-                    })
-                }
+        let prompt_count = prompts.len();
+        for (prompt_index, prompt) in prompts.into_iter().enumerate() {
+            let prompt_number = prompt_index + 1;
+            let prompt_label = if prompt_index == 0 {
+                "initial prompt"
+            } else {
+                "follow-up launch prompt"
             };
-            if let Some((delivery, used_fallback)) = delivery {
-                if used_fallback {
-                    eprintln!(
-                        "process {process_id}: initial prompt readiness was not detected within {}s; using fallback delivery",
-                        INITIAL_PROMPT_READY_TIMEOUT.as_secs()
-                    );
+            let started = Instant::now();
+            let ready_deadline = started + INITIAL_PROMPT_READY_TIMEOUT;
+            let hard_deadline = started + INITIAL_PROMPT_HARD_TIMEOUT;
+            loop {
+                let delivery = {
+                    let mut registry = registry.lock().await;
+                    let now = Instant::now();
+                    if now >= hard_deadline {
+                        let _ = registry.record_process_event(
+                            process_id,
+                            "initial_prompt_dropped",
+                            format!(
+                                "{prompt_label} dropped ({prompt_number}/{prompt_count}, reason: hard_cap) after {}s without a safe delivery point",
+                                INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
+                            ),
+                        );
+                        return;
+                    }
+                    // Keep this hot poll on the tracker snapshot. `get_status` observes durable
+                    // attention state and would perform database work on every 50 ms tick.
+                    let agent_state = match registry.agent_attention_snapshot(process_id) {
+                        Ok(agent_state) => agent_state,
+                        Err(error) => {
+                            let _ = registry.record_process_event(
+                                process_id,
+                                "initial_prompt_dropped",
+                                format!(
+                                    "{prompt_label} dropped ({prompt_number}/{prompt_count}, reason: submit_failed): attention unavailable: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    if agent_state.state == AttentionState::Exited {
+                        let _ = registry.record_process_event(
+                            process_id,
+                            "initial_prompt_dropped",
+                            format!(
+                                "{prompt_label} dropped ({prompt_number}/{prompt_count}, reason: exited) before a safe delivery point"
+                            ),
+                        );
+                        return;
+                    }
+                    let dialog = match registry.pending_dialog(process_id) {
+                        Ok(dialog) => dialog,
+                        Err(error) => {
+                            let _ = registry.record_process_event(
+                                process_id,
+                                "initial_prompt_dropped",
+                                format!(
+                                    "{prompt_label} dropped ({prompt_number}/{prompt_count}, reason: submit_failed): dialog state unavailable: {error}"
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    if dialog.is_some() {
+                        None
+                    } else {
+                        let output_observed = agent_state.last_output_at.is_some();
+                        let ready = matches!(
+                            agent_state.state,
+                            AttentionState::Idle | AttentionState::NeedsInput
+                        ) && output_observed;
+                        // The first launch prompt retains the startup fallback for adapters that
+                        // cannot identify a resting prompt. Follow-ups must observe a completed
+                        // turn so template setup and caller direction can never collapse together.
+                        let quiet_fallback = prompt_index == 0
+                            && now >= ready_deadline
+                            && output_observed
+                            && agent_state
+                                .last_output_seconds
+                                .is_some_and(|seconds| seconds >= DEFAULT_IDLE_AFTER.as_secs_f64());
+                        (ready || quiet_fallback).then(|| {
+                            let used_fallback = !ready;
+                            let verify_this_submission =
+                                verify_kimi_submission && prompt_index == 0;
+                            let result = if verify_this_submission {
+                                registry.submit_initial_prompt(process_id, prompt.as_bytes())
+                            } else {
+                                registry.submit_input(process_id, prompt.as_bytes())
+                            }
+                            .map_err(|error| error.to_string());
+                            match &result {
+                                Ok(_) if verify_this_submission => {
+                                    let _ = registry.record_process_event(
+                                        process_id,
+                                        "initial_prompt_queued",
+                                        format!(
+                                            "{prompt_label} queued ({prompt_number}/{prompt_count}); waiting for Kimi session creation"
+                                        ),
+                                    );
+                                }
+                                Ok(_) => {
+                                    let suffix = if used_fallback {
+                                        " using the observed-output quiet fallback"
+                                    } else {
+                                        ""
+                                    };
+                                    let _ = registry.record_process_event(
+                                        process_id,
+                                        "initial_prompt_delivered",
+                                        format!(
+                                            "{prompt_label} delivered ({prompt_number}/{prompt_count}){suffix}"
+                                        ),
+                                    );
+                                }
+                                Err(error) => {
+                                    let _ = registry.record_process_event(
+                                        process_id,
+                                        "initial_prompt_dropped",
+                                        format!(
+                                            "{prompt_label} dropped ({prompt_number}/{prompt_count}, reason: submit_failed): {error}"
+                                        ),
+                                    );
+                                }
+                            }
+                            (result, used_fallback, verify_this_submission)
+                        })
+                    }
+                };
+                if let Some((delivery, used_fallback, verify_this_submission)) = delivery {
+                    if used_fallback {
+                        eprintln!(
+                            "process {process_id}: {prompt_label} readiness was not detected within {}s; using fallback delivery",
+                            INITIAL_PROMPT_READY_TIMEOUT.as_secs()
+                        );
+                    }
+                    if let Err(error) = delivery {
+                        eprintln!("process {process_id}: {prompt_label} delivery failed: {error}");
+                        return;
+                    }
+                    if verify_this_submission
+                        && !confirm_kimi_initial_prompt_submission(
+                            registry.clone(),
+                            process_id,
+                            used_fallback,
+                            prompt_count,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    break;
                 }
-                if let Err(error) = delivery {
-                    eprintln!("process {process_id}: initial prompt delivery failed: {error}");
-                } else if verify_kimi_submission {
-                    confirm_kimi_initial_prompt_submission(
-                        registry.clone(),
-                        process_id,
-                        used_fallback,
-                    )
-                    .await;
-                }
-                return;
+                tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
             }
-            tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
         }
     });
 }
@@ -1561,7 +1614,8 @@ async fn confirm_kimi_initial_prompt_submission(
     registry: crate::SharedProcessRegistry,
     process_id: ProcessId,
     used_fallback: bool,
-) {
+    prompt_count: usize,
+) -> bool {
     let hard_deadline = Instant::now() + INITIAL_PROMPT_HARD_TIMEOUT;
     let mut quiet_deadline = Instant::now() + KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT;
     let mut last_output_offset = 0;
@@ -1578,7 +1632,7 @@ async fn confirm_kimi_initial_prompt_submission(
                             "initial prompt dropped (reason: verification_failed): attention unavailable: {error}"
                         ),
                     );
-                    return;
+                    return false;
                 }
             };
             if agent_state.state == AttentionState::Exited {
@@ -1587,7 +1641,7 @@ async fn confirm_kimi_initial_prompt_submission(
                     "initial_prompt_dropped",
                     "initial prompt dropped (reason: exited) before Kimi created a session",
                 );
-                return;
+                return false;
             }
             let rendered = match registry.rendered_output(process_id) {
                 Ok(rendered) => rendered,
@@ -1599,7 +1653,7 @@ async fn confirm_kimi_initial_prompt_submission(
                             "initial prompt dropped (reason: verification_failed): rendered output unavailable: {error}"
                         ),
                     );
-                    return;
+                    return false;
                 }
             };
             let now = Instant::now();
@@ -1617,10 +1671,10 @@ async fn confirm_kimi_initial_prompt_submission(
                     process_id,
                     "initial_prompt_delivered",
                     format!(
-                        "initial prompt submitted after Kimi session creation verification{suffix}"
+                        "initial prompt submitted (1/{prompt_count}) after Kimi session creation verification{suffix}"
                     ),
                 );
-                true
+                Some(true)
             } else if now >= hard_deadline {
                 let _ = registry.record_process_event(
                     process_id,
@@ -1630,7 +1684,7 @@ async fn confirm_kimi_initial_prompt_submission(
                         INITIAL_PROMPT_HARD_TIMEOUT.as_secs()
                     ),
                 );
-                true
+                Some(false)
             } else if now >= quiet_deadline {
                 let _ = registry.record_process_event(
                     process_id,
@@ -1640,13 +1694,13 @@ async fn confirm_kimi_initial_prompt_submission(
                         KIMI_INITIAL_PROMPT_CONFIRM_QUIET_TIMEOUT.as_secs()
                     ),
                 );
-                true
+                Some(false)
             } else {
-                false
+                None
             }
         };
-        if finished {
-            return;
+        if let Some(delivered) = finished {
+            return delivered;
         }
         tokio::time::sleep(INITIAL_PROMPT_POLL_INTERVAL).await;
     }
@@ -3038,23 +3092,23 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_composition_trims_edges_and_adds_one_blank_line() {
+    fn template_and_caller_prompts_are_delivered_as_separate_turns() {
         assert_eq!(
-            compose_initial_prompt(
+            compose_launch_prompts(
                 Some("  Keep the change focused.\n"),
                 Some("\nImplement the dialog.  ")
             ),
-            Some("Keep the change focused.\n\nImplement the dialog.".into())
+            ["Keep the change focused.", "Implement the dialog."]
         );
         assert_eq!(
-            compose_initial_prompt(Some(" Template only "), Some("  ")),
-            Some("Template only".into())
+            compose_launch_prompts(Some(" Template only "), Some("  ")),
+            ["Template only"]
         );
         assert_eq!(
-            compose_initial_prompt(None, Some(" Prompt only ")),
-            Some("Prompt only".into())
+            compose_launch_prompts(None, Some(" Prompt only ")),
+            ["Prompt only"]
         );
-        assert_eq!(compose_initial_prompt(Some("\n"), None), None);
+        assert!(compose_launch_prompts(Some("\n"), None).is_empty());
     }
 
     #[test]
@@ -3142,9 +3196,10 @@ mod tests {
         assert_eq!(default.agent_tool_id, 91);
         assert_eq!(default.extra_args, ["--template", "model-a", "--caller"]);
         assert_eq!(
-            default.initial_prompt.as_deref(),
-            Some("Review carefully.\n\nCheck this.")
+            default.template_prompt.as_deref(),
+            Some("Review carefully.")
         );
+        assert_eq!(default.caller_prompt.as_deref(), Some("Check this."));
 
         let overridden = resolve_agent_spawn(
             &registry,
@@ -3158,9 +3213,10 @@ mod tests {
         assert_eq!(overridden.agent_tool_id, 92);
         assert_eq!(overridden.extra_args, ["--caller"]);
         assert_eq!(
-            overridden.initial_prompt.as_deref(),
-            Some("Review carefully.\n\nCheck this.")
+            overridden.template_prompt.as_deref(),
+            Some("Review carefully.")
         );
+        assert_eq!(overridden.caller_prompt.as_deref(), Some("Check this."));
 
         assert_eq!(
             resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None, None).unwrap_err(),

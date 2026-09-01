@@ -46,7 +46,7 @@ test('add-agent launch choices expose templates and standalone agents directly',
     'function selectTemplateAgent',
     'standalone agent selection handler'
   );
-  assert.match(standaloneHandler, /onChange\(\{ templateId: null, agentToolId: tool\.id \}\)/);
+  assert.match(standaloneHandler, /onChange\(\{[\s\S]*templateId: null,[\s\S]*agentToolId: tool\.id/);
   assert.match(standaloneHandler, /rememberChoice\(\{ kind: 'tool', id: tool\.id \}\)/);
 });
 
@@ -62,7 +62,7 @@ test('a template keeps its default agent and reveals optional override choices',
   assert.match(selectTemplate, /if \(!selection\) return/);
   assert.match(
     selectTemplate,
-    /onChange\(\{ templateId: selection\.id, agentToolId: selection\.agentToolId \}\)/
+    /onChange\(\{[\s\S]*templateId: selection\.id,[\s\S]*agentToolId: selection\.agentToolId/
   );
 
   const standaloneLoop = source.indexOf('{#each enabledTools as tool');
@@ -90,7 +90,7 @@ test('a template keeps its default agent and reveals optional override choices',
     'template override selection handler'
   );
   assert.match(overrideHandler, /if \(!selectedTemplate\) return/);
-  assert.match(overrideHandler, /onChange\(\{ agentToolId: tool\.id \}\)/);
+  assert.match(overrideHandler, /onChange\(\{[\s\S]*agentToolId: tool\.id/);
   assert.match(
     overrideHandler,
     /rememberChoice\(\{ kind: 'template', id: selectedTemplate\.id, agentToolId: tool\.id \}\)/
@@ -109,7 +109,7 @@ test('the additional-instructions surface owns Create and remains optional', asy
     'additional instructions surface'
   );
   assert.match(instructionSurface, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);
-  assert.match(instructionSurface, /Added after \$\{selectedTemplate\.name\}'s instructions\./);
+  assert.match(instructionSurface, /Sent as a separate message after \$\{selectedTemplate\.name\} finishes its setup\./);
   assert.match(instructionSurface, /<Textarea\b/);
   const createButton = instructionSurface.match(/<Button\b([\s\S]*?)>[\s\S]*?Creat(?:e|ing)/);
   assert.ok(createButton, 'Create is rendered beside the prompt controls');

@@ -59,6 +59,8 @@ test('persistence round-trips each kind per profile and clones array fields', ()
       ...createCreationDraft('agent', 7, -1, 10),
       prompt: 'Keep this prompt',
       attachments: ['/tmp/workman/image-one.png'],
+      model: 'fable',
+      effort: 'xhigh',
       touched: true
     },
     { ...createCreationDraft('command', 7, -2, 20), name: 'Vite', command: 'npm run dev', saveMode: 'local', touched: true },
@@ -78,6 +80,8 @@ test('persistence round-trips each kind per profile and clones array fields', ()
 test('agent draft attachments start empty and restore valid Unix and Windows paths independently', () => {
   const empty = createCreationDraft('agent', 7, -1, 10);
   assert.deepEqual(empty.attachments, []);
+  assert.equal(empty.model, '');
+  assert.equal(empty.effort, '');
 
   const storage = memoryStorage({
     [creationDraftStorageKey(3)]: JSON.stringify({

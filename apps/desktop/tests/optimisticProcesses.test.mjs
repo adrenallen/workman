@@ -22,7 +22,8 @@ test('failed optimistic agents retain an independent exact retry payload', () =>
     project_id: 7,
     agent_template_id: 12,
     name: 'reviewer',
-    extra_args: ['--model', 'fast model'],
+    model: 'fable',
+    extra_args: ['--effort', 'xhigh'],
     prompt: 'Review the patch.'
   };
   const optimistic = createOptimisticProcess({
@@ -41,7 +42,8 @@ test('failed optimistic agents retain an independent exact retry payload', () =>
     project_id: 7,
     agent_template_id: 12,
     name: 'reviewer',
-    extra_args: ['--model', 'fast model'],
+    model: 'fable',
+    extra_args: ['--effort', 'xhigh'],
     prompt: 'Review the patch.'
   });
   assert.equal(failed.error, 'spawn failed');
