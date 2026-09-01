@@ -22,7 +22,7 @@ tauri-plugin-dialog = "2.6.0"
 tauri-plugin-notification = "2.3.3"
 notify-rust = { version = "4.18.0", features = ["preview-macos-un"] }
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
