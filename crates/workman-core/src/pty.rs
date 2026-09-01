@@ -58,6 +58,8 @@ pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
 
 /// Maximum cadence for the rendered viewport used by daemon-side attention classification.
 const ATTENTION_RENDER_CADENCE: Duration = Duration::from_millis(16);
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 /// A fixed-capacity byte ring that always retains the newest bytes.
 ///
@@ -1055,7 +1057,9 @@ fn process_submissions(
 ) {
     for submission in submissions {
         let output_before_content = raw_output.total_bytes_seen();
-        if write_and_flush(&writer, &submission.content).is_err() {
+        let content =
+            framed_submission_content(&submission.content, terminal_output.is_bracketed_paste());
+        if write_and_flush(&writer, &content).is_err() {
             break;
         }
         thread::sleep(submission.key_delay);
@@ -1105,6 +1109,18 @@ fn process_submissions(
             }
         }
     }
+}
+
+fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
+    if !bracketed_paste || content.is_empty() {
+        return content.to_vec();
+    }
+    let mut framed =
+        Vec::with_capacity(BRACKETED_PASTE_START.len() + content.len() + BRACKETED_PASTE_END.len());
+    framed.extend_from_slice(BRACKETED_PASTE_START);
+    framed.extend_from_slice(content);
+    framed.extend_from_slice(BRACKETED_PASTE_END);
+    framed
 }
 
 fn write_and_flush(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> io::Result<()> {
@@ -1768,6 +1784,17 @@ mod tests {
                 truncated: true,
             }
         );
+    }
+
+    #[test]
+    fn daemon_submissions_follow_the_negotiated_bracketed_paste_protocol() {
+        let content = b"template line one\ntemplate line two\n\ncaller direction";
+        assert_eq!(framed_submission_content(content, false), content);
+        assert_eq!(
+            framed_submission_content(content, true),
+            [BRACKETED_PASTE_START, content, BRACKETED_PASTE_END].concat()
+        );
+        assert!(framed_submission_content(b"", true).is_empty());
     }
 
     #[cfg(windows)]

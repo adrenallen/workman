@@ -20,6 +20,15 @@
     isStandaloneAgentSelected,
     resolveAgentDraftChoice
   } from './agentDraftChoices';
+  import {
+    AGENT_EFFORT_LEVELS,
+    agentModelSuggestions,
+    agentSupportsEffort,
+    agentSupportsModel,
+    configuredAgentLaunchOptions,
+    splitAgentLaunchOptions,
+    withAgentLaunchOptions
+  } from './agentLaunchOptions';
   import CreationDraftScaffold from './CreationDraftScaffold.svelte';
   import { parseExtraArgs, type AgentTool, type SpawnAgentInput } from './agentTools';
   import {
@@ -33,6 +42,7 @@
   import IconButton from './components/ds/IconButton.svelte';
   import * as Collapsible from './components/ui/collapsible';
   import { Input } from './components/ui/input';
+  import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
   import { primaryModifier, primaryModifierLabel } from './primaryModifier';
 
@@ -117,6 +127,13 @@
       && selectedTool !== null
       && selectedTool.id !== selectedTemplate.agent_tool_id
   );
+  const inheritedLaunchOptions = $derived(configuredAgentLaunchOptions(
+    selectedTool,
+    selectedTemplate && !agentOverridden ? selectedTemplate.extra_args : []
+  ));
+  const modelSupported = $derived(agentSupportsModel(selectedTool?.tool_type));
+  const effortSupported = $derived(agentSupportsEffort(selectedTool?.tool_type));
+  const modelSuggestions = $derived(agentModelSuggestions(selectedTool?.tool_type));
   const canCreate = $derived(
     !loading
       && !attachmentSaving
@@ -165,20 +182,31 @@
     if (!selection) return;
     templateInstructionsOpen = false;
     templateAgentOpen = false;
-    onChange({ templateId: selection.id, agentToolId: selection.agentToolId });
+    onChange({
+      templateId: selection.id,
+      agentToolId: selection.agentToolId,
+      ...(draft.agentToolId !== selection.agentToolId ? { model: '', effort: '' } : {})
+    });
     rememberChoice(selection);
   }
 
   function selectStandaloneAgent(tool: AgentTool): void {
     templateInstructionsOpen = false;
     templateAgentOpen = false;
-    onChange({ templateId: null, agentToolId: tool.id });
+    onChange({
+      templateId: null,
+      agentToolId: tool.id,
+      ...(draft.agentToolId !== tool.id ? { model: '', effort: '' } : {})
+    });
     rememberChoice({ kind: 'tool', id: tool.id });
   }
 
   function selectTemplateAgent(tool: AgentTool): void {
     if (!selectedTemplate) return;
-    onChange({ agentToolId: tool.id });
+    onChange({
+      agentToolId: tool.id,
+      ...(draft.agentToolId !== tool.id ? { model: '', effort: '' } : {})
+    });
     rememberChoice({ kind: 'template', id: selectedTemplate.id, agentToolId: tool.id });
     templateAgentOpen = false;
   }
@@ -196,8 +224,19 @@
   function submit(): void {
     if (!canCreate || !selectedTool || busy) return;
     let extraArgs: string[];
+    let requestedModel: string | null;
     try {
-      extraArgs = parseExtraArgs(draft.extraArgs);
+      const parsed = splitAgentLaunchOptions(
+        parseExtraArgs(draft.extraArgs),
+        selectedTool.tool_type
+      );
+      requestedModel = draft.model.trim() || parsed.model;
+      extraArgs = withAgentLaunchOptions(
+        parsed.extraArgs,
+        selectedTool.tool_type,
+        null,
+        draft.effort || parsed.effort
+      );
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause));
       return;
@@ -212,6 +251,7 @@
           ? { agent_template_id: selectedTemplate.id, agent_tool_id: selectedTool.id }
           : { agent_tool_id: selectedTool.id }),
         name: draft.name.trim() || undefined,
+        model: requestedModel || undefined,
         extra_args: extraArgs,
         prompt: draft.prompt.trim() || undefined,
         attachments: draft.attachments.length > 0 ? [...draft.attachments] : undefined
@@ -589,7 +629,7 @@
     >
       <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
         <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
-        <small>{selectedTemplate ? `Added after ${selectedTemplate.name}'s instructions.` : 'Tell this agent what to do.'}</small>
+        <small>{selectedTemplate ? `Combined with ${selectedTemplate.name}'s instructions in one starting prompt.` : 'Tell this agent what to do.'}</small>
       </label>
       <div class="prompt-composer">
         <Textarea
@@ -651,7 +691,66 @@
       <Collapsible.Content>
         <div class="advanced-grid">
           <label class="field-label" for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
-          <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Extra launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder='--model "gpt-5"' disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
+          <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Other launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder="--permission-mode plan" disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
+          {#if modelSupported || effortSupported}
+            <section class="launch-tuning" aria-labelledby={`draft-agent-tuning-${draft.id}`}>
+              <div class="launch-tuning-heading">
+                <span id={`draft-agent-tuning-${draft.id}`}>Model &amp; effort</span>
+                <small>
+                  {#if inheritedLaunchOptions.model || inheritedLaunchOptions.effort}
+                    Inherits {inheritedLaunchOptions.model ?? 'the configured model'}{#if inheritedLaunchOptions.effort} · {inheritedLaunchOptions.effort} effort{/if}
+                  {:else}
+                    Uses the selected agent's defaults
+                  {/if}
+                </small>
+              </div>
+              <div class="launch-tuning-fields">
+                {#if modelSupported}
+                  <label class="field-label" for={`draft-agent-model-${draft.id}`}>
+                    <span>Model <small>optional override</small></span>
+                    <Input
+                      id={`draft-agent-model-${draft.id}`}
+                      value={draft.model}
+                      list={modelSuggestions.length > 0 ? `draft-agent-models-${draft.id}` : undefined}
+                      placeholder={inheritedLaunchOptions.model ?? 'Agent default'}
+                      disabled={busy}
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck={false}
+                      oninput={(event) => onChange({ model: event.currentTarget.value })}
+                      onkeydown={handleKeydown}
+                    />
+                    {#if modelSuggestions.length > 0}
+                      <datalist id={`draft-agent-models-${draft.id}`}>
+                        {#each modelSuggestions as model}<option value={model}></option>{/each}
+                      </datalist>
+                    {/if}
+                  </label>
+                {/if}
+                {#if effortSupported}
+                  <label class="field-label" for={`draft-agent-effort-${draft.id}`}>
+                    <span>Effort <small>optional override</small></span>
+                    <Select.Root
+                      type="single"
+                      value={draft.effort || 'inherit'}
+                      disabled={busy}
+                      onValueChange={(value) => onChange({ effort: value === 'inherit' ? '' : value })}
+                    >
+                      <Select.Trigger id={`draft-agent-effort-${draft.id}`} class="w-full">
+                        {draft.effort || (inheritedLaunchOptions.effort ? `Default · ${inheritedLaunchOptions.effort}` : 'Agent default')}
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Item value="inherit" label={inheritedLaunchOptions.effort ? `Default · ${inheritedLaunchOptions.effort}` : 'Agent default'} />
+                        {#each AGENT_EFFORT_LEVELS as effort}
+                          <Select.Item value={effort} label={effort} />
+                        {/each}
+                      </Select.Content>
+                    </Select.Root>
+                  </label>
+                {/if}
+              </div>
+            </section>
+          {/if}
         </div>
       </Collapsible.Content>
     </Collapsible.Root>
@@ -715,6 +814,11 @@
   .override-note { display: block; margin-top: 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .template-preview { border-top: 1px solid var(--border); padding: 8px 10px 9px; background: var(--card); color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
   .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
+  .launch-tuning { display: grid; grid-column: 1 / -1; gap: 9px; border-top: 1px solid var(--border); padding-top: 11px; }
+  .launch-tuning-heading { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .launch-tuning-heading > span { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
+  .launch-tuning-heading small { overflow: hidden; color: var(--muted-foreground); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .launch-tuning-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
   .prompt-field { display: grid; align-content: start; gap: 6px; }
   .prompt-composer { overflow: hidden; border: 1px solid var(--input); border-radius: var(--radius); background: var(--background); transition: border-color 120ms ease, box-shadow 120ms ease; }
@@ -731,7 +835,7 @@
   .attachment-chip img { width: 28px; height: 28px; flex: 0 0 auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
   .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 620px) {
-    .advanced-grid, .roster-options, .override-options { grid-template-columns: 1fr; }
+    .advanced-grid, .launch-tuning-fields, .roster-options, .override-options { grid-template-columns: 1fr; }
     .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }
     .instruction-label { align-items: flex-start; flex-direction: column; gap: 2px; }
     .prompt-actions { align-items: stretch; flex-direction: column; }

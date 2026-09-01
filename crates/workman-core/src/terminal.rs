@@ -484,6 +484,11 @@ impl TerminalEmulator {
         self.terminal.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// Whether the application has enabled DEC private bracketed-paste mode (2004).
+    pub fn is_bracketed_paste(&self) -> bool {
+        self.terminal.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Whether the application has enabled DEC private focus reporting (mode 1004).
     pub fn is_focus_reporting(&self) -> bool {
         self.terminal.mode().contains(TermMode::FOCUS_IN_OUT)
@@ -503,6 +508,7 @@ impl fmt::Debug for TerminalEmulator {
             .field("history_rows", &self.history_rows())
             .field("scrollback_limit", &self.scrollback_lines)
             .field("alternate_screen", &self.is_alternate_screen())
+            .field("bracketed_paste", &self.is_bracketed_paste())
             .field("focus_reporting", &self.is_focus_reporting())
             .field("keyboard_protocol", &self.keyboard_protocol())
             .finish_non_exhaustive()
@@ -590,6 +596,11 @@ impl TerminalOutput {
 
     pub fn history_rows(&self) -> usize {
         self.lock().history_rows()
+    }
+
+    /// Whether the latest PTY output enabled DEC private bracketed-paste mode (2004).
+    pub fn is_bracketed_paste(&self) -> bool {
+        self.lock().is_bracketed_paste()
     }
 
     /// Whether the latest PTY output enabled DEC private focus reporting (mode 1004).
@@ -703,6 +714,18 @@ mod tests {
 
         emulator.feed(b"\x1b[?1004l");
         assert!(!emulator.is_focus_reporting());
+    }
+
+    #[test]
+    fn bracketed_paste_tracks_dec_private_mode_2004() {
+        let mut emulator = TerminalEmulator::new(3, 20, 4);
+        assert!(!emulator.is_bracketed_paste());
+
+        emulator.feed(b"\x1b[?2004h");
+        assert!(emulator.is_bracketed_paste());
+
+        emulator.feed(b"\x1b[?2004l");
+        assert!(!emulator.is_bracketed_paste());
     }
 
     #[test]

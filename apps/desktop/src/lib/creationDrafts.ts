@@ -18,6 +18,8 @@ export interface AgentCreationDraft extends CreationDraftBase {
   name: string;
   prompt: string;
   attachments: string[];
+  model: string;
+  effort: string;
   extraArgs: string;
 }
 
@@ -86,6 +88,8 @@ export function createCreationDraft(
       name: '',
       prompt: '',
       attachments: [],
+      model: '',
+      effort: '',
       extraArgs: ''
     };
   }
@@ -242,6 +246,8 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
       || !isNullablePositiveInteger(value.templateId)
       || !isDraftText(value.name)
       || !isDraftText(value.prompt)
+      || !isDraftText(value.model ?? '')
+      || !isDraftText(value.effort ?? '')
       || !isDraftText(value.extraArgs)
     ) return null;
     return {
@@ -252,6 +258,8 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
       name: value.name,
       prompt: value.prompt,
       attachments,
+      model: typeof value.model === 'string' ? value.model : '',
+      effort: typeof value.effort === 'string' ? value.effort : '',
       extraArgs: value.extraArgs
     };
   }
@@ -351,6 +359,8 @@ function creationDraftTextLength(draft: CreationDraft): number {
   if (draft.kind === 'agent') {
     return draft.name.length
       + draft.prompt.length
+      + draft.model.length
+      + draft.effort.length
       + draft.extraArgs.length
       + draft.attachments.reduce((total, path) => total + path.length, 0);
   }

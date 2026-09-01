@@ -142,7 +142,8 @@ struct SpawnAgentArgs {
     /// for model selection; use model instead.
     #[serde(default)]
     extra_args: Vec<String>,
-    /// Optional first prompt delivered once the agent reaches a safe input state.
+    /// Optional first prompt delivered once the agent reaches a safe input state. When a template
+    /// is selected, its reusable prompt is prepended to this text in the same submission.
     #[serde(default)]
     initial_prompt: Option<String>,
     /// Optional local image paths. Workman copies them into daemon-owned per-process storage and
@@ -568,7 +569,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while keeping the prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,

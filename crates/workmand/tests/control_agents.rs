@@ -81,7 +81,7 @@ $| = 1;
 system('stty', 'raw', '-echo');
 print "agent-args:" . join('|', @ARGV) . "\r\n";
 select undef, undef, undef, 0.25;
-print "agent-ready\r\n\$";
+print "\033[?2004hagent-ready\r\n\$";
 my $prompt = '';
 while (1) {
     my $chunk = '';
@@ -89,6 +89,10 @@ while (1) {
     exit 3 unless defined($count) && $count > 0;
     for my $character (split //, $chunk) {
         if ($character eq "\r") {
+            my $bracketed = $prompt =~ /^\e\[200~.*\e\[201~$/s;
+            $prompt =~ s/^\e\[200~//;
+            $prompt =~ s/\e\[201~$//;
+            print "\r\nagent-paste:" . ($bracketed ? "bracketed" : "raw") . "\r\n";
             print "\r\nagent-answer:$prompt\r\n";
             sleep 30;
             exit 0;
@@ -232,6 +236,10 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    let template_prompt = format!(
+        "TEMPLATE-BEGIN\n{}TEMPLATE-END",
+        "Keep this orchestrator instruction intact across terminal reads.\n".repeat(160)
+    );
     let template = rpc(
         &mut socket,
         23,
@@ -241,7 +249,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
                 "name": "Review worker",
                 "agent_tool_id": tool_id,
                 "extra_args": ["--template", "alpha value"],
-                "prompt": "You are a careful reviewer."
+                "prompt": template_prompt.clone()
             }
         }),
     )
@@ -542,7 +550,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     let saved_attachment = data_dir.join(format!("agent-attachments/{template_process_id}/01.png"));
     assert!(saved_attachment.is_file());
     let expected_template_prompt = format!(
-        "agent-answer:You are a careful reviewer.\n\nReview line one.\nReview line two.\n\nAttached image files were saved locally at these paths:\n- {}",
+        "agent-answer:{template_prompt}\n\nReview line one.\nReview line two.\n\nAttached image files were saved locally at these paths:\n- {}",
         saved_attachment.display()
     );
     let template_deadline = Instant::now() + Duration::from_secs(8);
@@ -554,6 +562,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         let output = String::from_utf8_lossy(&raw.data);
         if output.contains(&expected_template_prompt) {
             assert_eq!(output.matches("agent-answer:").count(), 1);
+            assert!(output.contains("agent-paste:bracketed"));
             assert!(output.contains("agent-args:--template|alpha value|--caller|beta"));
             assert!(
                 output.find("agent-ready").unwrap() < output.find("agent-answer:").unwrap(),
@@ -601,7 +610,11 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             .await
             .raw_output(override_process_id, None, usize::MAX)?;
         let output = String::from_utf8_lossy(&raw.data);
-        if output.contains("agent-answer:You are a careful reviewer.\n\nUse the selected agent.") {
+        let expected_override_prompt =
+            format!("agent-answer:{template_prompt}\n\nUse the selected agent.");
+        if output.contains(&expected_override_prompt) {
+            assert_eq!(output.matches("agent-answer:").count(), 1);
+            assert!(output.contains("agent-paste:bracketed"));
             assert!(output.contains("agent-args:--caller|override"));
             assert!(!output.contains("--template"));
             assert_eq!(

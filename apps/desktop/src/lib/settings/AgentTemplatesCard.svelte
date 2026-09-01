@@ -7,6 +7,15 @@
   import XIcon from '@lucide/svelte/icons/x';
 
   import AgentBrandMark from '../AgentBrandMark.svelte';
+  import {
+    AGENT_EFFORT_LEVELS,
+    agentModelSuggestions,
+    agentSupportsEffort,
+    agentSupportsModel,
+    configuredAgentLaunchOptions,
+    splitAgentLaunchOptions,
+    withAgentLaunchOptions
+  } from '../agentLaunchOptions';
   import type { AgentTool, AgentToolsSnapshot } from '../agentTools';
   import { formatExtraArgs, getAgentToolsStore, parseExtraArgs } from '../agentTools';
   import {
@@ -32,6 +41,8 @@
     id?: number;
     name: string;
     agentToolId: number;
+    model: string;
+    effort: string;
     extraArgs: string;
     prompt: string;
   }
@@ -48,6 +59,11 @@
   let saving = $state(false);
   let busyId = $state<number | null>(null);
   let removeRequest = $state<AgentTemplate | null>(null);
+  let draftTool = $derived(
+    toolSnapshot.tools.find((tool) => tool.id === draft?.agentToolId) ?? null
+  );
+  let draftAgentDefaults = $derived(configuredAgentLaunchOptions(draftTool));
+  let draftModelSuggestions = $derived(agentModelSuggestions(draftTool?.tool_type));
 
   $effect(() => {
     const unsubscribeTools = toolStore.subscribe((snapshot) => (toolSnapshot = snapshot));
@@ -72,15 +88,19 @@
       onError('Add or enable an agent before creating an agent template');
       return;
     }
-    draft = { name: '', agentToolId: tool.id, extraArgs: '', prompt: '' };
+    draft = { name: '', agentToolId: tool.id, model: '', effort: '', extraArgs: '', prompt: '' };
   }
 
   function beginEdit(template: AgentTemplate): void {
+    const tool = toolFor(template);
+    const launch = splitAgentLaunchOptions(template.extra_args, tool?.tool_type);
     draft = {
       id: template.id,
       name: template.name,
       agentToolId: template.agent_tool_id,
-      extraArgs: formatExtraArgs(template.extra_args),
+      model: launch.model ?? '',
+      effort: launch.effort ?? '',
+      extraArgs: formatExtraArgs(launch.extraArgs),
       prompt: template.prompt
     };
   }
@@ -89,7 +109,13 @@
     if (!draft || saving || !draft.name.trim()) return;
     let extraArgs: string[];
     try {
-      extraArgs = parseExtraArgs(draft.extraArgs);
+      const parsed = splitAgentLaunchOptions(parseExtraArgs(draft.extraArgs), draftTool?.tool_type);
+      extraArgs = withAgentLaunchOptions(
+        parsed.extraArgs,
+        draftTool?.tool_type,
+        draft.model.trim() || parsed.model,
+        draft.effort || parsed.effort
+      );
     } catch (cause) {
       onError(message(cause));
       return;
@@ -146,6 +172,29 @@
     return toolSnapshot.tools.find((tool) => tool.id === template.agent_tool_id) ?? null;
   }
 
+  function selectDraftTool(value: string | undefined): void {
+    if (!draft || !value) return;
+    const tool = toolSnapshot.tools.find((candidate) => candidate.id === Number(value));
+    if (!tool) return;
+    if (tool.id !== draft.agentToolId) {
+      draft.model = '';
+      draft.effort = '';
+    }
+    draft.agentToolId = tool.id;
+    if (!agentSupportsModel(tool.tool_type)) draft.model = '';
+    if (!agentSupportsEffort(tool.tool_type)) draft.effort = '';
+  }
+
+  function templateLaunchSummary(template: AgentTemplate, tool: AgentTool | null): string {
+    const launch = splitAgentLaunchOptions(template.extra_args, tool?.tool_type);
+    const parts = [
+      launch.model,
+      launch.effort ? `${launch.effort} effort` : null,
+      launch.extraArgs.length ? formatExtraArgs(launch.extraArgs) : null
+    ].filter((part): part is string => Boolean(part));
+    return parts.length > 0 ? parts.join(' · ') : 'Agent launch defaults';
+  }
+
   function message(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
@@ -191,7 +240,7 @@
               <span class="shrink-0 text-xs text-muted-foreground">{tool?.name ?? 'Missing default agent'}</span>
             </div>
             <p class="mt-0.5 truncate text-xs text-muted-foreground">
-              {template.extra_args.length ? formatExtraArgs(template.extra_args) : 'No extra launch args'} · {template.prompt || 'No template prompt'}
+              {templateLaunchSummary(template, tool)} · {template.prompt || 'No template prompt'}
             </p>
           </div>
           <div class="flex gap-1">
@@ -218,7 +267,7 @@
           <Input id="template-name" bind:value={draft.name} placeholder="Implementation worker" required disabled={saving} />
         </label>
         <label class="grid gap-1.5 text-sm font-medium" for="template-tool">Default agent
-          <Select.Root type="single" value={String(draft.agentToolId)} disabled={saving} onValueChange={(value) => { if (value) draft!.agentToolId = Number(value); }}>
+          <Select.Root type="single" value={String(draft.agentToolId)} disabled={saving} onValueChange={selectDraftTool}>
             <Select.Trigger id="template-tool" class="w-full">
               {@const currentTool = toolSnapshot.tools.find((tool) => tool.id === draft?.agentToolId)}
               {#if currentTool}<AgentBrandMark tool={currentTool} size={16} />{currentTool.name}{:else}Select a default agent{/if}
@@ -237,12 +286,55 @@
           </Select.Root>
         </label>
       </div>
-      <label class="grid gap-1.5 text-sm font-medium" for="template-args">Extra launch args <span class="font-normal text-muted-foreground">(optional)</span>
-        <Input id="template-args" bind:value={draft.extraArgs} placeholder='--model "gpt-5.6-sol"' disabled={saving} autocapitalize="off" autocorrect="off" spellcheck={false} />
-        <span class="text-xs font-normal text-muted-foreground">Quotes group one literal argument. These are prepended to any per-launch arguments.</span>
+      {#if draftTool && (agentSupportsModel(draftTool.tool_type) || agentSupportsEffort(draftTool.tool_type))}
+        <section class="grid gap-3 rounded-md border border-border bg-background/55 p-3" aria-labelledby="template-launch-tuning">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <strong id="template-launch-tuning" class="text-sm font-medium">Default model &amp; effort</strong>
+            <small class="text-xs text-muted-foreground">Shown as inherited values in New Agent · Advanced</small>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            {#if agentSupportsModel(draftTool.tool_type)}
+              <label class="grid gap-1.5 text-sm font-medium" for="template-model">Model <span class="font-normal text-muted-foreground">(optional)</span>
+                <Input
+                  id="template-model"
+                  bind:value={draft.model}
+                  list={draftModelSuggestions.length > 0 ? 'template-models' : undefined}
+                  placeholder={draftAgentDefaults.model ?? 'Agent default'}
+                  disabled={saving}
+                  autocapitalize="off"
+                  autocorrect="off"
+                  spellcheck={false}
+                />
+                {#if draftModelSuggestions.length > 0}
+                  <datalist id="template-models">
+                    {#each draftModelSuggestions as model}<option value={model}></option>{/each}
+                  </datalist>
+                {/if}
+              </label>
+            {/if}
+            {#if agentSupportsEffort(draftTool.tool_type)}
+              <label class="grid gap-1.5 text-sm font-medium" for="template-effort">Effort <span class="font-normal text-muted-foreground">(optional)</span>
+                <Select.Root type="single" value={draft.effort || 'inherit'} disabled={saving} onValueChange={(value) => { if (draft) draft.effort = value === 'inherit' ? '' : value; }}>
+                  <Select.Trigger id="template-effort" class="w-full">
+                    {draft.effort || (draftAgentDefaults.effort ? `Agent default · ${draftAgentDefaults.effort}` : 'Agent default')}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="inherit" label={draftAgentDefaults.effort ? `Agent default · ${draftAgentDefaults.effort}` : 'Agent default'} />
+                    {#each AGENT_EFFORT_LEVELS as effort}<Select.Item value={effort} label={effort} />{/each}
+                  </Select.Content>
+                </Select.Root>
+              </label>
+            {/if}
+          </div>
+        </section>
+      {/if}
+      <label class="grid gap-1.5 text-sm font-medium" for="template-args">Other launch args <span class="font-normal text-muted-foreground">(optional)</span>
+        <Input id="template-args" bind:value={draft.extraArgs} placeholder="--permission-mode plan" disabled={saving} autocapitalize="off" autocorrect="off" spellcheck={false} />
+        <span class="text-xs font-normal text-muted-foreground">Quotes group one literal argument. These run before any per-launch overrides.</span>
       </label>
       <label class="grid gap-1.5 text-sm font-medium" for="template-prompt">Template prompt <span class="font-normal text-muted-foreground">(optional)</span>
         <Textarea id="template-prompt" bind:value={draft.prompt} rows={6} placeholder="Persistent instructions for agents launched with this template" disabled={saving} />
+        <span class="text-xs font-normal text-muted-foreground">Combined with any New Agent instructions and sent as one starting prompt.</span>
       </label>
       <footer class="flex justify-end gap-2">
         <Button type="button" variant="ghost" disabled={saving} onclick={() => (draft = null)}>Cancel</Button>
