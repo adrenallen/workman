@@ -334,7 +334,7 @@
       </label>
       <label class="grid gap-1.5 text-sm font-medium" for="template-prompt">Template prompt <span class="font-normal text-muted-foreground">(optional)</span>
         <Textarea id="template-prompt" bind:value={draft.prompt} rows={6} placeholder="Persistent instructions for agents launched with this template" disabled={saving} />
-        <span class="text-xs font-normal text-muted-foreground">Sent first as the template's setup message. New Agent instructions follow as a separate message.</span>
+        <span class="text-xs font-normal text-muted-foreground">Combined with any New Agent instructions and sent as one starting prompt.</span>
       </label>
       <footer class="flex justify-end gap-2">
         <Button type="button" variant="ghost" disabled={saving} onclick={() => (draft = null)}>Cancel</Button>

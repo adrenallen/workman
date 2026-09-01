@@ -629,7 +629,7 @@
     >
       <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
         <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
-        <small>{selectedTemplate ? `Sent as a separate message after ${selectedTemplate.name} finishes its setup.` : 'Tell this agent what to do.'}</small>
+        <small>{selectedTemplate ? `Combined with ${selectedTemplate.name}'s instructions in one starting prompt.` : 'Tell this agent what to do.'}</small>
       </label>
       <div class="prompt-composer">
         <Textarea
@@ -637,7 +637,7 @@
           class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
           bind:ref={promptTextarea}
           value={draft.prompt}
-          placeholder={selectedTemplate ? 'What should this template do next?' : 'What should this agent do?'}
+          placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
           disabled={busy}
           oninput={(event) => onChange({ prompt: event.currentTarget.value })}
           onkeydown={handleKeydown}

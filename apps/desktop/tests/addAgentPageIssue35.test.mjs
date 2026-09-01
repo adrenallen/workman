@@ -109,7 +109,7 @@ test('the additional-instructions surface owns Create and remains optional', asy
     'additional instructions surface'
   );
   assert.match(instructionSurface, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);
-  assert.match(instructionSurface, /Sent as a separate message after \$\{selectedTemplate\.name\} finishes its setup\./);
+  assert.match(instructionSurface, /Combined with \$\{selectedTemplate\.name\}'s instructions in one starting prompt\./);
   assert.match(instructionSurface, /<Textarea\b/);
   const createButton = instructionSurface.match(/<Button\b([\s\S]*?)>[\s\S]*?Creat(?:e|ing)/);
   assert.ok(createButton, 'Create is rendered beside the prompt controls');

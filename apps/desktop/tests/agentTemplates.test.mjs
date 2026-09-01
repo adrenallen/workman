@@ -91,7 +91,7 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /draft\.agentToolId !== tool\.id \? \{ model: '', effort: '' \}/);
   assert.match(source, /Template launch args are skipped when using/);
   assert.match(source, /Template instructions/);
-  assert.match(source, /Sent as a separate message after \$\{selectedTemplate\.name\} finishes its setup\./);
+  assert.match(source, /Combined with \$\{selectedTemplate\.name\}'s instructions in one starting prompt\./);
   assert.match(source, />Model &amp; effort</);
   assert.match(source, /AGENT_EFFORT_LEVELS/);
   assert.match(source, /Inherits \{inheritedLaunchOptions\.model/);
@@ -119,7 +119,7 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(card, /Pair a default agent with launch arguments and a reusable prompt\./);
   assert.match(card, />Default model &amp; effort</);
   assert.match(card, /withAgentLaunchOptions\(/);
-  assert.match(card, /Sent first as the template's setup message\. New Agent instructions follow as a separate message\./);
+  assert.match(card, /Combined with any New Agent instructions and sent as one starting prompt\./);
   assert.match(card, />Default agent/);
   assert.match(card, /Select a default agent/);
   assert.match(card, /Missing default agent/);
@@ -137,7 +137,7 @@ test('desktop spawn entry surfaces route through the inline draft panel', async 
   assert.match(app, /<NewAgentDraftPanel/);
   assert.match(app, /await openAgentDraft\(tool\.id\)/);
   assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
-  assert.match(draftPanel, /Sent as a separate message after \$\{selectedTemplate\.name\} finishes its setup\./);
+  assert.match(draftPanel, /Combined with \$\{selectedTemplate\.name\}'s instructions in one starting prompt\./);
   assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
   assert.match(draftPanel, /Template #\{draft\.templateId\} is no longer available/);
   assert.match(draftPanel, /showFooterCreate=\{false\}/);
