@@ -4,11 +4,46 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.13 - 2026-09-01
+
+Workman 0.1.13 makes agent launches and stopped sessions more reliable, clarifies process controls,
+and adds more expressive project and folder organization.
+
 ### Agent orchestration
 
+- Preserve long, multiline agent-template instructions and per-launch input as one initial turn by
+  following each terminal's negotiated bracketed-paste protocol, avoiding truncated prompts without
+  adding another agent response cycle.
+- Add structured model and effort defaults to agent templates, plus per-launch overrides in New
+  Agent advanced settings. Claude models such as Fable and Codex models can be paired with a
+  supported effort level while other launch arguments remain available.
 - Teach waiting parent agents to end their turn after arming an idle timer instead of polling, and
   repeat the no-poll wake-up contract in MCP server guidance, tool schemas, help, launch context,
   and timer results while preserving delivery overrides and requiring a fresh status check on wake.
+
+### Terminals and process controls
+
+- Keep ANSI styling, cursor state, and terminal layout visible after an agent, terminal, or command
+  stops, exits, or crashes, with an inline Resume agent, Start terminal, or Run again action instead
+  of replacing the session with flattened output.
+- Make terminal attachment more resilient to daemon latency with fast-path geometry and bounded
+  retries, so opening a busy agent is less likely to require another sidebar click.
+- Streamline context menus with icons, action colors, and grouped secondary commands; distinguish a
+  graceful Stop from Force stop and from removing the saved sidebar entry.
+
+### Projects, folders, and settings
+
+- Add optional name colors for projects and folders, plus a searchable icon library for replacing
+  the standard folder glyph while retaining the familiar default.
+- Fold worktree creation, adoption, and removal progress into the matching project row and remove
+  duplicate or lingering operation rows after completion.
+- Keep modal actions padded and reachable in compact windows, describe settings as application-wide,
+  and use platform-neutral “saved locally” status copy.
+
+### Documentation
+
+- Rework the README around practical workflows with a current workspace screenshot, and move deeper
+  architecture and contributor detail into a dedicated technical guide.
 
 ## 0.1.12 - 2026-08-27
 

@@ -6323,7 +6323,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "workman-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -6340,7 +6340,7 @@ dependencies = [
 
 [[package]]
 name = "workman-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6365,7 +6365,7 @@ dependencies = [
 
 [[package]]
 name = "workman-desktop"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "arboard",
  "futures-util",
@@ -6390,7 +6390,7 @@ dependencies = [
 
 [[package]]
 name = "workmand"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "axum",
  "base64 0.22.1",
