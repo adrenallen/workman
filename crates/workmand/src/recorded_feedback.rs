@@ -554,13 +554,14 @@ fn create_feedback_scratchpad(
         match service.write(
             project_id,
             None,
-            candidate,
+            candidate.clone(),
             content.to_owned(),
             Some(vec!["recorded-feedback".into()]),
             None,
         ) {
             Ok((created, _)) => return Ok(created),
-            Err(ScratchpadServiceError::NameConflict { .. }) => continue,
+            Err(ScratchpadServiceError::NameConflict { name, .. }) if name == candidate => continue,
+            Err(error @ ScratchpadServiceError::NameConflict { .. }) => return Err(error),
             Err(error) => return Err(error),
         }
     }
@@ -587,6 +588,7 @@ fn compile_packet(data_dir: &Path, feedback: &RecordedFeedback) -> ControlResult
         .join(PACKET_DIRECTORY)
         .join(feedback.id.to_string());
     create_private_directory(&packet_parent).map_err(storage_error)?;
+    remove_abandoned_packet_builds(&packet_parent).map_err(storage_error)?;
     let root = packet_parent.join(format!("r{}", feedback.revision));
     if root.exists() {
         if let Ok(packet) = load_compiled_packet(&root, feedback) {
@@ -843,11 +845,12 @@ fn render_packet_markdown(
 }
 
 fn scratchpad_packet_content(packet: &CompiledPacket) -> String {
-    let mut content = packet
+    let body = packet
         .markdown
         .split_once('\n')
         .map(|(_, body)| body.trim_start_matches('\n').to_owned())
         .unwrap_or_else(|| packet.markdown.clone());
+    let mut content = format!("<!-- Workman recorded feedback -->\n\n{body}");
     let root = packet
         .markdown_path
         .parent()
@@ -862,6 +865,18 @@ fn scratchpad_packet_content(packet: &CompiledPacket) -> String {
         content = content.replace(&relative, &format!("](<{absolute}>)"));
     }
     content
+}
+
+fn remove_abandoned_packet_builds(packet_parent: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(packet_parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".r") && name.ends_with(".building") && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 type ControlResultAs<T> = Result<T, (&'static str, String)>;
@@ -1107,11 +1122,38 @@ mod tests {
         let service = ScratchpadService::attributed(&store, "user");
         let first =
             create_feedback_scratchpad(&service, 3, "Navigation feedback", "First").unwrap();
-        let second =
-            create_feedback_scratchpad(&service, 3, "Navigation feedback", "Second").unwrap();
+        let second = create_feedback_scratchpad(
+            &service,
+            3,
+            "Navigation feedback",
+            "<!-- Workman recorded feedback -->\n\n# User-authored heading\n\nSecond",
+        )
+        .unwrap();
         assert_eq!(first.name, "Navigation feedback");
         assert_eq!(second.name, "Navigation feedback (2)");
-        assert_eq!(second.content, "Second");
+        assert!(second.content.contains("# User-authored heading"));
+
+        service
+            .write(
+                3,
+                None,
+                "Conflicting heading".into(),
+                "Existing".into(),
+                None,
+                None,
+            )
+            .unwrap();
+        let error = create_feedback_scratchpad(
+            &service,
+            3,
+            "Fallback name",
+            "# Conflicting heading\n\nContent",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ScratchpadServiceError::NameConflict { name, .. } if name == "Conflicting heading"
+        ));
     }
 
     #[test]
@@ -1121,8 +1163,15 @@ mod tests {
         create_private_directory(&media).unwrap();
         let image = media.join("snapshot.png");
         let feedback = ready_feedback(&image, test_png(&image));
+        let abandoned = temp
+            .path()
+            .join(PACKET_DIRECTORY)
+            .join("7")
+            .join(".r1-crashed.building");
+        create_private_directory(&abandoned).unwrap();
 
         let packet = compile_packet(temp.path(), &feedback).unwrap();
+        assert!(!abandoned.exists());
         assert!(
             packet
                 .markdown_path
@@ -1162,7 +1211,7 @@ mod tests {
         }
 
         let scratchpad = scratchpad_packet_content(&packet);
-        assert!(!scratchpad.starts_with('#'));
+        assert!(scratchpad.starts_with("<!-- Workman recorded feedback -->"));
         assert!(scratchpad.contains(&format!(
             "](<{}>)",
             packet

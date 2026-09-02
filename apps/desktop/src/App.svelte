@@ -935,6 +935,15 @@
       ).then(() => {
         if (feedbackLeaseErrorId === session.feedback_id) feedbackLeaseErrorId = null;
       }).catch((cause) => {
+        const terminal = cause instanceof DaemonRequestError
+          && ['feedback_not_found', 'feedback_invalid_state', 'project_not_found'].includes(cause.code);
+        if (terminal && activeFeedbackSession?.feedback_id === session.feedback_id) {
+          activeFeedbackSession = null;
+          feedbackLeaseErrorId = null;
+          void invoke<boolean>('feedback_abort', { feedbackId: session.feedback_id }).catch(() => false);
+          reportError(cause);
+          return;
+        }
         if (feedbackLeaseErrorId === session.feedback_id) return;
         feedbackLeaseErrorId = session.feedback_id;
         reportError(cause);

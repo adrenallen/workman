@@ -114,6 +114,30 @@ struct FeedbackSession {
     width: f32,
     registered_shortcuts: Vec<String>,
     display_ids: Vec<u32>,
+    capture_in_progress: bool,
+}
+
+#[derive(Debug)]
+struct SnapshotCapture {
+    feedback_id: i64,
+    project_id: i64,
+    media_dir: PathBuf,
+    display_ids: Vec<u32>,
+    annotations: Vec<AnnotationStroke>,
+    ordinal: i64,
+    anchor_ms: i64,
+    anchor_samples: i64,
+    invoked_at_ms: i64,
+}
+
+#[derive(Debug)]
+struct CapturedSnapshot {
+    capture: SnapshotCapture,
+    completed_at_ms: i64,
+    image_path: PathBuf,
+    sha256: String,
+    width: u32,
+    height: u32,
 }
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<std::io::BufWriter<fs::File>>>>>;
@@ -320,6 +344,7 @@ pub(crate) fn feedback_start(
         width: 4.0,
         registered_shortcuts,
         display_ids,
+        capture_in_progress: false,
     };
     let view = session_view(&session, "recording", None);
     *active = Some(session);
@@ -452,13 +477,22 @@ pub(crate) async fn feedback_capture_snapshot(
 ) -> Result<SnapshotView, String> {
     let selecting_region = region.is_some();
     let capture_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         capture_snapshot(display_index, region, &capture_app)
     })
     .await
-    .map_err(|error| format!("Snapshot worker stopped: {error}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            clear_active_snapshot_reservation(&app);
+            Err(format!("Snapshot worker stopped: {error}"))
+        }
+    };
     if selecting_region {
-        let _ = restore_overlay_interaction(&app);
+        let restore_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = restore_overlay_interaction(&restore_app);
+        });
         let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
     }
     result
@@ -469,22 +503,52 @@ fn capture_snapshot(
     region: Option<Region>,
     app: &AppHandle,
 ) -> Result<SnapshotView, String> {
-    let invoked_at_ms = now_millis();
     let state = app.state::<FeedbackState>();
-    let mut active = state
-        .session
-        .lock()
-        .map_err(|_| "feedback state is unavailable")?;
-    let session = active.as_mut().ok_or("No feedback recording is active.")?;
-    let anchor_ms = session.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
-    let anchor_samples = session.audio_samples.load(Ordering::Relaxed) as i64;
+    let capture = {
+        let mut active = state
+            .session
+            .lock()
+            .map_err(|_| "feedback state is unavailable")?;
+        let session = active.as_mut().ok_or("No feedback recording is active.")?;
+        if session.capture_in_progress {
+            return Err("A snapshot is already being saved.".into());
+        }
+        session.capture_in_progress = true;
+        SnapshotCapture {
+            feedback_id: session.feedback_id,
+            project_id: session.project_id,
+            media_dir: session.media_dir.clone(),
+            display_ids: session.display_ids.clone(),
+            annotations: session.annotations.clone(),
+            ordinal: session.snapshot_count as i64,
+            anchor_ms: session.started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            anchor_samples: session.audio_samples.load(Ordering::Relaxed) as i64,
+            invoked_at_ms: now_millis(),
+        }
+    };
+    let feedback_id = capture.feedback_id;
+    let ordinal = capture.ordinal;
+    let result = capture_snapshot_image(display_index, region, app, capture)
+        .and_then(|captured| commit_snapshot(app, captured));
+    if result.is_err() {
+        clear_snapshot_reservation(app, feedback_id, ordinal);
+    }
+    result
+}
+
+fn capture_snapshot_image(
+    display_index: Option<usize>,
+    region: Option<Region>,
+    app: &AppHandle,
+    capture: SnapshotCapture,
+) -> Result<CapturedSnapshot, String> {
     let monitors =
         Monitor::all().map_err(|error| format!("Could not inspect displays: {error}"))?;
     let current_display_ids = monitors
         .iter()
         .map(|monitor| monitor.id().map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut expected_display_ids = session.display_ids.clone();
+    let mut expected_display_ids = capture.display_ids.clone();
     let mut observed_display_ids = current_display_ids.clone();
     expected_display_ids.sort_unstable();
     observed_display_ids.sort_unstable();
@@ -497,14 +561,14 @@ fn capture_snapshot(
     let display_index = display_index
         .or_else(|| {
             active_toolbar_display_id(app, &monitors).and_then(|id| {
-                session
+                capture
                     .display_ids
                     .iter()
                     .position(|candidate| *candidate == id)
             })
         })
         .unwrap_or(0);
-    let display_id = *session
+    let display_id = *capture
         .display_ids
         .get(display_index)
         .ok_or("The selected display is no longer available.")?;
@@ -516,41 +580,95 @@ fn capture_snapshot(
     let mut image = monitor
         .capture_image()
         .map_err(|error| format!("Snapshot failed: {error}"))?;
-    composite_annotations(&mut image, &session.annotations, display_index, scale);
+    composite_annotations(&mut image, &capture.annotations, display_index, scale);
     if let Some(region) = region {
         let (x, y, width, height) = pixel_region(region, scale, image.width(), image.height())?;
         image = imageops::crop_imm(&image, x, y, width, height).to_image();
     }
-    let ordinal = session.snapshot_count as i64;
-    let path = session
+    let path = capture
         .media_dir
-        .join(format!("snapshot-{:03}.png", ordinal + 1));
+        .join(format!("snapshot-{:03}.png", capture.ordinal + 1));
     write_png_atomic(&image, &path)?;
-    let sha256 = sha256_file(&path)?;
-    let completed_at_ms = now_millis();
-    append_journal(
-        &session.media_dir.join("events.jsonl"),
-        &json!({
-            "event": "snapshot", "ordinal": ordinal, "anchor_ms": anchor_ms,
-            "anchor_samples": anchor_samples, "invoked_at_ms": invoked_at_ms,
-            "completed_at_ms": completed_at_ms, "image_path": path, "sha256": sha256,
-            "width": image.width(), "height": image.height()
-        }),
-    )?;
-    session.snapshot_count += 1;
-    let view = SnapshotView {
-        feedback_id: session.feedback_id,
-        project_id: session.project_id,
-        ordinal,
-        anchor_ms,
-        anchor_samples,
-        invoked_at_ms,
-        completed_at_ms,
-        image_path: path.to_string_lossy().into_owned(),
+    let sha256 = sha256_file(&path).inspect_err(|_| {
+        let _ = fs::remove_file(&path);
+    })?;
+    Ok(CapturedSnapshot {
+        capture,
+        completed_at_ms: now_millis(),
+        image_path: path,
         sha256,
+        width: image.width(),
+        height: image.height(),
+    })
+}
+
+fn commit_snapshot(app: &AppHandle, captured: CapturedSnapshot) -> Result<SnapshotView, String> {
+    if let Err(error) = append_journal(
+        &captured.capture.media_dir.join("events.jsonl"),
+        &json!({
+            "event": "snapshot", "ordinal": captured.capture.ordinal,
+            "anchor_ms": captured.capture.anchor_ms,
+            "anchor_samples": captured.capture.anchor_samples,
+            "invoked_at_ms": captured.capture.invoked_at_ms,
+            "completed_at_ms": captured.completed_at_ms,
+            "image_path": captured.image_path, "sha256": captured.sha256,
+            "width": captured.width, "height": captured.height
+        }),
+    ) {
+        let _ = fs::remove_file(&captured.image_path);
+        return Err(error.to_string());
+    }
+    let state = app.state::<FeedbackState>();
+    let mut active = state.session.lock().map_err(|_| {
+        let _ = fs::remove_file(&captured.image_path);
+        "feedback state is unavailable"
+    })?;
+    let Some(session) = active.as_mut() else {
+        let _ = fs::remove_file(&captured.image_path);
+        return Err("The feedback recording ended before the snapshot was saved.".into());
+    };
+    if session.feedback_id != captured.capture.feedback_id
+        || !session.capture_in_progress
+        || session.snapshot_count as i64 != captured.capture.ordinal
+    {
+        let _ = fs::remove_file(&captured.image_path);
+        return Err("The feedback recording changed before the snapshot was saved.".into());
+    }
+    session.snapshot_count += 1;
+    session.capture_in_progress = false;
+    let view = SnapshotView {
+        feedback_id: captured.capture.feedback_id,
+        project_id: captured.capture.project_id,
+        ordinal: captured.capture.ordinal,
+        anchor_ms: captured.capture.anchor_ms,
+        anchor_samples: captured.capture.anchor_samples,
+        invoked_at_ms: captured.capture.invoked_at_ms,
+        completed_at_ms: captured.completed_at_ms,
+        image_path: captured.image_path.to_string_lossy().into_owned(),
+        sha256: captured.sha256,
     };
     let _ = app.emit(EVENT_SNAPSHOT, &view);
     Ok(view)
+}
+
+fn clear_snapshot_reservation(app: &AppHandle, feedback_id: i64, ordinal: i64) {
+    let state = app.state::<FeedbackState>();
+    if let Ok(mut active) = state.session.lock()
+        && let Some(session) = active.as_mut()
+        && session.feedback_id == feedback_id
+        && session.snapshot_count as i64 == ordinal
+    {
+        session.capture_in_progress = false;
+    }
+}
+
+fn clear_active_snapshot_reservation(app: &AppHandle) {
+    let state = app.state::<FeedbackState>();
+    if let Ok(mut active) = state.session.lock()
+        && let Some(session) = active.as_mut()
+    {
+        session.capture_in_progress = false;
+    }
 }
 
 fn active_toolbar_display_id(app: &AppHandle, monitors: &[Monitor]) -> Option<u32> {
@@ -622,7 +740,12 @@ pub(crate) fn feedback_finish(
         .session
         .lock()
         .map_err(|_| "feedback state is unavailable")?;
-    let session = active.take().ok_or("No feedback recording is active.")?;
+    let session = active.as_ref().ok_or("No feedback recording is active.")?;
+    if session.capture_in_progress {
+        return Err("Wait for the current snapshot to finish saving.".into());
+    }
+    let session = active.take().expect("active session checked above");
+    drop(active);
     let duration_ms = session.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     unregister_shortcuts(&app, &session.registered_shortcuts);
     close_feedback_panels(&app);
@@ -1294,13 +1417,14 @@ fn write_png_atomic(image: &RgbaImage, path: &Path) -> Result<(), String> {
 }
 
 fn append_journal(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let mut line = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    line.push(b'\n');
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|error| error.to_string())?;
-    serde_json::to_writer(&mut file, value).map_err(|error| error.to_string())?;
-    file.write_all(b"\n").map_err(|error| error.to_string())?;
+    file.write_all(&line).map_err(|error| error.to_string())?;
     file.sync_data().map_err(|error| error.to_string())?;
     set_private_permissions(path)
 }

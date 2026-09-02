@@ -78,10 +78,14 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(native, /\.content_protected\(true\)/);
   assert.match(native, /\.nonactivating_panel\(\)/);
   assert.match(native, /pub\(crate\) async fn feedback_capture_snapshot/);
+  assert.match(native, /run_on_main_thread/);
+  assert.match(native, /capture_in_progress/);
   assert.match(native, /"feedback_id": feedback_id, "project_id": project_id/);
   assert.match(native, /pub\(crate\) fn feedback_abort/);
   assert.match(daemon, /\.join\(format!\("r\{\}", feedback\.revision\)\)/);
   assert.match(daemon, /scratchpad_packet_content/);
+  assert.match(daemon, /remove_abandoned_packet_builds/);
+  assert.match(app, /\['feedback_not_found', 'feedback_invalid_state', 'project_not_found'\]/);
   assert.match(detail, /if \(feedback\.status === 'ready'\) await afterSave\(onArchive\)/);
   const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
   const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);
