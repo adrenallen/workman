@@ -5,7 +5,11 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import QuickPromptEditor from './QuickPromptEditor.svelte';
   import type { DaemonClient } from './daemon';
-  import { primaryModifierLabel, shiftModifierLabel } from './primaryModifier.ts';
+  import {
+    hotkeyDisplayLabel,
+    hotkeyPreferences,
+    matchesHotkeyAction
+  } from './hotkeys';
   import {
     filterQuickPrompts,
     moveQuickPromptSelection,
@@ -28,10 +32,8 @@
   }
 
   let { client, canInsert, onInsert, onClose, onError }: Props = $props();
-  const macChords = primaryModifierLabel === '⌘';
-  const chordJoin = macChords ? '' : '+';
-  const openChord = [primaryModifierLabel, shiftModifierLabel, 'P'].join(chordJoin);
-  const sendChord = [primaryModifierLabel, 'Enter'].join(chordJoin);
+  let openChord = $derived(hotkeyDisplayLabel($hotkeyPreferences['quick-prompts']) || 'Not set');
+  let sendChord = $derived(hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'Not set');
   let store = $derived(getQuickPromptsStore(client));
   let snapshot = $state<QuickPromptsSnapshot>({ prompts: [], loading: false, error: null });
   let query = $state('');
@@ -73,6 +75,18 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    if (matchesHotkeyAction(event, 'new-quick-prompt', $hotkeyPreferences)) {
+      event.preventDefault();
+      event.stopPropagation();
+      editorOpen = true;
+      return;
+    }
+    if (matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) {
+      event.preventDefault();
+      event.stopPropagation();
+      choose(activePrompt, true);
+      return;
+    }
     const action = quickPromptPaletteAction(event);
     if (!action) return;
     event.preventDefault();
@@ -82,11 +96,7 @@
       moveSelection(action);
       return;
     }
-    if (action === 'new') {
-      editorOpen = true;
-      return;
-    }
-    choose(activePrompt, action === 'insert-and-send');
+    choose(activePrompt, false);
   }
 
   function moveSelection(
@@ -187,9 +197,7 @@
             {:else}
               <div class="grid min-h-28 place-content-center gap-1 text-center">
                 <strong class="text-sm text-foreground">{query ? 'No matching prompt' : 'No quick prompts saved'}</strong>
-                {#if macChords}
-                  <span class="text-xs text-muted-foreground">Press ⌘N to create one.</span>
-                {/if}
+                <span class="text-xs text-muted-foreground">Press {hotkeyDisplayLabel($hotkeyPreferences['new-quick-prompt']) || 'the configured hotkey'} to create one.</span>
                 <Button class="mt-2 justify-self-center" size="sm" onclick={() => (editorOpen = true)}>New quick prompt</Button>
               </div>
             {/if}
@@ -200,9 +208,7 @@
           <span>↑↓ · navigate</span>
           <span>Enter · insert</span>
           <span>{sendChord} · insert and send</span>
-          {#if macChords}
-            <span>⌘N · new quick prompt</span>
-          {/if}
+          <span>{hotkeyDisplayLabel($hotkeyPreferences['new-quick-prompt']) || 'Not set'} · new quick prompt</span>
           <span class="ml-auto">Esc · close</span>
         </footer>
       </Command.Root>

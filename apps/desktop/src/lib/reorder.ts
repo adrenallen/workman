@@ -1,3 +1,7 @@
+import { get } from 'svelte/store';
+
+import { findHotkeyAction, hotkeyAriaLabel, hotkeyPreferences } from './hotkeys.ts';
+
 export type DropPlacement = 'before' | 'after';
 export type ReorderDirection = -1 | 1;
 
@@ -92,7 +96,7 @@ export function moveTreeOrderBlock(
   return remaining;
 }
 
-/** Find the adjacent sibling used by the Alt+Arrow keyboard fallback. */
+/** Find the adjacent sibling used by the configured keyboard reorder command. */
 export function siblingTarget(
   orderedItems: TreeOrderItem[],
   sourceId: number,
@@ -105,7 +109,7 @@ export function siblingTarget(
   return siblings[index + direction]?.id ?? null;
 }
 
-/** Svelte action implementing native drag/drop and the Alt+Up/Down keyboard equivalent. */
+/** Svelte action implementing native drag/drop and its configurable keyboard equivalent. */
 export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
   let options = initial;
 
@@ -117,7 +121,12 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
     node.dataset.reorderable = enabled ? 'true' : 'false';
     node.removeAttribute('title');
     if (enabled) {
-      node.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+      const shortcuts = [
+        hotkeyAriaLabel(get(hotkeyPreferences)['reorder-up']),
+        hotkeyAriaLabel(get(hotkeyPreferences)['reorder-down'])
+      ].filter(Boolean).join(' ');
+      if (shortcuts) node.setAttribute('aria-keyshortcuts', shortcuts);
+      else node.removeAttribute('aria-keyshortcuts');
     } else {
       node.removeAttribute('aria-keyshortcuts');
       clearMark(node);
@@ -186,8 +195,9 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
 
   function keyDown(event: KeyboardEvent): void {
     if (!activeDrag) suppressClickAfterDrag = false;
-    if (options.disabled || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
-    const direction = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : null;
+    if (options.disabled) return;
+    const action = findHotkeyAction(event, get(hotkeyPreferences));
+    const direction = action === 'reorder-up' ? -1 : action === 'reorder-down' ? 1 : null;
     if (direction === null) return;
     event.preventDefault();
     event.stopPropagation();
@@ -201,6 +211,7 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
   node.addEventListener('pointercancel', pointerCancel);
   node.addEventListener('click', click, true);
   node.addEventListener('keydown', keyDown);
+  const unsubscribeHotkeys = hotkeyPreferences.subscribe(() => configure());
   configure();
 
   return {
@@ -216,6 +227,7 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
       node.removeEventListener('pointercancel', pointerCancel);
       node.removeEventListener('click', click, true);
       node.removeEventListener('keydown', keyDown);
+      unsubscribeHotkeys();
       if (activeDrag?.node === node) finishPointerDrag(activeDrag);
       clearMark(node);
     }

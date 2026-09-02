@@ -10,6 +10,7 @@
   import ProjectIcon from './ProjectIcon.svelte';
   import TooltipLabel from './components/ds/TooltipLabel.svelte';
   import { sidebarIdentityColorValue } from './projectAppearance';
+  import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
   import {
     folderDragId,
     type ProjectFolder,
@@ -78,7 +79,7 @@
   }
 
   function showKeyboardMenu(event: KeyboardEvent): void {
-    if (!event.shiftKey || event.key !== 'F10') return;
+    if (!matchesHotkeyAction(event, 'open-context-menu', $hotkeyPreferences)) return;
     const anchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     if (!anchor) return;
     const bounds = anchor.getBoundingClientRect();

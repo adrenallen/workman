@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Button } from '$lib/components/ui/button';
+  import { onDestroy } from 'svelte';
   import {
     hotkeyActionLabel,
     hotkeyDefinitions,
@@ -13,28 +14,72 @@
     type HotkeyDefinition
   } from '../hotkeys';
   import {
-    altModifierLabel as alt,
-    primaryModifierLabel as mod,
-    shiftModifierLabel as shift,
-    terminalUnfocusKeys
+    suspendNativeMenuAccelerators,
+    syncNativeMenuAccelerators
+  } from '../nativeMenu';
+  import {
+    primaryModifierLabel as mod
   } from '../primaryModifier';
 
   let recording = $state<HotkeyAction | null>(null);
   let message = $state('');
 
-  const projectDefinitions = hotkeyDefinitions.filter(
-    (definition) => definition.group === 'projects'
-  );
-  const creationDefinitions = hotkeyDefinitions.filter(
-    (definition) => definition.group === 'creation'
-  );
-  const chordJoin = mod === '⌘' ? '' : '+';
+  const groups = [
+    {
+      id: 'workspace',
+      title: 'Workspace',
+      description: 'Open global surfaces and control the application frame.',
+      scope: 'Global'
+    },
+    {
+      id: 'navigation',
+      title: 'Navigation and order',
+      description: 'Move through panels and processes, or rearrange focused items.',
+      scope: 'Focus'
+    },
+    {
+      id: 'terminal',
+      title: 'Terminal',
+      description: 'Control terminal focus and search without sending keys to the process.',
+      scope: 'Terminal'
+    },
+    {
+      id: 'editing',
+      title: 'Editors and details',
+      description: 'Submit focused forms and control detail-panel layouts.',
+      scope: 'Context'
+    },
+    {
+      id: 'projects',
+      title: 'Project rail',
+      description: 'Slots follow visual rail order, including projects inside folders.',
+      scope: '1–9'
+    },
+    {
+      id: 'creation',
+      title: 'Create in current project',
+      description: 'Start new work in whichever project is active.',
+      scope: 'Current'
+    }
+  ] as const;
+
+  onDestroy(() => restoreNativeMenuAccelerators());
+
+  function setRecording(action: HotkeyAction | null): void {
+    recording = action;
+    if (action) void suspendNativeMenuAccelerators().catch(() => undefined);
+    else restoreNativeMenuAccelerators();
+  }
+
+  function restoreNativeMenuAccelerators(): void {
+    void syncNativeMenuAccelerators($hotkeyPreferences).catch(() => undefined);
+  }
 
   function captureHotkey(event: KeyboardEvent, definition: HotkeyDefinition): void {
     event.preventDefault();
     event.stopPropagation();
     if (event.key === 'Escape') {
-      recording = null;
+      setRecording(null);
       message = 'Shortcut recording cancelled.';
       return;
     }
@@ -46,13 +91,13 @@
       && !event.shiftKey
     ) {
       setHotkeyBinding(definition.id, null);
-      recording = null;
+      setRecording(null);
       message = `${definition.label} cleared.`;
       return;
     }
     const chord = hotkeyFromKeyboardEvent(event);
     if (!chord) {
-      message = `Include ${mod}, ${mod === '⌘' ? '⌃' : 'Meta'}, or ${mod === '⌘' ? '⌥' : 'Alt'} in an app shortcut.`;
+      message = `Include ${mod}, ${mod === '⌘' ? '⌃' : 'Meta'}, or ${mod === '⌘' ? '⌥' : 'Alt'}; Shift alone is available with function keys.`;
       return;
     }
     const reserved = reservedHotkeyLabel(chord);
@@ -61,7 +106,7 @@
       return;
     }
     const displaced = setHotkeyBinding(definition.id, chord);
-    recording = null;
+    setRecording(null);
     message = displaced
       ? `${definition.label} now uses ${hotkeyDisplayLabel(chord)}; ${hotkeyActionLabel(displaced)} was cleared.`
       : `${definition.label} now uses ${hotkeyDisplayLabel(chord)}.`;
@@ -69,13 +114,13 @@
 
   function clearHotkey(definition: HotkeyDefinition): void {
     setHotkeyBinding(definition.id, null);
-    if (recording === definition.id) recording = null;
+    if (recording === definition.id) setRecording(null);
     message = `${definition.label} cleared.`;
   }
 
   function reset(): void {
     resetHotkeyBindings();
-    recording = null;
+    setRecording(null);
     message = 'Default shortcuts restored.';
   }
 </script>
@@ -94,7 +139,7 @@
       aria-label={`Set shortcut for ${definition.label}`}
       aria-pressed={recording === definition.id}
       onclick={() => {
-        recording = recording === definition.id ? null : definition.id;
+        setRecording(recording === definition.id ? null : definition.id);
         message = recording === definition.id
           ? `Press a shortcut for ${definition.label}. Escape cancels; Delete clears.`
           : 'Shortcut recording cancelled.';
@@ -126,7 +171,7 @@
     <div>
       <span class="eyebrow">Keyboard</span>
       <h2 id="hotkeys-title">Hotkeys</h2>
-      <p>Jump between projects and create work without leaving the keyboard.</p>
+      <p>One command map for workspace navigation, terminals, editors, projects, and creation.</p>
     </div>
     <Button variant="outline" size="sm" onclick={reset}>Restore defaults</Button>
   </header>
@@ -136,58 +181,25 @@
     <small>Escape cancels · Delete clears</small>
   </div>
 
-  <section class="group" aria-labelledby="project-hotkeys-title">
-    <div class="group-heading">
-      <div>
-        <h3 id="project-hotkeys-title">Project rail</h3>
-        <p>Slots follow the visual order in the left rail, including projects inside folders.</p>
+  {#each groups as group (group.id)}
+    <section class="group" aria-labelledby={`${group.id}-hotkeys-title`}>
+      <div class="group-heading">
+        <div>
+          <h3 id={`${group.id}-hotkeys-title`}>{group.title}</h3>
+          <p>{group.description}</p>
+        </div>
+        <span class="scope">{group.scope}</span>
       </div>
-      <span class="scope">1–9</span>
-    </div>
-    <div class="hotkey-grid project-grid">
-      {#each projectDefinitions as definition (definition.id)}
-        {@render hotkeyRow(definition)}
-      {/each}
-    </div>
-  </section>
-
-  <section class="group" aria-labelledby="creation-hotkeys-title">
-    <div class="group-heading">
-      <div>
-        <h3 id="creation-hotkeys-title">Create in current project</h3>
-        <p>New agent defaults to <kbd>{chordJoin === '' ? `${mod}N` : `${mod}+N`}</kbd>; the other actions are ready to bind.</p>
+      <div class="hotkey-grid">
+        {#each hotkeyDefinitions.filter((definition) => definition.group === group.id) as definition (definition.id)}
+          {@render hotkeyRow(definition)}
+        {/each}
       </div>
-      <span class="scope">Current</span>
-    </div>
-    <div class="hotkey-grid creation-grid">
-      {#each creationDefinitions as definition (definition.id)}
-        {@render hotkeyRow(definition)}
-      {/each}
-    </div>
-  </section>
-
-  <section class="group built-ins" aria-labelledby="built-in-hotkeys-title">
-    <div class="group-heading">
-      <div>
-        <h3 id="built-in-hotkeys-title">Built-in workspace shortcuts</h3>
-        <p>These remain fixed and cannot be assigned above.</p>
-      </div>
-    </div>
-    <div class="built-in-grid">
-      <div><kbd>{chordJoin === '' ? `${mod}K` : `${mod}+K`}</kbd><span>Quick jump</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod}/` : `${mod}+/`}</kbd><span>Keyboard reference</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod}B` : `${mod}+B`}</kbd><span>Toggle project rail</span></div>
-      <div><kbd>{terminalUnfocusKeys.join(chordJoin)}</kbd><span>Unfocus terminal</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod}${shift}P` : `${mod}+${shift}+P`}</kbd><span>Quick prompts</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod}← / →` : `${mod}+← / →`}</kbd><span>Move between panels</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod}F` : `${mod}+F`}</kbd><span>Search terminal</span></div>
-      <div><kbd>{chordJoin === '' ? `${alt}↑ / ↓` : `${alt}+↑ / ↓`}</kbd><span>Reorder focused item</span></div>
-      <div><kbd>{chordJoin === '' ? `${mod},` : `${mod}+,`}</kbd><span>Settings</span></div>
-    </div>
-  </section>
+    </section>
+  {/each}
 
   <footer>
-    Project and creation shortcuts work from text fields and terminal input. A project shortcut keeps following its rail position when projects are reordered.
+    Global, project, and creation commands work from text fields and terminal input. Context commands act only where they apply, so terminal and editor keystrokes remain available elsewhere.
   </footer>
 </section>
 
@@ -216,17 +228,12 @@
   .recorder:hover, .recorder:focus-visible { border-color: var(--ring); color: var(--text-soft); outline: 0; }
   .recorder.recording { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--night)); color: var(--foreground); box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 15%, transparent); }
   kbd { display: inline-grid; min-width: 25px; min-height: 22px; place-items: center; border: 1px solid var(--border-strong); border-bottom-color: color-mix(in srgb, var(--text) 30%, var(--border)); border-radius: 3px; padding: 1px 5px; background: var(--surface-raised); color: var(--text-soft); font-size: var(--font-size-xs); white-space: nowrap; }
-  .built-in-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--border); }
-  .built-in-grid > div { display: grid; min-height: 44px; grid-template-columns: 88px minmax(0, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 7px 12px; color: var(--text-soft); font-size: var(--font-size-xs); }
-  .built-in-grid > div:not(:nth-child(3n)) { border-right: 1px solid var(--border); }
-  .built-in-grid > div:nth-last-child(-n + 3) { border-bottom: 0; }
   footer { border-top: 1px solid var(--border); padding: 11px 12px; color: var(--muted); font-size: var(--font-size-xs); line-height: 1.5; }
 
   @media (max-width: 900px) {
-    .hotkey-grid, .built-in-grid { grid-template-columns: 1fr; }
-    .hotkey-row:nth-child(odd), .built-in-grid > div:not(:nth-child(3n)) { border-right: 0; }
-    .hotkey-row:nth-child(n + 2), .built-in-grid > div:nth-child(n + 2) { border-top: 1px solid var(--border); }
-    .built-in-grid > div { border-bottom: 0; }
+    .hotkey-grid { grid-template-columns: 1fr; }
+    .hotkey-row:nth-child(odd) { border-right: 0; }
+    .hotkey-row:nth-child(n + 2) { border-top: 1px solid var(--border); }
   }
   @media (max-width: 620px) {
     .hotkey-row { grid-template-columns: minmax(0, 1fr) 104px; }

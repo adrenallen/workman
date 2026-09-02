@@ -6,15 +6,10 @@
   import {
     hotkeyDefinitions,
     hotkeyDisplayParts,
-    hotkeyPreferences
+    hotkeyPreferences,
+    matchesHotkeyAction,
+    type HotkeyDefinition
   } from './hotkeys';
-  import {
-    altModifierLabel as alt,
-    primaryModifier,
-    primaryModifierLabel as mod,
-    shiftModifierLabel as shift,
-    terminalUnfocusKeys
-  } from './primaryModifier';
 
   interface Props {
     onClose: () => void;
@@ -23,59 +18,53 @@
 
   let { onClose, keepAwakeSupported = false }: Props = $props();
 
-  let groups = $derived([
-    {
-      title: 'Move through the workspace',
-      shortcuts: [
-        { keys: [mod, '← / →'], label: 'Move between project rail, tree, and main frame' },
-        { keys: [mod, '↑ / ↓'], label: 'Select the previous or next process, including from terminal input' },
-        { keys: [mod, alt, '← / →'], label: 'Panel traversal alias' },
-        { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
-        { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
-        { keys: ['↵'], label: 'Open or activate the focused row' }
-      ]
-    },
-    {
-      title: 'Jump and act',
-      shortcuts: [
-        {
-          keys: [mod, 'K'],
-          label: `Quick jump or create in any project${keepAwakeSupported ? ', including Keep awake…' : ''}`
-        },
-        { keys: [mod, shift, 'P'], label: 'Open quick prompts for the selected agent' },
-        { keys: [shift, 'F10'], label: 'Open the focused row’s context menu' },
-        { keys: [alt, '↑ / ↓'], label: 'Reorder the focused project or process' },
-        { keys: [mod, '/'], label: 'Show or close this shortcuts reference' },
-        { keys: ['esc'], label: 'Close the active overlay or dialog' }
-      ]
-    },
-    {
-      title: 'Panels and terminal',
-      shortcuts: [
-        { keys: [mod, 'B'], label: 'Collapse or expand the project rail' },
-        { keys: [mod, shift, 'B'], label: 'Collapse or expand the project tree' },
-        { keys: terminalUnfocusKeys, label: 'Unfocus the terminal and return to the project tree' },
-        { keys: [mod, 'F'], label: 'Search the focused terminal buffer' },
-        { keys: ['Tab', '↵'], label: 'Use Unfocus, Previous, and Next in the process bar' }
-      ]
-    },
-    {
-      title: 'Projects and creation',
-      shortcuts: hotkeyDefinitions.map((definition) => ({
+  function configuredShortcuts(...groupIds: HotkeyDefinition['group'][]) {
+    return hotkeyDefinitions
+      .filter((definition) => groupIds.includes(definition.group))
+      .map((definition) => ({
         keys: hotkeyDisplayParts($hotkeyPreferences[definition.id]).length > 0
           ? hotkeyDisplayParts($hotkeyPreferences[definition.id])
           : ['Not set'],
-        label: definition.label
-      }))
+        label: definition.id === 'quick-jump' && keepAwakeSupported
+          ? `${definition.description}, including Keep awake…`
+          : definition.description
+      }));
+  }
+
+  let groups = $derived([
+    {
+      title: 'Workspace',
+      shortcuts: configuredShortcuts('workspace')
+    },
+    {
+      title: 'Navigation and order',
+      shortcuts: configuredShortcuts('navigation')
+    },
+    {
+      title: 'Terminal and editors',
+      shortcuts: configuredShortcuts('terminal', 'editing')
+    },
+    {
+      title: 'Projects and creation',
+      shortcuts: configuredShortcuts('projects', 'creation')
+    },
+    {
+      title: 'Standard controls',
+      shortcuts: [
+        { keys: ['↑ / ↓'], label: 'Move through the focused project or tree list' },
+        { keys: ['← / →'], label: 'Collapse or expand a focused tree group' },
+        { keys: ['↵'], label: 'Open, activate, or submit the focused control' },
+        { keys: ['esc'], label: 'Close the active overlay, dialog, or edit' },
+        { keys: ['Tab'], label: 'Move between interactive controls' }
+      ]
     }
   ]);
 
-  const chordJoin = mod === '⌘' ? '' : '+';
-  const chord = (...keys: string[]) => keys.join(chordJoin);
-  const unfocusLabel = chord(...terminalUnfocusKeys);
-
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape' || (primaryModifier(event) && event.key === '/')) {
+    if (
+      event.key === 'Escape'
+      || matchesHotkeyAction(event, 'keyboard-reference', $hotkeyPreferences)
+    ) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -119,7 +108,7 @@
     </ScrollArea>
 
     <footer>
-      <span>Text fields keep Home/End; quick-prompt search uses them for first/last. Terminal input reserves <strong>{unfocusLabel} Unfocus</strong>, <strong>{chord(mod, '↑')}/{chord(mod, '↓')} process selection</strong>, and <strong>{chord(mod, shift, 'P')} quick prompts</strong>; other keys reach the terminal.</span>
+      <span>Command shortcuts are configurable in <strong>Settings → Hotkeys</strong>. Unmodified text-editing and control keys keep their platform behavior.</span>
       <Button class="shrink-0" variant="outline" size="sm" onclick={onClose}>Done</Button>
     </footer>
   </Dialog.Content>
@@ -136,7 +125,7 @@
   .shortcut-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .shortcut-row { display: grid; min-height: 39px; grid-template-columns: 126px minmax(0, 1fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 5px 8px; color: var(--text-soft); font-size: var(--font-size-sm); }
   .shortcut-row:nth-child(odd) { border-right: 1px solid var(--border); }
-  .shortcut-row:nth-last-child(-n + 2) { border-bottom: 0; }
+  .shortcut-row:last-child, .shortcut-row:nth-last-child(2):nth-child(odd) { border-bottom: 0; }
   .keys { display: flex; align-items: center; gap: 3px; }
   kbd { display: inline-grid; min-width: 23px; min-height: 21px; place-items: center; border: 1px solid #444a52; border-bottom-color: #616873; border-radius: 3px; padding: 1px 5px; background: var(--accent); color: var(--foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   footer { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 8px 6px 11px; background: var(--card); color: var(--muted-foreground); font-size: var(--font-size-xs); }

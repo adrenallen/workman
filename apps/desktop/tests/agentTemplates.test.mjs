@@ -100,7 +100,8 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /selectedTemplate \? 'Additional instructions' : 'Instructions'\} can be empty/);
   assert.match(source, /let templateInstructionsOpen = \$state\(false\)/);
   assert.match(source, /let templateAgentOpen = \$state\(false\)/);
-  assert.match(source, /primaryModifier\(event\)/);
+  assert.match(source, /hotkeyPreferences\['submit-focused-form'\]/);
+  assert.match(source, /<CreationDraftScaffold[\s\S]*onCreate=\{submit\}/);
   assert.match(source, /\{#each templateChoices as templateChoice/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
   assert.match(source, /agent disabled/);

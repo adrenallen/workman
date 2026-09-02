@@ -22,8 +22,6 @@ export type QuickPromptPaletteAction =
   | 'last'
   | 'swallow'
   | 'insert'
-  | 'insert-and-send'
-  | 'new'
   | null;
 
 interface PaletteKeyEvent {
@@ -34,11 +32,6 @@ interface PaletteKeyEvent {
   shiftKey?: boolean;
   isComposing?: boolean;
   keyCode?: number;
-}
-
-export function isQuickPromptPaletteShortcut(event: PaletteKeyEvent): boolean {
-  return primaryModifier(event) && Boolean(event.shiftKey) && !secondaryModifier(event)
-    && !event.altKey && event.key.toLowerCase() === 'p';
 }
 
 /** Interpret palette-owned navigation and selection actions. */
@@ -66,9 +59,8 @@ export function quickPromptPaletteAction(event: PaletteKeyEvent): QuickPromptPal
   }
   if (event.key === 'Enter') {
     if (event.shiftKey || secondaryModifier(event) || event.altKey) return 'swallow';
-    return primaryModifier(event) ? 'insert-and-send' : 'insert';
+    return primaryModifier(event) ? 'swallow' : 'insert';
   }
-  if (event.metaKey && !event.shiftKey && key === 'n') return 'new';
   return null;
 }
 

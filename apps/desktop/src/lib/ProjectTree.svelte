@@ -42,6 +42,7 @@
     type ContextMenuTarget
   } from './contextMenu';
   import { liveStats, type ProcessRuntimeStats } from './liveStats';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
   import {
     projectTreeSelection,
     type ProjectTreeGroup,
@@ -675,7 +676,7 @@
     <IconButton
       class="size-7 shrink-0 rounded border border-border bg-card"
       label={`${collapsed ? 'Expand' : 'Collapse'} project tree`}
-      shortcut="⌘⇧B"
+      shortcut={hotkeyDisplayLabel($hotkeyPreferences['toggle-project-tree']) || undefined}
       onclick={onToggleCollapse}
     >
       {#snippet icon()}
@@ -1031,7 +1032,7 @@
   </div>
 
   <footer class="tree-footer">
-    <IconButton class="size-7" label="Open Settings" shortcut="⌘," data-tree-row onclick={onOpenSettings}>
+    <IconButton class="size-7" label="Open Settings" shortcut={hotkeyDisplayLabel($hotkeyPreferences['open-settings']) || undefined} data-tree-row onclick={onOpenSettings}>
       {#snippet icon()}<SettingsIcon size={15} strokeWidth={1.8} />{/snippet}
     </IconButton>
   </footer>

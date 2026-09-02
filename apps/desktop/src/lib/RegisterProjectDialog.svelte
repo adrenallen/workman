@@ -8,6 +8,7 @@
   import { Button } from '$lib/components/ui/button';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Input } from '$lib/components/ui/input';
+  import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
 
   interface Props {
     path: string;
@@ -47,7 +48,7 @@
   }
 
   function handleTitleKeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+    if (!matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) return;
     event.preventDefault();
     submit();
   }

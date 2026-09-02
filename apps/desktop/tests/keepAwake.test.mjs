@@ -548,7 +548,8 @@ test('control exposes resilient, truthful keep-awake status and copy', async () 
   assert.match(navigation, /type: 'keep-awake'/);
   assert.match(palette, /if \(keepAwakeSupported\)/);
   assert.match(palette, /label: 'Keep awake…'/);
-  assert.match(shortcuts, /keepAwakeSupported \? ', including Keep awake…' : ''/);
+  assert.match(shortcuts, /definition\.id === 'quick-jump' && keepAwakeSupported/);
+  assert.match(shortcuts, /including Keep awake…/);
   assert.doesNotMatch(shortcuts, /keys: \['⌘', 'K'\], label: 'Open Keep awake/);
   assert.match(native, /run_keep_awake_watchdog/);
   assert.match(native, /observe_auto_keep_awake_snapshot/);

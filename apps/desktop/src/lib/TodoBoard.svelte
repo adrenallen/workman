@@ -4,7 +4,7 @@
   import MarkdownView from './MarkdownView.svelte';
   import type { TodoDetail, TodoStatus, TodoSummary } from './coordination';
   import { submitOnEnter } from './formInputConventions';
-  import { primaryModifier } from './primaryModifier';
+  import { hotkeyDisplayLabel, hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -96,10 +96,7 @@
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (
-      !primaryModifier(event) ||
-      !event.shiftKey ||
-      event.altKey ||
-      event.key.toLowerCase() !== 'i' ||
+      !matchesHotkeyAction(event, 'toggle-todo-inspector', $hotkeyPreferences) ||
       target instanceof HTMLInputElement ||
       target instanceof HTMLTextAreaElement ||
       target?.isContentEditable
@@ -250,7 +247,7 @@
                   class="panel-toggle"
                   type="button"
                   aria-label={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comment inspector`}
-                  title={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comment inspector (⌘⇧I)`}
+                  title={`${inspectorCollapsed ? 'Expand' : 'Collapse'} comment inspector${hotkeyDisplayLabel($hotkeyPreferences['toggle-todo-inspector']) ? ` (${hotkeyDisplayLabel($hotkeyPreferences['toggle-todo-inspector'])})` : ''}`}
                   onclick={toggleInspector}
                 >{inspectorCollapsed ? '‹' : '›'}</button>
               </div>

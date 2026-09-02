@@ -19,7 +19,7 @@ test('folder selection opens a focused title step before the registration RPC', 
   assert.match(dialog, /onEscapeKeydown=\{keepDefault\}/);
   assert.match(dialog, /submit\(defaultTitle\)/);
   assert.match(dialog, /Esc registers as/);
-  assert.match(dialog, /event\.metaKey && !event\.ctrlKey/);
+  assert.match(dialog, /matchesHotkeyAction\(event, 'submit-focused-form', \$hotkeyPreferences\)/);
   assert.match(dialog, /onclick=\{onBack\}/);
   assert.match(app, /onBack=\{\(\) => void changeRegisterProjectFolder\(\)\}/);
 });

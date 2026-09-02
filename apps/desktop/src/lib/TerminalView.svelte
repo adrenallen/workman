@@ -1,8 +1,12 @@
 <script lang="ts">
   import BotIcon from '@lucide/svelte/icons/bot';
+  import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
+  import XIcon from '@lucide/svelte/icons/x';
   import { FitAddon } from '@xterm/addon-fit';
+  import { SearchAddon } from '@xterm/addon-search';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { WebglAddon } from '@xterm/addon-webgl';
   import { Terminal } from '@xterm/xterm';
@@ -26,7 +30,7 @@
   import type { DaemonClient, ProcessView, TerminalFrame } from './daemon';
   import { isDaemonRequestTimeoutError } from './daemonLog';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
-  import { primaryModifier, terminalUnfocusChord } from './primaryModifier';
+  import { primaryModifier } from './primaryModifier';
   import {
     hasRetainedTerminalOutput,
     isUnstyledRetainedSnapshot,
@@ -39,7 +43,6 @@
     webglRecoveryDelay
   } from './terminalRenderer';
   import {
-    isQuickPromptPaletteShortcut,
     sanitizeQuickPromptBody
   } from './quickPromptPalette';
   import {
@@ -47,7 +50,7 @@
     clipboardImagePasteRoute,
     shouldForwardTerminalInput
   } from './terminalInput';
-  import { encodeTerminalKey, processCycleDirection } from './terminalKeys';
+  import { encodeTerminalKey } from './terminalKeys';
   import {
     installTerminalTransfers,
     type TerminalTransfers,
@@ -63,10 +66,7 @@
     onStart,
     onError,
     onContextMenu,
-    onAppShortcut,
-    onQuickPrompts,
-    onCycleProcess,
-    onUnfocus
+    onAppShortcut
   }: {
     client: DaemonClient;
     process: ProcessView;
@@ -77,15 +77,13 @@
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
     onAppShortcut?: (event: KeyboardEvent) => boolean;
-    onQuickPrompts?: () => void;
-    onCycleProcess?: (direction: -1 | 1) => void;
-    onUnfocus?: () => void;
   } = $props();
 
   let host: HTMLDivElement;
   let frame: HTMLElement;
   let terminal = $state<Terminal | null>(null);
   let fitAddon: FitAddon | null = null;
+  let searchAddon: SearchAddon | null = null;
   let webglAddon: WebglAddon | null = null;
   let webglRecovering = false;
   let webglRecoveryAttempt = 0;
@@ -108,6 +106,10 @@
   let hoveredLinkUri: string | null = null;
   let transferDropActive = $state(false);
   let imagePasteSaving = $state(false);
+  let searchOpen = $state(false);
+  let searchQuery = $state('');
+  let searchMatched = $state(true);
+  let searchInput = $state<HTMLInputElement | null>(null);
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
   let inputProcessId: number | null = null;
@@ -176,6 +178,43 @@
     terminal?.focus();
   }
 
+  export function openSearch(): void {
+    searchOpen = true;
+    requestAnimationFrame(() => {
+      searchInput?.focus();
+      searchInput?.select();
+    });
+  }
+
+  function runSearch(direction: -1 | 1, incremental = false): void {
+    const addon = searchAddon;
+    if (!addon || !searchQuery) {
+      addon?.clearDecorations();
+      searchMatched = true;
+      return;
+    }
+    searchMatched = direction < 0
+      ? addon.findPrevious(searchQuery)
+      : addon.findNext(searchQuery, { incremental });
+  }
+
+  function closeSearch(): void {
+    searchOpen = false;
+    searchAddon?.clearDecorations();
+    terminal?.focus();
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent): void {
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSearch();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      runSearch(event.shiftKey ? -1 : 1);
+    }
+  }
+
   onMount(() => {
     const initialPalette = initialAppearance.terminalTheme.palette;
     const initialFontFamily = terminalFontCss(
@@ -216,6 +255,8 @@
     });
     fitAddon = new FitAddon();
     instance.loadAddon(fitAddon);
+    searchAddon = new SearchAddon();
+    instance.loadAddon(searchAddon);
     instance.loadAddon(
       new WebLinksAddon(activateLink, {
         hover: showLinkHint,
@@ -267,28 +308,11 @@
         event.stopPropagation();
         return false;
       }
-      if (onQuickPrompts && isQuickPromptPaletteShortcut(event)) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.type === 'keydown') onQuickPrompts();
-        return false;
-      }
-      const cycleDirection = onCycleProcess ? processCycleDirection(event) : null;
-      if (cycleDirection !== null) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.type === 'keydown') onCycleProcess?.(cycleDirection);
-        return false;
-      }
       let userKeyToken: number | null = null;
       if (event.type === 'keydown') {
         userKeyToken = ++nextUserKeyToken;
         pendingUserKeyTokens.push(userKeyToken);
         setTimeout(() => removePendingUserKeyToken(userKeyToken), 0);
-      }
-      if (terminalUnfocusChord(event)) {
-        if (event.type === 'keydown') onUnfocus?.();
-        return false;
       }
       const modifiedKey = encodeTerminalKey(event, { kittyFlags: kittyKeyboardFlags, modifyOtherKeys });
       if (modifiedKey !== null) {
@@ -346,6 +370,7 @@
       window.removeEventListener(TERMINAL_CONTEXT_ACTION_EVENT, runContextAction);
       terminalTransfers?.dispose();
       terminalTransfers = null;
+      searchAddon = null;
       document.removeEventListener('visibilitychange', recoverVisibleRenderer);
       window.removeEventListener('pageshow', recoverVisibleRenderer);
       window.removeEventListener('focus', recoverVisibleRenderer);
@@ -987,6 +1012,22 @@
   class:has-ended-bar={processDead}
   class:is-drop-target={transferDropActive}
 >
+  {#if searchOpen}
+    <div class="terminal-search" role="search" aria-label="Search terminal buffer">
+      <input
+        bind:this={searchInput}
+        bind:value={searchQuery}
+        aria-label="Search terminal output"
+        placeholder="Find in terminal"
+        oninput={() => runSearch(1, true)}
+        onkeydown={handleSearchKeydown}
+      />
+      <span class:no-match={!searchMatched}>{searchMatched ? '' : 'No match'}</span>
+      <button type="button" aria-label="Previous match" onclick={() => runSearch(-1)}><ChevronUpIcon size={14} /></button>
+      <button type="button" aria-label="Next match" onclick={() => runSearch(1)}><ChevronDownIcon size={14} /></button>
+      <button type="button" aria-label="Close terminal search" onclick={closeSearch}><XIcon size={14} /></button>
+    </div>
+  {/if}
   <div
     class="terminal-host"
     class:is-hidden={processStarting}
@@ -1080,6 +1121,59 @@
 
   .terminal-frame.is-drop-target {
     border-color: var(--ring);
+  }
+  .terminal-search {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 6;
+    display: grid;
+    grid-template-columns: minmax(150px, 240px) auto repeat(3, 28px);
+    align-items: center;
+    gap: 3px;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 24%, var(--terminal-background));
+    border-radius: 4px;
+    padding: 4px;
+    background: color-mix(in srgb, var(--terminal-background) 94%, var(--terminal-foreground));
+    box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
+  }
+  .terminal-search input {
+    min-width: 0;
+    height: 28px;
+    border: 1px solid color-mix(in srgb, var(--terminal-foreground) 20%, var(--terminal-background));
+    border-radius: 3px;
+    padding: 3px 7px;
+    outline: 0;
+    background: var(--terminal-background);
+    color: var(--terminal-foreground);
+    font: var(--font-size-xs) var(--terminal-font-family);
+  }
+  .terminal-search input:focus {
+    border-color: var(--ring);
+  }
+  .terminal-search > span {
+    min-width: 0;
+    padding: 0 4px;
+    color: color-mix(in srgb, var(--terminal-foreground) 60%, var(--terminal-background));
+    font: var(--font-size-xs) var(--terminal-font-family);
+    white-space: nowrap;
+  }
+  .terminal-search > span.no-match { color: var(--destructive); }
+  .terminal-search button {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: color-mix(in srgb, var(--terminal-foreground) 72%, var(--terminal-background));
+    cursor: pointer;
+  }
+  .terminal-search button:hover, .terminal-search button:focus-visible {
+    outline: 0;
+    background: color-mix(in srgb, var(--terminal-foreground) 10%, transparent);
+    color: var(--terminal-foreground);
   }
   .terminal-starting {
     position: absolute;

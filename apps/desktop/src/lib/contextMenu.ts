@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { get } from 'svelte/store';
 
 import type { ScratchpadSummary, TodoSummary } from './coordination';
 import type { ProcessView, Project } from './daemon';
@@ -9,6 +10,7 @@ import {
   type OpenersState
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
+import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
 import { projectFrequentActions } from './projectMenu';
 import type { PullRequestState, WorktreeEntry, WorktreeRepository } from './worktrees';
 import { projectRepositoryTitle } from './worktrees';
@@ -147,7 +149,7 @@ export function keyboardContextMenuRequest(
   event: KeyboardEvent,
   target: ContextMenuTarget
 ): ContextMenuRequest | null {
-  if (!event.shiftKey || event.key !== 'F10') return null;
+  if (!matchesHotkeyAction(event, 'open-context-menu', get(hotkeyPreferences))) return null;
   const anchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   if (!anchor) return null;
   const bounds = anchor.getBoundingClientRect();

@@ -23,6 +23,11 @@
   import DocumentScaffold from './DocumentScaffold.svelte';
   import CountBadge from './CountBadge.svelte';
   import LiveMarkdownEditor from './LiveMarkdownEditor.svelte';
+  import {
+    hotkeyDisplayLabel,
+    hotkeyPreferences,
+    matchesHotkeyAction
+  } from './hotkeys';
   import { scratchpadOutline, type ScratchpadOutlineItem } from './scratchpadOutline';
   import {
     mapScratchpadSelectionAnchor,
@@ -215,7 +220,7 @@
     if (event.key === 'Escape') {
       event.preventDefault();
       cancelComment();
-    } else if (event.key === 'Enter' && event.metaKey) {
+    } else if (matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) {
       event.preventDefault();
       void saveComment();
     }
@@ -670,7 +675,7 @@
         placeholder="Add review feedback…"
         onkeydown={composerKeydown}
       ></Textarea>
-      <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>⌘↵</kbd></Button></div>
+      <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'}</kbd></Button></div>
     </form>
   {/if}
   <div class="comment-list" aria-label="Scratchpad comments">
@@ -692,7 +697,7 @@
         {#if editingCommentId === comment.id}
           <Textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows={3} aria-label="Edit scratchpad comment" onkeydown={(event) => {
             if (event.key === 'Escape') { event.preventDefault(); editingCommentId = null; }
-            else if (event.key === 'Enter' && event.metaKey) { event.preventDefault(); void saveEditedComment(comment.id); }
+            else if (matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) { event.preventDefault(); void saveEditedComment(comment.id); }
           }}></Textarea>
         {:else}
           <p>{comment.body}</p>

@@ -3,6 +3,7 @@
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
 
   import { loadPanelPreference, type PanelPreference } from '../panelPreferences';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from '../hotkeys';
 
   const projectFallback = { collapsed: false, width: 238 };
   const treeFallback = { collapsed: false, width: 280 };
@@ -35,13 +36,13 @@
       <span class="rail-preview project" aria-hidden="true"><i></i><i></i><i></i></span>
       <div><strong>Project rail</strong><small>Projects, status, and workspace switching.</small></div>
       <output>{stateLabel(projectRail)}</output>
-      <kbd>⌘B</kbd>
+      <kbd>{hotkeyDisplayLabel($hotkeyPreferences['toggle-project-rail']) || 'Not set'}</kbd>
     </div>
     <div class="rail-row">
       <span class="rail-preview tree" aria-hidden="true"><i></i><i></i><i></i></span>
       <div><strong>Project tree</strong><small>Agents, terminals, commands, todos, and notes.</small></div>
       <output>{stateLabel(projectTree)}</output>
-      <kbd>⌘⇧B</kbd>
+      <kbd>{hotkeyDisplayLabel($hotkeyPreferences['toggle-project-tree']) || 'Not set'}</kbd>
     </div>
   </div>
 

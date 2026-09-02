@@ -29,9 +29,56 @@ export const creationHotkeyActions = [
   'new-todo'
 ] as const;
 
+export const workspaceHotkeyActions = [
+  'previous-view',
+  'quick-jump',
+  'keyboard-reference',
+  'open-settings',
+  'toggle-project-rail',
+  'toggle-project-tree',
+  'quick-prompts'
+] as const;
+
+export const navigationHotkeyActions = [
+  'navigate-left',
+  'navigate-right',
+  'previous-process',
+  'next-process',
+  'reorder-up',
+  'reorder-down',
+  'open-context-menu'
+] as const;
+
+export const terminalHotkeyActions = [
+  'unfocus-terminal',
+  'search-terminal'
+] as const;
+
+export const editingHotkeyActions = [
+  'submit-focused-form',
+  'toggle-scratchpad-list',
+  'toggle-todo-inspector'
+] as const;
+
+export const contextualHotkeyActions = [
+  'new-quick-prompt'
+] as const;
+
 export type ProjectHotkeyAction = (typeof projectHotkeyActions)[number];
 export type CreationHotkeyAction = (typeof creationHotkeyActions)[number];
-export type HotkeyAction = ProjectHotkeyAction | CreationHotkeyAction;
+export type WorkspaceHotkeyAction = (typeof workspaceHotkeyActions)[number];
+export type NavigationHotkeyAction = (typeof navigationHotkeyActions)[number];
+export type TerminalHotkeyAction = (typeof terminalHotkeyActions)[number];
+export type EditingHotkeyAction = (typeof editingHotkeyActions)[number];
+export type ContextualHotkeyAction = (typeof contextualHotkeyActions)[number];
+export type HotkeyAction =
+  | ProjectHotkeyAction
+  | CreationHotkeyAction
+  | WorkspaceHotkeyAction
+  | NavigationHotkeyAction
+  | TerminalHotkeyAction
+  | EditingHotkeyAction
+  | ContextualHotkeyAction;
 
 export interface HotkeyChord {
   code: string;
@@ -47,10 +94,130 @@ export interface HotkeyDefinition {
   id: HotkeyAction;
   label: string;
   description: string;
-  group: 'projects' | 'creation';
+  group: 'workspace' | 'navigation' | 'terminal' | 'editing' | 'projects' | 'creation';
 }
 
 export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
+  {
+    id: 'previous-view',
+    label: 'Previous view',
+    description: 'Switch between the two most recent project views',
+    group: 'workspace'
+  },
+  {
+    id: 'quick-jump',
+    label: 'Quick jump',
+    description: 'Find or create something in any project',
+    group: 'workspace'
+  },
+  {
+    id: 'keyboard-reference',
+    label: 'Keyboard reference',
+    description: 'Show or close the keyboard reference',
+    group: 'workspace'
+  },
+  {
+    id: 'open-settings',
+    label: 'Settings',
+    description: 'Open application settings',
+    group: 'workspace'
+  },
+  {
+    id: 'toggle-project-rail',
+    label: 'Toggle project rail',
+    description: 'Collapse or expand the project rail',
+    group: 'workspace'
+  },
+  {
+    id: 'toggle-project-tree',
+    label: 'Toggle project tree',
+    description: 'Collapse or expand the current project tree',
+    group: 'workspace'
+  },
+  {
+    id: 'quick-prompts',
+    label: 'Quick prompts',
+    description: 'Open saved prompts for the selected agent',
+    group: 'workspace'
+  },
+  {
+    id: 'navigate-left',
+    label: 'Navigate left',
+    description: 'Move left across panels or adjacent details',
+    group: 'navigation'
+  },
+  {
+    id: 'navigate-right',
+    label: 'Navigate right',
+    description: 'Move right across panels or adjacent details',
+    group: 'navigation'
+  },
+  {
+    id: 'previous-process',
+    label: 'Previous process',
+    description: 'Select the previous process or process draft',
+    group: 'navigation'
+  },
+  {
+    id: 'next-process',
+    label: 'Next process',
+    description: 'Select the next process or process draft',
+    group: 'navigation'
+  },
+  {
+    id: 'reorder-up',
+    label: 'Reorder up',
+    description: 'Move the focused project or tree item up',
+    group: 'navigation'
+  },
+  {
+    id: 'reorder-down',
+    label: 'Reorder down',
+    description: 'Move the focused project or tree item down',
+    group: 'navigation'
+  },
+  {
+    id: 'open-context-menu',
+    label: 'Open context menu',
+    description: 'Open actions for the focused project or tree item',
+    group: 'navigation'
+  },
+  {
+    id: 'unfocus-terminal',
+    label: 'Unfocus terminal',
+    description: 'Return focus from terminal input to the project tree',
+    group: 'terminal'
+  },
+  {
+    id: 'search-terminal',
+    label: 'Search terminal',
+    description: 'Search the focused terminal buffer',
+    group: 'terminal'
+  },
+  {
+    id: 'submit-focused-form',
+    label: 'Submit focused form',
+    description: 'Create or save from the focused editor form',
+    group: 'editing'
+  },
+  {
+    id: 'toggle-scratchpad-list',
+    label: 'Toggle scratchpad list',
+    description: 'Show or hide the scratchpad list',
+    group: 'editing'
+  },
+  {
+    id: 'toggle-todo-inspector',
+    label: 'Toggle todo inspector',
+    description: 'Show or hide the todo inspector',
+    group: 'editing'
+  },
+  {
+    id: 'new-quick-prompt',
+    label: 'New quick prompt',
+    description: 'Create a prompt while the quick-prompt palette is open',
+    group: 'editing'
+  },
   ...projectHotkeyActions.map((id, index) => ({
     id,
     label: `Project ${index + 1}`,
@@ -91,7 +258,17 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
 
 export const hotkeyStorageKey = 'workman.hotkeys.v1';
 
-const allHotkeyActions = [...projectHotkeyActions, ...creationHotkeyActions] as const;
+export const allHotkeyActions = [
+  ...workspaceHotkeyActions,
+  ...navigationHotkeyActions,
+  ...terminalHotkeyActions,
+  ...editingHotkeyActions,
+  ...projectHotkeyActions,
+  ...creationHotkeyActions,
+  // Context-only actions come last so globally active commands win shared chords.
+  ...contextualHotkeyActions
+] as const;
+const legacyHotkeyActions = [...projectHotkeyActions, ...creationHotkeyActions] as const;
 const supportedCodes = new Set([
   ...Array.from({ length: 26 }, (_, index) => `Key${String.fromCharCode(65 + index)}`),
   ...Array.from({ length: 10 }, (_, index) => `Digit${index}`),
@@ -149,12 +326,34 @@ const codeLabels: Record<string, string> = {
 
 const secondaryModifierLabel = primaryModifierLabel === '⌘' ? '⌃' : 'Meta';
 const defaultPreferences: HotkeyPreferences = Object.fromEntries([
+  ['previous-view', primaryChord('Backquote')],
+  ['quick-jump', primaryChord('KeyK')],
+  ['keyboard-reference', primaryChord('Slash')],
+  ['open-settings', primaryChord('Comma')],
+  ['toggle-project-rail', primaryChord('KeyB')],
+  ['toggle-project-tree', { ...primaryChord('KeyB'), shift: true }],
+  ['quick-prompts', { ...primaryChord('KeyP'), shift: true }],
+  ['navigate-left', primaryChord('ArrowLeft')],
+  ['navigate-right', primaryChord('ArrowRight')],
+  ['previous-process', primaryChord('ArrowUp')],
+  ['next-process', primaryChord('ArrowDown')],
+  ['reorder-up', altChord('ArrowUp')],
+  ['reorder-down', altChord('ArrowDown')],
+  ['open-context-menu', shiftChord('F10')],
+  ['unfocus-terminal', terminalUnfocusChordValue()],
+  ['search-terminal', primaryChord('KeyF')],
+  ['submit-focused-form', primaryChord('Enter')],
+  ['toggle-scratchpad-list', { ...primaryChord('KeyS'), shift: true }],
+  ['toggle-todo-inspector', { ...primaryChord('KeyI'), shift: true }],
   ...projectHotkeyActions.map((action, index) => [action, primaryChord(`Digit${index + 1}`)]),
   ['new-agent', primaryChord('KeyN')],
-  ['new-terminal', null],
+  ['new-terminal', primaryChord('KeyT')],
   ['new-command', null],
   ['new-scratchpad', null],
-  ['new-todo', null]
+  ['new-todo', null],
+  // This chord is intentionally shared with New agent. The prompt action exists only inside its
+  // palette, where it handles the event before the global shortcut resolver.
+  ['new-quick-prompt', primaryChord('KeyN')]
 ]) as HotkeyPreferences;
 
 export const hotkeyPreferences = writable<HotkeyPreferences>(loadHotkeyPreferences());
@@ -181,8 +380,10 @@ export function hotkeyFromKeyboardEvent(event: KeyboardEvent): HotkeyChord | nul
     alt: event.altKey,
     shift: event.shiftKey
   };
-  // Global unmodified or Shift-only keys would steal ordinary typing and editing.
-  return chord.primary || chord.secondary || chord.alt ? chord : null;
+  // Only function keys can safely use Shift alone; ordinary Shift-only chords would steal text.
+  return chord.primary || chord.secondary || chord.alt || (chord.shift && /^F\d+$/.test(chord.code))
+    ? chord
+    : null;
 }
 
 export function matchesHotkey(event: KeyboardEvent, chord: HotkeyChord | null): boolean {
@@ -199,6 +400,14 @@ export function findHotkeyAction(
   preferences: HotkeyPreferences
 ): HotkeyAction | null {
   return allHotkeyActions.find((action) => matchesHotkey(event, preferences[action])) ?? null;
+}
+
+export function matchesHotkeyAction(
+  event: KeyboardEvent,
+  action: HotkeyAction,
+  preferences: HotkeyPreferences
+): boolean {
+  return matchesHotkey(event, preferences[action]);
 }
 
 export function equalHotkey(left: HotkeyChord | null, right: HotkeyChord | null): boolean {
@@ -229,22 +438,42 @@ export function hotkeyDisplayLabel(chord: HotkeyChord | null): string {
   return parts.join(primaryModifierLabel === '⌘' ? '' : '+');
 }
 
+export function nativeHotkeyAccelerator(chord: HotkeyChord | null): string | null {
+  if (!chord) return null;
+  const modifiers = [
+    ...(chord.primary ? ['CmdOrCtrl'] : []),
+    ...(chord.secondary ? [primaryModifierLabel === '⌘' ? 'Ctrl' : 'Super'] : []),
+    ...(chord.alt ? ['Alt'] : []),
+    ...(chord.shift ? ['Shift'] : [])
+  ];
+  return [...modifiers, chord.code].join('+');
+}
+
+export function hotkeyAriaLabel(chord: HotkeyChord | null): string | null {
+  if (!chord) return null;
+  const modifiers = [
+    ...(chord.primary ? [primaryModifierLabel === '⌘' ? 'Meta' : 'Control'] : []),
+    ...(chord.secondary ? [primaryModifierLabel === '⌘' ? 'Control' : 'Meta'] : []),
+    ...(chord.alt ? ['Alt'] : []),
+    ...(chord.shift ? ['Shift'] : [])
+  ];
+  const key = chord.code.replace(/^Key/, '').replace(/^Digit/, '');
+  return [...modifiers, key].join('+');
+}
+
 export function reservedHotkeyLabel(chord: HotkeyChord): string | null {
   const reserved: Array<[HotkeyChord, string]> = [
-    [primaryChord('KeyK'), 'Quick jump'],
-    [primaryChord('Slash'), 'Keyboard reference'],
-    [primaryChord('Comma'), 'Settings'],
-    [primaryChord('KeyB'), 'Toggle project rail'],
-    [{ ...primaryChord('KeyB'), shift: true }, 'Toggle project tree'],
-    [{ ...primaryChord('KeyP'), shift: true }, 'Quick prompts'],
-    [primaryChord('KeyF'), 'Search terminal buffer'],
-    [primaryChord('ArrowLeft'), 'Panel navigation'],
-    [primaryChord('ArrowRight'), 'Panel navigation'],
-    [primaryChord('ArrowUp'), 'Process navigation'],
-    [primaryChord('ArrowDown'), 'Process navigation'],
-    [altChord('ArrowUp'), 'Reorder focused item'],
-    [altChord('ArrowDown'), 'Reorder focused item'],
-    [terminalUnfocusChordValue(), 'Unfocus terminal']
+    [primaryChord('KeyQ'), 'Quit'],
+    [primaryChord('KeyW'), 'Close window'],
+    [primaryChord('KeyM'), 'Minimize window'],
+    [primaryChord('KeyH'), 'Hide application'],
+    [primaryChord('KeyX'), 'Cut'],
+    [primaryChord('KeyC'), 'Copy'],
+    [primaryChord('KeyV'), 'Paste'],
+    [primaryChord('KeyA'), 'Select all'],
+    [primaryChord('KeyZ'), 'Undo'],
+    [{ ...primaryChord('KeyZ'), shift: true }, 'Redo'],
+    [primaryChord('KeyY'), 'Redo']
   ];
   return reserved.find(([candidate]) => equalHotkey(candidate, chord))?.[1] ?? null;
 }
@@ -259,9 +488,13 @@ export function setHotkeyBinding(
     const next = clonePreferences(current);
     if (chord) {
       for (const candidate of allHotkeyActions) {
-        if (candidate !== action && equalHotkey(next[candidate], chord)) {
+        if (
+          candidate !== action
+          && !canShareHotkey(action, candidate)
+          && equalHotkey(next[candidate], chord)
+        ) {
           next[candidate] = null;
-          displaced = candidate;
+          displaced ??= candidate;
         }
       }
     }
@@ -284,14 +517,49 @@ export function loadHotkeyPreferences(
   if (!storage) return defaultHotkeyPreferences();
   try {
     const parsed = JSON.parse(storage.getItem(hotkeyStorageKey) ?? 'null') as unknown;
-    if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.bindings)) {
+    if (
+      !isRecord(parsed)
+      || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)
+      || !isRecord(parsed.bindings)
+    ) {
       return defaultHotkeyPreferences();
     }
-    const next = defaultHotkeyPreferences();
-    for (const action of allHotkeyActions) {
+    const legacyPreferences = parsed.version === 1 || parsed.version === 2;
+    const next = legacyPreferences
+      ? emptyHotkeyPreferences()
+      : defaultHotkeyPreferences();
+    if (legacyPreferences) {
+      for (const action of legacyHotkeyActions) {
+        next[action] = defaultPreferences[action] ? { ...defaultPreferences[action]! } : null;
+      }
+      if (parsed.version === 1) next['new-terminal'] = null;
+    }
+    const storedActions = legacyPreferences ? legacyHotkeyActions : allHotkeyActions;
+    for (const action of storedActions) {
       const value = parsed.bindings[action];
       if (value === null) next[action] = null;
       else if (isHotkeyChord(value) && reservedHotkeyLabel(value) === null) next[action] = value;
+    }
+    const terminalDefault = defaultPreferences['new-terminal'];
+    if (
+      parsed.version === 1
+      && next['new-terminal'] === null
+      && terminalDefault !== null
+      && !allHotkeyActions.some((action) => equalHotkey(next[action], terminalDefault))
+    ) {
+      next['new-terminal'] = { ...terminalDefault };
+    }
+    if (legacyPreferences) {
+      for (const action of allHotkeyActions) {
+        if ((legacyHotkeyActions as readonly HotkeyAction[]).includes(action)) continue;
+        const chord = defaultPreferences[action];
+        if (
+          chord
+          && !allHotkeyActions.some((candidate) => (
+            !canShareHotkey(action, candidate) && equalHotkey(next[candidate], chord)
+          ))
+        ) next[action] = { ...chord };
+      }
     }
     return deduplicatePreferences(next);
   } catch {
@@ -305,7 +573,7 @@ export function saveHotkeyPreferences(
 ): void {
   if (!storage) return;
   try {
-    storage.setItem(hotkeyStorageKey, JSON.stringify({ version: 1, bindings: preferences }));
+    storage.setItem(hotkeyStorageKey, JSON.stringify({ version: 3, bindings: preferences }));
   } catch {
     // Hotkeys remain active for this session when webview storage is unavailable.
   }
@@ -317,6 +585,10 @@ function primaryChord(code: string): HotkeyChord {
 
 function altChord(code: string): HotkeyChord {
   return { code, primary: false, secondary: false, alt: true, shift: false };
+}
+
+function shiftChord(code: string): HotkeyChord {
+  return { code, primary: false, secondary: false, alt: false, shift: true };
 }
 
 function terminalUnfocusChordValue(): HotkeyChord {
@@ -334,25 +606,41 @@ function isHotkeyChord(value: unknown): value is HotkeyChord {
     && typeof value.secondary === 'boolean'
     && typeof value.alt === 'boolean'
     && typeof value.shift === 'boolean'
-    && (value.primary || value.secondary || value.alt);
+    && (
+      value.primary
+      || value.secondary
+      || value.alt
+      || (value.shift && /^F\d+$/.test(value.code))
+    );
 }
 
 function deduplicatePreferences(preferences: HotkeyPreferences): HotkeyPreferences {
   const next = clonePreferences(preferences);
-  const seen: HotkeyChord[] = [];
+  const seen: Array<[HotkeyAction, HotkeyChord]> = [];
   for (const action of allHotkeyActions) {
     const chord = next[action];
     if (!chord) continue;
-    if (seen.some((candidate) => equalHotkey(candidate, chord))) next[action] = null;
-    else seen.push(chord);
+    if (seen.some(([candidate, candidateChord]) => (
+      !canShareHotkey(action, candidate) && equalHotkey(candidateChord, chord)
+    ))) next[action] = null;
+    else seen.push([action, chord]);
   }
   return next;
+}
+
+function canShareHotkey(left: HotkeyAction, right: HotkeyAction): boolean {
+  return (left === 'new-quick-prompt' && right === 'new-agent')
+    || (left === 'new-agent' && right === 'new-quick-prompt');
 }
 
 function clonePreferences(preferences: HotkeyPreferences): HotkeyPreferences {
   return Object.fromEntries(
     allHotkeyActions.map((action) => [action, preferences[action] ? { ...preferences[action] } : null])
   ) as HotkeyPreferences;
+}
+
+function emptyHotkeyPreferences(): HotkeyPreferences {
+  return Object.fromEntries(allHotkeyActions.map((action) => [action, null])) as HotkeyPreferences;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

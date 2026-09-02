@@ -3,6 +3,7 @@
   import type { Snippet } from 'svelte';
 
   import { Button } from '$lib/components/ui/button';
+  import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
 
   interface Props {
     projectName: string;
@@ -31,9 +32,22 @@
     secondaryAction,
     children
   }: Props = $props();
+
+  let formElement: HTMLFormElement;
+
+  function handleKeydown(event: KeyboardEvent): void {
+    if (!(event.target instanceof Node) || !formElement?.contains(event.target)) return;
+    if (!matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!busy && canCreate) onCreate();
+  }
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <form
+  bind:this={formElement}
   class="draft-shell"
   data-creation-draft={kindLabel.toLowerCase()}
   onsubmit={(event) => {

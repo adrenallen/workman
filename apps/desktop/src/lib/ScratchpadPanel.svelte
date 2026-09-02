@@ -4,7 +4,7 @@
 
   import MarkdownView from './MarkdownView.svelte';
   import type { ScratchpadRead, ScratchpadSummary } from './coordination';
-  import { primaryModifier } from './primaryModifier';
+  import { hotkeyDisplayLabel, hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
   import {
     clampPanelWidth,
     loadPanelPreference,
@@ -60,10 +60,7 @@
   function handleShortcut(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (
-      !primaryModifier(event) ||
-      !event.shiftKey ||
-      event.altKey ||
-      event.key.toLowerCase() !== 's' ||
+      !matchesHotkeyAction(event, 'toggle-scratchpad-list', $hotkeyPreferences) ||
       target instanceof HTMLInputElement ||
       target instanceof HTMLTextAreaElement ||
       target?.isContentEditable
@@ -103,7 +100,7 @@
           class="panel-toggle"
           type="button"
           aria-label={`${listCollapsed ? 'Expand' : 'Collapse'} scratchpad list`}
-          title={`${listCollapsed ? 'Expand' : 'Collapse'} scratchpad list (⌘⇧S)`}
+          title={`${listCollapsed ? 'Expand' : 'Collapse'} scratchpad list${hotkeyDisplayLabel($hotkeyPreferences['toggle-scratchpad-list']) ? ` (${hotkeyDisplayLabel($hotkeyPreferences['toggle-scratchpad-list'])})` : ''}`}
           onclick={toggleList}
         >{listCollapsed ? '›' : '‹'}</button>
       </div>

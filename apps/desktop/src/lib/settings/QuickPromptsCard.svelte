@@ -10,6 +10,7 @@
   import QuickPromptEditor from '../QuickPromptEditor.svelte';
   import type { DaemonClient } from '../daemon';
   import { quickPromptPreview } from '../quickPromptPalette';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from '../hotkeys';
   import {
     getQuickPromptsStore,
     type QuickPrompt,
@@ -88,7 +89,7 @@
 
   <aside class="grid gap-x-4 gap-y-2 border-b border-border bg-muted/10 px-3 py-2.5 sm:grid-cols-2" aria-label="Quick prompt keyboard shortcuts">
     <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>P</kbd></span>
+      <kbd class="shrink-0">{hotkeyDisplayLabel($hotkeyPreferences['quick-prompts']) || 'Not set'}</kbd>
       <span>Open quick prompts for the selected agent</span>
     </div>
     <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -100,11 +101,11 @@
       <span>Insert the highlighted prompt without sending</span>
     </div>
     <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>Enter</kbd></span>
+      <kbd class="shrink-0">{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'Not set'}</kbd>
       <span>Insert and send</span>
     </div>
     <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-      <span class="flex shrink-0 gap-1"><kbd>⌘</kbd><kbd>N</kbd></span>
+      <kbd class="shrink-0">{hotkeyDisplayLabel($hotkeyPreferences['new-quick-prompt']) || 'Not set'}</kbd>
       <span>Create a quick prompt from the palette</span>
     </div>
     <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -119,7 +120,7 @@
     <div class="flex min-h-28 items-center justify-between gap-4 p-4">
       <div>
         <strong class="text-sm text-foreground">No quick prompts saved</strong>
-        <p class="mt-1 text-xs text-muted-foreground">Create one, then open the palette with ⌘⇧P.</p>
+        <p class="mt-1 text-xs text-muted-foreground">Create one, then open the palette with {hotkeyDisplayLabel($hotkeyPreferences['quick-prompts']) || 'its configured hotkey'}.</p>
       </div>
       <Button variant="outline" size="sm" disabled={!connected} onclick={() => (editing = 'new')}>Add the first prompt</Button>
     </div>

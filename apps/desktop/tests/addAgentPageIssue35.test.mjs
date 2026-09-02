@@ -134,7 +134,7 @@ test('the additional-instructions surface owns Create and remains optional', asy
   assert.match(canCreate, /selectedTool !== null/);
   assert.doesNotMatch(canCreate, /draft\.prompt|prompt\.trim/);
 
-  const submit = sourceBetween(source, 'function submit()', 'function handleKeydown', 'submit handler');
+  const submit = sourceBetween(source, 'function submit()', 'async function attachImages', 'submit handler');
   assert.doesNotMatch(submit, /if\s*\([^)]*(?:draft\.)?prompt/);
   assert.match(submit, /prompt: draft\.prompt\.trim\(\) \|\| undefined/);
   assert.match(submit, /void onCreate\(/);

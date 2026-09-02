@@ -136,7 +136,7 @@ test('folder header keeps collapse, rename, context, pointer, and keyboard paths
   assert.match(source, /aria-expanded=\{!folder\.collapsed\}/);
   assert.match(source, /use:reorderItem/);
   assert.match(source, /canDropInside: \(sourceId\) => sourceId > 0/);
-  assert.match(source, /event\.shiftKey \|\| event\.key !== 'F10'/);
+  assert.match(source, /matchesHotkeyAction\(event, 'open-context-menu', \$hotkeyPreferences\)/);
   assert.match(source, /Project folder name/);
   assert.match(source, /data-reorder-drop='inside'/);
 

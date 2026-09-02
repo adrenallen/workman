@@ -22,6 +22,7 @@
     type NavigationProjectSnapshot
   } from './navigation';
   import { projectTreeSelection, type ProjectTreeItemKind } from './projectTree';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
   import type { PullRequestStatus } from './worktrees';
   import { projectDisplayName, pullRequestLabel, pullRequestVisual } from './worktrees';
 
@@ -401,7 +402,7 @@
         <span class="jump-mark" aria-hidden="true"><SearchIcon size={14} strokeWidth={1.8} /></span>
         <div><strong id="quick-jump-title">Quick jump</strong><small>Every project, one search</small></div>
       </div>
-      <kbd>⌘ K</kbd>
+      <kbd>{hotkeyDisplayLabel($hotkeyPreferences['quick-jump']) || 'Not set'}</kbd>
     </header>
 
     <label class="search-field">

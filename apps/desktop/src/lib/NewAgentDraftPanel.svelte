@@ -44,7 +44,10 @@
   import { Input } from './components/ui/input';
   import * as Select from './components/ui/select';
   import { Textarea } from './components/ui/textarea';
-  import { primaryModifier, primaryModifierLabel } from './primaryModifier';
+  import {
+    hotkeyDisplayLabel,
+    hotkeyPreferences
+  } from './hotkeys';
 
   interface AttachmentImageRead {
     bytes: number[];
@@ -259,12 +262,6 @@
       tool: selectedTool,
       template: selectedTemplate
     });
-  }
-
-  function handleKeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Enter' || !primaryModifier(event)) return;
-    event.preventDefault();
-    submit();
   }
 
   async function attachImages(files: File[]): Promise<void> {
@@ -640,7 +637,6 @@
           placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
           disabled={busy}
           oninput={(event) => onChange({ prompt: event.currentTarget.value })}
-          onkeydown={handleKeydown}
           onpaste={handlePromptPaste}
         />
         {#if draft.attachments.length > 0}
@@ -670,7 +666,7 @@
         {/if}
         <div class="prompt-actions">
           <small id={`draft-agent-create-help-${draft.id}`}>
-            {selectedTemplate ? 'Additional instructions' : 'Instructions'} can be empty · {primaryModifierLabel}+Enter creates · Shift+Enter adds a line
+            {selectedTemplate ? 'Additional instructions' : 'Instructions'} can be empty · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
           </small>
           <Button
             type="submit"
@@ -690,8 +686,8 @@
       </Collapsible.Trigger>
       <Collapsible.Content>
         <div class="advanced-grid">
-          <label class="field-label" for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
-          <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Other launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder="--permission-mode plan" disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} onkeydown={handleKeydown} /></label>
+          <label class="field-label" for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} /></label>
+          <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Other launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder="--permission-mode plan" disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} /></label>
           {#if modelSupported || effortSupported}
             <section class="launch-tuning" aria-labelledby={`draft-agent-tuning-${draft.id}`}>
               <div class="launch-tuning-heading">
@@ -718,7 +714,6 @@
                       autocorrect="off"
                       spellcheck={false}
                       oninput={(event) => onChange({ model: event.currentTarget.value })}
-                      onkeydown={handleKeydown}
                     />
                     {#if modelSuggestions.length > 0}
                       <datalist id={`draft-agent-models-${draft.id}`}>

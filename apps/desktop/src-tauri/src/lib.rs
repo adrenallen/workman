@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{
     Emitter, Manager, RunEvent, State, WindowEvent,
-    menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID},
+    menu::{Menu, MenuBuilder, MenuItemBuilder, MenuItemKind, SubmenuBuilder, WINDOW_SUBMENU_ID},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -45,6 +45,7 @@ const KEEP_AWAKE_RESYNC_EVENT: &str = "keep-awake://resync";
 const MENU_ABOUT: &str = "workman.about";
 const MENU_SETTINGS: &str = "workman.settings";
 const MENU_CHECK_UPDATES: &str = "workman.check_updates";
+const MENU_PREVIOUS_VIEW: &str = "view.previous_view";
 const MENU_TOGGLE_PROJECT_RAIL: &str = "view.toggle_project_rail";
 const MENU_TOGGLE_SECTION_RAIL: &str = "view.toggle_section_rail";
 const TERMINAL_FRAME_MAGIC: &[u8; 4] = b"WRK1";
@@ -586,8 +587,17 @@ enum NativeMenuAction {
     About,
     Settings,
     CheckUpdates,
+    PreviousView,
     ToggleProjectRail,
     ToggleSectionRail,
+}
+
+#[derive(Deserialize)]
+struct DesktopMenuAccelerators {
+    settings: Option<String>,
+    previous_view: Option<String>,
+    toggle_project_rail: Option<String>,
+    toggle_section_rail: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1371,6 +1381,7 @@ pub fn run() {
             daemon_status,
             desktop_relaunch_capability,
             desktop_restart_after_update,
+            desktop_set_menu_accelerators,
             keep_awake_start,
             keep_awake_stop,
             keep_awake_status,
@@ -1432,6 +1443,9 @@ fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> 
         .build(app)?;
     let check_updates =
         MenuItemBuilder::with_id(MENU_CHECK_UPDATES, "Check for Updates…").build(app)?;
+    let previous_view = MenuItemBuilder::with_id(MENU_PREVIOUS_VIEW, "Switch to Previous View")
+        .accelerator("CmdOrCtrl+`")
+        .build(app)?;
     let toggle_project_rail =
         MenuItemBuilder::with_id(MENU_TOGGLE_PROJECT_RAIL, "Toggle Project Rail")
             .accelerator("CmdOrCtrl+B")
@@ -1467,6 +1481,8 @@ fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> 
         .select_all()
         .build()?;
     let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&previous_view)
+        .separator()
         .item(&toggle_project_rail)
         .item(&toggle_section_rail)
         .separator()
@@ -1489,10 +1505,59 @@ fn native_menu_action(id: &str) -> Option<NativeMenuAction> {
         MENU_ABOUT => Some(NativeMenuAction::About),
         MENU_SETTINGS => Some(NativeMenuAction::Settings),
         MENU_CHECK_UPDATES => Some(NativeMenuAction::CheckUpdates),
+        MENU_PREVIOUS_VIEW => Some(NativeMenuAction::PreviousView),
         MENU_TOGGLE_PROJECT_RAIL => Some(NativeMenuAction::ToggleProjectRail),
         MENU_TOGGLE_SECTION_RAIL => Some(NativeMenuAction::ToggleSectionRail),
         _ => None,
     }
+}
+
+#[tauri::command]
+fn desktop_set_menu_accelerators(
+    app: tauri::AppHandle,
+    accelerators: DesktopMenuAccelerators,
+) -> Result<(), String> {
+    let menu = app
+        .menu()
+        .ok_or_else(|| "desktop menu is unavailable".to_string())?;
+    for (id, accelerator) in [
+        (MENU_SETTINGS, accelerators.settings),
+        (MENU_PREVIOUS_VIEW, accelerators.previous_view),
+        (MENU_TOGGLE_PROJECT_RAIL, accelerators.toggle_project_rail),
+        (MENU_TOGGLE_SECTION_RAIL, accelerators.toggle_section_rail),
+    ] {
+        let updated = set_nested_menu_accelerator(
+            &menu.items().map_err(|error| error.to_string())?,
+            id,
+            accelerator.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        if !updated {
+            return Err(format!("desktop menu item {id} is unavailable"));
+        }
+    }
+    Ok(())
+}
+
+fn set_nested_menu_accelerator(
+    items: &[MenuItemKind<tauri::Wry>],
+    id: &str,
+    accelerator: Option<&str>,
+) -> tauri::Result<bool> {
+    for item in items {
+        if item.id().as_ref() == id {
+            if let Some(menu_item) = item.as_menuitem() {
+                menu_item.set_accelerator(accelerator)?;
+                return Ok(true);
+            }
+        }
+        if let Some(submenu) = item.as_submenu()
+            && set_nested_menu_accelerator(&submenu.items()?, id, accelerator)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Detect the private daemon-process mode used when no standalone `workmand` sits beside the app.
@@ -3075,6 +3140,10 @@ mod tests {
             Some(NativeMenuAction::CheckUpdates)
         );
         assert_eq!(
+            native_menu_action(MENU_PREVIOUS_VIEW),
+            Some(NativeMenuAction::PreviousView)
+        );
+        assert_eq!(
             native_menu_action(MENU_TOGGLE_PROJECT_RAIL),
             Some(NativeMenuAction::ToggleProjectRail)
         );
@@ -3086,6 +3155,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&NativeMenuAction::CheckUpdates).unwrap(),
             "\"check_updates\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NativeMenuAction::PreviousView).unwrap(),
+            "\"previous_view\""
         );
     }
 

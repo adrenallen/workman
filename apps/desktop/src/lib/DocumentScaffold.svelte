@@ -7,6 +7,7 @@
   import type { Snippet } from 'svelte';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
 
   interface Props {
     ariaLabel: string;
@@ -66,12 +67,12 @@
 
     <div class="document-actions">
       {#if onPrevious}
-        <IconButton label="Previous item" shortcut="⌘←" disabled={previousDisabled} onclick={onPrevious}>
+        <IconButton label="Previous item" shortcut={hotkeyDisplayLabel($hotkeyPreferences['navigate-left']) || undefined} disabled={previousDisabled} onclick={onPrevious}>
           {#snippet icon()}<ChevronLeftIcon size={15} strokeWidth={1.8} />{/snippet}
         </IconButton>
       {/if}
       {#if onNext}
-        <IconButton label="Next item" shortcut="⌘→" disabled={nextDisabled} onclick={onNext}>
+        <IconButton label="Next item" shortcut={hotkeyDisplayLabel($hotkeyPreferences['navigate-right']) || undefined} disabled={nextDisabled} onclick={onNext}>
           {#snippet icon()}<ChevronRightIcon size={15} strokeWidth={1.8} />{/snippet}
         </IconButton>
       {/if}

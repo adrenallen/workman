@@ -34,6 +34,7 @@
   import StatusIndicator from './components/ds/StatusIndicator.svelte';
   import * as Popover from './components/ui/popover';
   import { liveStats, type DescendantProcessStats } from './liveStats';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
   import { processActivity } from './processActivity';
   import { openBrowserUrl } from './openers';
   import PullRequestList from './PullRequestList.svelte';
@@ -261,8 +262,7 @@
     <button
       type="button"
       class="unfocus"
-      title="Unfocus terminal (⌘U)"
-      aria-keyshortcuts="Meta+U"
+      title={`Unfocus terminal${hotkeyDisplayLabel($hotkeyPreferences['unfocus-terminal']) ? ` (${hotkeyDisplayLabel($hotkeyPreferences['unfocus-terminal'])})` : ''}`}
       onclick={onUnfocus}
     >
       <XIcon size={13} aria-hidden="true" /><span class="nav-label">Unfocus</span>
@@ -270,7 +270,7 @@
     <span class="rule" aria-hidden="true"></span>
     <button
       type="button"
-      title="Previous process"
+      title={`Previous process${hotkeyDisplayLabel($hotkeyPreferences['previous-process']) ? ` (${hotkeyDisplayLabel($hotkeyPreferences['previous-process'])})` : ''}`}
       disabled={processes.length < 2}
       onclick={() => cycle(-1)}
     >
@@ -278,7 +278,7 @@
     </button>
     <button
       type="button"
-      title="Next process"
+      title={`Next process${hotkeyDisplayLabel($hotkeyPreferences['next-process']) ? ` (${hotkeyDisplayLabel($hotkeyPreferences['next-process'])})` : ''}`}
       disabled={processes.length < 2}
       onclick={() => cycle(1)}
     >

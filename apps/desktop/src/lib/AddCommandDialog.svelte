@@ -20,6 +20,7 @@
     type CommandInput,
     type CommandProcessReceipt
   } from './commandCreation';
+  import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
   import { projectDisplayName } from './worktrees';
 
   interface ValidatedWorkingDirectory {
@@ -48,6 +49,15 @@
   );
   let name = $state(untrack(() => initialProcess.name));
   let command = $state(untrack(() => initialProcess.command ?? ''));
+  let formElement: HTMLFormElement;
+
+  function handleKeydown(event: KeyboardEvent): void {
+    if (!(event.target instanceof Node) || !formElement?.contains(event.target)) return;
+    if (!matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void submit();
+  }
   let workingDir = $state(untrack(() => initialProcess.working_dir));
   let environment = $state(untrack(() => formatCommandEnvironment(initialProcess.env)));
   let restartWhenChanged = $state(
@@ -144,6 +154,8 @@
 
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
   <Dialog.Content
     class="command-dialog w-[min(560px,calc(100vw-32px))] max-w-none gap-0 rounded-lg border border-border bg-popover p-0 shadow-2xl"
@@ -152,6 +164,7 @@
     aria-describedby="command-dialog-description"
   >
     <form
+      bind:this={formElement}
       onsubmit={(event) => {
         event.preventDefault();
         void submit();

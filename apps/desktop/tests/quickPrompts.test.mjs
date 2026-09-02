@@ -4,7 +4,6 @@ import test from 'node:test';
 
 import {
   filterQuickPrompts,
-  isQuickPromptPaletteShortcut,
   moveQuickPromptSelection,
   quickPromptPaletteAction,
   quickPromptPreview,
@@ -13,9 +12,8 @@ import {
 import { primaryModifierLabel } from '../src/lib/primaryModifier.ts';
 import { QuickPromptsStore } from '../src/lib/quickPrompts.ts';
 
-// The palette shortcut and send/jump chords follow the platform primary
-// modifier: Command on macOS, Control elsewhere. Creating a prompt stays ⌘N,
-// because Control+N belongs to the palette's vim navigation.
+// Platform-primary keys remain palette navigation inputs unless a configured
+// command handler claims them first.
 const primary = primaryModifierLabel === '⌘' ? 'metaKey' : 'ctrlKey';
 
 function prompt(id, name, body, sortOrder = id) {
@@ -29,18 +27,16 @@ function prompt(id, name, body, sortOrder = id) {
   };
 }
 
-test('palette actions distinguish insert, insert-and-send, and new prompt', () => {
-  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', [primary]: true, shiftKey: true }), true);
-  assert.equal(isQuickPromptPaletteShortcut({ key: 'p', [primary]: true }), false);
+test('palette actions keep selection controls separate from configurable commands', () => {
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false }),
     'insert'
   );
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false, [primary]: true }),
-    'insert-and-send'
+    'swallow'
   );
-  assert.equal(quickPromptPaletteAction({ key: 'n', metaKey: true }), 'new');
+  assert.equal(quickPromptPaletteAction({ key: 'n', metaKey: true }), null);
   assert.equal(
     quickPromptPaletteAction({ key: 'Enter', metaKey: false, shiftKey: true }),
     'swallow'
@@ -189,8 +185,7 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
     readFile(new URL('../src/lib/KeyboardShortcuts.svelte', import.meta.url), 'utf8')
   ]);
 
-  assert.match(app, /primaryModifier\(event\) && event\.shiftKey[\s\S]*event\.key\.toLowerCase\(\) === 'p'/);
-  assert.match(app, /onQuickPrompts=\{openQuickPrompts\}/);
+  assert.match(app, /case 'quick-prompts':[\s\S]*openQuickPrompts\(\)/);
   assert.match(app, /<QuickPromptPalette[\s\S]*canInsert=\{terminalView !== null && selectedProcess\?\.kind === 'agent' && selectedProcess\.status === 'running'\}/);
   assert.match(app, /bind:this=\{terminalView\}/);
   assert.match(palette, /Select a running agent first/);
@@ -205,11 +200,13 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
   assert.match(palette, /↑↓ · navigate/);
   assert.match(palette, /Enter · insert/);
   assert.match(palette, /\{sendChord\} · insert and send/);
+  assert.match(palette, /matchesHotkeyAction\(event, 'new-quick-prompt', \$hotkeyPreferences\)/);
+  assert.match(palette, /matchesHotkeyAction\(event, 'submit-focused-form', \$hotkeyPreferences\)/);
   assert.match(palette, /<QuickPromptEditor/);
   assert.match(palette, />Retry<\/Button>/);
   assert.match(palette, />New quick prompt<\/Button>/);
   assert.match(terminal, /export function insertQuickPrompt/);
-  assert.match(terminal, /attachCustomKeyEventHandler[\s\S]*onQuickPrompts && isQuickPromptPaletteShortcut\(event\)[\s\S]*onQuickPrompts\(\)[\s\S]*return false/);
+  assert.match(terminal, /attachCustomKeyEventHandler[\s\S]*onAppShortcut\?\.\(event\)[\s\S]*let userKeyToken/);
   assert.match(terminal, /instance\.paste\(sanitizeQuickPromptBody\(text\)\)/);
   assert.match(terminal, /if \(submit\)[\s\S]*encoder\.encode\('\\r'\)/);
   assert.match(settings, /<QuickPromptsCard/);
@@ -223,8 +220,8 @@ test('app, palette, terminal, and settings wire the complete quick prompt flow',
     'Create a quick prompt from the palette',
     'Close the palette'
   ]) assert.match(card, new RegExp(hint));
-  assert.match(shortcuts, /\[mod, shift, 'P'\], label: 'Open quick prompts for the selected agent'/);
-  assert.match(shortcuts, /quick-prompt search uses them for first\/last/);
+  assert.match(shortcuts, /configuredShortcuts\('workspace'\)/);
+  assert.match(shortcuts, /hotkeyDisplayParts\(\$hotkeyPreferences\[definition\.id\]\)/);
 });
 
 test('selected prompt row background clears 3:1 against adjacent rows in both themes', async () => {

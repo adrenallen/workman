@@ -25,20 +25,4 @@ export const primaryModifierLabel = macLike ? '⌘' : 'Ctrl';
 export const altModifierLabel = macLike ? '⌥' : 'Alt';
 export const shiftModifierLabel = macLike ? '⇧' : 'Shift';
 
-/**
- * The terminal unfocus chord: ⌘U on macOS, Ctrl+Shift+U elsewhere — plain
- * Ctrl+U is shell line editing, and terminal input stays sovereign.
- */
-export function terminalUnfocusChord(
-  event: ModifierEvent & { altKey: boolean; shiftKey: boolean; key: string }
-): boolean {
-  return (
-    primaryModifier(event) &&
-    !secondaryModifier(event) &&
-    !event.altKey &&
-    event.shiftKey !== macLike &&
-    event.key.toLowerCase() === 'u'
-  );
-}
-
 export const terminalUnfocusKeys = macLike ? ['⌘', 'U'] : ['Ctrl', 'Shift', 'U'];

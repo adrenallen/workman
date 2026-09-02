@@ -67,7 +67,6 @@
     type UpdateFlow
   } from './lib/updateFlow';
   import TerminalView from './lib/TerminalView.svelte';
-  import { processCycleDirection } from './lib/terminalKeys';
   import TodoBrowser from './lib/TodoBrowser.svelte';
   import TodoDetailView from './lib/TodoDetailView.svelte';
   import TrustReviewDialog from './lib/TrustReview.svelte';
@@ -177,6 +176,14 @@
     type ProjectPaneMemory
   } from './lib/projectPaneMemory';
   import {
+    emptyWorkspaceViewHistory,
+    recordWorkspaceView,
+    sameWorkspaceView,
+    swapWorkspaceViews,
+    type WorkspaceViewHistory,
+    type WorkspaceViewState
+  } from './lib/workspaceViewHistory';
+  import {
     deliverNativeNotification,
     listenForNativeNotificationActions,
     refreshNativeNotificationPermission,
@@ -210,6 +217,7 @@
   import {
     NATIVE_MENU_EVENT,
     requestNativeUpdateCheck,
+    syncNativeMenuAccelerators,
     type NativeMenuAction
   } from './lib/nativeMenu';
   import { primaryModifier, secondaryModifier } from './lib/primaryModifier';
@@ -434,6 +442,8 @@
   let quickJumpRecentKeys = $state<string[]>([]);
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
   let projectPaneMemory = $state<ProjectPaneMemory>(loadProjectPaneMemory());
+  let workspaceViewHistory = $state<WorkspaceViewHistory>(emptyWorkspaceViewHistory);
+  let workspaceViewSwapTarget: WorkspaceViewState | null = null;
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
   let flatProjectOrderChecked = false;
@@ -492,6 +502,7 @@
   let terminalView = $state<{
     insertQuickPrompt: (text: string, submit?: boolean) => boolean;
     focusInput: () => void;
+    openSearch: () => void;
   } | null>(null);
   let importOffer = $state<{ repository: WorktreeRepository; entries: WorktreeEntry[] } | null>(null);
   let importBusyPath = $state<string | null>(null);
@@ -622,6 +633,11 @@
   let showVersionBanner = $derived(showVersionSkew || (updateBanner.visible && !updateBannerDismissed));
 
   $effect(() => {
+    void syncNativeMenuAccelerators($hotkeyPreferences).catch(() => {
+      // Browser-only development and older desktop shells keep webview hotkeys functional.
+    });
+  });
+  $effect(() => {
     void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
   });
 
@@ -683,6 +699,23 @@
     if (!pane || sameProjectPane(projectPaneMemory[projectId], pane)) return;
     projectPaneMemory = { ...projectPaneMemory, [projectId]: pane };
     saveProjectPaneMemory(projectPaneMemory);
+  });
+
+  $effect(() => {
+    const projectId = selectedProject?.id ?? null;
+    if (
+      connection.status !== 'connected'
+      || projectId === null
+      || loadedProjectId !== projectId
+    ) return;
+    const pane = currentProjectPane();
+    if (!pane) return;
+    const next = { projectId, pane };
+    if (workspaceViewSwapTarget) {
+      if (!sameWorkspaceView(workspaceViewSwapTarget, next)) return;
+      workspaceViewSwapTarget = null;
+    }
+    workspaceViewHistory = recordWorkspaceView(workspaceViewHistory, next);
   });
 
   $effect(() => {
@@ -928,6 +961,9 @@
         requestNativeUpdateCheck();
         openSettingsSection('about');
         return;
+      case 'previous_view':
+        switchToPreviousWorkspaceView();
+        return;
       case 'toggle_project_rail':
         toggleProjectRail();
         return;
@@ -938,7 +974,7 @@
   }
 
   function handleShortcut(event: KeyboardEvent): void {
-    projectHotkeyHintsVisible = primaryModifier(event);
+    projectHotkeyHintsVisible = projectHotkeyModifiersActive(event);
     const target = event.target as HTMLElement | null;
     if (folderMenuRequest) {
       if (event.key === 'Escape') closeProjectFolderMenu();
@@ -948,84 +984,17 @@
       if (event.key === 'Escape') closeContextMenu();
       return;
     }
-    if (handleConfiguredHotkey(event)) return;
+    if (handleAppShortcut(event)) return;
     if (isTerminalInputTarget(target)) return;
-    if (primaryModifier(event) && !event.altKey && !secondaryModifier(event) && event.key === '/') {
-      event.preventDefault();
-      if (shortcutsOpen) closeShortcuts();
-      else openShortcuts();
-      return;
-    }
-    if (primaryModifier(event) && !event.altKey && !secondaryModifier(event) && event.key.toLowerCase() === 'k') {
-      event.preventDefault();
-      if (shortcutsOpen) closeShortcuts();
-      if (quickJumpOpen) closeQuickJump();
-      else openQuickJump();
-      return;
-    }
-    if (
-      primaryModifier(event) && event.shiftKey && !event.altKey && !secondaryModifier(event)
-      && event.key.toLowerCase() === 'p'
-    ) {
-      event.preventDefault();
-      if (quickPromptOpen) closeQuickPrompts();
-      else openQuickPrompts();
-      return;
-    }
     if (quickJumpOpen || quickPromptOpen || shortcutsOpen) return;
     if (event.key === 'Escape' && (treeMultiSelection?.ids.length ?? 0) > 0) {
       event.preventDefault();
       treeMultiSelection = null;
       return;
     }
-    const draftForm = target?.closest('[data-creation-draft]') ?? null;
-    const draftCycleDirection = draftForm
-      ? processCycleDirection(event)
-      : null;
-    if (draftCycleDirection !== null) {
-      event.preventDefault();
-      cycleProcess(draftCycleDirection, 'main');
-      return;
-    }
     if (isTextEditingTarget(target)) return;
-    if (
-      selection?.kind === 'todo' && primaryModifier(event) && !event.altKey && !secondaryModifier(event) && !event.shiftKey
-      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-    ) {
-      event.preventDefault();
-      void navigateAdjacentTodo(event.key === 'ArrowLeft' ? -1 : 1);
-      return;
-    }
-    if (
-      selection?.kind === 'scratchpad' && primaryModifier(event) && !event.altKey && !secondaryModifier(event) && !event.shiftKey
-      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-    ) {
-      event.preventDefault();
-      void navigateAdjacentScratchpad(event.key === 'ArrowLeft' ? -1 : 1);
-      return;
-    }
-    if (
-      primaryModifier(event) && !secondaryModifier(event) && !event.shiftKey
-      && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-    ) {
-      event.preventDefault();
-      focusAdjacentPanel(panelForTarget(target), event.key === 'ArrowLeft' ? -1 : 1);
-      return;
-    }
-    const cycleDirection = processCycleDirection(event);
-    if (cycleDirection !== null) {
-      event.preventDefault();
-      cycleProcess(cycleDirection, panelForTarget(target));
-      return;
-    }
     if (panelForTarget(target) === 'projects') handleProjectListKeys(event);
     if (event.defaultPrevented) return;
-    if (primaryModifier(event) && !event.altKey && event.key.toLowerCase() === 'b') {
-      event.preventDefault();
-      if (event.shiftKey) toggleTreeRail();
-      else toggleProjectRail();
-      return;
-    }
     if (event.key === 'Escape') {
       if (quickJumpOpen) closeQuickJump();
       else if (dialog) dialog = null;
@@ -1037,20 +1006,112 @@
   }
 
   function handleShortcutKeyup(event: KeyboardEvent): void {
-    projectHotkeyHintsVisible = primaryModifier(event);
+    projectHotkeyHintsVisible = projectHotkeyModifiersActive(event);
+  }
+
+  function projectHotkeyModifiersActive(event: KeyboardEvent): boolean {
+    const primary = primaryModifier(event);
+    const secondary = secondaryModifier(event);
+    return projectHotkeyActions.some((action) => {
+      const chord = $hotkeyPreferences[action];
+      return chord !== null
+        && chord.primary === primary
+        && chord.secondary === secondary
+        && chord.alt === event.altKey
+        && chord.shift === event.shiftKey;
+    });
   }
 
   function hideProjectHotkeyHints(): void {
     projectHotkeyHintsVisible = false;
   }
 
+  function handleAppShortcut(event: KeyboardEvent): boolean {
+    return handleConfiguredHotkey(event);
+  }
+
   function handleConfiguredHotkey(event: KeyboardEvent): boolean {
-    if (quickJumpOpen || quickPromptOpen || shortcutsOpen) return false;
     const action = findHotkeyAction(event, $hotkeyPreferences);
     if (!action) return false;
+
+    const target = event.target as HTMLElement | null;
+    const terminalTarget = isTerminalInputTarget(target);
+    const textTarget = isTextEditingTarget(target);
+    const draftTarget = target?.closest('[data-creation-draft]') !== null;
+    if (
+      action === 'reorder-up'
+      || action === 'reorder-down'
+      || action === 'open-context-menu'
+      || action === 'submit-focused-form'
+      || action === 'toggle-scratchpad-list'
+      || action === 'toggle-todo-inspector'
+      || action === 'new-quick-prompt'
+    ) return false;
+    if (quickJumpOpen && action !== 'quick-jump') return false;
+    if (quickPromptOpen && action !== 'quick-prompts') return false;
+    if (shortcutsOpen && action !== 'keyboard-reference') return false;
+    if ((action === 'navigate-left' || action === 'navigate-right') && textTarget) return false;
+    if (
+      (action === 'previous-process' || action === 'next-process')
+      && textTarget
+      && !terminalTarget
+      && !draftTarget
+    ) return false;
+    if (action === 'unfocus-terminal' && !terminalTarget) return false;
+    if (action === 'search-terminal' && (!terminalTarget || terminalView === null)) return false;
+
     event.preventDefault();
     event.stopPropagation();
-    if (event.repeat) return true;
+    const repeatable = action === 'navigate-left'
+      || action === 'navigate-right'
+      || action === 'previous-process'
+      || action === 'next-process';
+    if (event.repeat && !repeatable) return true;
+
+    switch (action) {
+      case 'previous-view':
+        switchToPreviousWorkspaceView();
+        return true;
+      case 'quick-jump':
+        if (quickJumpOpen) closeQuickJump();
+        else openQuickJump();
+        return true;
+      case 'keyboard-reference':
+        if (shortcutsOpen) closeShortcuts();
+        else openShortcuts();
+        return true;
+      case 'open-settings':
+        appNavigation.navigate({ type: 'settings' }, 'keyboard');
+        return true;
+      case 'toggle-project-rail':
+        toggleProjectRail();
+        return true;
+      case 'toggle-project-tree':
+        toggleTreeRail();
+        return true;
+      case 'quick-prompts':
+        if (quickPromptOpen) closeQuickPrompts();
+        else openQuickPrompts();
+        return true;
+      case 'navigate-left':
+      case 'navigate-right': {
+        const direction = action === 'navigate-left' ? -1 : 1;
+        if (selection?.kind === 'todo') void navigateAdjacentTodo(direction);
+        else if (selection?.kind === 'scratchpad') void navigateAdjacentScratchpad(direction);
+        else focusAdjacentPanel(panelForTarget(target), direction);
+        return true;
+      }
+      case 'previous-process':
+      case 'next-process':
+        cycleProcess(action === 'previous-process' ? -1 : 1, panelForTarget(target));
+        return true;
+      case 'unfocus-terminal':
+        unfocusSelectedProcess();
+        return true;
+      case 'search-terminal':
+        terminalView?.openSearch();
+        return true;
+    }
 
     const projectIndex = projectHotkeyIndex(action);
     if (projectIndex !== null) {
@@ -2499,6 +2560,8 @@
       const process = await client.spawnTerminal(selectedProject.id);
       await refreshProcesses(selectedProject.id);
       await selectTreeItem(projectTreeSelection('terminal', process.id, process.project_id, processLabel(process)));
+      await tick();
+      terminalView?.focusInput();
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -3119,8 +3182,94 @@
     return { type: 'overview' };
   }
 
+  function switchToPreviousWorkspaceView(): void {
+    if (workspaceViewNavigationBlocked()) return;
+    const target = workspaceViewHistory.previous;
+    if (!target) return;
+    if (!workspaceViewAvailable(target)) {
+      workspaceViewHistory = { ...workspaceViewHistory, previous: null };
+      return;
+    }
+
+    const nextHistory = swapWorkspaceViews(workspaceViewHistory);
+    if (!nextHistory.current) return;
+    workspaceViewSwapTarget = nextHistory.current;
+    workspaceViewHistory = nextHistory;
+    rememberProjectPane(target.projectId, target.pane);
+    if (!activateProject(target.projectId)) {
+      workspaceViewSwapTarget = null;
+      workspaceViewHistory = swapWorkspaceViews(nextHistory);
+      return;
+    }
+
+    if (target.pane.type === 'selection') {
+      void selectTreeItem({ ...target.pane.selection, projectId: target.projectId });
+    } else {
+      applyProjectPane(target.projectId, target.pane);
+    }
+    void tick().then(() => {
+      if (target.pane.type === 'selection' && isProcessSelection(target.pane.selection)) {
+        terminalView?.focusInput();
+      } else {
+        focusPanel('main');
+      }
+    });
+  }
+
+  function workspaceViewNavigationBlocked(): boolean {
+    return quickJumpOpen
+      || quickPromptOpen
+      || shortcutsOpen
+      || folderMenuRequest !== null
+      || contextRequest !== null
+      || folderSettingsFolder !== null
+      || projectSettingsProject !== null
+      || dialog !== null
+      || trustReview !== null
+      || keepAwakeOpen
+      || agentCascadeRequest !== null
+      || registerProjectDialog !== null
+      || worktreeDialog !== null
+      || removeWorktreeDialog !== null
+      || importOffer !== null
+      || confirmationDialog !== null;
+  }
+
+  function workspaceViewAvailable(view: WorkspaceViewState): boolean {
+    if (!projects.some((project) => project.id === view.projectId)) return false;
+    const snapshot = navigationIndex[view.projectId];
+    const isCurrentProject = selectedProject?.id === view.projectId;
+    const projectProcesses = isCurrentProject
+      ? visibleProcesses.filter((process) => process.project_id === view.projectId)
+      : (snapshot?.processes ?? []);
+    const projectCoordination = isCurrentProject ? coordination : snapshot?.coordination;
+    return projectPaneSelectionExists(view.pane, {
+      processIds: new Set(projectProcesses.map((process) => process.id)),
+      todoIds: new Set((projectCoordination?.todos ?? []).map((todo) => todo.id)),
+      scratchpadIds: new Set([
+        ...(projectCoordination?.scratchpads ?? []),
+        ...(projectCoordination?.archived_scratchpads ?? [])
+      ].map((scratchpad) => scratchpad.id)),
+      draftIds: new Set(
+        creationDrafts
+          .filter((draft) => draft.projectId === view.projectId)
+          .map((draft) => draft.id)
+      )
+    });
+  }
+
+  function rememberProjectPane(projectId: number, pane: ProjectPane): void {
+    if (sameProjectPane(projectPaneMemory[projectId], pane)) return;
+    projectPaneMemory = { ...projectPaneMemory, [projectId]: pane };
+    saveProjectPaneMemory(projectPaneMemory);
+  }
+
   function applyRememberedProjectPane(projectId: number): void {
     const pane = projectPaneMemory[projectId] ?? { type: 'overview' };
+    applyProjectPane(projectId, pane);
+  }
+
+  function applyProjectPane(projectId: number, pane: ProjectPane): void {
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
@@ -5220,7 +5369,7 @@
       <IconButton
         class="brand-collapse size-7 shrink-0 rounded border border-border bg-card"
         label={`${projectRailCollapsed ? 'Expand' : 'Collapse'} project rail`}
-        shortcut="⌘B"
+        shortcut={hotkeyDisplayLabel($hotkeyPreferences['toggle-project-rail']) || undefined}
         onclick={toggleProjectRail}
       >
         {#snippet icon()}
@@ -5510,10 +5659,7 @@
                 onStart={(process) => void startOrReviewProcess(process)}
                 onError={reportError}
                 onContextMenu={showContextMenu}
-                onAppShortcut={handleConfiguredHotkey}
-                onQuickPrompts={openQuickPrompts}
-                onCycleProcess={(direction) => cycleProcess(direction, 'main')}
-                onUnfocus={unfocusSelectedProcess}
+                onAppShortcut={handleAppShortcut}
               />
               <ClaimedTodoOverlay claims={selectedProcess.claimed_todos ?? []} onOpen={openClaimedTodo} />
             </div>
