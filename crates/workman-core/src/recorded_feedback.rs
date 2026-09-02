@@ -272,20 +272,38 @@ impl<'store> RecordedFeedbackService<'store> {
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
-        if !matches!(
-            current.status,
-            RecordedFeedbackStatus::Recording | RecordedFeedbackStatus::Transcribing
-        ) {
-            return Err(RecordedFeedbackError::InvalidState {
-                expected: "recording or transcribing",
-                actual: current.status,
-            });
-        }
+        let status = match current.status {
+            RecordedFeedbackStatus::Recording => "recording",
+            RecordedFeedbackStatus::Transcribing => "transcribing",
+            RecordedFeedbackStatus::Failed if is_interrupted(&current) => {
+                if current.audio_path.is_some() {
+                    "transcribing"
+                } else {
+                    "recording"
+                }
+            }
+            _ => {
+                return Err(RecordedFeedbackError::InvalidState {
+                    expected: "recording, transcribing, or interrupted",
+                    actual: current.status,
+                });
+            }
+        };
         let changed = self.store.connection().execute(
-            "UPDATE recorded_feedback SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
-             WHERE id = ?4 AND project_id = ?5 AND status IN ('recording', 'transcribing')
-               AND (lease_owner IS NULL OR lease_owner = ?1)",
-            params![lease_owner, expires_at, now_ms, feedback_id, project_id],
+            "UPDATE recorded_feedback SET status = ?1, error_code = NULL, lease_owner = ?2,
+                    lease_expires_at = ?3, updated_at = ?4
+             WHERE id = ?5 AND project_id = ?6
+               AND (status IN ('recording', 'transcribing')
+                    OR (status = 'failed' AND error_code = 'recording_interrupted'))
+               AND (lease_owner IS NULL OR lease_owner = ?2)",
+            params![
+                status,
+                lease_owner,
+                expires_at,
+                now_ms,
+                feedback_id,
+                project_id
+            ],
         )?;
         if changed == 0 {
             return Err(RecordedFeedbackError::InvalidInput(
@@ -303,9 +321,9 @@ impl<'store> RecordedFeedbackService<'store> {
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
-        if current.status != RecordedFeedbackStatus::Recording {
+        if current.status != RecordedFeedbackStatus::Recording && !is_interrupted(&current) {
             return Err(RecordedFeedbackError::InvalidState {
-                expected: "recording",
+                expected: "recording or an interrupted recording",
                 actual: current.status,
             });
         }
@@ -331,7 +349,8 @@ impl<'store> RecordedFeedbackService<'store> {
             ],
         )?;
         transaction.execute(
-            "UPDATE recorded_feedback SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+            "UPDATE recorded_feedback SET status = 'recording', error_code = NULL,
+                    revision = revision + 1, updated_at = ?1 WHERE id = ?2",
             params![now_ms, feedback_id],
         )?;
         transaction.commit()?;
@@ -347,15 +366,16 @@ impl<'store> RecordedFeedbackService<'store> {
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
-        if current.status != RecordedFeedbackStatus::Recording {
+        if current.status != RecordedFeedbackStatus::Recording && !is_interrupted(&current) {
             return Err(RecordedFeedbackError::InvalidState {
-                expected: "recording",
+                expected: "recording or an interrupted recording",
                 actual: current.status,
             });
         }
         self.store.connection().execute(
             "UPDATE recorded_feedback SET status = 'transcribing', duration_ms = ?1,
-                    audio_path = ?2, revision = revision + 1, updated_at = ?3 WHERE id = ?4",
+                    audio_path = ?2, error_code = NULL, revision = revision + 1,
+                    updated_at = ?3 WHERE id = ?4",
             params![duration_ms.max(0), audio_path, now_ms, feedback_id],
         )?;
         self.require(project_id, feedback_id)
@@ -370,9 +390,9 @@ impl<'store> RecordedFeedbackService<'store> {
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
-        if current.status != RecordedFeedbackStatus::Transcribing {
+        if current.status != RecordedFeedbackStatus::Transcribing && !is_interrupted(&current) {
             return Err(RecordedFeedbackError::InvalidState {
-                expected: "transcribing",
+                expected: "transcribing or interrupted transcription",
                 actual: current.status,
             });
         }
@@ -464,10 +484,12 @@ impl<'store> RecordedFeedbackService<'store> {
         let current = self.require(project_id, feedback_id)?;
         if !matches!(
             current.status,
-            RecordedFeedbackStatus::Recording | RecordedFeedbackStatus::Transcribing
+            RecordedFeedbackStatus::Recording
+                | RecordedFeedbackStatus::Transcribing
+                | RecordedFeedbackStatus::Failed
         ) {
             return Err(RecordedFeedbackError::InvalidState {
-                expected: "recording or transcribing",
+                expected: "recording, transcribing, or failed",
                 actual: current.status,
             });
         }
@@ -480,6 +502,11 @@ impl<'store> RecordedFeedbackService<'store> {
             return Err(RecordedFeedbackError::InvalidInput(
                 "failure code is invalid".into(),
             ));
+        }
+        if current.status == RecordedFeedbackStatus::Failed
+            && current.error_code.as_deref() == Some(code)
+        {
+            return Ok(current);
         }
         self.store.connection().execute(
             "UPDATE recorded_feedback SET status = 'failed', error_code = ?1,
@@ -678,6 +705,11 @@ fn validate_snapshot(snapshot: &NewRecordedFeedbackSnapshot) -> RecordedFeedback
     Ok(())
 }
 
+fn is_interrupted(feedback: &RecordedFeedback) -> bool {
+    feedback.status == RecordedFeedbackStatus::Failed
+        && feedback.error_code.as_deref() == Some("recording_interrupted")
+}
+
 fn validate_document(
     transcript: &[RecordedFeedbackTranscriptSegment],
     blocks: &[RecordedFeedbackBlock],
@@ -805,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_live_session_becomes_recoverable_failure() {
+    fn interrupted_sessions_resume_from_native_progress() {
         let store = store_with_project();
         let service = RecordedFeedbackService::new(&store);
         let created = service
@@ -816,5 +848,61 @@ mod tests {
         let failed = service.get(1, created.id).unwrap().unwrap();
         assert_eq!(failed.status, RecordedFeedbackStatus::Failed);
         assert_eq!(failed.error_code.as_deref(), Some("recording_interrupted"));
+
+        let transcribing = service
+            .begin_transcription(1, created.id, 2_500, Some("/managed/audio.wav"), 2_100)
+            .unwrap();
+        assert_eq!(transcribing.status, RecordedFeedbackStatus::Transcribing);
+        assert_eq!(transcribing.error_code, None);
+
+        let second = service
+            .create(1, "Interrupted snapshot", "desktop-1", 4_000, 3_000)
+            .unwrap();
+        assert_eq!(service.fail_expired(1, 4_001).unwrap(), 1);
+        let recovered = service
+            .add_snapshot(
+                1,
+                second.id,
+                NewRecordedFeedbackSnapshot {
+                    ordinal: 0,
+                    anchor_ms: 1_000,
+                    anchor_samples: 16_000,
+                    invoked_at_ms: 4_100,
+                    completed_at_ms: 4_150,
+                    image_path: "/managed/recovered.png".into(),
+                    caption: String::new(),
+                    width: 100,
+                    height: 80,
+                    sha256: "b".repeat(64),
+                },
+                4_200,
+            )
+            .unwrap();
+        assert_eq!(recovered.status, RecordedFeedbackStatus::Recording);
+        assert_eq!(recovered.error_code, None);
+
+        let third = service
+            .create(1, "Interrupted transcription", "desktop-1", 6_000, 5_000)
+            .unwrap();
+        service
+            .begin_transcription(1, third.id, 1_000, Some("/managed/third.wav"), 5_500)
+            .unwrap();
+        assert_eq!(service.fail_expired(1, 6_001).unwrap(), 1);
+        let completed = service
+            .complete(1, third.id, vec![], vec![], 6_100)
+            .unwrap();
+        assert_eq!(completed.status, RecordedFeedbackStatus::Ready);
+        assert_eq!(completed.error_code, None);
+
+        let fourth = service
+            .create(1, "Interrupted renewal", "desktop-1", 8_000, 7_000)
+            .unwrap();
+        assert_eq!(service.fail_expired(1, 8_001).unwrap(), 1);
+        let renewed = service
+            .renew_lease(1, fourth.id, "desktop-1", 10_000, 8_100)
+            .unwrap();
+        assert_eq!(renewed.status, RecordedFeedbackStatus::Recording);
+        assert_eq!(renewed.error_code, None);
+        assert_eq!(renewed.lease_expires_at, Some(10_000));
     }
 }

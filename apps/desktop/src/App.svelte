@@ -390,6 +390,7 @@
   const feedbackLeaseOwner = `desktop-${crypto.randomUUID()}`;
   let feedbackEventQueue = Promise.resolve();
   const pendingFeedbackTranscripts = new Map<number, NativeFeedbackTranscript>();
+  let feedbackLeaseErrorId: number | null = null;
   let processOverviewKind = $state<ProcessKind | null>(null);
   let scratchpadBrowserBusyId = $state<number | null>(null);
   let trustReview = $state<TrustReview | null>(null);
@@ -864,23 +865,25 @@
       listen<NativeFeedbackTranscript>('feedback://transcript', ({ payload }) => {
         if (active) enqueueFeedbackEvent(() => completeFeedbackTranscription(payload));
       }),
-      listen<{ feedback_id: number; project_id?: number; code: string; message: string }>('feedback://error', ({ payload }) => {
+      listen<{ feedback_id: number; project_id: number; code: string; message: string }>('feedback://error', ({ payload }) => {
         if (!active) return;
-        if (payload.project_id) {
-          enqueueFeedbackEvent(async () => {
-            await client.recordedFeedbackFailed(payload.project_id!, payload.feedback_id, payload.code);
-            pendingFeedbackTranscripts.delete(payload.feedback_id);
-            if (activeFeedbackSession?.feedback_id === payload.feedback_id) activeFeedbackSession = null;
-            if (selectedProject?.id === payload.project_id) {
-              await refreshFeedback(payload.project_id!);
-              if (selection?.kind === 'feedback' && selection.id === payload.feedback_id) {
-                await loadFeedback(payload.feedback_id, false);
-              }
+        reportError(new Error(payload.message));
+        enqueueFeedbackEvent(async () => {
+          if (activeFeedbackSession?.feedback_id === payload.feedback_id) {
+            activeFeedbackSession = null;
+            feedbackLeaseErrorId = null;
+          }
+          await invoke<boolean>('feedback_abort', { feedbackId: payload.feedback_id }).catch(() => false);
+          await client.recordedFeedbackFailed(payload.project_id, payload.feedback_id, payload.code)
+            .catch((cause) => recordDaemonLog('warning', 'Could not persist feedback failure', messageForCause(cause)));
+          pendingFeedbackTranscripts.delete(payload.feedback_id);
+          if (selectedProject?.id === payload.project_id) {
+            await refreshFeedback(payload.project_id);
+            if (selection?.kind === 'feedback' && selection.id === payload.feedback_id) {
+              await loadFeedback(payload.feedback_id, false);
             }
-          });
-        } else {
-          reportError(new Error(payload.message));
-        }
+          }
+        });
       }),
       listen<{ downloaded: number; total: number }>('feedback://model-progress', ({ payload }) => {
         if (active) feedbackModelProgress = payload;
@@ -929,7 +932,13 @@
         session.project_id,
         session.feedback_id,
         feedbackLeaseOwner
-      ).catch(reportError);
+      ).then(() => {
+        if (feedbackLeaseErrorId === session.feedback_id) feedbackLeaseErrorId = null;
+      }).catch((cause) => {
+        if (feedbackLeaseErrorId === session.feedback_id) return;
+        feedbackLeaseErrorId = session.feedback_id;
+        reportError(cause);
+      });
     }, 5_000);
 
     void client
@@ -1146,6 +1155,7 @@
     ) return false;
     if (action === 'unfocus-terminal' && !terminalTarget) return false;
     if (action === 'search-terminal' && (!terminalTarget || terminalView === null)) return false;
+    if ((recordingHotkeyActions as readonly string[]).includes(action)) return false;
 
     event.preventDefault();
     event.stopPropagation();
@@ -1198,11 +1208,6 @@
       case 'search-terminal':
         terminalView?.openSearch();
         return true;
-    }
-
-    if ((recordingHotkeyActions as readonly string[]).includes(action)) {
-      // Native global shortcuts own these while the non-activating recorder is visible.
-      return true;
     }
 
     const projectIndex = projectHotkeyIndex(action);
@@ -2510,11 +2515,12 @@
 
   async function completeFeedbackTranscription(result: NativeFeedbackTranscript): Promise<void> {
     const current = await client.recordedFeedbackGet(result.project_id, result.feedback_id);
-    if (current.status === 'recording') {
+    const interrupted = current.status === 'failed' && current.error_code === 'recording_interrupted';
+    if (current.status === 'recording' || (interrupted && activeFeedbackSession?.phase === 'recording')) {
       pendingFeedbackTranscripts.set(result.feedback_id, result);
       return;
     }
-    if (current.status === 'ready' || current.status === 'failed') return;
+    if (current.status === 'ready' || (current.status === 'failed' && !interrupted)) return;
     const blocks = compileFeedbackTimeline(result.segments, current.snapshots);
     const next = await client.recordedFeedbackComplete(
       result.project_id,
@@ -6197,7 +6203,7 @@
             onSendNewAgent={sendSelectedFeedbackToNewAgent}
             onSendScratchpad={sendSelectedFeedbackToScratchpad}
             onCopy={copySelectedFeedbackPacket}
-            onArchive={() => void archiveSelectedFeedback()}
+            onArchive={archiveSelectedFeedback}
             onDelete={() => void deleteSelectedFeedback()}
           />
         {:else if selection?.kind === 'todo'}

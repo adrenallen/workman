@@ -17,7 +17,7 @@ use workman_core::{
     NewRecordedFeedbackDelivery, NewRecordedFeedbackSnapshot, ProcessKind, ProcessStatus,
     ProjectId, RecordedFeedback, RecordedFeedbackBlock, RecordedFeedbackDocumentUpdate,
     RecordedFeedbackError, RecordedFeedbackId, RecordedFeedbackService, RecordedFeedbackStatus,
-    RecordedFeedbackTranscriptSegment, ScratchpadService,
+    RecordedFeedbackTranscriptSegment, Scratchpad, ScratchpadService, ScratchpadServiceError,
 };
 
 use crate::ProcessRegistry;
@@ -26,7 +26,7 @@ pub(crate) type ControlResult = Result<Value, (&'static str, String)>;
 
 const FEEDBACK_DIRECTORY: &str = "recorded-feedback";
 const PACKET_DIRECTORY: &str = "feedback-packets";
-const LEASE_MS: i64 = 15_000;
+const LEASE_MS: i64 = 60_000;
 
 #[derive(Debug, Deserialize)]
 struct CreateParams {
@@ -140,17 +140,17 @@ struct ToScratchpadParams {
     name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct PacketManifest<'a> {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PacketManifest {
     version: u8,
     feedback_id: i64,
     revision: i64,
     source_created_at: i64,
-    markdown: &'a str,
+    markdown: String,
     images: Vec<PacketImage>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct PacketImage {
     snapshot_id: i64,
     path: String,
@@ -517,16 +517,10 @@ fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> 
     let params: ToScratchpadParams = params_as(params)?;
     let feedback = require_feedback(registry, params.project_id, params.feedback_id)?;
     let packet = compile_packet(data_dir, &feedback)?;
-    let name = params.name.as_deref().unwrap_or(&feedback.title);
-    let (scratchpad, _) = ScratchpadService::attributed(registry.store(), "user")
-        .write(
-            params.project_id,
-            None,
-            name.to_owned(),
-            packet.markdown,
-            Some(vec!["recorded-feedback".into()]),
-            None,
-        )
+    let name = params.name.unwrap_or_else(|| feedback.title.clone());
+    let content = scratchpad_packet_content(&packet);
+    let service = ScratchpadService::attributed(registry.store(), "user");
+    let scratchpad = create_feedback_scratchpad(&service, params.project_id, &name, &content)
         .map_err(|error| ("scratchpad_error", error.to_string()))?;
     let delivery = RecordedFeedbackService::new(registry.store())
         .record_delivery(
@@ -545,10 +539,41 @@ fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> 
     Ok(json!({ "scratchpad": scratchpad, "delivery": delivery }))
 }
 
+fn create_feedback_scratchpad(
+    service: &ScratchpadService<'_>,
+    project_id: ProjectId,
+    name: &str,
+    content: &str,
+) -> Result<Scratchpad, ScratchpadServiceError> {
+    for copy in 1..=1_000 {
+        let candidate = if copy == 1 {
+            name.to_owned()
+        } else {
+            format!("{name} ({copy})")
+        };
+        match service.write(
+            project_id,
+            None,
+            candidate,
+            content.to_owned(),
+            Some(vec!["recorded-feedback".into()]),
+            None,
+        ) {
+            Ok((created, _)) => return Ok(created),
+            Err(ScratchpadServiceError::NameConflict { .. }) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(ScratchpadServiceError::InvalidInput(
+        "could not find an available scratchpad name".into(),
+    ))
+}
+
 #[derive(Debug)]
 struct CompiledPacket {
     markdown: String,
     markdown_path: PathBuf,
+    images: Vec<PacketImage>,
 }
 
 fn compile_packet(data_dir: &Path, feedback: &RecordedFeedback) -> ControlResultAs<CompiledPacket> {
@@ -558,10 +583,50 @@ fn compile_packet(data_dir: &Path, feedback: &RecordedFeedback) -> ControlResult
             "finish transcription before sending this feedback".into(),
         ));
     }
-    let root = data_dir
+    let packet_parent = data_dir
         .join(PACKET_DIRECTORY)
-        .join(feedback.id.to_string())
-        .join(format!("r{}-{}", feedback.revision, Uuid::new_v4()));
+        .join(feedback.id.to_string());
+    create_private_directory(&packet_parent).map_err(storage_error)?;
+    let root = packet_parent.join(format!("r{}", feedback.revision));
+    if root.exists() {
+        if let Ok(packet) = load_compiled_packet(&root, feedback) {
+            return Ok(packet);
+        }
+        fs::remove_dir_all(&root).map_err(storage_error)?;
+    }
+
+    let staged = packet_parent.join(format!(
+        ".r{}-{}.building",
+        feedback.revision,
+        Uuid::new_v4()
+    ));
+    let build_result = build_compiled_packet(&staged, data_dir, feedback);
+    let (markdown, images) = match build_result {
+        Ok(packet) => packet,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&staged, &root) {
+        let _ = fs::remove_dir_all(&staged);
+        if root.exists() {
+            return load_compiled_packet(&root, feedback);
+        }
+        return Err(storage_error(error));
+    }
+    Ok(CompiledPacket {
+        markdown,
+        markdown_path: root.join("feedback.md"),
+        images,
+    })
+}
+
+fn build_compiled_packet(
+    root: &Path,
+    data_dir: &Path,
+    feedback: &RecordedFeedback,
+) -> ControlResultAs<(String, Vec<PacketImage>)> {
     let images_dir = root.join("images");
     create_private_directory(&images_dir).map_err(storage_error)?;
     let mut markdown = format!("# {}\n\n", feedback.title.trim());
@@ -623,15 +688,14 @@ fn compile_packet(data_dir: &Path, feedback: &RecordedFeedback) -> ControlResult
             }
         }
     }
-    let markdown_path = root.join("feedback.md");
-    atomic_write(&markdown_path, markdown.as_bytes()).map_err(storage_error)?;
+    atomic_write(&root.join("feedback.md"), markdown.as_bytes()).map_err(storage_error)?;
     let manifest = PacketManifest {
         version: 1,
         feedback_id: feedback.id,
         revision: feedback.revision,
         source_created_at: feedback.created_at,
-        markdown: "feedback.md",
-        images: manifest_images,
+        markdown: "feedback.md".into(),
+        images: manifest_images.clone(),
     };
     atomic_write(
         &root.join("manifest.json"),
@@ -639,10 +703,165 @@ fn compile_packet(data_dir: &Path, feedback: &RecordedFeedback) -> ControlResult
             .map_err(|error| ("feedback_packet_error", error.to_string()))?,
     )
     .map_err(storage_error)?;
+    Ok((markdown, manifest_images))
+}
+
+fn load_compiled_packet(
+    root: &Path,
+    feedback: &RecordedFeedback,
+) -> ControlResultAs<CompiledPacket> {
+    let manifest: PacketManifest =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).map_err(storage_error)?)
+            .map_err(|error| ("feedback_packet_error", error.to_string()))?;
+    if manifest.version != 1
+        || manifest.feedback_id != feedback.id
+        || manifest.revision != feedback.revision
+        || manifest.source_created_at != feedback.created_at
+        || manifest.markdown != "feedback.md"
+    {
+        return Err((
+            "feedback_packet_error",
+            "cached feedback packet metadata does not match".into(),
+        ));
+    }
+    let canonical_parent = root
+        .parent()
+        .ok_or(("feedback_packet_error", "packet path has no parent".into()))?
+        .canonicalize()
+        .map_err(storage_error)?;
+    let canonical_root = root.canonicalize().map_err(storage_error)?;
+    if canonical_root.parent() != Some(canonical_parent.as_path()) {
+        return Err((
+            "feedback_packet_error",
+            "cached feedback packet is outside private storage".into(),
+        ));
+    }
+    for image in &manifest.images {
+        let relative = Path::new(&image.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err((
+                "feedback_packet_error",
+                "cached feedback packet contains an invalid image path".into(),
+            ));
+        }
+        let path = root.join(relative).canonicalize().map_err(storage_error)?;
+        if !path.starts_with(&canonical_root)
+            || !path.is_file()
+            || sha256_file(&path).map_err(storage_error)? != image.sha256
+        {
+            return Err((
+                "feedback_packet_error",
+                "cached feedback packet image failed validation".into(),
+            ));
+        }
+    }
+    let markdown_path = root.join("feedback.md");
+    let canonical_markdown = markdown_path.canonicalize().map_err(storage_error)?;
+    if !canonical_markdown.starts_with(&canonical_root) || !canonical_markdown.is_file() {
+        return Err((
+            "feedback_packet_error",
+            "cached feedback packet markdown is invalid".into(),
+        ));
+    }
+    let markdown = fs::read_to_string(&markdown_path).map_err(storage_error)?;
+    if markdown != render_packet_markdown(feedback, &manifest.images)? {
+        return Err((
+            "feedback_packet_error",
+            "cached feedback packet content does not match this revision".into(),
+        ));
+    }
     Ok(CompiledPacket {
         markdown,
         markdown_path,
+        images: manifest.images,
     })
+}
+
+fn render_packet_markdown(
+    feedback: &RecordedFeedback,
+    images: &[PacketImage],
+) -> ControlResultAs<String> {
+    let mut markdown = format!("# {}\n\n", feedback.title.trim());
+    let mut image_index = 0;
+    for block in &feedback.blocks {
+        match block {
+            RecordedFeedbackBlock::Text { text, .. } => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    markdown.push_str(text);
+                    markdown.push_str("\n\n");
+                }
+            }
+            RecordedFeedbackBlock::Image { snapshot_id } => {
+                let snapshot = feedback
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.id == *snapshot_id)
+                    .ok_or((
+                        "feedback_integrity_error",
+                        format!("snapshot {snapshot_id} is missing"),
+                    ))?;
+                let image = images.get(image_index).ok_or((
+                    "feedback_packet_error",
+                    "cached feedback packet is missing an image".into(),
+                ))?;
+                if image.snapshot_id != snapshot.id || image.sha256 != snapshot.sha256 {
+                    return Err((
+                        "feedback_packet_error",
+                        "cached feedback packet image does not match this revision".into(),
+                    ));
+                }
+                let caption = if snapshot.caption.trim().is_empty() {
+                    format!(
+                        "Screenshot {} · {}",
+                        snapshot.ordinal + 1,
+                        format_duration(snapshot.anchor_ms)
+                    )
+                } else {
+                    snapshot.caption.trim().to_owned()
+                };
+                markdown.push_str(&format!(
+                    "![{}]({})\n\n",
+                    escape_markdown_alt(&caption),
+                    image.path
+                ));
+                image_index += 1;
+            }
+        }
+    }
+    if image_index != images.len() {
+        return Err((
+            "feedback_packet_error",
+            "cached feedback packet has unexpected images".into(),
+        ));
+    }
+    Ok(markdown)
+}
+
+fn scratchpad_packet_content(packet: &CompiledPacket) -> String {
+    let mut content = packet
+        .markdown
+        .split_once('\n')
+        .map(|(_, body)| body.trim_start_matches('\n').to_owned())
+        .unwrap_or_else(|| packet.markdown.clone());
+    let root = packet
+        .markdown_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    for image in &packet.images {
+        let relative = format!("]({})", image.path);
+        let absolute = root
+            .join(&image.path)
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace('>', "%3E");
+        content = content.replace(&relative, &format!("](<{absolute}>)"));
+    }
+    content
 }
 
 type ControlResultAs<T> = Result<T, (&'static str, String)>;
@@ -810,7 +1029,7 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
     use tempfile::tempdir;
-    use workman_core::RecordedFeedbackSnapshot;
+    use workman_core::{Project, RecordedFeedbackSnapshot, Store};
 
     fn ready_feedback(image_path: &Path, sha256: String) -> RecordedFeedback {
         RecordedFeedback {
@@ -872,6 +1091,30 @@ mod tests {
     }
 
     #[test]
+    fn repeated_scratchpad_delivery_uses_an_available_name() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 3,
+                path: "/tmp/feedback-project".into(),
+                name: "feedback-project".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let service = ScratchpadService::attributed(&store, "user");
+        let first =
+            create_feedback_scratchpad(&service, 3, "Navigation feedback", "First").unwrap();
+        let second =
+            create_feedback_scratchpad(&service, 3, "Navigation feedback", "Second").unwrap();
+        assert_eq!(first.name, "Navigation feedback");
+        assert_eq!(second.name, "Navigation feedback (2)");
+        assert_eq!(second.content, "Second");
+    }
+
+    #[test]
     fn packet_is_immutable_private_and_uses_relative_images() {
         let temp = tempdir().unwrap();
         let media = feedback_directory(temp.path(), 7);
@@ -917,6 +1160,32 @@ mod tests {
                 0o600
             );
         }
+
+        let scratchpad = scratchpad_packet_content(&packet);
+        assert!(!scratchpad.starts_with('#'));
+        assert!(scratchpad.contains(&format!(
+            "](<{}>)",
+            packet
+                .markdown_path
+                .parent()
+                .unwrap()
+                .join("images/snapshot-01.png")
+                .display()
+        )));
+
+        let reused = compile_packet(temp.path(), &feedback).unwrap();
+        assert_eq!(reused.markdown_path, packet.markdown_path);
+        assert_eq!(
+            fs::read_dir(packet.markdown_path.parent().unwrap().parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+
+        fs::write(&packet.markdown_path, "tampered").unwrap();
+        let repaired = compile_packet(temp.path(), &feedback).unwrap();
+        assert_eq!(repaired.markdown_path, packet.markdown_path);
+        assert_eq!(repaired.markdown, packet.markdown);
     }
 
     #[test]

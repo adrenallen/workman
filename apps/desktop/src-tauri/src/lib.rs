@@ -1420,6 +1420,7 @@ pub fn run() {
             recorded_feedback::feedback_begin_region,
             recorded_feedback::feedback_cancel_region,
             recorded_feedback::feedback_capture_snapshot,
+            recorded_feedback::feedback_abort,
             recorded_feedback::feedback_finish,
             recorded_feedback::feedback_read_image
         ])

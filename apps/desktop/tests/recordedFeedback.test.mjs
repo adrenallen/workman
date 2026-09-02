@@ -60,12 +60,13 @@ test('recording shortcuts have unique session-scoped defaults', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, detail, native, release] = await Promise.all([
+  const [app, tree, preflight, detail, native, daemon, release] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../../scripts/release.sh', import.meta.url), 'utf8')
   ]);
   assert.match(tree, /feedback: 'Feedback'/);
@@ -76,5 +77,16 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(detail, /onSendScratchpad/);
   assert.match(native, /\.content_protected\(true\)/);
   assert.match(native, /\.nonactivating_panel\(\)/);
+  assert.match(native, /pub\(crate\) async fn feedback_capture_snapshot/);
+  assert.match(native, /"feedback_id": feedback_id, "project_id": project_id/);
+  assert.match(native, /pub\(crate\) fn feedback_abort/);
+  assert.match(daemon, /\.join\(format!\("r\{\}", feedback\.revision\)\)/);
+  assert.match(daemon, /scratchpad_packet_content/);
+  assert.match(detail, /if \(feedback\.status === 'ready'\) await afterSave\(onArchive\)/);
+  const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
+  const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);
+  const preventDefault = app.indexOf('event.preventDefault()', shortcutHandler);
+  assert.ok(recordingGuard > shortcutHandler && recordingGuard < preventDefault,
+    'inactive recording shortcuts must return before the app swallows the key');
   assert.match(release, /com\.apple\.security\.device\.audio-input/);
 });

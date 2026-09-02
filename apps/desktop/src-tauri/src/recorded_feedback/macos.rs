@@ -113,6 +113,7 @@ struct FeedbackSession {
     color: String,
     width: f32,
     registered_shortcuts: Vec<String>,
+    display_ids: Vec<u32>,
 }
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<std::io::BufWriter<fs::File>>>>>;
@@ -288,15 +289,19 @@ pub(crate) fn feedback_start(
     }
     let media_dir = validate_media_dir(feedback_id, &media_dir)?;
     let audio_path = media_dir.join("audio.wav");
-    let (stream, writer, sample_rate, audio_samples) = start_audio(&app, feedback_id, &audio_path)?;
+    let (stream, writer, sample_rate, audio_samples) =
+        start_audio(&app, feedback_id, project_id, &audio_path)?;
     let registered_shortcuts = register_shortcuts(&app, shortcuts)?;
-    if let Err(error) = create_feedback_panels(&app) {
-        unregister_shortcuts(&app, &registered_shortcuts);
-        close_feedback_panels(&app);
-        drop(stream);
-        finalize_writer(&writer)?;
-        return Err(error);
-    }
+    let display_ids = match create_feedback_panels(&app) {
+        Ok(display_ids) => display_ids,
+        Err(error) => {
+            unregister_shortcuts(&app, &registered_shortcuts);
+            close_feedback_panels(&app);
+            drop(stream);
+            finalize_writer(&writer)?;
+            return Err(error);
+        }
+    };
     let session = FeedbackSession {
         feedback_id,
         project_id,
@@ -314,6 +319,7 @@ pub(crate) fn feedback_start(
         color: "#ff4d5e".into(),
         width: 4.0,
         registered_shortcuts,
+        display_ids,
     };
     let view = session_view(&session, "recording", None);
     *active = Some(session);
@@ -439,13 +445,32 @@ pub(crate) fn feedback_cancel_region(
 }
 
 #[tauri::command]
-pub(crate) fn feedback_capture_snapshot(
+pub(crate) async fn feedback_capture_snapshot(
     display_index: Option<usize>,
     region: Option<Region>,
     app: AppHandle,
-    state: State<'_, FeedbackState>,
+) -> Result<SnapshotView, String> {
+    let selecting_region = region.is_some();
+    let capture_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        capture_snapshot(display_index, region, &capture_app)
+    })
+    .await
+    .map_err(|error| format!("Snapshot worker stopped: {error}"))?;
+    if selecting_region {
+        let _ = restore_overlay_interaction(&app);
+        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+    }
+    result
+}
+
+fn capture_snapshot(
+    display_index: Option<usize>,
+    region: Option<Region>,
+    app: &AppHandle,
 ) -> Result<SnapshotView, String> {
     let invoked_at_ms = now_millis();
+    let state = app.state::<FeedbackState>();
     let mut active = state
         .session
         .lock()
@@ -455,13 +480,38 @@ pub(crate) fn feedback_capture_snapshot(
     let anchor_samples = session.audio_samples.load(Ordering::Relaxed) as i64;
     let monitors =
         Monitor::all().map_err(|error| format!("Could not inspect displays: {error}"))?;
+    let current_display_ids = monitors
+        .iter()
+        .map(|monitor| monitor.id().map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected_display_ids = session.display_ids.clone();
+    let mut observed_display_ids = current_display_ids.clone();
+    expected_display_ids.sort_unstable();
+    observed_display_ids.sort_unstable();
+    if expected_display_ids != observed_display_ids {
+        return Err(
+            "The display layout changed during recording. Finish this recording and start a new one before taking another snapshot."
+                .into(),
+        );
+    }
     let display_index = display_index
-        .or_else(|| active_toolbar_display(&app, &monitors))
+        .or_else(|| {
+            active_toolbar_display_id(app, &monitors).and_then(|id| {
+                session
+                    .display_ids
+                    .iter()
+                    .position(|candidate| *candidate == id)
+            })
+        })
         .unwrap_or(0);
-    let monitor = monitors
+    let display_id = *session
+        .display_ids
         .get(display_index)
-        .or_else(|| monitors.first())
-        .ok_or("No display is available.")?;
+        .ok_or("The selected display is no longer available.")?;
+    let monitor = monitors
+        .iter()
+        .find(|monitor| monitor.id().is_ok_and(|id| id == display_id))
+        .ok_or("The selected display is no longer available.")?;
     let scale = monitor.scale_factor().unwrap_or(1.0).max(1.0);
     let mut image = monitor
         .capture_image()
@@ -500,14 +550,10 @@ pub(crate) fn feedback_capture_snapshot(
         sha256,
     };
     let _ = app.emit(EVENT_SNAPSHOT, &view);
-    if region.is_some() {
-        set_overlays_interactive(&app, session.tool != AnnotationTool::Pointer)?;
-        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
-    }
     Ok(view)
 }
 
-fn active_toolbar_display(app: &AppHandle, monitors: &[Monitor]) -> Option<usize> {
+fn active_toolbar_display_id(app: &AppHandle, monitors: &[Monitor]) -> Option<u32> {
     let monitor = app
         .get_webview_window("feedback-toolbar")?
         .current_monitor()
@@ -515,9 +561,56 @@ fn active_toolbar_display(app: &AppHandle, monitors: &[Monitor]) -> Option<usize
     let scale = monitor.scale_factor();
     let logical_x = (monitor.position().x as f64 / scale).round() as i32;
     let logical_y = (monitor.position().y as f64 / scale).round() as i32;
-    monitors.iter().position(|candidate| {
-        candidate.x().is_ok_and(|x| x == logical_x) && candidate.y().is_ok_and(|y| y == logical_y)
-    })
+    monitors
+        .iter()
+        .find(|candidate| {
+            candidate.x().is_ok_and(|x| x == logical_x)
+                && candidate.y().is_ok_and(|y| y == logical_y)
+        })
+        .and_then(|monitor| monitor.id().ok())
+}
+
+fn restore_overlay_interaction(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<FeedbackState>();
+    let active = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?;
+    let session = active.as_ref().ok_or("No feedback recording is active.")?;
+    set_overlays_interactive(app, session.tool != AnnotationTool::Pointer)
+}
+
+#[tauri::command]
+pub(crate) fn feedback_abort(
+    feedback_id: i64,
+    app: AppHandle,
+    state: State<'_, FeedbackState>,
+) -> Result<bool, String> {
+    let mut active = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?;
+    let Some(session) = active.as_ref() else {
+        return Ok(false);
+    };
+    if session.feedback_id != feedback_id {
+        return Err("A different feedback recording is active.".into());
+    }
+    let session = active.take().expect("active session checked above");
+    drop(active);
+    unregister_shortcuts(&app, &session.registered_shortcuts);
+    close_feedback_panels(&app);
+    drop(session.stream);
+    let finalize_result = finalize_writer(&session.writer);
+    let _ = append_journal(
+        &session.media_dir.join("events.jsonl"),
+        &json!({
+            "event": "interrupted", "reason": "native_error",
+            "samples": session.audio_samples.load(Ordering::Relaxed),
+            "sample_rate": session.sample_rate, "at": now_millis()
+        }),
+    );
+    finalize_result.map(|_| true)
 }
 
 #[tauri::command]
@@ -544,14 +637,14 @@ pub(crate) fn feedback_finish(
         );
         return Err("Could not finish the feedback audio.".into());
     }
-    append_journal(
+    let _ = append_journal(
         &session.media_dir.join("events.jsonl"),
         &json!({
             "event": "audio_finished", "duration_ms": duration_ms, "audio_path": session.audio_path,
             "samples": session.audio_samples.load(Ordering::Relaxed), "sample_rate": session.sample_rate,
             "at": now_millis()
         }),
-    )?;
+    );
     let finished = FinishedView {
         feedback_id: session.feedback_id,
         project_id: session.project_id,
@@ -601,6 +694,7 @@ pub(crate) fn feedback_finish(
 fn start_audio(
     app: &AppHandle,
     feedback_id: i64,
+    project_id: i64,
     path: &Path,
 ) -> Result<(Stream, SharedWriter, u32, Arc<AtomicU64>), String> {
     let host = cpal::default_host();
@@ -631,7 +725,8 @@ fn start_audio(
         let _ = error_app.emit(
             EVENT_ERROR,
             json!({
-                "feedback_id": feedback_id, "code": "microphone_disconnected",
+                "feedback_id": feedback_id, "project_id": project_id,
+                "code": "microphone_disconnected",
                 "message": format!("Microphone disconnected: {error}")
             }),
         );
@@ -732,9 +827,13 @@ fn finalize_writer(writer: &SharedWriter) -> Result<(), String> {
     Ok(())
 }
 
-fn create_feedback_panels(app: &AppHandle) -> Result<(), String> {
+fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
     close_feedback_panels(app);
     let monitors = Monitor::all().map_err(|error| error.to_string())?;
+    let display_ids = monitors
+        .iter()
+        .map(|monitor| monitor.id().map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
     for (index, monitor) in monitors.iter().enumerate() {
         let position = LogicalPosition::new(
             monitor.x().map_err(|error| error.to_string())? as f64,
@@ -821,7 +920,7 @@ fn create_feedback_panels(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|error| error.to_string())?
         .show();
-    Ok(())
+    Ok(display_ids)
 }
 
 fn close_feedback_panels(app: &AppHandle) {

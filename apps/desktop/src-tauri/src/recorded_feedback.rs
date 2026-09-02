@@ -102,6 +102,7 @@ mod unsupported {
     unsupported_command!(feedback_begin_region() -> serde_json::Value);
     unsupported_command!(feedback_cancel_region() -> serde_json::Value);
     unsupported_command!(feedback_capture_snapshot(display_index: Option<usize>, region: Option<serde_json::Value>) -> serde_json::Value);
+    unsupported_command!(feedback_abort(feedback_id: i64, app: AppHandle) -> bool);
     unsupported_command!(feedback_finish(app: AppHandle) -> serde_json::Value);
 }
 

@@ -35,7 +35,7 @@
     onSendNewAgent: () => Promise<void>;
     onSendScratchpad: () => Promise<void>;
     onCopy: () => Promise<void>;
-    onArchive: () => void;
+    onArchive: () => Promise<void>;
     onDelete: () => void;
   }
 
@@ -101,6 +101,12 @@
       })));
       await action();
     });
+  }
+
+  async function archive(): Promise<void> {
+    if (!feedback) return;
+    if (feedback.status === 'ready') await afterSave(onArchive);
+    else await run(onArchive);
   }
 
   async function run(action: () => Promise<void>): Promise<void> {
@@ -173,7 +179,7 @@
     <footer>
       <div class="manage-actions">
         {#if feedback.status === 'ready'}<Button variant="outline" size="sm" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={13} />{/if}</Button>{/if}
-        <Button variant="ghost" size="sm" disabled={localBusy || busy || feedback.status === 'recording'} onclick={onArchive}>
+        <Button variant="ghost" size="sm" disabled={localBusy || busy || feedback.status === 'recording'} onclick={() => void archive()}>
           {#if feedback.archived}<ArchiveRestoreIcon size={14} />Restore{:else}<ArchiveIcon size={14} />Archive{/if}
         </Button>
         <Button variant="ghost" size="sm" class="delete" disabled={localBusy || busy || feedback.status === 'recording'} onclick={onDelete}><Trash2Icon size={14} />Delete</Button>
