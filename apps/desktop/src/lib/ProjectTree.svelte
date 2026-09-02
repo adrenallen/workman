@@ -103,6 +103,7 @@
     onReorderScratchpads: (orderedIds: number[]) => void;
     renameTarget: ContextMenuTarget | null;
     onContextMenu: (request: ContextMenuRequest) => void;
+    onMiddleClick: (target: ContextMenuTarget) => void;
     onRenameSubmit: (name: string) => void;
     onRenameCancel: () => void;
   }
@@ -141,6 +142,7 @@
     onReorderScratchpads,
     renameTarget,
     onContextMenu,
+    onMiddleClick,
     onRenameSubmit,
     onRenameCancel
   }: Props = $props();
@@ -381,6 +383,17 @@
   function openKeyboardMenu(event: KeyboardEvent, target: ContextMenuTarget): void {
     const request = keyboardContextMenuRequest(event, target);
     if (request) onContextMenu(request);
+  }
+
+  function preventMiddleMouseDefault(event: MouseEvent): void {
+    if (event.button === 1) event.preventDefault();
+  }
+
+  function handleMiddleClick(event: MouseEvent, target: ContextMenuTarget): void {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMiddleClick(target);
   }
 
   function processLabel(process: ProcessView): string {
@@ -777,6 +790,8 @@
                   data-context-id={todo.id}
                   use:reorderItem={todoReorderOptions(todo)}
                   onclick={(event) => selectGroupItem(event, 'todos', todo.id, visibleTodos.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title)))}
+                  onmousedown={preventMiddleMouseDefault}
+                  onauxclick={(event) => handleMiddleClick(event, todoTarget(todo))}
                   oncontextmenu={(event) => openSelectablePointerMenu(event, todoTarget(todo), 'todos', todo.id, visibleTodos.map((candidate) => candidate.id))}
                   onkeydown={(event) => openKeyboardMenu(event, todoTarget(todo))}
                 >
@@ -839,6 +854,8 @@
                       data-context-id={process.id}
                       use:reorderItem={reorderOptions(process)}
                       onclick={(event) => selectGroupItem(event, 'agents', process.id, visibleAgentRows.map((candidate) => candidate.process.id), () => selectProcess(process))}
+                      onmousedown={preventMiddleMouseDefault}
+                      onauxclick={(event) => handleMiddleClick(event, processTarget(process))}
                       oncontextmenu={(event) => openSelectablePointerMenu(event, processTarget(process), 'agents', process.id, visibleAgentRows.map((candidate) => candidate.process.id))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
@@ -913,6 +930,8 @@
                       data-context-id={process.id}
                       use:reorderItem={reorderOptions(process)}
                       onclick={(event) => selectGroupItem(event, 'terminals', process.id, visibleTerminals.map((candidate) => candidate.id), () => selectProcess(process))}
+                      onmousedown={preventMiddleMouseDefault}
+                      onauxclick={(event) => handleMiddleClick(event, processTarget(process))}
                       oncontextmenu={(event) => openSelectablePointerMenu(event, processTarget(process), 'terminals', process.id, visibleTerminals.map((candidate) => candidate.id))}
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
@@ -1007,6 +1026,8 @@
                     data-context-id={scratchpad.id}
                     use:reorderItem={scratchpadReorderOptions(scratchpad)}
                     onclick={(event) => selectGroupItem(event, 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name)))}
+                    onmousedown={preventMiddleMouseDefault}
+                    onauxclick={(event) => handleMiddleClick(event, scratchpadTarget(scratchpad))}
                     oncontextmenu={(event) => openSelectablePointerMenu(event, scratchpadTarget(scratchpad), 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id))}
                     onkeydown={(event) => openKeyboardMenu(event, scratchpadTarget(scratchpad))}
                   >

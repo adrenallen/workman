@@ -4601,6 +4601,55 @@
     await refreshCoordination(target.selection.projectId, false);
   }
 
+  async function runTreeMiddleClick(target: ContextMenuTarget): Promise<void> {
+    if (treeBulkBusy || agentCascadeBusy) return;
+    treeRenameTarget = null;
+    contextRequest = null;
+
+    if (target.kind === 'process') {
+      const process = target.process;
+      if (process.kind === 'command' || processBusyId !== null) return;
+      const removed = planAgentCascade(processes, [process], true);
+      const removedIds = new Set([
+        ...removed.selected.map((candidate) => candidate.id),
+        ...removed.additionalDescendants.map((candidate) => candidate.id)
+      ]);
+      processBusyId = process.id;
+      try {
+        if (process.status === 'running' || process.status === 'starting') {
+          await client.control('process.kill', {
+            process_id: process.id,
+            confirm_kill: true
+          });
+        }
+        await client.closeProcess(process.id);
+        if (selection && isProcessSelection(selection) && removedIds.has(selection.id)) {
+          clearSelection();
+        }
+        treeMultiSelection = null;
+        await refreshProcesses(process.project_id);
+      } catch (cause) {
+        reportError(cause);
+      } finally {
+        processBusyId = null;
+      }
+      return;
+    }
+
+    treeBulkBusy = true;
+    try {
+      if (target.kind === 'todo') {
+        if (!target.todo.completed) await runTodoContextAction('complete-todo', target);
+      } else if (target.kind === 'scratchpad') {
+        await runScratchpadContextAction('archive-scratchpad', target);
+      }
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      treeBulkBusy = false;
+    }
+  }
+
   async function commitTreeRename(name: string): Promise<void> {
     const target = treeRenameTarget;
     treeRenameTarget = null;
@@ -5520,6 +5569,7 @@
         onReorderScratchpads={(orderedIds) => void persistScratchpadOrder(orderedIds)}
         renameTarget={treeRenameTarget}
         onContextMenu={showContextMenu}
+        onMiddleClick={(target) => void runTreeMiddleClick(target)}
         onRenameSubmit={(name) => void commitTreeRename(name)}
         onRenameCancel={() => (treeRenameTarget = null)}
       />
