@@ -61,7 +61,7 @@
     onSave: () => void;
     onViewportLineChange?: (line: number) => void;
     onCommentSelection?: (anchor: ScratchpadSelectionAnchor) => void;
-    onCommentClick?: (commentId: number) => void;
+    onCommentClick?: (commentId: number, anchor: HTMLElement) => void;
   }
 
   let {
@@ -154,6 +154,11 @@
   function commentDecorations(editor: EditorView): DecorationSet {
     const ranges: Range<Decoration>[] = [];
     const content = editor.state.doc.toString();
+    const groups = new Map<string, {
+      from: number;
+      to: number;
+      comments: ScratchpadComment[];
+    }>();
     for (const comment of comments) {
       if (comment.resolved && !showResolvedComments) continue;
       const resolved = resolveScratchpadAnchor(content, comment);
@@ -161,20 +166,40 @@
       const to = resolved.current_end;
       if (resolved.anchor_state !== 'anchored' || from === null || to === null) continue;
       if (from < 0 || to <= from || to > editor.state.doc.length) continue;
-      const excerpt = comment.body.replaceAll(/\s+/g, ' ').slice(0, 120);
+      const key = `${from}:${to}`;
+      const group = groups.get(key);
+      if (group) group.comments.push(comment);
+      else groups.set(key, { from, to, comments: [comment] });
+    }
+    for (const { from, to, comments: groupedComments } of groups.values()) {
+      const first = groupedComments[0];
+      const ids = groupedComments.map((comment) => comment.id);
+      const allResolved = groupedComments.every((comment) => comment.resolved);
+      const excerpt = first.body.replaceAll(/\s+/g, ' ').slice(0, 120);
+      const attributes = {
+        'data-scratchpad-comment-id': String(first.id),
+        'data-scratchpad-comment-ids': ids.join(','),
+        title: groupedComments.length === 1
+          ? `${first.actor}: ${excerpt}`
+          : `${groupedComments.length} comments on this text`
+      };
       ranges.push(
         Decoration.mark({
           class: [
             'cm-comment-highlight',
-            comment.resolved ? 'cm-comment-resolved' : '',
-            focusedCommentId === comment.id ? 'cm-comment-focused' : ''
+            allResolved ? 'cm-comment-resolved' : '',
+            groupedComments.some((comment) => focusedCommentId === comment.id) ? 'cm-comment-focused' : ''
           ].filter(Boolean).join(' '),
-          attributes: {
-            'data-scratchpad-comment-id': String(comment.id),
-            title: `${comment.actor}: ${excerpt}`
-          },
+          attributes,
           inclusive: true
-        }).range(from, to)
+        }).range(from, to),
+        Decoration.widget({
+          widget: new CommentMarkerWidget(
+            ids,
+            allResolved
+          ),
+          side: 1
+        }).range(to)
       );
     }
     return Decoration.set(ranges, true);
@@ -233,6 +258,61 @@
 
     eq(other: MarkerWidget): boolean {
       return this.label === other.label && this.className === other.className;
+    }
+  }
+
+  class CommentMarkerWidget extends WidgetType {
+    readonly ids: number[];
+    readonly resolved: boolean;
+
+    constructor(ids: number[], resolved: boolean) {
+      super();
+      this.ids = ids;
+      this.resolved = resolved;
+    }
+
+    toDOM(): HTMLElement {
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = [
+        'cm-comment-marker',
+        this.resolved ? 'cm-comment-marker-resolved' : ''
+      ].filter(Boolean).join(' ');
+      marker.dataset.scratchpadCommentId = String(this.ids[0]);
+      marker.dataset.scratchpadCommentIds = this.ids.join(',');
+      marker.contentEditable = 'false';
+      marker.title = this.ids.length === 1 ? 'Open comment' : `Open ${this.ids.length} comments`;
+      marker.setAttribute('aria-label', marker.title);
+
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('width', '12');
+      svg.setAttribute('height', '12');
+      svg.setAttribute('fill', 'none');
+      svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '2');
+      svg.setAttribute('stroke-linecap', 'round');
+      svg.setAttribute('stroke-linejoin', 'round');
+      svg.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', 'M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z');
+      svg.append(path);
+      marker.append(svg);
+      if (this.ids.length > 1) {
+        const count = document.createElement('span');
+        count.textContent = String(this.ids.length);
+        marker.append(count);
+      }
+      return marker;
+    }
+
+    eq(other: CommentMarkerWidget): boolean {
+      return this.resolved === other.resolved &&
+        this.ids.join(',') === other.ids.join(',');
+    }
+
+    ignoreEvent(): boolean {
+      return false;
     }
   }
 
@@ -460,6 +540,39 @@
       borderBottomColor: 'var(--border-strong)',
       backgroundColor: 'color-mix(in srgb, var(--muted-foreground) 8%, transparent)'
     },
+    '.cm-comment-marker': {
+      display: 'inline-flex',
+      minWidth: '20px',
+      height: '20px',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '2px',
+      margin: '0 2px 0 5px',
+      border: '1px solid color-mix(in srgb, var(--notification-unread) 55%, var(--border))',
+      borderRadius: '999px',
+      padding: '0 4px',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, var(--popover))',
+      color: 'var(--notification-unread-foreground)',
+      fontFamily: "'JetBrains Mono Variable', monospace",
+      fontSize: '9px',
+      fontWeight: '700',
+      lineHeight: '1',
+      verticalAlign: '2px',
+      cursor: 'pointer'
+    },
+    '.cm-comment-marker:hover': {
+      borderColor: 'var(--notification-unread)',
+      backgroundColor: 'color-mix(in srgb, var(--notification-unread) 22%, var(--popover))'
+    },
+    '.cm-comment-marker:focus-visible': {
+      outline: '2px solid var(--ring)',
+      outlineOffset: '1px'
+    },
+    '.cm-comment-marker.cm-comment-marker-resolved': {
+      borderColor: 'var(--border-strong)',
+      backgroundColor: 'var(--card)',
+      color: 'var(--muted-foreground)'
+    },
     '.cm-comment-flash': { outline: '2px solid var(--notification-unread)', outlineOffset: '1px' },
     '.cm-placeholder': { color: 'var(--muted-foreground)', fontStyle: 'italic' }
     });
@@ -493,7 +606,13 @@
                 : null;
               const commentId = Number(target?.dataset.scratchpadCommentId);
               if (target && Number.isInteger(commentId)) {
-                onCommentClick?.(commentId);
+                event.preventDefault();
+                const marker = target.classList.contains('cm-comment-marker')
+                  ? target
+                  : [...editor.dom.querySelectorAll<HTMLElement>('.cm-comment-marker')]
+                      .find((candidate) => candidate.dataset.scratchpadCommentIds
+                        ?.split(',').includes(String(commentId)));
+                onCommentClick?.(commentId, marker ?? target);
                 return true;
               }
               if (!primaryModifier(event) || event.button !== 0) return false;
@@ -619,7 +738,11 @@
     let from: number | null = null;
     let to: number | null = null;
     view.state.field(commentDecorationField).between(0, view.state.doc.length, (rangeFrom, rangeTo, decoration) => {
-      if (decoration.spec.attributes?.['data-scratchpad-comment-id'] === String(request.commentId)) {
+      const ids = decoration.spec.attributes?.['data-scratchpad-comment-ids']?.split(',') ?? [];
+      if (
+        decoration.spec.attributes?.['data-scratchpad-comment-id'] === String(request.commentId) ||
+        ids.includes(String(request.commentId))
+      ) {
         from = rangeFrom;
         to = rangeTo;
       }
@@ -637,9 +760,8 @@
       effects: EditorView.scrollIntoView(from, { y: 'center', yMargin: 36 })
     });
     requestAnimationFrame(() => {
-      const highlight = view?.dom.querySelector<HTMLElement>(
-        `[data-scratchpad-comment-id="${request.commentId}"]`
-      );
+      const highlight = [...(view?.dom.querySelectorAll<HTMLElement>('[data-scratchpad-comment-ids]') ?? [])]
+        .find((element) => element.dataset.scratchpadCommentIds?.split(',').includes(String(request.commentId)));
       highlight?.classList.add('cm-comment-flash');
       window.setTimeout(() => highlight?.classList.remove('cm-comment-flash'), 900);
     });

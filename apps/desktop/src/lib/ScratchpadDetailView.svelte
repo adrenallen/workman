@@ -6,6 +6,7 @@
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import TagIcon from '@lucide/svelte/icons/tag';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
+  import XIcon from '@lucide/svelte/icons/x';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -13,6 +14,7 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Collapsible from '$lib/components/ui/collapsible';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import * as Popover from '$lib/components/ui/popover';
   import { Textarea } from '$lib/components/ui/textarea';
 
   import type {
@@ -68,6 +70,18 @@
     markdown: string;
   }
 
+  interface ScratchpadCommentThread {
+    key: string;
+    comments: ScratchpadComment[];
+    latest: ScratchpadComment;
+    unresolvedCount: number;
+  }
+
+  type ScratchpadCommentAnchor = Omit<
+    NewScratchpadCommentInput,
+    'body' | 'expected_revision' | 'allow_unanchored'
+  >;
+
   type SaveState = 'saved' | 'unsaved' | 'saving' | 'conflict' | 'error';
 
   let {
@@ -104,6 +118,7 @@
   let tagsDraft = $state('');
   let metadataBusy = $state(false);
   let mobileOutlineOpen = $state(false);
+  let viewportWidth = $state(0);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveInFlight: Promise<void> | null = null;
   let seenFocusRequest = -1;
@@ -120,6 +135,9 @@
   let commentDraft = $state('');
   let commentBusy = $state(false);
   let focusedCommentId = $state<number | null>(null);
+  let commentPopoverOpen = $state(false);
+  let commentPopoverAnchor = $state<HTMLElement | null>(null);
+  let replyDraft = $state('');
   let editingCommentId = $state<number | null>(null);
   let editingCommentDraft = $state('');
   let commentScrollKey = $state(0);
@@ -155,9 +173,46 @@
       ...resolveScratchpadAnchor(bodyDraft, comment)
     }))
   );
-  let visibleComments = $derived(
-    locallyResolvedComments.filter((comment) => showResolvedComments || !comment.resolved)
+  let commentThreads = $derived(groupCommentThreads(locallyResolvedComments));
+  let visibleCommentThreads = $derived(
+    commentThreads.filter((thread) => showResolvedComments || thread.unresolvedCount > 0)
   );
+  let focusedCommentThread = $derived(
+    commentThreads.find((thread) => thread.comments.some((comment) => comment.id === focusedCommentId)) ?? null
+  );
+
+  function commentThreadKey(comment: ScratchpadComment): string {
+    if (
+      comment.anchor_state === 'anchored' &&
+      comment.current_start !== null &&
+      comment.current_end !== null
+    ) {
+      return `anchor:${comment.current_start}:${comment.current_end}`;
+    }
+    if (comment.anchor_state === 'unanchored') return 'document';
+    return `orphan:${comment.quote ?? ''}:${comment.anchor_prefix ?? ''}:${comment.anchor_suffix ?? ''}`;
+  }
+
+  function groupCommentThreads(comments: ScratchpadComment[]): ScratchpadCommentThread[] {
+    const groups = new Map<string, ScratchpadComment[]>();
+    for (const comment of comments) {
+      const key = commentThreadKey(comment);
+      const group = groups.get(key);
+      if (group) group.push(comment);
+      else groups.set(key, [comment]);
+    }
+    return [...groups.entries()]
+      .map(([key, threadComments]) => {
+        const sorted = [...threadComments].sort((a, b) => a.created_at - b.created_at);
+        return {
+          key,
+          comments: sorted,
+          latest: sorted[sorted.length - 1],
+          unresolvedCount: sorted.filter((comment) => !comment.resolved).length
+        };
+      })
+      .sort((a, b) => b.latest.created_at - a.latest.created_at);
+  }
 
   function visibleElement<T extends HTMLElement>(selector: string): T | null {
     return [...document.querySelectorAll<T>(selector)].find((element) => element.offsetParent !== null) ?? null;
@@ -226,14 +281,25 @@
     }
   }
 
-  function focusComment(commentId: number): void {
+  function focusComment(commentId: number, anchor?: HTMLElement): void {
     focusedCommentId = commentId;
-    commentsOpen = true;
-    mobileCommentsOpen = true;
+    replyDraft = '';
+    editingCommentId = null;
+    if (anchor) {
+      commentPopoverAnchor = anchor;
+      commentPopoverOpen = true;
+    }
     queueMicrotask(() => {
       const row = visibleElement<HTMLElement>(`[data-scratchpad-comment-row="${commentId}"]`);
       row?.scrollIntoView({ block: 'nearest' });
     });
+  }
+
+  function closeCommentPopover(): void {
+    commentPopoverOpen = false;
+    commentPopoverAnchor = null;
+    replyDraft = '';
+    editingCommentId = null;
   }
 
   function jumpToComment(comment: ScratchpadComment): void {
@@ -251,6 +317,60 @@
     editingCommentId = comment.id;
     editingCommentDraft = comment.body;
     queueMicrotask(() => visibleElement<HTMLTextAreaElement>(`[data-scratchpad-comment-edit="${comment.id}"]`)?.focus());
+  }
+
+  function replyAnchor(thread: ScratchpadCommentThread): ScratchpadCommentAnchor | null {
+    const anchoredComment = thread.comments.find((comment) =>
+      comment.anchor_state === 'anchored' &&
+      comment.current_start !== null &&
+      comment.current_end !== null
+    );
+    if (
+      anchoredComment &&
+      anchoredComment.current_start !== null &&
+      anchoredComment.current_end !== null
+    ) {
+      return selectionAnchor(bodyDraft, anchoredComment.current_start, anchoredComment.current_end);
+    }
+    const quotedComment = thread.comments.find((comment) => comment.quote !== null);
+    if (!quotedComment) return null;
+    return {
+      quote: quotedComment.quote ?? '',
+      anchor_prefix: quotedComment.anchor_prefix ?? '',
+      anchor_suffix: quotedComment.anchor_suffix ?? ''
+    };
+  }
+
+  async function saveReply(thread: ScratchpadCommentThread): Promise<void> {
+    if (!onCreateComment || !replyDraft.trim() || commentBusy) return;
+    commentBusy = true;
+    try {
+      await saveDraft();
+      if (dirty || saveState !== 'saved' || conflict) return;
+      const anchor = replyAnchor(thread);
+      await onCreateComment({
+        body: replyDraft.trim(),
+        ...(anchor ?? {}),
+        expected_revision: baseRevision,
+        allow_unanchored: anchor !== null
+      });
+      replyDraft = '';
+      await onRefresh();
+    } catch {
+      // The parent reports daemon errors; preserve the reply for retry.
+    } finally {
+      commentBusy = false;
+    }
+  }
+
+  function replyKeydown(event: KeyboardEvent, thread: ScratchpadCommentThread): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCommentPopover();
+    } else if (matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) {
+      event.preventDefault();
+      void saveReply(thread);
+    }
   }
 
   async function saveEditedComment(commentId: number): Promise<void> {
@@ -563,6 +683,9 @@
       viewportLine = 1;
       composerAnchor = undefined;
       focusedCommentId = null;
+      commentPopoverOpen = false;
+      commentPopoverAnchor = null;
+      replyDraft = '';
       editingCommentId = null;
       return;
     }
@@ -633,6 +756,8 @@
   $effect(() => () => clearSaveTimer());
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} />
+
 {#snippet outlineList(closeAfterSelect: boolean)}
   <nav
     class="outline-list"
@@ -679,23 +804,70 @@
     </form>
   {/if}
   <div class="comment-list" aria-label="Scratchpad comments">
-    {#each visibleComments as comment (comment.id)}
-      <article
-        class:focused={focusedCommentId === comment.id}
-        class:resolved={comment.resolved}
+    {#each visibleCommentThreads as thread (thread.key)}
+      <button
+        type="button"
+        class:focused={focusedCommentThread?.key === thread.key}
+        class:resolved={thread.unresolvedCount === 0}
         class="comment-row"
-        data-scratchpad-comment-row={comment.id}
+        data-scratchpad-comment-row={thread.latest.id}
+        aria-label={`Open comment by ${thread.latest.actor}`}
+        onclick={(event) => focusComment(thread.latest.id, event.currentTarget)}
       >
-        <header><strong>{comment.actor}</strong><time datetime={new Date(comment.created_at).toISOString()} title={new Date(comment.created_at).toLocaleString()}>{relativeTime(comment.created_at)}</time></header>
-        {#if comment.quote}
-          <Button class="comment-quote" size="xs" variant="ghost" disabled={comment.anchor_state !== 'anchored'} onclick={() => jumpToComment(comment)}>
-            “{comment.quote.slice(0, 88)}{comment.quote.length > 88 ? '…' : ''}”
-          </Button>
-        {/if}
-        {#if comment.anchor_state === 'orphaned'}<small class="anchor-note">Text no longer found</small>
-        {:else if comment.anchor_state === 'unanchored'}<small class="anchor-note">Whole document</small>{/if}
+        <span class="comment-row-heading">
+          <strong>{thread.latest.actor}</strong>
+          {#if thread.comments.length > 1}<span>{thread.comments.length}</span>{/if}
+          <time datetime={new Date(thread.latest.created_at).toISOString()} title={new Date(thread.latest.created_at).toLocaleString()}>{relativeTime(thread.latest.created_at)}</time>
+        </span>
+        <small>
+          {#if thread.latest.anchor_state === 'orphaned'}Text no longer found
+          {:else if thread.latest.quote}“{thread.latest.quote}”
+          {:else}Whole document{/if}
+        </small>
+        <span class="comment-preview">{thread.latest.body}</span>
+      </button>
+    {:else}
+      <p class="comments-empty">{read?.comment_total_count ? 'No comments in this view.' : 'Select text to leave anchored feedback, or comment on the whole document.'}</p>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet commentThreadContent(thread: ScratchpadCommentThread)}
+  <header class="thread-header">
+    <div>
+      <strong>{thread.comments.length === 1 ? 'Comment' : `${thread.comments.length} comments`}</strong>
+      <span>{thread.unresolvedCount ? `${thread.unresolvedCount} open` : 'Resolved'}</span>
+    </div>
+    <button type="button" aria-label="Close comment" onclick={closeCommentPopover}>
+      <XIcon size={15} strokeWidth={1.8} aria-hidden="true" />
+    </button>
+  </header>
+
+  <button
+    type="button"
+    class="thread-context"
+    disabled={thread.latest.anchor_state !== 'anchored'}
+    onclick={() => jumpToComment(thread.latest)}
+  >
+    <MessageSquareIcon size={14} strokeWidth={1.8} aria-hidden="true" />
+    <span>
+      {#if thread.latest.anchor_state === 'orphaned'}Text no longer found
+      {:else if thread.latest.quote}“{thread.latest.quote}”
+      {:else}Whole document{/if}
+    </span>
+    {#if thread.latest.anchor_state === 'anchored'}<small>Jump</small>{/if}
+  </button>
+
+  <div class="thread-messages" aria-label="Comment thread">
+    {#each thread.comments as comment (comment.id)}
+      <article class:resolved={comment.resolved} class="thread-message">
+        <header>
+          <strong>{comment.actor}</strong>
+          <time datetime={new Date(comment.created_at).toISOString()} title={new Date(comment.created_at).toLocaleString()}>{relativeTime(comment.created_at)}</time>
+          {#if comment.resolved}<span>Resolved</span>{/if}
+        </header>
         {#if editingCommentId === comment.id}
-          <Textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows={3} aria-label="Edit scratchpad comment" onkeydown={(event) => {
+          <Textarea data-scratchpad-comment-edit={comment.id} bind:value={editingCommentDraft} rows={5} aria-label="Edit scratchpad comment" onkeydown={(event) => {
             if (event.key === 'Escape') { event.preventDefault(); editingCommentId = null; }
             else if (matchesHotkeyAction(event, 'submit-focused-form', $hotkeyPreferences)) { event.preventDefault(); void saveEditedComment(comment.id); }
           }}></Textarea>
@@ -703,23 +875,36 @@
           <p>{comment.body}</p>
         {/if}
         <footer>
-          {#if comment.anchor_state === 'anchored'}<Button size="xs" variant="outline" onclick={() => jumpToComment(comment)}>Jump</Button>{/if}
-          {#if comment.can_resolve}<Button size="xs" variant="outline" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</Button>{/if}
+          {#if comment.can_resolve}<Button size="xs" variant="ghost" disabled={commentBusy} onclick={() => void toggleCommentResolved(comment)}>{comment.resolved ? 'Reopen' : 'Resolve'}</Button>{/if}
           {#if comment.can_edit}
             {#if editingCommentId === comment.id}
-              <Button size="xs" variant="outline" onclick={() => (editingCommentId = null)}>Cancel</Button>
+              <Button size="xs" variant="ghost" onclick={() => (editingCommentId = null)}>Cancel</Button>
               <Button size="xs" disabled={!editingCommentDraft.trim() || commentBusy} onclick={() => void saveEditedComment(comment.id)}>Save</Button>
             {:else}
-              <Button size="xs" variant="outline" onclick={() => beginEditComment(comment)}>Edit</Button>
+              <Button size="xs" variant="ghost" onclick={() => beginEditComment(comment)}>Edit</Button>
             {/if}
           {/if}
-          {#if comment.can_delete}<Button size="xs" variant="destructive" disabled={commentBusy} onclick={() => (pendingDeleteComment = comment)}>Delete</Button>{/if}
+          {#if comment.can_delete}<Button size="xs" variant="ghost" disabled={commentBusy} onclick={() => (pendingDeleteComment = comment)}>Delete</Button>{/if}
         </footer>
       </article>
-    {:else}
-      <p class="comments-empty">{read?.comment_total_count ? 'No comments in this view.' : 'Select text to leave anchored feedback, or comment on the whole document.'}</p>
     {/each}
   </div>
+
+  {#if onCreateComment}
+    <form class="thread-reply" onsubmit={(event) => { event.preventDefault(); void saveReply(thread); }}>
+      <Textarea
+        bind:value={replyDraft}
+        rows={3}
+        aria-label="Reply to comment thread"
+        placeholder="Reply to this thread…"
+        onkeydown={(event) => replyKeydown(event, thread)}
+      ></Textarea>
+      <div>
+        <small><kbd>{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'}</kbd> to send</small>
+        <Button size="xs" type="submit" disabled={!replyDraft.trim() || commentBusy}>Reply</Button>
+      </div>
+    </form>
+  {/if}
 {/snippet}
 
 {#if loading && !read}
@@ -901,6 +1086,25 @@
   <div class="state">Scratchpad not found.</div>
 {/if}
 
+<Popover.Root open={commentPopoverOpen} onOpenChange={(open) => {
+  if (open) commentPopoverOpen = true;
+  else closeCommentPopover();
+}}>
+  {#if focusedCommentThread && commentPopoverAnchor}
+    <Popover.Content
+      customAnchor={commentPopoverAnchor}
+      side={viewportWidth <= 620 ? 'bottom' : 'right'}
+      align={viewportWidth <= 620 ? 'center' : 'start'}
+      sideOffset={8}
+      collisionPadding={12}
+      class="comment-thread-popover"
+      style="max-height: min(640px, calc(100vh - 24px)) !important; overflow: hidden !important;"
+    >
+      {@render commentThreadContent(focusedCommentThread)}
+    </Popover.Content>
+  {/if}
+</Popover.Root>
+
 <AlertDialog.Root open={pendingDeleteComment !== null} onOpenChange={(open) => { if (!open && !commentBusy) pendingDeleteComment = null; }}>
   <AlertDialog.Content>
     <AlertDialog.Header>
@@ -967,22 +1171,50 @@
   .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
   .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
-  .comment-composer small, .anchor-note { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comment-composer small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
   .comment-composer kbd { margin-left: 3px; color: inherit; font: var(--font-size-xs) var(--terminal-font-family); }
   .comment-list { display: grid; }
-  .comment-row { display: grid; gap: 5px; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 7px; }
+  .comment-row { display: grid; width: 100%; gap: 3px; overflow: hidden; border: 0; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 9px 9px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .comment-row:last-child { border-bottom: 0; }
+  .comment-row:hover { background: var(--accent); }
+  .comment-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .comment-row.focused { box-shadow: inset 2px 0 0 var(--notification-unread); background: color-mix(in srgb, var(--notification-unread) 8%, var(--accent)); }
   .comment-row.resolved { opacity: 0.72; }
-  .comment-row header { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
-  .comment-row header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .comment-row-heading { display: flex; min-width: 0; align-items: center; gap: 5px; }
+  .comment-row-heading strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .comment-row-heading > span { display: inline-flex; min-width: 16px; height: 16px; align-items: center; justify-content: center; border-radius: 999px; padding: 0 4px; background: var(--accent); color: var(--muted-foreground); font: 650 9px/1 var(--terminal-font-family); }
   .comment-row time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
-  .comment-row p { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.42; white-space: pre-wrap; }
-  :global(.comment-quote) { overflow: hidden; justify-content: flex-start; border: 0; border-left: 2px solid var(--border-strong); border-radius: 0; padding: 2px 5px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-style: italic; line-height: 1.35; text-align: left; text-overflow: ellipsis; cursor: pointer; white-space: normal; }
-  :global(.comment-quote:disabled) { cursor: default; }
-  .comment-row footer { display: flex; flex-wrap: wrap; gap: 4px; }
+  .comment-row > small { overflow: hidden; color: var(--muted-foreground); font-size: 10px; font-style: italic; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+  .comment-preview { display: -webkit-box; overflow: hidden; color: var(--foreground); font-size: var(--font-size-xs); line-height: 1.35; line-clamp: 2; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .comments-empty { margin: 0; padding: 10px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
+  :global(.comment-thread-popover.comment-thread-popover) { display: grid; width: min(420px, calc(100vw - 24px)); max-height: min(640px, calc(100vh - 24px)) !important; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 0; overflow: hidden !important; padding: 0; }
+  .thread-header { display: flex; min-height: 48px; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px 8px 14px; }
+  .thread-header > div { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 7px; }
+  .thread-header strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 680; }
+  .thread-header span { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .thread-header > button { display: grid; width: 28px; height: 28px; flex: none; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted-foreground); cursor: pointer; }
+  .thread-header > button:hover { background: var(--accent); color: var(--foreground); }
+  .thread-header > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .thread-context { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 0; border-bottom: 1px solid var(--border); padding: 9px 14px; background: color-mix(in srgb, var(--notification-unread) 6%, var(--card)); color: var(--muted-foreground); text-align: left; cursor: pointer; }
+  .thread-context:not(:disabled):hover { background: color-mix(in srgb, var(--notification-unread) 11%, var(--card)); color: var(--text-soft); }
+  .thread-context:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .thread-context:disabled { cursor: default; }
+  .thread-context > span { overflow: hidden; font-size: var(--font-size-xs); font-style: italic; text-overflow: ellipsis; white-space: nowrap; }
+  .thread-context small { color: var(--notification-unread-foreground); font-size: var(--font-size-xs); font-style: normal; font-weight: 650; }
+  .thread-messages { min-height: 0; max-height: min(380px, 48vh); overflow-y: auto; overscroll-behavior: contain; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .thread-message { display: grid; gap: 7px; border-bottom: 1px solid var(--border); padding: 12px 14px 10px; }
+  .thread-message.resolved { background: color-mix(in srgb, var(--muted) 4%, transparent); }
+  .thread-message > header { display: flex; min-width: 0; align-items: center; gap: 7px; }
+  .thread-message > header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
+  .thread-message > header time { color: var(--muted-foreground); font: var(--font-size-xs) var(--terminal-font-family); }
+  .thread-message > header span { border-radius: 999px; padding: 2px 5px; background: var(--accent); color: var(--muted-foreground); font-size: 10px; }
+  .thread-message p { margin: 0; color: var(--foreground); font-size: var(--font-size-sm); line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .thread-message footer { display: flex; min-height: 24px; flex-wrap: wrap; justify-content: flex-end; gap: 2px; margin-top: 1px; }
+  .thread-reply { display: grid; gap: 7px; border-top: 1px solid var(--border); padding: 10px; background: var(--card); }
+  .thread-reply > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .thread-reply small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .thread-reply kbd { font-family: var(--terminal-font-family); }
   .mobile-outline { display: none; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
   .mobile-comments { display: none; margin-bottom: 14px; }
   .mobile-outline :global(.outline-trigger) { display: flex; width: 100%; min-height: 38px; align-items: center; gap: 8px; border: 0; padding: 5px 8px 5px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
@@ -1008,6 +1240,11 @@
     .body-section { margin-top: 16px; }
     .conflict-banner, .recovery-banner { align-items: stretch; flex-wrap: wrap; }
     .conflict-banner div, .recovery-banner span { width: 100%; flex-basis: 100%; }
+  }
+
+  @media (max-width: 620px) {
+    :global([data-bits-floating-content-wrapper]:has(.comment-thread-popover)) { position: fixed !important; inset: 12px !important; display: flex; min-width: 0 !important; align-items: center; justify-content: center; transform: none !important; pointer-events: none !important; }
+    :global(.comment-thread-popover.comment-thread-popover) { max-height: calc(100vh - 24px) !important; pointer-events: auto; }
   }
 
   @media (prefers-reduced-motion: reduce) {
