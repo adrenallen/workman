@@ -15,6 +15,7 @@ export interface ProjectPaneInventory {
   processIds: ReadonlySet<number>;
   todoIds: ReadonlySet<number>;
   scratchpadIds: ReadonlySet<number>;
+  feedbackIds: ReadonlySet<number>;
   draftIds: ReadonlySet<number>;
 }
 
@@ -30,6 +31,7 @@ const selectionKinds = new Set<ProjectTreeItemKind>([
   'terminal',
   'command',
   'scratchpad',
+  'feedback',
   'draft'
 ]);
 const processKinds = new Set<ProcessKind>(['agent', 'terminal', 'command']);
@@ -90,6 +92,7 @@ export function projectPaneSelectionExists(
   ) return inventory.processIds.has(pane.selection.id);
   if (pane.selection.kind === 'todo') return inventory.todoIds.has(pane.selection.id);
   if (pane.selection.kind === 'draft') return inventory.draftIds.has(pane.selection.id);
+  if (pane.selection.kind === 'feedback') return inventory.feedbackIds.has(pane.selection.id);
   return inventory.scratchpadIds.has(pane.selection.id);
 }
 

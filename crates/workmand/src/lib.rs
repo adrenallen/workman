@@ -51,6 +51,7 @@ mod process_tree;
 mod profiles;
 mod project_titles;
 pub mod readiness;
+mod recorded_feedback;
 pub mod runtime_doctor;
 mod settings;
 mod status_invalidation;

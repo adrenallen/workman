@@ -175,10 +175,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sidebar_identity",
         include_str!("../migrations/0032_sidebar_identity.sql"),
     ),
+    (
+        33,
+        "recorded_feedback",
+        include_str!("../migrations/0033_recorded_feedback.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 32;
+pub const LATEST_SCHEMA_VERSION: i64 = 33;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

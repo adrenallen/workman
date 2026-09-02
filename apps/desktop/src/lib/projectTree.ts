@@ -4,6 +4,7 @@ export type ProjectTreeItemKind =
   | 'terminal'
   | 'command'
   | 'scratchpad'
+  | 'feedback'
   | 'draft';
 
 export type ProjectTreeGroup =
@@ -11,6 +12,7 @@ export type ProjectTreeGroup =
   | 'agents'
   | 'terminals'
   | 'commands'
+  | 'feedback'
   | 'scratchpads';
 
 export interface ProjectTreeSelection {

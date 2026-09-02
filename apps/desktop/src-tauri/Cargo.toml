@@ -12,13 +12,15 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
+base64 = "0.22.1"
 futures-util = "0.3.31"
 image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 workmand = { path = "../../../crates/workmand" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2.6.0"
+tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-notification = "2.3.3"
 notify-rust = { version = "4.18.0", features = ["preview-macos-un"] }
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "signal", "sync", "time"] }
@@ -26,10 +28,20 @@ tokio-tungstenite = "0.29.0"
 url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.18.2"
+hound = "3.5.1"
+imageproc = { version = "0.25.0", default-features = false }
 mac-usernotifications = "0.3.1"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSPasteboard"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSString"] }
 plist = "1.8.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
+sha2 = "0.10.9"
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "c9ec2130422200f0863b23dfdad02b133a529b07" }
+uuid = { version = "1.18.1", features = ["v4"] }
+whisper-rs = { version = "0.16.0", features = ["metal"] }
+xcap = "0.9.8"
 
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }

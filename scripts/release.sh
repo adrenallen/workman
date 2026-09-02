@@ -123,7 +123,7 @@ version_stamp() {
 
 preflight() {
   log "Preflight"
-  for tool in cargo rustup npm git gh jq tar ditto zip unzip file shasum awk security codesign xcrun spctl; do require "$tool"; done
+  for tool in cargo rustup npm git gh jq tar ditto zip unzip file shasum awk security codesign xcrun spctl plutil cmake; do require "$tool"; done
   [[ "$(uname -s)" == Darwin ]] || { echo "local releases must run on macOS" >&2; exit 1; }
   [[ "$(uname -m)" == arm64 ]] || { echo "local releases require Apple silicon" >&2; exit 1; }
   [[ "$(git branch --show-current)" == main ]] || { echo "release must run from main" >&2; exit 1; }
@@ -170,6 +170,24 @@ sign_macos_binary() {
   local binary="$1"
   codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY" "$binary"
   codesign --verify --strict --verbose=2 "$binary"
+}
+
+verify_recording_macos_metadata() {
+  local app="$1" info="$1/Contents/Info.plist" entitlements
+  [[ -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "$info")" ]] || {
+    echo "macOS bundle is missing NSMicrophoneUsageDescription" >&2
+    exit 1
+  }
+  [[ -n "$(plutil -extract NSScreenCaptureUsageDescription raw -o - "$info")" ]] || {
+    echo "macOS bundle is missing NSScreenCaptureUsageDescription" >&2
+    exit 1
+  }
+  entitlements="$(codesign -d --entitlements :- "$app" 2>/dev/null)"
+  plutil -convert json -o - - <<<"$entitlements" \
+    | jq -e '."com.apple.security.device.audio-input" == true' >/dev/null || {
+    echo "macOS bundle is missing the audio-input entitlement" >&2
+    exit 1
+  }
 }
 
 create_macos_zip() {
@@ -227,6 +245,7 @@ verify_signed_macos_package() {
   unzip -q "$archive" -d "$verify_dir"
 
   codesign --verify --deep --strict --verbose=2 "$verify_dir/Workman.app"
+  verify_recording_macos_metadata "$verify_dir/Workman.app"
   codesign --verify --strict --verbose=2 "$verify_dir/bin/wrk"
   codesign --verify --strict --verbose=2 "$verify_dir/bin/workmand"
   xcrun stapler validate -v "$verify_dir/Workman.app"
@@ -325,6 +344,7 @@ build_macos() {
   sign_macos_binary "$target_dir/wrk"
   sign_macos_binary "$target_dir/workmand"
   codesign --verify --deep --strict --verbose=2 "$app"
+  verify_recording_macos_metadata "$app"
 
   local package_dir="$WORK_DIR/macos-bundle"
   rm -rf "$package_dir"

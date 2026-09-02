@@ -60,6 +60,16 @@ export const editingHotkeyActions = [
   'toggle-todo-inspector'
 ] as const;
 
+export const recordingHotkeyActions = [
+  'feedback-snap',
+  'feedback-snap-region',
+  'feedback-snap-display',
+  'feedback-toggle-annotation',
+  'feedback-undo',
+  'feedback-clear',
+  'feedback-finish'
+] as const;
+
 export const contextualHotkeyActions = [
   'new-quick-prompt'
 ] as const;
@@ -70,6 +80,7 @@ export type WorkspaceHotkeyAction = (typeof workspaceHotkeyActions)[number];
 export type NavigationHotkeyAction = (typeof navigationHotkeyActions)[number];
 export type TerminalHotkeyAction = (typeof terminalHotkeyActions)[number];
 export type EditingHotkeyAction = (typeof editingHotkeyActions)[number];
+export type RecordingHotkeyAction = (typeof recordingHotkeyActions)[number];
 export type ContextualHotkeyAction = (typeof contextualHotkeyActions)[number];
 export type HotkeyAction =
   | ProjectHotkeyAction
@@ -78,6 +89,7 @@ export type HotkeyAction =
   | NavigationHotkeyAction
   | TerminalHotkeyAction
   | EditingHotkeyAction
+  | RecordingHotkeyAction
   | ContextualHotkeyAction;
 
 export interface HotkeyChord {
@@ -94,7 +106,7 @@ export interface HotkeyDefinition {
   id: HotkeyAction;
   label: string;
   description: string;
-  group: 'workspace' | 'navigation' | 'terminal' | 'editing' | 'projects' | 'creation';
+  group: 'workspace' | 'navigation' | 'terminal' | 'editing' | 'projects' | 'creation' | 'feedback';
 }
 
 export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
@@ -218,6 +230,48 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
     description: 'Create a prompt while the quick-prompt palette is open',
     group: 'editing'
   },
+  {
+    id: 'feedback-snap',
+    label: 'Snap last mode',
+    description: 'Capture using the most recent region or display mode',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-snap-region',
+    label: 'Snap region',
+    description: 'Drag around part of a display to capture it',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-snap-display',
+    label: 'Snap display',
+    description: 'Capture the display containing the feedback toolbar',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-toggle-annotation',
+    label: 'Toggle annotation',
+    description: 'Switch between pointer and drawing mode',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-undo',
+    label: 'Undo annotation',
+    description: 'Remove the most recent screen annotation',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-clear',
+    label: 'Clear annotations',
+    description: 'Remove all current screen annotations',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-finish',
+    label: 'Finish recording',
+    description: 'Stop the microphone and begin local transcription',
+    group: 'feedback'
+  },
   ...projectHotkeyActions.map((id, index) => ({
     id,
     label: `Project ${index + 1}`,
@@ -263,6 +317,7 @@ export const allHotkeyActions = [
   ...navigationHotkeyActions,
   ...terminalHotkeyActions,
   ...editingHotkeyActions,
+  ...recordingHotkeyActions,
   ...projectHotkeyActions,
   ...creationHotkeyActions,
   // Context-only actions come last so globally active commands win shared chords.
@@ -345,6 +400,13 @@ const defaultPreferences: HotkeyPreferences = Object.fromEntries([
   ['submit-focused-form', primaryChord('Enter')],
   ['toggle-scratchpad-list', { ...primaryChord('KeyS'), shift: true }],
   ['toggle-todo-inspector', { ...primaryChord('KeyI'), shift: true }],
+  ['feedback-snap', { ...primaryChord('KeyC'), shift: true }],
+  ['feedback-snap-region', { ...primaryChord('KeyR'), shift: true }],
+  ['feedback-snap-display', { ...primaryChord('KeyD'), shift: true }],
+  ['feedback-toggle-annotation', { ...primaryChord('KeyA'), shift: true }],
+  ['feedback-undo', { ...primaryChord('KeyU'), shift: true }],
+  ['feedback-clear', { ...primaryChord('Backspace'), shift: true }],
+  ['feedback-finish', { ...primaryChord('Enter'), shift: true }],
   ...projectHotkeyActions.map((action, index) => [action, primaryChord(`Digit${index + 1}`)]),
   ['new-agent', primaryChord('KeyN')],
   ['new-terminal', primaryChord('KeyT')],

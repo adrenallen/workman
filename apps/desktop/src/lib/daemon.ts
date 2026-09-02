@@ -70,6 +70,15 @@ import {
 import type { ClaimedTodo } from './claimedTodos';
 import { DaemonRequestTimeoutError } from './daemonLog';
 import type { UpdateInstallReport, UpdateProgress } from './settings';
+import type {
+  FeedbackPacketResult,
+  FeedbackStartResult,
+  RecordedFeedback,
+  RecordedFeedbackBlock,
+  RecordedFeedbackSnapshot,
+  RecordedFeedbackSummary,
+  RecordedFeedbackTranscriptSegment
+} from './recordedFeedback';
 
 export type ProjectStatus = 'running' | 'error' | 'idle';
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'exited' | 'crashed';
@@ -598,6 +607,127 @@ export class DaemonClient
     await this.request('coordination.scratchpad_comment_delete', {
       project_id: projectId,
       comment_id: commentId
+    });
+  }
+
+  recordedFeedback(projectId: number, archived = false): Promise<RecordedFeedbackSummary[]> {
+    return this.request('recorded_feedback.list', { project_id: projectId, archived });
+  }
+
+  recordedFeedbackGet(projectId: number, feedbackId: number): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.get', { project_id: projectId, feedback_id: feedbackId });
+  }
+
+  recordedFeedbackCreate(projectId: number, title: string, leaseOwner: string): Promise<FeedbackStartResult> {
+    return this.request('recorded_feedback.create', {
+      project_id: projectId,
+      title,
+      lease_owner: leaseOwner
+    });
+  }
+
+  recordedFeedbackRenewLease(projectId: number, feedbackId: number, leaseOwner: string): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.renew_lease', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      lease_owner: leaseOwner
+    });
+  }
+
+  recordedFeedbackAddSnapshot(
+    projectId: number,
+    snapshot: Omit<RecordedFeedbackSnapshot, 'id' | 'feedback_id' | 'caption' | 'width' | 'height'> & { feedback_id: number }
+  ): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.add_snapshot', { project_id: projectId, ...snapshot });
+  }
+
+  recordedFeedbackBeginTranscription(
+    projectId: number,
+    feedbackId: number,
+    durationMs: number,
+    audioPath: string | null
+  ): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.begin_transcription', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      duration_ms: durationMs,
+      audio_path: audioPath
+    });
+  }
+
+  recordedFeedbackComplete(
+    projectId: number,
+    feedbackId: number,
+    transcript: RecordedFeedbackTranscriptSegment[],
+    blocks: RecordedFeedbackBlock[]
+  ): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.complete', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      transcript,
+      blocks
+    });
+  }
+
+  recordedFeedbackUpdate(
+    projectId: number,
+    feedbackId: number,
+    expectedRevision: number,
+    title: string,
+    blocks: RecordedFeedbackBlock[],
+    snapshotCaptions: Array<{ snapshot_id: number; caption: string }>
+  ): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.update', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      expected_revision: expectedRevision,
+      title,
+      blocks,
+      snapshot_captions: snapshotCaptions
+    });
+  }
+
+  recordedFeedbackFailed(projectId: number, feedbackId: number, code: string): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.failed', { project_id: projectId, feedback_id: feedbackId, code });
+  }
+
+  recordedFeedbackArchive(projectId: number, feedbackId: number, archived = true): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.archive', { project_id: projectId, feedback_id: feedbackId, archived });
+  }
+
+  recordedFeedbackDelete(projectId: number, feedbackId: number): Promise<{ feedback_id: number; deleted: boolean }> {
+    return this.request('recorded_feedback.delete', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      confirm_delete: true
+    });
+  }
+
+  recordedFeedbackPreparePacket(projectId: number, feedbackId: number): Promise<FeedbackPacketResult> {
+    return this.request('recorded_feedback.prepare_packet', { project_id: projectId, feedback_id: feedbackId });
+  }
+
+  recordedFeedbackDeliverAgent(
+    projectId: number,
+    feedbackId: number,
+    processId: number
+  ): Promise<{ delivery: unknown; process: ProcessView }> {
+    return this.request('recorded_feedback.deliver_agent', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      process_id: processId
+    });
+  }
+
+  recordedFeedbackToScratchpad(
+    projectId: number,
+    feedbackId: number,
+    name?: string
+  ): Promise<{ scratchpad: Scratchpad; delivery: unknown }> {
+    return this.request('recorded_feedback.to_scratchpad', {
+      project_id: projectId,
+      feedback_id: feedbackId,
+      name
     });
   }
 

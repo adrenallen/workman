@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENTITLEMENTS="$REPO_ROOT/apps/desktop/src-tauri/Entitlements.plist"
+
 usage() {
   cat >&2 <<'EOF'
 Usage: scripts/native-visual-qa.sh --todo NNN --source-app PATH [--daemon-bin PATH]
@@ -42,6 +45,10 @@ fi
   exit 64
 }
 [[ -n "$SOURCE_APP" ]] || usage
+[[ -f "$ENTITLEMENTS" ]] || {
+  printf 'native visual QA: missing desktop entitlements: %s\n' "$ENTITLEMENTS" >&2
+  exit 65
+}
 SOURCE_APP="$(cd "$(dirname "$SOURCE_APP")" && pwd)/$(basename "$SOURCE_APP")"
 [[ -d "$SOURCE_APP/Contents/MacOS" && -f "$SOURCE_APP/Contents/Info.plist" ]] || {
   printf 'native visual QA: source is not a macOS app bundle: %s\n' "$SOURCE_APP" >&2
@@ -131,7 +138,7 @@ fi
 # Clear inherited quarantine/provenance metadata and sign only the disposable copy
 # so LaunchServices can execute the new identity.
 /usr/bin/xattr -cr "$QA_APP"
-/usr/bin/codesign --force --deep --sign - "$QA_APP"
+/usr/bin/codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$QA_APP"
 /usr/bin/codesign --verify --deep --strict "$QA_APP"
 
 actual_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")"

@@ -44,6 +44,8 @@
   import RegisterProjectDialog from './lib/RegisterProjectDialog.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
+  import RecordedFeedbackDetailView from './lib/RecordedFeedbackDetailView.svelte';
+  import RecordedFeedbackPreflight from './lib/RecordedFeedbackPreflight.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
   import QuickPromptPalette from './lib/QuickPromptPalette.svelte';
   import ScratchpadBrowser from './lib/ScratchpadBrowser.svelte';
@@ -161,8 +163,10 @@
     hotkeyPreferences,
     projectHotkeyActions,
     projectHotkeyIndex,
+    recordingHotkeyActions,
     type CreationHotkeyAction
   } from './lib/hotkeys';
+  import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
   import { liveStats } from './lib/liveStats';
   import {
     beginOptimisticNavigation,
@@ -249,6 +253,17 @@
     type ProjectTreeSelection
   } from './lib/projectTree';
   import {
+    type NativeFeedbackFinished,
+    type NativeFeedbackPreflight,
+    type NativeFeedbackSession,
+    type NativeFeedbackSnapshot,
+    type NativeFeedbackTranscript,
+    type RecordedFeedback,
+    type RecordedFeedbackBlock,
+    type RecordedFeedbackSummary
+  } from './lib/recordedFeedback';
+  import { compileFeedbackTimeline } from './lib/recordedFeedbackTimeline';
+  import {
     bulkFailureMessage,
     type ProjectTreeBulkAction,
     type ProjectTreeMultiSelection
@@ -316,6 +331,8 @@
   let optimisticProcesses = $state<OptimisticProcess[]>([]);
   let nextOptimisticProcessId = -1;
   let coordination = $state<CoordinationSnapshot | null>(null);
+  let feedbackSummaries = $state<RecordedFeedbackSummary[]>([]);
+  let feedbackDetail = $state<RecordedFeedback | null>(null);
   let connection = $state<ConnectionStatus>({
     status: 'connecting',
     message: null,
@@ -362,6 +379,17 @@
   let todoBrowserOpen = $state(false);
   let todoNavigationIds = $state<number[]>([]);
   let scratchpadBrowserOpen = $state(false);
+  let feedbackPreflightOpen = $state(false);
+  let feedbackPreflight = $state<NativeFeedbackPreflight | null>(null);
+  let feedbackPreflightLoading = $state(false);
+  let feedbackModelInstalling = $state(false);
+  let feedbackStarting = $state(false);
+  let feedbackPreflightError = $state<string | null>(null);
+  let feedbackModelProgress = $state<{ downloaded: number; total: number } | null>(null);
+  let activeFeedbackSession = $state<NativeFeedbackSession | null>(null);
+  const feedbackLeaseOwner = `desktop-${crypto.randomUUID()}`;
+  let feedbackEventQueue = Promise.resolve();
+  const pendingFeedbackTranscripts = new Map<number, NativeFeedbackTranscript>();
   let processOverviewKind = $state<ProcessKind | null>(null);
   let scratchpadBrowserBusyId = $state<number | null>(null);
   let trustReview = $state<TrustReview | null>(null);
@@ -822,6 +850,44 @@
       if (active) stopNativeMenu = stop;
       else stop();
     }).catch(reportError);
+    let stopFeedbackEvents = (): void => {};
+    void Promise.all([
+      listen<NativeFeedbackSession>('feedback://status', ({ payload }) => {
+        if (active) activeFeedbackSession = payload;
+      }),
+      listen<NativeFeedbackSnapshot>('feedback://snapshot', ({ payload }) => {
+        if (active) enqueueFeedbackEvent(() => persistFeedbackSnapshot(payload));
+      }),
+      listen<NativeFeedbackFinished>('feedback://finished', ({ payload }) => {
+        if (active) enqueueFeedbackEvent(() => beginFeedbackTranscription(payload));
+      }),
+      listen<NativeFeedbackTranscript>('feedback://transcript', ({ payload }) => {
+        if (active) enqueueFeedbackEvent(() => completeFeedbackTranscription(payload));
+      }),
+      listen<{ feedback_id: number; project_id?: number; code: string; message: string }>('feedback://error', ({ payload }) => {
+        if (!active) return;
+        if (payload.project_id) {
+          enqueueFeedbackEvent(async () => {
+            await client.recordedFeedbackFailed(payload.project_id!, payload.feedback_id, payload.code);
+            pendingFeedbackTranscripts.delete(payload.feedback_id);
+            if (activeFeedbackSession?.feedback_id === payload.feedback_id) activeFeedbackSession = null;
+            if (selectedProject?.id === payload.project_id) {
+              await refreshFeedback(payload.project_id!);
+              if (selection?.kind === 'feedback' && selection.id === payload.feedback_id) {
+                await loadFeedback(payload.feedback_id, false);
+              }
+            }
+          });
+        } else {
+          reportError(new Error(payload.message));
+        }
+      }),
+      listen<{ downloaded: number; total: number }>('feedback://model-progress', ({ payload }) => {
+        if (active) feedbackModelProgress = payload;
+      })
+    ]).then((unlisteners) => {
+      stopFeedbackEvents = () => unlisteners.forEach((unlisten) => unlisten());
+    }).catch(reportError);
     let stopNativeNotifications = (): void => {};
     void listenForNativeNotificationActions((notificationId) => {
       if (active) void openNativeNotification(notificationId);
@@ -856,6 +922,15 @@
         void refreshNotifications();
       }
     }, 1000);
+    const feedbackLeaseTimer = setInterval(() => {
+      const session = activeFeedbackSession;
+      if (!active || !session || connection.status !== 'connected') return;
+      void client.recordedFeedbackRenewLease(
+        session.project_id,
+        session.feedback_id,
+        feedbackLeaseOwner
+      ).catch(reportError);
+    }, 5_000);
 
     void client
       .start(
@@ -864,7 +939,13 @@
           if (active) recordDaemonLog('warning', 'Control message issue', message);
         }
       )
-      .then((status) => { if (active) applyConnectionStatus(status); })
+      .then((status) => {
+        if (!active) return;
+        applyConnectionStatus(status);
+        void invoke<NativeFeedbackSession | null>('feedback_status')
+          .then((session) => { if (active) activeFeedbackSession = session; })
+          .catch(() => undefined);
+      })
       .catch(reportError);
 
     return () => {
@@ -878,11 +959,13 @@
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
       clearInterval(notificationTimer);
+      clearInterval(feedbackLeaseTimer);
       if (updateProgressTimer) clearTimeout(updateProgressTimer);
       if (updateRestartTimer) clearTimeout(updateRestartTimer);
       stopStatuses();
       stopNavigation();
       stopNativeMenu();
+      stopFeedbackEvents();
       stopNativeNotifications();
       client.close();
     };
@@ -1117,6 +1200,11 @@
         return true;
     }
 
+    if ((recordingHotkeyActions as readonly string[]).includes(action)) {
+      // Native global shortcuts own these while the non-activating recorder is visible.
+      return true;
+    }
+
     const projectIndex = projectHotkeyIndex(action);
     if (projectIndex !== null) {
       const projectId = projectHotkeyProjectIds[projectIndex];
@@ -1255,7 +1343,8 @@
     for (const [projectId, projectProcesses] of grouped) {
       updated[projectId] = {
         processes: projectProcesses,
-        coordination: updated[projectId]?.coordination ?? null
+        coordination: updated[projectId]?.coordination ?? null,
+        feedback: updated[projectId]?.feedback ?? []
       };
       changed = true;
     }
@@ -1649,7 +1738,8 @@
       ...navigationIndex,
       [projectId]: {
         processes: next,
-        coordination: navigationIndex[projectId]?.coordination ?? null
+        coordination: navigationIndex[projectId]?.coordination ?? null,
+        feedback: navigationIndex[projectId]?.feedback ?? []
       }
     };
   }
@@ -1659,9 +1749,29 @@
       ...navigationIndex,
       [projectId]: {
         processes: navigationIndex[projectId]?.processes ?? [],
-        coordination: next
+        coordination: next,
+        feedback: navigationIndex[projectId]?.feedback ?? []
       }
     };
+  }
+
+  function cacheProjectFeedback(projectId: number, next: RecordedFeedbackSummary[]): void {
+    navigationIndex = {
+      ...navigationIndex,
+      [projectId]: {
+        processes: navigationIndex[projectId]?.processes ?? [],
+        coordination: navigationIndex[projectId]?.coordination ?? null,
+        feedback: next
+      }
+    };
+  }
+
+  async function listProjectFeedback(projectId: number): Promise<RecordedFeedbackSummary[]> {
+    const [active, archived] = await Promise.all([
+      client.recordedFeedback(projectId),
+      client.recordedFeedback(projectId, true)
+    ]);
+    return [...active, ...archived];
   }
 
   async function refreshQuickJumpIndex(force: boolean): Promise<void> {
@@ -1676,15 +1786,18 @@
           projectList.map(async (project): Promise<[number, NavigationProjectSnapshot]> => {
             const cached = navigationIndex[project.id];
             if (!force && cached?.coordination) return [project.id, cached];
-            const [projectProcesses, projectCoordination] = await Promise.all([
+            const [projectProcesses, projectCoordination, projectFeedback] = await Promise.all([
               client.processes(project.id).catch(() => cached?.processes ?? []),
               connection.version_compatible
                 ? client.coordinationSnapshot(project.id).catch(() => cached?.coordination ?? null)
-                : Promise.resolve(null)
+                : Promise.resolve(null),
+              connection.version_compatible
+                ? listProjectFeedback(project.id).catch(() => cached?.feedback ?? [])
+                : Promise.resolve([])
             ]);
             return [
               project.id,
-              { processes: projectProcesses, coordination: projectCoordination }
+              { processes: projectProcesses, coordination: projectCoordination, feedback: projectFeedback }
             ];
           })
         )
@@ -1814,6 +1927,7 @@
     processes = cached?.processes ?? [];
     optimisticProcesses = [];
     coordination = cached?.coordination ?? null;
+    feedbackSummaries = cached?.feedback ?? [];
     treeMultiSelection = null;
     applyRememberedProjectPane(projectId);
   }
@@ -1846,6 +1960,7 @@
         ...(snapshot?.coordination?.scratchpads ?? []),
         ...(snapshot?.coordination?.archived_scratchpads ?? [])
       ].map((scratchpad) => scratchpad.id)),
+      feedbackIds: new Set(snapshot?.feedback.map((item) => item.id) ?? []),
       draftIds: new Set(
         creationDrafts.filter((draft) => draft.projectId === projectId).map((draft) => draft.id)
       )
@@ -1860,6 +1975,7 @@
     if (selection?.projectId !== projectId || selection.key !== pane.selection.key) return;
     if (selection.kind === 'todo') await loadTodo(selection.id);
     else if (selection.kind === 'scratchpad') await loadScratchpad(selection.id);
+    else if (selection.kind === 'feedback') await loadFeedback(selection.id);
   }
 
   async function loadProject(projectId: number): Promise<void> {
@@ -1869,9 +1985,10 @@
       reportError(cause);
     }
     if (connection.version_compatible) {
-      await Promise.all([refreshProcesses(projectId), refreshCoordination(projectId, true)]);
+      await Promise.all([refreshProcesses(projectId), refreshCoordination(projectId, true), refreshFeedback(projectId)]);
     } else {
       coordination = null;
+      feedbackSummaries = [];
       await refreshProcesses(projectId);
     }
   }
@@ -2145,6 +2262,27 @@
     }
   }
 
+  async function refreshFeedback(projectId: number): Promise<void> {
+    try {
+      const next = await listProjectFeedback(projectId);
+      cacheProjectFeedback(projectId, next);
+      if (selectedProject?.id !== projectId) return;
+      feedbackSummaries = next;
+      if (selection?.kind === 'feedback') {
+        const summary = next.find((item) => item.id === selection?.id);
+        if (summary) {
+          selection = projectTreeSelection('feedback', summary.id, projectId, summary.title);
+          if (
+            summary.status !== feedbackDetail?.status
+            || (feedbackDetail?.status !== 'ready' && summary.revision !== feedbackDetail?.revision)
+          ) void loadFeedback(summary.id, false);
+        }
+      }
+    } catch (cause) {
+      reportError(cause);
+    }
+  }
+
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
     treeMultiSelection = null;
@@ -2165,6 +2303,7 @@
     selection = next;
     todoDetail = null;
     scratchpadRead = null;
+    feedbackDetail = null;
 
     if (next.kind === 'todo' && !todoNavigationIds.includes(next.id)) {
       todoNavigationIds = (coordination?.todos ?? []).map((todo) => todo.id);
@@ -2179,6 +2318,8 @@
       await loadTodo(next.id);
     } else if (next.kind === 'scratchpad') {
       await loadScratchpad(next.id);
+    } else if (next.kind === 'feedback') {
+      await loadFeedback(next.id);
     }
   }
 
@@ -2210,6 +2351,265 @@
     } finally {
       if (request === detailRequest) detailLoading = false;
     }
+  }
+
+  async function loadFeedback(feedbackId: number, showLoading = true): Promise<void> {
+    if (!selectedProject) return;
+    const projectId = selectedProject.id;
+    const request = ++detailRequest;
+    if (showLoading) detailLoading = true;
+    try {
+      const next = await client.recordedFeedbackGet(projectId, feedbackId);
+      if (
+        request === detailRequest
+        && selectedProject?.id === projectId
+        && selection?.kind === 'feedback'
+        && selection.id === feedbackId
+      ) feedbackDetail = next;
+    } catch (cause) {
+      if (request === detailRequest) reportError(cause);
+    } finally {
+      if (showLoading && request === detailRequest) detailLoading = false;
+    }
+  }
+
+  function browseFeedback(): void {
+    const item = feedbackSummaries[0];
+    if (item && selectedProject) {
+      void selectTreeItem(projectTreeSelection('feedback', item.id, selectedProject.id, item.title));
+    } else {
+      void openFeedbackPreflight();
+    }
+  }
+
+  async function openFeedbackPreflight(): Promise<void> {
+    if (!selectedProject) return;
+    feedbackPreflightOpen = true;
+    feedbackPreflightError = null;
+    feedbackPreflightLoading = true;
+    try {
+      const active = await invoke<NativeFeedbackSession | null>('feedback_status');
+      if (active) {
+        activeFeedbackSession = active;
+        feedbackPreflightOpen = false;
+        appNavigation.navigate({
+          type: 'item',
+          selection: projectTreeSelection('feedback', active.feedback_id, active.project_id, 'Recorded feedback')
+        }, 'api');
+        return;
+      }
+      feedbackPreflight = await invoke<NativeFeedbackPreflight>('feedback_preflight');
+    } catch (cause) {
+      feedbackPreflightError = messageForCause(cause);
+    } finally {
+      feedbackPreflightLoading = false;
+    }
+  }
+
+  async function requestFeedbackScreenAccess(): Promise<void> {
+    feedbackPreflightError = null;
+    try {
+      feedbackPreflight = await invoke<NativeFeedbackPreflight>('feedback_request_screen_access');
+    } catch (cause) {
+      feedbackPreflightError = messageForCause(cause);
+    }
+  }
+
+  async function installFeedbackModel(): Promise<void> {
+    if (feedbackModelInstalling) return;
+    feedbackModelInstalling = true;
+    feedbackModelProgress = null;
+    feedbackPreflightError = null;
+    try {
+      feedbackPreflight = await invoke<NativeFeedbackPreflight>('feedback_install_model');
+    } catch (cause) {
+      feedbackPreflightError = messageForCause(cause);
+    } finally {
+      feedbackModelInstalling = false;
+    }
+  }
+
+  async function startFeedbackRecording(): Promise<void> {
+    const project = selectedProject;
+    if (!project || feedbackStarting) return;
+    feedbackStarting = true;
+    feedbackPreflightError = null;
+    let created: Awaited<ReturnType<DaemonClient['recordedFeedbackCreate']>> | null = null;
+    try {
+      const title = `Feedback · ${new Intl.DateTimeFormat(undefined, {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+      }).format(new Date())}`;
+      created = await client.recordedFeedbackCreate(project.id, title, feedbackLeaseOwner);
+      activeFeedbackSession = await invoke<NativeFeedbackSession>('feedback_start', {
+        feedbackId: created.feedback.id,
+        projectId: project.id,
+        mediaDir: created.media_dir,
+        shortcuts: recordingHotkeyBindings($hotkeyPreferences)
+      });
+      feedbackPreflightOpen = false;
+      await refreshFeedback(project.id);
+      await selectTreeItem(projectTreeSelection('feedback', created.feedback.id, project.id, title));
+    } catch (cause) {
+      if (created) {
+        await client.recordedFeedbackDelete(project.id, created.feedback.id).catch(() => undefined);
+        await refreshFeedback(project.id);
+      }
+      feedbackPreflightError = messageForCause(cause);
+    } finally {
+      feedbackStarting = false;
+    }
+  }
+
+  function enqueueFeedbackEvent(action: () => Promise<void>): void {
+    feedbackEventQueue = feedbackEventQueue.then(action).catch(reportError);
+  }
+
+  async function persistFeedbackSnapshot(snapshot: NativeFeedbackSnapshot): Promise<void> {
+    const { project_id, ...input } = snapshot;
+    await client.recordedFeedbackAddSnapshot(project_id, input);
+    if (selectedProject?.id === project_id) {
+      await refreshFeedback(project_id);
+      if (selection?.kind === 'feedback' && selection.id === snapshot.feedback_id) {
+        await loadFeedback(snapshot.feedback_id, false);
+      }
+    }
+  }
+
+  async function beginFeedbackTranscription(finished: NativeFeedbackFinished): Promise<void> {
+    const previous = activeFeedbackSession;
+    activeFeedbackSession = {
+      feedback_id: finished.feedback_id,
+      project_id: finished.project_id,
+      started_at_ms: previous?.started_at_ms ?? Date.now() - finished.duration_ms,
+      elapsed_ms: finished.duration_ms,
+      audio_samples: previous?.audio_samples ?? 0,
+      sample_rate: previous?.sample_rate ?? 0,
+      snapshot_count: previous?.snapshot_count ?? 0,
+      phase: 'transcribing',
+      error: null
+    };
+    await client.recordedFeedbackBeginTranscription(
+      finished.project_id,
+      finished.feedback_id,
+      finished.duration_ms,
+      finished.audio_path
+    );
+    const pendingTranscript = pendingFeedbackTranscripts.get(finished.feedback_id);
+    if (pendingTranscript) {
+      pendingFeedbackTranscripts.delete(finished.feedback_id);
+      await completeFeedbackTranscription(pendingTranscript);
+      return;
+    }
+    if (selectedProject?.id === finished.project_id) {
+      await refreshFeedback(finished.project_id);
+      if (selection?.kind === 'feedback' && selection.id === finished.feedback_id) {
+        await loadFeedback(finished.feedback_id, false);
+      }
+    }
+  }
+
+  async function completeFeedbackTranscription(result: NativeFeedbackTranscript): Promise<void> {
+    const current = await client.recordedFeedbackGet(result.project_id, result.feedback_id);
+    if (current.status === 'recording') {
+      pendingFeedbackTranscripts.set(result.feedback_id, result);
+      return;
+    }
+    if (current.status === 'ready' || current.status === 'failed') return;
+    const blocks = compileFeedbackTimeline(result.segments, current.snapshots);
+    const next = await client.recordedFeedbackComplete(
+      result.project_id,
+      result.feedback_id,
+      result.segments,
+      blocks
+    );
+    activeFeedbackSession = null;
+    if (selectedProject?.id === result.project_id) {
+      await refreshFeedback(result.project_id);
+      if (selection?.kind === 'feedback' && selection.id === result.feedback_id) feedbackDetail = next;
+    }
+  }
+
+  async function saveSelectedFeedback(
+    title: string,
+    blocks: RecordedFeedbackBlock[],
+    captions: Array<{ snapshot_id: number; caption: string }>
+  ): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
+    const next = await client.recordedFeedbackUpdate(
+      selectedProject.id,
+      selection.id,
+      feedbackDetail.revision,
+      title,
+      blocks,
+      captions
+    );
+    feedbackDetail = next;
+    await refreshFeedback(selectedProject.id);
+  }
+
+  async function sendSelectedFeedbackToAgent(processId: number): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback') return;
+    await client.recordedFeedbackDeliverAgent(selectedProject.id, selection.id, processId);
+    await loadFeedback(selection.id, false);
+  }
+
+  async function sendSelectedFeedbackToScratchpad(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback') return;
+    const projectId = selectedProject.id;
+    const result = await client.recordedFeedbackToScratchpad(projectId, selection.id);
+    await refreshCoordination(projectId, false);
+    await selectTreeItem(projectTreeSelection(
+      'scratchpad', result.scratchpad.id, projectId, result.scratchpad.name
+    ));
+  }
+
+  async function copySelectedFeedbackPacket(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback') return;
+    const packet = await client.recordedFeedbackPreparePacket(selectedProject.id, selection.id);
+    await invoke('terminal_write_clipboard_text', {
+      text: `Review and act on the recorded feedback packet at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+    });
+    await loadFeedback(selection.id, false);
+  }
+
+  async function sendSelectedFeedbackToNewAgent(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
+    const packet = await client.recordedFeedbackPreparePacket(selectedProject.id, selection.id);
+    const draft = openCreationDraft('agent');
+    if (draft?.kind !== 'agent') return;
+    patchCreationDraft(draft.id, {
+      name: `Feedback: ${feedbackDetail.title}`,
+      prompt: `Review and act on the recorded feedback packet at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+    });
+    await ensureAgentDraftMetadata();
+  }
+
+  async function archiveSelectedFeedback(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
+    const projectId = selectedProject.id;
+    const next = await client.recordedFeedbackArchive(projectId, selection.id, !feedbackDetail.archived);
+    feedbackDetail = next;
+    await refreshFeedback(projectId);
+  }
+
+  async function deleteSelectedFeedback(): Promise<void> {
+    if (!selectedProject || selection?.kind !== 'feedback') return;
+    const projectId = selectedProject.id;
+    const feedbackId = selection.id;
+    const confirmed = await confirmInApp({
+      title: 'Delete recorded feedback?',
+      description: 'The transcript, microphone audio, screenshots, and generated packets will be permanently deleted.',
+      confirmLabel: 'Delete feedback',
+      destructive: true
+    });
+    if (!confirmed) return;
+    await client.recordedFeedbackDelete(projectId, feedbackId);
+    clearSelection();
+    await refreshFeedback(projectId);
+  }
+
+  function messageForCause(cause: unknown): string {
+    return cause instanceof Error ? cause.message : String(cause);
   }
 
   async function navigateAdjacentTodo(direction: -1 | 1): Promise<void> {
@@ -3231,6 +3631,7 @@
       || dialog !== null
       || trustReview !== null
       || keepAwakeOpen
+      || feedbackPreflightOpen
       || agentCascadeRequest !== null
       || addProjectDialogOpen
       || registerProjectDialog !== null
@@ -3255,6 +3656,7 @@
         ...(projectCoordination?.scratchpads ?? []),
         ...(projectCoordination?.archived_scratchpads ?? [])
       ].map((scratchpad) => scratchpad.id)),
+      feedbackIds: new Set(isCurrentProject ? feedbackSummaries.map((item) => item.id) : (snapshot?.feedback ?? []).map((item) => item.id)),
       draftIds: new Set(
         creationDrafts
           .filter((draft) => draft.projectId === view.projectId)
@@ -3278,6 +3680,7 @@
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+    feedbackDetail = null;
     detailLoading = false;
     settingsOpen = false;
     todoBrowserOpen = false;
@@ -3288,7 +3691,7 @@
     switch (pane.type) {
       case 'selection':
         selection = { ...pane.selection, projectId };
-        detailLoading = selection.kind === 'todo' || selection.kind === 'scratchpad';
+        detailLoading = selection.kind === 'todo' || selection.kind === 'scratchpad' || selection.kind === 'feedback';
         return;
       case 'todos':
         todoBrowserOpen = true;
@@ -3312,6 +3715,7 @@
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+    feedbackDetail = null;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
@@ -5561,6 +5965,7 @@
         agentTools={registeredAgentTools}
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
+        feedback={feedbackSummaries}
         drafts={creationDrafts.filter((draft) => draft.projectId === selectedProject.id)}
         {selection}
         multiSelection={treeMultiSelection}
@@ -5572,11 +5977,13 @@
         onCreateTodo={openTodoDraft}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
+        onBrowseFeedback={browseFeedback}
         onBrowseProcesses={openProcessOverview}
         onAddAgent={() => void openAgentDraft()}
         onAddTerminal={() => void spawnTerminal()}
         onAddCommand={openCommandDraft}
         onAddScratchpad={() => void createScratchpad()}
+        onStartFeedback={() => void openFeedbackPreflight()}
         {processBusyId}
         onStartProcess={(process) => void startOrReviewProcess(process)}
         onStopCommand={(process) => void stopProcess(process)}
@@ -5779,6 +6186,20 @@
             onEdit={openEditCommand}
             onRemove={(process) => void removeCommand(process)}
           />
+        {:else if selection?.kind === 'feedback'}
+          <RecordedFeedbackDetailView
+            feedback={feedbackDetail}
+            loading={detailLoading}
+            busy={detailBusy}
+            processes={treeProcesses}
+            onSave={saveSelectedFeedback}
+            onSendAgent={sendSelectedFeedbackToAgent}
+            onSendNewAgent={sendSelectedFeedbackToNewAgent}
+            onSendScratchpad={sendSelectedFeedbackToScratchpad}
+            onCopy={copySelectedFeedbackPacket}
+            onArchive={() => void archiveSelectedFeedback()}
+            onDelete={() => void deleteSelectedFeedback()}
+          />
         {:else if selection?.kind === 'todo'}
           <TodoDetailView
             detail={todoDetail}
@@ -5880,6 +6301,23 @@
     items={contextMenuDescriptor.items}
     onSelect={(action) => void runContextAction(action)}
     onClose={closeContextMenu}
+  />
+{/if}
+
+{#if feedbackPreflightOpen && selectedProject}
+  <RecordedFeedbackPreflight
+    projectName={projectDisplayName(selectedProject)}
+    preflight={feedbackPreflight}
+    loading={feedbackPreflightLoading}
+    installing={feedbackModelInstalling}
+    starting={feedbackStarting}
+    progress={feedbackModelProgress}
+    error={feedbackPreflightError}
+    onRefresh={() => void openFeedbackPreflight()}
+    onRequestScreen={() => void requestFeedbackScreenAccess()}
+    onInstall={() => void installFeedbackModel()}
+    onStart={() => void startFeedbackRecording()}
+    onClose={() => (feedbackPreflightOpen = false)}
   />
 {/if}
 

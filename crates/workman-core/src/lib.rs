@@ -8,6 +8,7 @@ pub mod notifications;
 mod output_spill;
 mod paths;
 pub mod project_folders;
+pub mod recorded_feedback;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
 pub mod store;
@@ -25,6 +26,7 @@ pub use locks::*;
 pub use notifications::*;
 pub use paths::*;
 pub use project_folders::*;
+pub use recorded_feedback::*;
 pub use scratchpads::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todo_claims::*;

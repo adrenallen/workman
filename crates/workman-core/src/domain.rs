@@ -19,6 +19,9 @@ pub type TodoId = i64;
 pub type TodoCommentId = i64;
 pub type ScratchpadId = i64;
 pub type ScratchpadCommentId = i64;
+pub type RecordedFeedbackId = i64;
+pub type RecordedFeedbackSnapshotId = i64;
+pub type RecordedFeedbackDeliveryId = i64;
 pub type TimerId = i64;
 
 /// Error returned when persisted text does not name a supported enum variant.
@@ -110,6 +113,17 @@ string_enum! {
         Command => "command",
         Terminal => "terminal",
         Agent => "agent",
+    }
+}
+
+string_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RecordedFeedbackStatus {
+        Recording => "recording",
+        Transcribing => "transcribing",
+        Ready => "ready",
+        Failed => "failed",
     }
 }
 
@@ -387,6 +401,92 @@ pub struct ScratchpadComment {
     pub anchor_suffix: Option<String>,
     pub anchor_revision: Option<i64>,
     pub resolved: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One locally recorded feedback session. Media paths always point inside Workman's data root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedback {
+    pub id: RecordedFeedbackId,
+    pub project_id: ProjectId,
+    pub title: String,
+    pub status: RecordedFeedbackStatus,
+    pub revision: i64,
+    pub duration_ms: i64,
+    pub audio_path: Option<String>,
+    pub transcript: Vec<RecordedFeedbackTranscriptSegment>,
+    pub blocks: Vec<RecordedFeedbackBlock>,
+    pub snapshots: Vec<RecordedFeedbackSnapshot>,
+    pub deliveries: Vec<RecordedFeedbackDelivery>,
+    pub error_code: Option<String>,
+    pub archived: bool,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedbackSummary {
+    pub id: RecordedFeedbackId,
+    pub project_id: ProjectId,
+    pub title: String,
+    pub status: RecordedFeedbackStatus,
+    pub revision: i64,
+    pub duration_ms: i64,
+    pub snapshot_count: usize,
+    pub archived: bool,
+    pub error_code: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedbackTranscriptSegment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordedFeedbackBlock {
+    Text {
+        text: String,
+        start_ms: i64,
+        end_ms: i64,
+    },
+    Image {
+        snapshot_id: RecordedFeedbackSnapshotId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedbackSnapshot {
+    pub id: RecordedFeedbackSnapshotId,
+    pub feedback_id: RecordedFeedbackId,
+    pub ordinal: i64,
+    pub anchor_ms: i64,
+    pub anchor_samples: i64,
+    pub invoked_at_ms: i64,
+    pub completed_at_ms: i64,
+    pub image_path: String,
+    pub caption: String,
+    pub width: u32,
+    pub height: u32,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedbackDelivery {
+    pub id: RecordedFeedbackDeliveryId,
+    pub feedback_id: RecordedFeedbackId,
+    pub target_kind: String,
+    pub target_id: Option<i64>,
+    pub status: String,
+    pub packet_path: Option<String>,
+    pub error_message: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

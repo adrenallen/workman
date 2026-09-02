@@ -50,6 +50,12 @@
       scope: 'Context'
     },
     {
+      id: 'feedback',
+      title: 'Recorded Feedback',
+      description: 'Global controls available while a feedback recording is active.',
+      scope: 'Recording'
+    },
+    {
       id: 'projects',
       title: 'Project rail',
       description: 'Slots follow visual rail order, including projects inside folders.',

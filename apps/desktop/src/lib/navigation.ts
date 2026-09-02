@@ -3,6 +3,7 @@ import { writable, type Readable } from 'svelte/store';
 import type { CoordinationSnapshot } from './coordination';
 import type { ProcessKind, ProcessView } from './daemon';
 import type { ProjectTreeSelection } from './projectTree';
+import type { RecordedFeedbackSummary } from './recordedFeedback';
 
 export type AppNavigationTarget =
   | { type: 'project'; projectId: number }
@@ -40,6 +41,7 @@ export interface AppNavigationState {
 export interface NavigationProjectSnapshot {
   processes: ProcessView[];
   coordination: CoordinationSnapshot | null;
+  feedback: RecordedFeedbackSummary[];
 }
 
 const recentStorageKey = 'workman.navigation.recents.v1';

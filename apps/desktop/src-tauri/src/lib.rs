@@ -36,6 +36,7 @@ use workmand::{
 
 mod external_navigation;
 mod native_notifications;
+mod recorded_feedback;
 mod terminal_clipboard;
 
 const STATUS_EVENT: &str = "daemon://status";
@@ -1362,12 +1363,18 @@ pub fn run() {
         KeepAwakeState::persistent(default_data_dir().join(KEEP_AWAKE_PREFERENCE_FILE));
     let bridge_keep_awake_state = keep_awake_state.clone();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(external_navigation::plugin())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(external_navigation::plugin());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .manage(state)
         .manage(keep_awake_state)
+        .manage(recorded_feedback::FeedbackState::default())
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
             if let Some(action) = native_menu_action(event.id().as_ref()) {
@@ -1400,7 +1407,21 @@ pub fn run() {
             terminal_clipboard::terminal_write_clipboard_text,
             native_notifications::native_notification_permission_state,
             native_notifications::native_notification_request_permission,
-            native_notifications::native_notification_show
+            native_notifications::native_notification_show,
+            recorded_feedback::feedback_preflight,
+            recorded_feedback::feedback_request_screen_access,
+            recorded_feedback::feedback_install_model,
+            recorded_feedback::feedback_start,
+            recorded_feedback::feedback_status,
+            recorded_feedback::feedback_set_tool,
+            recorded_feedback::feedback_record_stroke,
+            recorded_feedback::feedback_undo,
+            recorded_feedback::feedback_clear,
+            recorded_feedback::feedback_begin_region,
+            recorded_feedback::feedback_cancel_region,
+            recorded_feedback::feedback_capture_snapshot,
+            recorded_feedback::feedback_finish,
+            recorded_feedback::feedback_read_image
         ])
         .setup(move |app| {
             tauri::async_runtime::spawn(run_bridge(
@@ -1432,6 +1453,8 @@ pub fn run() {
                 );
             if should_stop {
                 app.state::<KeepAwakeState>().stop_silently();
+                app.state::<recorded_feedback::FeedbackState>()
+                    .shutdown(app);
             }
         });
 }
@@ -1545,11 +1568,11 @@ fn set_nested_menu_accelerator(
     accelerator: Option<&str>,
 ) -> tauri::Result<bool> {
     for item in items {
-        if item.id().as_ref() == id {
-            if let Some(menu_item) = item.as_menuitem() {
-                menu_item.set_accelerator(accelerator)?;
-                return Ok(true);
-            }
+        if item.id().as_ref() == id
+            && let Some(menu_item) = item.as_menuitem()
+        {
+            menu_item.set_accelerator(accelerator)?;
+            return Ok(true);
         }
         if let Some(submenu) = item.as_submenu()
             && set_nested_menu_accelerator(&submenu.items()?, id, accelerator)?

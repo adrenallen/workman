@@ -1014,6 +1014,11 @@ async fn dispatch(
     if let Some(result) = crate::coordination::dispatch(method, params.clone(), registry.store()) {
         return result;
     }
+    if let Some(result) =
+        crate::recorded_feedback::dispatch(method, params.clone(), &mut registry, data_dir)
+    {
+        return result;
+    }
     if let Some(result) = crate::subprocesses::dispatch(method, params.clone(), &mut registry) {
         return result;
     }

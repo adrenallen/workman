@@ -22,9 +22,10 @@ copies key material into the repository or release output.
 ## Release trust pipeline
 
 The local pipeline builds the app with Tauri's Developer ID signing configuration and hardened
-runtime. Workman is not App Sandbox-enabled: its PTY spawning and outbound localhost/network
-connections do not require entitlements, so no runtime-relaxing entitlements are granted. The
-standalone CLI and daemon are signed separately with secure timestamps and hardened runtime.
+runtime. Workman is not App Sandbox-enabled. The desktop bundle includes the narrow audio-input
+entitlement and microphone/screen-capture usage descriptions required by Recorded Feedback; the
+release script verifies all three after signing and again after packaging. The standalone CLI and
+daemon are signed separately with secure timestamps and hardened runtime.
 
 The complete macOS package is submitted with one blocking `notarytool --wait --timeout 2h` call.
 The first submission from a new Apple Developer account can normally take 30–60 minutes or more;

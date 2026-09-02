@@ -14,8 +14,7 @@ trap cleanup EXIT
 
 SOURCE_APP="$TEMP_DIR/Workman Test.app"
 mkdir -p "$SOURCE_APP/Contents/MacOS"
-printf '#!/bin/sh\nexit 0\n' > "$SOURCE_APP/Contents/MacOS/workman-desktop"
-chmod +x "$SOURCE_APP/Contents/MacOS/workman-desktop"
+cp /usr/bin/true "$SOURCE_APP/Contents/MacOS/workman-desktop"
 cat > "$SOURCE_APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,6 +43,9 @@ test -f "$OPEN_CAPTURE"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_REQUIRE_EXPLICIT_DAEMON' "$QA_APP/Contents/Info.plist")" == 1 ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:WORKMAN_BROWSER_OPEN_CAPTURE' "$QA_APP/Contents/Info.plist")" == "$OPEN_CAPTURE" ]]
 /usr/bin/codesign --verify --deep --strict "$QA_APP"
+entitlements="$(/usr/bin/codesign -d --entitlements :- "$QA_APP" 2>/dev/null)"
+/usr/bin/plutil -convert json -o - - <<<"$entitlements" \
+  | jq -e '."com.apple.security.device.audio-input" == true' >/dev/null
 FAKE_PATH="$(/usr/libexec/PlistBuddy -c 'Print :LSEnvironment:PATH' "$QA_APP/Contents/Info.plist")"
 [[ "$FAKE_PATH" == "$QA_ROOT/fake-bin:/usr/bin:/bin:/usr/sbin:/sbin" ]]
 grep -qx 'agent_tools: \[\]' "$CONFIG"

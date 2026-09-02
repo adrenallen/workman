@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -30,7 +31,10 @@
   "bundle": {
     "active": false,
     "macOS": {
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist"
     },
     "icon": [
       "icons/32x32.png",

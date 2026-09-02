@@ -4,6 +4,7 @@
   import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
   import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+  import Mic2Icon from '@lucide/svelte/icons/mic-2';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -34,6 +35,7 @@
   import type { ProcessKind, ProcessView, Project } from './daemon';
   import type { AgentTool } from './agentTools';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
+  import { feedbackDuration, feedbackStatusLabel, type RecordedFeedbackSummary } from './recordedFeedback';
   import type { CreationDraft } from './creationDrafts';
   import {
     contextMenuRequest,
@@ -75,6 +77,7 @@
     agentTools: AgentTool[];
     todos: TodoSummary[];
     scratchpads: ScratchpadSummary[];
+    feedback: RecordedFeedbackSummary[];
     drafts: CreationDraft[];
     selection: ProjectTreeSelection | null;
     multiSelection: ProjectTreeMultiSelection | null;
@@ -86,11 +89,13 @@
     onCreateTodo: () => void;
     onBrowseTodos: () => void;
     onBrowseScratchpads: () => void;
+    onBrowseFeedback: () => void;
     onBrowseProcesses: (kind: ProcessKind) => void;
     onAddAgent: () => void;
     onAddTerminal: () => void;
     onAddCommand: () => void;
     onAddScratchpad: () => void;
+    onStartFeedback: () => void;
     processBusyId: number | null;
     onStartProcess: (process: ProcessView) => void;
     onStopCommand: (process: ProcessView) => void;
@@ -114,6 +119,7 @@
     agentTools,
     todos,
     scratchpads,
+    feedback,
     drafts,
     selection,
     multiSelection,
@@ -125,11 +131,13 @@
     onCreateTodo,
     onBrowseTodos,
     onBrowseScratchpads,
+    onBrowseFeedback,
     onBrowseProcesses,
     onAddAgent,
     onAddTerminal,
     onAddCommand,
     onAddScratchpad,
+    onStartFeedback,
     processBusyId,
     onStartProcess,
     onStopCommand,
@@ -154,6 +162,7 @@
     'agents',
     'terminals',
     'commands',
+    'feedback',
     'scratchpads'
   ];
   const groupLabel: Record<ProjectTreeGroup, string> = {
@@ -161,6 +170,7 @@
     agents: 'Agents',
     terminals: 'Terminals',
     commands: 'Commands',
+    feedback: 'Feedback',
     scratchpads: 'Scratchpads'
   };
   const groupIcon: Record<ProjectTreeGroup, Component> = {
@@ -168,6 +178,7 @@
     agents: BotIcon,
     terminals: SquareTerminalIcon,
     commands: PlayIcon,
+    feedback: Mic2Icon,
     scratchpads: NotebookTextIcon
   };
 
@@ -180,6 +191,7 @@
     agents: true,
     terminals: true,
     commands: true,
+    feedback: true,
     scratchpads: true
   });
 
@@ -223,6 +235,9 @@
   let visibleScratchpads = $derived(
     orderedScratchpads.filter((scratchpad) => matchesQuery(`${scratchpad.name} ${scratchpad.tags.join(' ')}`))
   );
+  let visibleFeedback = $derived(feedback
+    .filter((item) => matchesQuery(item.title))
+    .sort((left, right) => Number(left.archived) - Number(right.archived) || right.updated_at - left.updated_at));
   let projectCounts = $derived($liveStats.counts[project.id]);
 
   onMount(() => {
@@ -261,6 +276,8 @@
       onBrowseTodos();
     } else if (group === 'scratchpads') {
       onBrowseScratchpads();
+    } else if (group === 'feedback') {
+      onBrowseFeedback();
     } else if (group === 'agents') {
       onBrowseProcesses('agent');
     } else if (group === 'terminals') {
@@ -276,6 +293,7 @@
       case 'agents': onAddAgent(); break;
       case 'terminals': onAddTerminal(); break;
       case 'commands': onAddCommand(); break;
+      case 'feedback': onStartFeedback(); break;
       case 'scratchpads': onAddScratchpad(); break;
     }
   }
@@ -286,6 +304,7 @@
       case 'agents': return 'Add agent';
       case 'terminals': return 'New terminal';
       case 'commands': return 'Add command';
+      case 'feedback': return 'Record feedback';
       case 'scratchpads': return 'New scratchpad';
     }
   }
@@ -450,6 +469,7 @@
       case 'agents': return `${projectCounts?.agent_running ?? agents.filter(isRunning).length}/${projectCounts?.agent_total ?? agents.length}`;
       case 'terminals': return `${projectCounts?.terminal_running ?? terminals.filter(isRunning).length}/${projectCounts?.terminal_total ?? terminals.length}`;
       case 'commands': return `${projectCounts?.command_running ?? commands.filter(isRunning).length}/${projectCounts?.command_total ?? commands.length}`;
+      case 'feedback': return String(feedback.length);
       case 'scratchpads': return String(scratchpads.length);
     }
   }
@@ -458,6 +478,11 @@
     group: ProjectTreeGroup
   ): 'neutral' | 'working' | 'needs-input' | 'waiting' | 'error' | 'attention' {
     if (group === 'todos' && openTodos.some((todo) => todo.is_blocked)) return 'attention';
+    if (group === 'feedback') {
+      if (feedback.some((item) => !item.archived && item.status === 'failed')) return 'error';
+      if (feedback.some((item) => !item.archived && (item.status === 'recording' || item.status === 'transcribing'))) return 'working';
+      return 'neutral';
+    }
     if (group === 'todos' || group === 'scratchpads') return 'neutral';
     const states = processesForGroup(group)
       .map((process) => processActivity(process, runtimeStats(process)).state);
@@ -470,7 +495,7 @@
 
   function groupCountTitle(group: ProjectTreeGroup): string {
     const value = groupCount(group);
-    if (group === 'todos' || group === 'scratchpads') return `${value} ${group}`;
+    if (group === 'todos' || group === 'scratchpads' || group === 'feedback') return `${value} ${group}`;
     const [running, total] = value.split('/');
     const unread = group === 'agents'
       ? agents.filter((process) => process.agent_state.unread).length
@@ -759,7 +784,7 @@
 
         {#if openGroups[group] && !collapsed}
           <div class="group-rows">
-            {#if group !== 'commands' && selectedCount(group) > 1}
+            {#if group !== 'commands' && group !== 'feedback' && selectedCount(group) > 1}
               <div class="bulk-action-bar" role="toolbar" aria-label={`${selectedCount(group)} selected ${group}`}>
                 <strong>{selectedCount(group)} selected</strong>
                 <span class="bulk-action-buttons">
@@ -1011,6 +1036,29 @@
               {#if commands.length === 0}
                 <button class="add-row" type="button" data-tree-row onclick={onAddCommand}>+ Add command</button>
               {/if}
+            {:else if group === 'feedback'}
+              {#each visibleFeedback as item (item.id)}
+                <button
+                  type="button"
+                  class="tree-row feedback-row"
+                  class:archived={item.archived}
+                  class:selected={selection?.key === `feedback:${item.id}`}
+                  data-tree-row
+                  onclick={() => onSelect(projectTreeSelection('feedback', item.id, project.id, item.title))}
+                >
+                  <StatusIndicator
+                    tone={item.status === 'failed' ? 'danger' : item.status === 'recording' || item.status === 'transcribing' ? 'success' : 'neutral'}
+                    state={item.status === 'recording' || item.status === 'transcribing' ? 'working' : item.status === 'failed' ? 'crashed' : 'idle'}
+                    label={feedbackStatusLabel(item.status)}
+                  />
+                  <span class="row-copy"><strong>{item.title}</strong><small>{item.archived ? 'Archived · ' : ''}{feedbackStatusLabel(item.status)} · {feedbackDuration(item.duration_ms)} · {item.snapshot_count} snap{item.snapshot_count === 1 ? '' : 's'}</small></span>
+                </button>
+              {:else}
+                <p class="empty-row">{query ? 'No matching feedback' : 'No recorded feedback'}</p>
+              {/each}
+              {#if feedback.length === 0}
+                <button class="add-row" type="button" data-tree-row onclick={onStartFeedback}>+ Record feedback</button>
+              {/if}
             {:else}
               {#each visibleScratchpads as scratchpad (scratchpad.id)}
                 {#if renameTarget?.kind === 'scratchpad' && renameTarget.scratchpad.id === scratchpad.id}
@@ -1109,6 +1157,7 @@
   .agent-row-shell.agent-child .agent-row { grid-template-columns: 12px 17px minmax(0, 1fr) auto; }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
   .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .feedback-row.archived:not(.selected) { opacity: 0.58; }
   .tree-row.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
   .process-row-shell { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-radius: 3px; }
   .process-row-shell.has-actions { grid-template-columns: minmax(0, 1fr) 28px; }

@@ -3,6 +3,7 @@
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import CoffeeIcon from '@lucide/svelte/icons/coffee';
   import GitBranchPlusIcon from '@lucide/svelte/icons/git-branch-plus';
+  import Mic2Icon from '@lucide/svelte/icons/mic-2';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SearchIcon from '@lucide/svelte/icons/search';
@@ -10,6 +11,7 @@
   import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
   import type { AgentTool } from './agentTools';
   import type { Project } from './daemon';
+  import { feedbackStatusLabel } from './recordedFeedback';
   import PullRequestStateIcon from './PullRequestStateIcon.svelte';
   import ProjectIcon from './ProjectIcon.svelte';
   import * as Dialog from '$lib/components/ui/dialog';
@@ -267,6 +269,21 @@
           creation: false
         });
       }
+
+      for (const feedback of snapshot?.feedback ?? []) {
+        const selection = projectTreeSelection('feedback', feedback.id, project.id, feedback.title);
+        const feedbackTarget: AppNavigationTarget = { type: 'item', selection };
+        next.push({
+          key: navigationTargetKey(feedbackTarget),
+          kind: 'feedback',
+          label: feedback.title,
+          detail: `${feedback.archived ? 'Archived · ' : ''}${feedbackStatusLabel(feedback.status)} · ${feedback.snapshot_count} snapshots`,
+          projectName: name,
+          searchText: `${feedback.title} ${feedback.status} ${name} recorded feedback recording`,
+          target: feedbackTarget,
+          creation: false
+        });
+      }
     }
 
     return next;
@@ -334,6 +351,7 @@
       case 'terminal': return 'Terminal';
       case 'command': return 'Command';
       case 'scratchpad': return 'Scratchpad';
+      case 'feedback': return 'Feedback';
     }
   }
 
@@ -356,6 +374,7 @@
       case 'terminal': return SquareTerminalIcon;
       case 'command': return PlayIcon;
       case 'scratchpad': return NotebookTextIcon;
+      case 'feedback': return Mic2Icon;
     }
   }
 
