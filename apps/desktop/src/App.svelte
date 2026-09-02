@@ -13,6 +13,7 @@
   import { onMount, tick } from 'svelte';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
+  import AddProjectDialog from './lib/AddProjectDialog.svelte';
   import AgentCascadeDialog from './lib/AgentCascadeDialog.svelte';
   import AgentDoneToasts, { type AgentDoneNotice } from './lib/AgentDoneToasts.svelte';
   import IconButton from './lib/components/ds/IconButton.svelte';
@@ -459,6 +460,9 @@
   let treeRenameTarget = $state<ContextMenuTarget | null>(null);
   let worktreeLists = $state<Record<number, WorktreeList>>({});
   let worktreeRefreshingRepositoryId = $state<number | null>(null);
+  let addProjectDialogOpen = $state(false);
+  let addProjectFolderBusy = $state(false);
+  let addProjectWorktreeBusyId = $state<number | null>(null);
   let registerProjectDialog = $state<{ path: string; defaultTitle: string } | null>(null);
   let registerProjectBusy = $state(false);
   let registerProjectError = $state<string | null>(null);
@@ -3228,6 +3232,7 @@
       || trustReview !== null
       || keepAwakeOpen
       || agentCascadeRequest !== null
+      || addProjectDialogOpen
       || registerProjectDialog !== null
       || worktreeDialog !== null
       || removeWorktreeDialog !== null
@@ -3522,7 +3527,7 @@
   }
 
   async function chooseRegisterProjectFolder(): Promise<string | null> {
-    const path = await open({ directory: true, multiple: false, title: 'Register a project folder' });
+    const path = await open({ directory: true, multiple: false, title: 'Choose a project folder' });
     return typeof path === 'string' ? path : null;
   }
 
@@ -3534,23 +3539,38 @@
     };
   }
 
-  async function registerProject(): Promise<void> {
-    const path = await chooseRegisterProjectFolder();
-    if (path) showRegisterProjectTitle(path);
+  function showAddProject(): void {
+    addProjectDialogOpen = true;
   }
 
-  async function changeRegisterProjectFolder(): Promise<void> {
-    const previous = registerProjectDialog;
-    const previousError = registerProjectError;
-    if (!previous || registerProjectBusy) return;
+  async function chooseFolderFromAddProject(): Promise<void> {
+    if (addProjectFolderBusy || addProjectWorktreeBusyId !== null) return;
+    addProjectFolderBusy = true;
+    try {
+      const path = await chooseRegisterProjectFolder();
+      if (!path) return;
+      addProjectDialogOpen = false;
+      showRegisterProjectTitle(path);
+    } finally {
+      addProjectFolderBusy = false;
+    }
+  }
+
+  function returnToAddProject(): void {
+    if (registerProjectBusy) return;
     registerProjectDialog = null;
     registerProjectError = null;
-    const path = await chooseRegisterProjectFolder();
-    if (path) {
-      showRegisterProjectTitle(path);
-    } else {
-      registerProjectDialog = previous;
-      registerProjectError = previousError;
+    addProjectDialogOpen = true;
+  }
+
+  async function createWorktreeFromAddProject(project: Project): Promise<void> {
+    if (addProjectFolderBusy || addProjectWorktreeBusyId !== null) return;
+    addProjectWorktreeBusyId = project.id;
+    try {
+      await openWorktreeDialog('create', project);
+      if (worktreeDialog) addProjectDialogOpen = false;
+    } finally {
+      addProjectWorktreeBusyId = null;
     }
   }
 
@@ -5453,7 +5473,7 @@
     <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
     <div class="project-list" aria-live="polite" onscroll={closeProjectRailTooltip}>
       {#if projects.length === 0 && projectFolders.length === 0 && connection.status === 'connected' && !busy}
-        <div class="project-empty"><strong>No projects</strong><p>Register a folder or switch profiles.</p><Button size="sm" onclick={() => void registerProject()}>Register folder</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
+        <div class="project-empty"><strong>No projects</strong><p>Add a folder or switch profiles.</p><Button size="sm" onclick={showAddProject}>Add project</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
       {/if}
       {#if folderCreateOpen && !projectRailCollapsed}
         <ProjectFolderCreateRow
@@ -5506,8 +5526,8 @@
       {/each}
     </div>
     <footer class="project-footer">
-      <Button class="min-w-0 flex-1 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}>
-        <PlusIcon size={14} aria-hidden="true" /><span class="button-copy">Register project</span>
+      <Button class="min-w-0 flex-1 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy} onclick={showAddProject}>
+        <PlusIcon size={14} aria-hidden="true" /><span class="button-copy">Add project</span>
       </Button>
       <Button class="folder-button min-w-0 justify-center" variant="outline" size="sm" disabled={connection.status !== 'connected' || busy || projectReorderBusy} onclick={beginCreateProjectFolder}>
         <FolderPlusIcon size={14} aria-hidden="true" /><span class="button-copy">Folder</span>
@@ -5841,9 +5861,9 @@
       {/if}
     {:else}
       <div class="onboarding">
-        <span>Local workspaces</span><h1>Register a project</h1><p>Choose a repository, or switch back to another profile.</p>
+        <span>Local workspaces</span><h1>Add a project</h1><p>Choose a folder from this computer, or create a worktree from a project already here.</p>
         <div class="flex gap-2">
-          <Button disabled={connection.status !== 'connected' || busy} onclick={() => void registerProject()}><PlusIcon size={14} />Register project</Button>
+          <Button disabled={connection.status !== 'connected' || busy} onclick={showAddProject}><PlusIcon size={14} />Add project</Button>
           <Button variant="outline" disabled={connection.status !== 'connected'} onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button>
         </div>
       </div>
@@ -5911,6 +5931,19 @@
   />
 {/if}
 
+{#if addProjectDialogOpen}
+  <AddProjectDialog
+    {projects}
+    folderBusy={addProjectFolderBusy}
+    worktreeBusyProjectId={addProjectWorktreeBusyId}
+    onChooseFolder={() => void chooseFolderFromAddProject()}
+    onCreateWorktree={(project) => void createWorktreeFromAddProject(project)}
+    onClose={() => {
+      if (!addProjectFolderBusy && addProjectWorktreeBusyId === null) addProjectDialogOpen = false;
+    }}
+  />
+{/if}
+
 {#if registerProjectDialog}
   <RegisterProjectDialog
     path={registerProjectDialog.path}
@@ -5918,7 +5951,7 @@
     busy={registerProjectBusy}
     error={registerProjectError}
     onSubmit={(title) => void submitRegisterProject(title)}
-    onBack={() => void changeRegisterProjectFolder()}
+    onBack={returnToAddProject}
     onClose={() => {
       if (!registerProjectBusy) {
         registerProjectDialog = null;

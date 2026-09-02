@@ -18,10 +18,11 @@ test('folder selection opens a focused title step before the registration RPC', 
   assert.match(dialog, /titleInput\?\.select\(\)/);
   assert.match(dialog, /onEscapeKeydown=\{keepDefault\}/);
   assert.match(dialog, /submit\(defaultTitle\)/);
-  assert.match(dialog, /Esc registers as/);
+  assert.match(dialog, /Esc adds as/);
   assert.match(dialog, /matchesHotkeyAction\(event, 'submit-focused-form', \$hotkeyPreferences\)/);
   assert.match(dialog, /onclick=\{onBack\}/);
-  assert.match(app, /onBack=\{\(\) => void changeRegisterProjectFolder\(\)\}/);
+  assert.match(app, /onBack=\{returnToAddProject\}/);
+  assert.match(app, /function returnToAddProject\(\)[\s\S]*addProjectDialogOpen = true/);
 });
 
 test('registration sends an optional display name in the original round trip', async () => {

@@ -81,7 +81,7 @@
             </Dialog.Description>
           </span>
         </span>
-        <IconButton label="Cancel project registration" disabled={busy} onclick={onClose}>
+        <IconButton label="Cancel adding project" disabled={busy} onclick={onClose}>
           {#snippet icon()}<XIcon size={14} />{/snippet}
         </IconButton>
       </Dialog.Header>
@@ -98,7 +98,7 @@
             onkeydown={handleTitleKeydown}
           />
         </label>
-        <small id="register-project-title-help" class="text-xs text-muted-foreground">Enter registers this title. Esc registers as “{defaultTitle}”. Cancel discards.</small>
+        <small id="register-project-title-help" class="text-xs text-muted-foreground">Enter adds this title. Esc adds as “{defaultTitle}”. Cancel discards.</small>
         {#if error}<p id="register-project-error" class="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>{/if}
       </div>
 
@@ -107,7 +107,7 @@
         <span class="flex items-center gap-2">
           <Button type="button" variant="ghost" disabled={busy} onclick={onClose}>Cancel</Button>
           <Button type="submit" disabled={busy}>
-            {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{busy ? 'Registering…' : 'Register project'}
+            {#if busy}<LoaderCircleIcon class="spin" size={14} />{/if}{busy ? 'Adding…' : 'Add project'}
           </Button>
         </span>
       </Dialog.Footer>

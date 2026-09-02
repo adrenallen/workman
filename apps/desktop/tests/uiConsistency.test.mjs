@@ -58,6 +58,7 @@ test('flush modal footers reset shared negative margins and retain edge padding'
     'lib/AgentCascadeDialog.svelte',
     'lib/WorktreeImportDialog.svelte',
     'lib/WorktreeDialog.svelte',
+    'lib/AddProjectDialog.svelte',
     'lib/RegisterProjectDialog.svelte',
     'lib/WorktreeRemoveDialog.svelte',
     'lib/ProjectSettingsDialog.svelte',
