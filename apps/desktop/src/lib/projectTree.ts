@@ -15,6 +15,33 @@ export type ProjectTreeGroup =
   | 'feedback'
   | 'scratchpads';
 
+export const projectTreeGroupOrderStorageKey = 'workman.tree.group-order.v1';
+
+export const defaultProjectTreeGroupOrder: readonly ProjectTreeGroup[] = [
+  'todos',
+  'agents',
+  'terminals',
+  'commands',
+  'scratchpads',
+  'feedback'
+];
+
+/** Keep every known group exactly once while accepting older saved layouts. */
+export function normalizeProjectTreeGroupOrder(value: unknown): ProjectTreeGroup[] {
+  const known = new Set<ProjectTreeGroup>(defaultProjectTreeGroupOrder);
+  const saved = Array.isArray(value)
+    ? value.filter((group): group is ProjectTreeGroup => (
+        typeof group === 'string'
+        && known.has(group as ProjectTreeGroup)
+      ))
+    : [];
+  const unique = [...new Set(saved)];
+  return [
+    ...unique,
+    ...defaultProjectTreeGroupOrder.filter((group) => !unique.includes(group))
+  ];
+}
+
 export interface ProjectTreeSelection {
   key: string;
   kind: ProjectTreeItemKind;

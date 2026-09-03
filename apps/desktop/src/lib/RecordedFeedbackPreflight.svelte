@@ -8,6 +8,7 @@
 
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
+  import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
   import type { NativeFeedbackPreflight } from './recordedFeedback';
 
   interface Props {
@@ -90,7 +91,12 @@
       <span class="privacy">No continuous screen video</span>
       <div class="actions">
         <Button variant="ghost" disabled={installing || starting} onclick={onClose}>Cancel</Button>
-        <Button disabled={!ready || installing || starting} onclick={onStart}><MicIcon size={14} />{starting ? 'Starting…' : 'Start recording'}</Button>
+        <Button disabled={!ready || installing || starting} onclick={onStart}>
+          <MicIcon size={14} />{starting ? 'Starting…' : 'Start recording'}
+          {#if !starting && hotkeyDisplayLabel($hotkeyPreferences['start-feedback'])}
+            <kbd>{hotkeyDisplayLabel($hotkeyPreferences['start-feedback'])}</kbd>
+          {/if}
+        </Button>
       </div>
     </Dialog.Footer>
     <Dialog.Close class="close" aria-label="Close" disabled={installing || starting}><XIcon size={15} /></Dialog.Close>
@@ -117,6 +123,7 @@
   .error span { font-weight: 700; }
   .privacy { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .actions { display: flex; gap: 8px; }
+  .actions kbd { border-left: 1px solid color-mix(in srgb, currentColor 28%, transparent); padding-left: 8px; font: 600 var(--font-size-xs) 'JetBrains Mono Variable', monospace; opacity: .72; }
   :global(.close) { position: absolute; top: 12px; right: 12px; display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); }
   :global(.close:hover) { background: var(--muted); color: var(--foreground); }
   @media (prefers-reduced-motion: reduce) { .progress span { transition: none; } }

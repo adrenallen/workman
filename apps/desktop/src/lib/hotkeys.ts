@@ -60,6 +60,10 @@ export const editingHotkeyActions = [
   'toggle-todo-inspector'
 ] as const;
 
+export const feedbackLaunchHotkeyActions = [
+  'start-feedback'
+] as const;
+
 export const recordingHotkeyActions = [
   'feedback-snap',
   'feedback-snap-region',
@@ -80,6 +84,7 @@ export type WorkspaceHotkeyAction = (typeof workspaceHotkeyActions)[number];
 export type NavigationHotkeyAction = (typeof navigationHotkeyActions)[number];
 export type TerminalHotkeyAction = (typeof terminalHotkeyActions)[number];
 export type EditingHotkeyAction = (typeof editingHotkeyActions)[number];
+export type FeedbackLaunchHotkeyAction = (typeof feedbackLaunchHotkeyActions)[number];
 export type RecordingHotkeyAction = (typeof recordingHotkeyActions)[number];
 export type ContextualHotkeyAction = (typeof contextualHotkeyActions)[number];
 export type HotkeyAction =
@@ -89,6 +94,7 @@ export type HotkeyAction =
   | NavigationHotkeyAction
   | TerminalHotkeyAction
   | EditingHotkeyAction
+  | FeedbackLaunchHotkeyAction
   | RecordingHotkeyAction
   | ContextualHotkeyAction;
 
@@ -231,6 +237,12 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
     group: 'editing'
   },
   {
+    id: 'start-feedback',
+    label: 'Start feedback',
+    description: 'Open recorded feedback for the current project',
+    group: 'feedback'
+  },
+  {
     id: 'feedback-snap',
     label: 'Snap last mode',
     description: 'Capture using the most recent region or display mode',
@@ -268,8 +280,8 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
   },
   {
     id: 'feedback-finish',
-    label: 'Finish recording',
-    description: 'Stop the microphone and begin local transcription',
+    label: 'Stop feedback',
+    description: 'Stop recording and begin local transcription',
     group: 'feedback'
   },
   ...projectHotkeyActions.map((id, index) => ({
@@ -317,6 +329,7 @@ export const allHotkeyActions = [
   ...navigationHotkeyActions,
   ...terminalHotkeyActions,
   ...editingHotkeyActions,
+  ...feedbackLaunchHotkeyActions,
   ...recordingHotkeyActions,
   ...projectHotkeyActions,
   ...creationHotkeyActions,
@@ -400,6 +413,7 @@ const defaultPreferences: HotkeyPreferences = Object.fromEntries([
   ['submit-focused-form', primaryChord('Enter')],
   ['toggle-scratchpad-list', { ...primaryChord('KeyS'), shift: true }],
   ['toggle-todo-inspector', { ...primaryChord('KeyI'), shift: true }],
+  ['start-feedback', { ...primaryChord('KeyF'), shift: true }],
   ['feedback-snap', { ...primaryChord('KeyC'), shift: true }],
   ['feedback-snap-region', { ...primaryChord('KeyR'), shift: true }],
   ['feedback-snap-display', { ...primaryChord('KeyD'), shift: true }],

@@ -71,6 +71,10 @@ test('defaults every command into one configurable command map', () => {
   assert.equal(findHotkeyAction(primaryKeyboardEvent('Digit9'), preferences), 'project-9');
   assert.equal(findHotkeyAction(primaryKeyboardEvent('KeyN'), preferences), 'new-agent');
   assert.equal(findHotkeyAction(primaryKeyboardEvent('KeyT'), preferences), 'new-terminal');
+  assert.equal(
+    findHotkeyAction(primaryKeyboardEvent('KeyF', { shiftKey: true }), preferences),
+    'start-feedback'
+  );
   assert.deepEqual(preferences['new-quick-prompt'], preferences['new-agent']);
 });
 
@@ -169,6 +173,7 @@ test('app and terminal route workspace shortcuts through the shared action resol
     'navigate-left', 'navigate-right', 'previous-process', 'next-process',
     'unfocus-terminal', 'search-terminal'
   ]) assert.match(app, new RegExp(`case '${action}'`));
+  assert.match(app, /case 'start-feedback':[\s\S]*openFeedbackPreflight\(\)/);
   assert.match(app, /onAppShortcut=\{handleAppShortcut\}/);
   assert.match(app, /'new-agent': \{ type: 'new-agent', projectId \}/);
   assert.match(app, /'new-terminal': \{ type: 'new-terminal', projectId \}/);

@@ -9,6 +9,7 @@
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical';
   import SearchIcon from '@lucide/svelte/icons/search';
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import SquareIcon from '@lucide/svelte/icons/square';
@@ -46,7 +47,10 @@
   import { liveStats, type ProcessRuntimeStats } from './liveStats';
   import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
   import {
+    defaultProjectTreeGroupOrder,
+    normalizeProjectTreeGroupOrder,
     projectTreeSelection,
+    projectTreeGroupOrderStorageKey,
     type ProjectTreeGroup,
     type ProjectTreeSelection
   } from './projectTree';
@@ -157,14 +161,14 @@
 
   let projectName = $derived(projectDisplayName(project));
 
-  const groupOrder: ProjectTreeGroup[] = [
-    'todos',
-    'agents',
-    'terminals',
-    'commands',
-    'feedback',
-    'scratchpads'
-  ];
+  const groupId: Record<ProjectTreeGroup, number> = {
+    todos: 1,
+    agents: 2,
+    terminals: 3,
+    commands: 4,
+    feedback: 5,
+    scratchpads: 6
+  };
   const groupLabel: Record<ProjectTreeGroup, string> = {
     todos: 'Todos',
     agents: 'Agents',
@@ -185,6 +189,7 @@
   const sidebarTodoLimit = 7;
 
   let query = $state('');
+  let groupOrder = $state<ProjectTreeGroup[]>([...defaultProjectTreeGroupOrder]);
   let selectionAnchors = $state<Partial<Record<ProjectTreeMultiSelectGroup, number>>>({});
   let openGroups = $state<Record<ProjectTreeGroup, boolean>>({
     todos: true,
@@ -243,11 +248,18 @@
   onMount(() => {
     try {
       const saved = localStorage.getItem('workman.tree.groups.v1');
-      if (!saved) return;
-      const parsed = JSON.parse(saved) as Partial<Record<ProjectTreeGroup, boolean>>;
-      openGroups = { ...openGroups, ...parsed };
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<Record<ProjectTreeGroup, boolean>>;
+        openGroups = { ...openGroups, ...parsed };
+      }
     } catch {
       // Group expansion remains usable if local storage is unavailable.
+    }
+    try {
+      const saved = localStorage.getItem(projectTreeGroupOrderStorageKey);
+      if (saved) groupOrder = normalizeProjectTreeGroupOrder(JSON.parse(saved));
+    } catch {
+      // The default group order remains usable if local storage is unavailable.
     }
   });
 
@@ -296,6 +308,49 @@
       case 'feedback': onStartFeedback(); break;
       case 'scratchpads': onAddScratchpad(); break;
     }
+  }
+
+  function groupReorderOptions(group: ProjectTreeGroup): ReorderItemOptions {
+    return {
+      id: groupId[group],
+      group: `project-tree-groups:${project.id}`,
+      handle: '.group-drag-handle',
+      disabled: collapsed,
+      label: `${groupLabel[group]} section`,
+      onDrop: handleGroupDrop,
+      onKeyboardMove: moveGroupFromKeyboard
+    };
+  }
+
+  function handleGroupDrop(drop: ReorderDrop): void {
+    const reorderedIds = moveOrderedId(
+      groupOrder.map((group) => groupId[group]),
+      drop.sourceId,
+      drop.targetId,
+      drop.placement
+    );
+    const next = reorderedIds.flatMap((id) => {
+      const group = defaultProjectTreeGroupOrder.find((candidate) => groupId[candidate] === id);
+      return group ? [group] : [];
+    });
+    if (next.every((group, index) => group === groupOrder[index])) return;
+    groupOrder = next;
+    try {
+      localStorage.setItem(projectTreeGroupOrderStorageKey, JSON.stringify(groupOrder));
+    } catch {
+      // Reordering still works for this session when local storage is unavailable.
+    }
+  }
+
+  function moveGroupFromKeyboard(id: number, direction: ReorderDirection): void {
+    const index = groupOrder.findIndex((group) => groupId[group] === id);
+    const target = groupOrder[index + direction];
+    if (!target) return;
+    handleGroupDrop({
+      sourceId: id,
+      targetId: groupId[target],
+      placement: direction < 0 ? 'before' : 'after'
+    });
   }
 
   function groupCreateLabel(group: ProjectTreeGroup): string {
@@ -727,7 +782,18 @@
     {#each groupOrder as group}
       {@const GroupIcon = groupIcon[group]}
       <section class="tree-group" class:closed={!openGroups[group]}>
-        <div class="group-header">
+        <div class="group-header" use:reorderItem={groupReorderOptions(group)}>
+          {#if !collapsed}
+            <TooltipLabel label={`Drag to reorder ${groupLabel[group]}`} tabindex={-1}>
+              <button
+                class="group-drag-handle"
+                type="button"
+                aria-label={`Drag to reorder the ${groupLabel[group]} section`}
+              >
+                <GripVerticalIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+            </TooltipLabel>
+          {/if}
           <button
             class="group-toggle"
             type="button"
@@ -774,6 +840,7 @@
             <IconButton
               class="group-create size-6 rounded-sm"
               label={`${groupCreateLabel(group)} in ${projectName}`}
+              shortcut={group === 'feedback' ? hotkeyDisplayLabel($hotkeyPreferences['start-feedback']) || undefined : undefined}
               data-tree-row
               onclick={() => createInGroup(group)}
             >
@@ -1116,13 +1183,20 @@
 
   .tree-groups { min-height: 0; overflow-y: auto; padding: 3px 0 5px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .tree-group { border-bottom: 1px solid var(--border); }
-  .group-header { display: grid; width: 100%; min-height: 28px; grid-template-columns: 19px minmax(0, 1fr) auto 28px; align-items: center; gap: 0; padding: 3px 3px; color: var(--text-soft); }
+  .group-header { position: relative; display: grid; width: 100%; min-height: 28px; grid-template-columns: 17px 19px minmax(0, 1fr) auto 28px; align-items: center; gap: 0; padding: 3px; color: var(--text-soft); }
+  .group-drag-handle { display: grid; width: 17px; height: 22px; place-items: center; border: 0; border-radius: 3px; padding: 0; background: transparent; color: var(--muted-foreground); opacity: .42; cursor: grab; }
+  .group-drag-handle:hover, .group-drag-handle:focus-visible, .group-header:hover .group-drag-handle { background: color-mix(in srgb, var(--muted) 70%, transparent); color: var(--foreground); opacity: 1; }
+  .group-drag-handle:active { cursor: grabbing; }
   .group-toggle, .group-title { min-width: 0; min-height: 22px; border: 0; border-radius: var(--radius); padding: 0; background: transparent; color: inherit; cursor: pointer; }
   .group-toggle { display: grid; place-items: center; }
   .group-title { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 4px; text-align: left; }
   .group-badges { display: flex; align-items: center; gap: 4px; }
   .group-header :global(.group-create) { justify-self: center; }
   .group-header:hover { background: var(--popover); }
+  .project-tree :global(.group-header[data-reorder-dragging='true']) { opacity: .42; }
+  .project-tree :global(.group-header[data-reorder-drop]::after) { position: absolute; z-index: 4; right: 4px; left: 4px; height: 2px; border-radius: 1px; background: var(--ring); content: ''; pointer-events: none; }
+  .project-tree :global(.group-header[data-reorder-drop='before']::after) { top: -1px; }
+  .project-tree :global(.group-header[data-reorder-drop='after']::after) { bottom: -1px; }
   .group-toggle:focus-visible, .group-title:focus-visible { position: relative; z-index: 1; }
   .group-header strong { overflow: hidden; font-size: var(--font-size-sm); font-weight: 700; letter-spacing: 0.055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
   .caret { color: var(--muted-foreground); font: var(--font-size-sm) 'JetBrains Mono Variable', monospace; }
@@ -1199,6 +1273,7 @@
   .project-tree.collapsed .tree-group { border: 0; }
   .project-tree.collapsed .group-header { min-height: 36px; grid-template-columns: 1fr; justify-items: center; padding: 4px; }
   .project-tree.collapsed .group-toggle,
+  .project-tree.collapsed .group-drag-handle,
   .project-tree.collapsed .group-title strong,
   .project-tree.collapsed .group-header :global(.badge) { display: none; }
   .project-tree.collapsed .group-title { width: 100%; grid-template-columns: 1fr; justify-items: center; }

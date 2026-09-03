@@ -17,6 +17,7 @@ export interface ReorderItemOptions {
   group: string;
   disabled?: boolean;
   label?: string;
+  handle?: string;
   canDropInside?: (sourceId: number) => boolean;
   onDrop: (drop: ReorderDrop) => void;
   onKeyboardMove: (id: number, direction: ReorderDirection) => void;
@@ -134,9 +135,11 @@ export function reorderItem(node: HTMLElement, initial: ReorderItemOptions) {
   }
 
   function pointerDown(event: PointerEvent): void {
+    const eventTarget = event.target as Element | null;
     if (
       options.disabled || event.button !== 0 || !event.isPrimary
       || event.metaKey || event.ctrlKey || event.shiftKey
+      || (options.handle && !eventTarget?.closest(options.handle))
     ) return;
     suppressClickAfterDrag = false;
     activeDrag = {

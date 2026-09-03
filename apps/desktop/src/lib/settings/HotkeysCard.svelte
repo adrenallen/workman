@@ -52,8 +52,8 @@
     {
       id: 'feedback',
       title: 'Recorded Feedback',
-      description: 'Global controls available while a feedback recording is active.',
-      scope: 'Recording'
+      description: 'Start in Workman, then use global controls while recording.',
+      scope: 'App + global'
     },
     {
       id: 'projects',

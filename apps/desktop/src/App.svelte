@@ -1199,6 +1199,9 @@
         if (quickPromptOpen) closeQuickPrompts();
         else openQuickPrompts();
         return true;
+      case 'start-feedback':
+        void openFeedbackPreflight();
+        return true;
       case 'navigate-left':
       case 'navigate-right': {
         const direction = action === 'navigate-left' ? -1 : 1;

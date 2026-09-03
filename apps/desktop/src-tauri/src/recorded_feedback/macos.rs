@@ -966,38 +966,39 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
             monitor.width().map_err(|error| error.to_string())? as f64,
             monitor.height().map_err(|error| error.to_string())? as f64,
         );
-        PanelBuilder::<_, FeedbackPanel>::new(app, format!("feedback-overlay-{index}"))
-            .url(WebviewUrl::App("index.html".into()))
-            .position(Position::Logical(position))
-            .size(Size::Logical(size))
-            .level(PanelLevel::ScreenSaver)
-            .has_shadow(false)
-            .opaque(false)
-            .transparent(true)
-            .hides_on_deactivate(false)
-            .ignores_mouse_events(true)
-            .works_when_modal(true)
-            .no_activate(true)
-            .collection_behavior(
-                CollectionBehavior::new()
-                    .can_join_all_spaces()
-                    .full_screen_auxiliary()
-                    .stationary()
-                    .ignores_cycle(),
-            )
-            .style_mask(StyleMask::empty().borderless().nonactivating_panel())
-            .with_window(|window| {
-                window
-                    .decorations(false)
-                    .transparent(true)
-                    .always_on_top(true)
-                    .skip_taskbar(true)
-                    .focusable(false)
-                    .content_protected(true)
-            })
-            .build()
-            .map_err(|error| error.to_string())?
-            .show();
+        let overlay =
+            PanelBuilder::<_, FeedbackPanel>::new(app, format!("feedback-overlay-{index}"))
+                .url(WebviewUrl::App("index.html".into()))
+                .position(Position::Logical(position))
+                .size(Size::Logical(size))
+                .level(PanelLevel::ScreenSaver)
+                .has_shadow(false)
+                .opaque(false)
+                .transparent(true)
+                .hides_on_deactivate(false)
+                .ignores_mouse_events(true)
+                .works_when_modal(true)
+                .no_activate(true)
+                .collection_behavior(
+                    CollectionBehavior::new()
+                        .can_join_all_spaces()
+                        .full_screen_auxiliary()
+                        .stationary()
+                        .ignores_cycle(),
+                )
+                .style_mask(StyleMask::empty().borderless().nonactivating_panel())
+                .with_window(|window| {
+                    window
+                        .decorations(false)
+                        .transparent(true)
+                        .always_on_top(true)
+                        .skip_taskbar(true)
+                        .focusable(false)
+                        .content_protected(true)
+                })
+                .build()
+                .map_err(|error| error.to_string())?;
+        overlay.show();
     }
     let primary = monitors
         .iter()
@@ -1007,14 +1008,14 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
     let position_x = primary.x().map_err(|error| error.to_string())? as f64;
     let position_y = primary.y().map_err(|error| error.to_string())? as f64;
     let monitor_width = primary.width().map_err(|error| error.to_string())? as f64;
-    let width = 780.0;
+    let width = 860.0_f64.min((monitor_width - 32.0).max(640.0));
     let x = position_x + ((monitor_width - width) / 2.0).max(16.0);
     let y = position_y + 28.0;
-    PanelBuilder::<_, FeedbackPanel>::new(app, "feedback-toolbar")
+    let toolbar = PanelBuilder::<_, FeedbackPanel>::new(app, "feedback-toolbar")
         .url(WebviewUrl::App("index.html".into()))
         .position(Position::Logical(LogicalPosition::new(x, y)))
         .size(Size::Logical(LogicalSize::new(width, 60.0)))
-        .level(PanelLevel::ScreenSaver)
+        .level(PanelLevel::Custom(1001))
         .has_shadow(true)
         .corner_radius(10.0)
         .opaque(false)
@@ -1041,8 +1042,9 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
                 .content_protected(true)
         })
         .build()
-        .map_err(|error| error.to_string())?
-        .show();
+        .map_err(|error| error.to_string())?;
+    toolbar.show();
+    toolbar.order_front_regardless();
     Ok(display_ids)
 }
 
@@ -1063,6 +1065,11 @@ fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), St
             panel.set_ignores_mouse_events(!interactive);
         }
     }
+    let toolbar = app
+        .get_webview_panel("feedback-toolbar")
+        .map_err(|error| format!("{error:?}"))?;
+    toolbar.set_level(PanelLevel::Custom(1001).value());
+    toolbar.order_front_regardless();
     Ok(())
 }
 

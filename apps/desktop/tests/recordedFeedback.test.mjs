@@ -60,12 +60,14 @@ test('recording shortcuts have unique session-scoped defaults', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, detail, native, daemon, release] = await Promise.all([
+  const [app, tree, preflight, toolbar, detail, native, capability, daemon, release] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/RecordedFeedbackToolbar.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../../scripts/release.sh', import.meta.url), 'utf8')
   ]);
@@ -77,6 +79,8 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(detail, /onSendScratchpad/);
   assert.match(native, /\.content_protected\(true\)/);
   assert.match(native, /\.nonactivating_panel\(\)/);
+  assert.match(native, /PanelLevel::Custom\(1001\)/);
+  assert.match(native, /toolbar\.order_front_regardless\(\)/);
   assert.match(native, /pub\(crate\) async fn feedback_capture_snapshot/);
   assert.match(native, /run_on_main_thread/);
   assert.match(native, /capture_in_progress/);
@@ -87,6 +91,11 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(daemon, /remove_abandoned_packet_builds/);
   assert.match(app, /\['feedback_not_found', 'feedback_invalid_state', 'project_not_found'\]/);
   assert.match(detail, /if \(feedback\.status === 'ready'\) await afterSave\(onArchive\)/);
+  assert.match(toolbar, /getCurrentWindow\(\)\.startDragging\(\)/);
+  assert.match(toolbar, /> Snap region/);
+  assert.match(toolbar, /Snap display/);
+  assert.match(toolbar, /snapshot_count/);
+  assert.match(capability, /core:window:allow-start-dragging/);
   const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
   const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);
   const preventDefault = app.indexOf('event.preventDefault()', shortcutHandler);

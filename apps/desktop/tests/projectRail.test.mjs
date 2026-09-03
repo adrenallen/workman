@@ -238,3 +238,45 @@ test('shared row action leaves modifier-click gestures entirely to list selectio
   assert.equal(captured, false);
   action.destroy();
 });
+
+test('shared reorder action can limit pointer drags to an explicit handle', () => {
+  class FakeRow {
+    dataset = {};
+    listeners = new Map();
+    draggable = false;
+    captured = [];
+
+    addEventListener(type, listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    removeEventListener() {}
+    setAttribute() {}
+    removeAttribute() {}
+    setPointerCapture(pointerId) { this.captured.push(pointerId); }
+    hasPointerCapture() { return false; }
+    dispatch(type, event) {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+  }
+
+  const row = new FakeRow();
+  const action = reorderItem(row, {
+    id: 1,
+    group: 'project-tree-groups',
+    handle: '.group-drag-handle',
+    onDrop() {},
+    onKeyboardMove() {}
+  });
+  const pointer = {
+    button: 0,
+    isPrimary: true,
+    pointerId: 4,
+    clientX: 10,
+    clientY: 10
+  };
+  row.dispatch('pointerdown', { ...pointer, target: { closest: () => null } });
+  row.dispatch('pointerdown', { ...pointer, pointerId: 5, target: { closest: () => ({}) } });
+
+  assert.deepEqual(row.captured, [5]);
+  action.destroy();
+});
