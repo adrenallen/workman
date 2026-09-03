@@ -62,7 +62,10 @@
     onChange: (value: string, changes: PositionMapper) => void;
     onSave: () => void;
     onViewportLineChange?: (line: number) => void;
-    onCommentSelection?: (anchor: ScratchpadSelectionAnchor) => void;
+    onCommentSelection?: (
+      anchor: ScratchpadSelectionAnchor,
+      point: { x: number; y: number }
+    ) => void;
     onCommentClick?: (commentId: number, anchor: HTMLElement) => void;
   }
 
@@ -237,10 +240,13 @@
     };
   }
 
-  function beginSelectionComment(): void {
+  function beginSelectionComment(event: MouseEvent): void {
     if (!selectionAction) return;
-    const { x: _x, y: _y, ...anchor } = selectionAction;
-    onCommentSelection?.(anchor);
+    const { x, y, ...anchor } = selectionAction;
+    onCommentSelection?.(anchor, {
+      x: event.clientX || x,
+      y: event.clientY || y
+    });
     selectionAction = null;
   }
 

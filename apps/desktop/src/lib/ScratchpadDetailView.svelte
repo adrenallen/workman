@@ -132,6 +132,8 @@
   let mobileCommentsOpen = $state(false);
   let showResolvedComments = $state(false);
   let composerAnchor = $state<ScratchpadSelectionAnchor | null | undefined>(undefined);
+  let composerPoint = $state<{ x: number; y: number } | null>(null);
+  let commentComposerPopoverAnchor = $state<HTMLElement | null>(null);
   let commentDraft = $state('');
   let commentBusy = $state(false);
   let focusedCommentId = $state<number | null>(null);
@@ -218,16 +220,30 @@
     return [...document.querySelectorAll<T>(selector)].find((element) => element.offsetParent !== null) ?? null;
   }
 
-  function beginComment(anchor: ScratchpadSelectionAnchor | null): void {
-    commentsOpen = true;
-    mobileCommentsOpen = true;
+  function pointAtEvent(event: MouseEvent): { x: number; y: number } {
+    if (event.clientX || event.clientY) return { x: event.clientX, y: event.clientY };
+    const target = event.currentTarget;
+    if (target instanceof HTMLElement) {
+      const bounds = target.getBoundingClientRect();
+      return { x: bounds.left + Math.min(bounds.width / 2, 28), y: bounds.bottom };
+    }
+    return { x: Math.max(12, viewportWidth / 2), y: 80 };
+  }
+
+  function beginComment(
+    anchor: ScratchpadSelectionAnchor | null,
+    point: { x: number; y: number }
+  ): void {
     composerAnchor = anchor;
+    composerPoint = point;
     commentDraft = '';
     queueMicrotask(() => visibleElement<HTMLTextAreaElement>('[data-scratchpad-comment-composer]')?.focus());
   }
 
   function cancelComment(): void {
     composerAnchor = undefined;
+    composerPoint = null;
+    commentComposerPopoverAnchor = null;
     commentDraft = '';
   }
 
@@ -682,6 +698,8 @@
       saveState = 'saved';
       viewportLine = 1;
       composerAnchor = undefined;
+      composerPoint = null;
+      commentComposerPopoverAnchor = null;
       focusedCommentId = null;
       commentPopoverOpen = false;
       commentPopoverAnchor = null;
@@ -787,22 +805,8 @@
     <label title="Show resolved scratchpad comments">
       <Checkbox bind:checked={showResolvedComments} aria-label="Show resolved scratchpad comments" /> Resolved
     </label>
-    <Button size="xs" variant="outline" disabled={!onCreateComment || commentBusy} onclick={() => beginComment(null)}>Comment</Button>
+    <Button size="xs" variant="outline" disabled={!onCreateComment || commentBusy} onclick={(event) => beginComment(null, pointAtEvent(event))}>Comment</Button>
   </div>
-  {#if composerAnchor !== undefined}
-    <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
-      <small>{composerAnchor ? `On “${composerAnchor.quote.slice(0, 52)}${composerAnchor.quote.length > 52 ? '…' : ''}”` : 'Whole document'}</small>
-      <Textarea
-        data-scratchpad-comment-composer
-        bind:value={commentDraft}
-        rows={3}
-        aria-label="Scratchpad comment"
-        placeholder="Add review feedback…"
-        onkeydown={composerKeydown}
-      ></Textarea>
-      <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'}</kbd></Button></div>
-    </form>
-  {/if}
   <div class="comment-list" aria-label="Scratchpad comments">
     {#each visibleCommentThreads as thread (thread.key)}
       <button
@@ -830,6 +834,25 @@
       <p class="comments-empty">{read?.comment_total_count ? 'No comments in this view.' : 'Select text to leave anchored feedback, or comment on the whole document.'}</p>
     {/each}
   </div>
+{/snippet}
+
+{#snippet commentComposerContent()}
+  <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
+    <div class="comment-composer-heading">
+      <small>{composerAnchor ? `On “${composerAnchor.quote.slice(0, 52)}${composerAnchor.quote.length > 52 ? '…' : ''}”` : 'Whole document'}</small>
+      <span>Drag corner to resize</span>
+    </div>
+    <Textarea
+      data-scratchpad-comment-composer
+      bind:value={commentDraft}
+      rows={3}
+      aria-label="Scratchpad comment"
+      placeholder="Add review feedback…"
+      autofocus
+      onkeydown={composerKeydown}
+    ></Textarea>
+    <div><Button size="xs" variant="outline" onclick={cancelComment}>Cancel</Button><Button size="xs" type="submit" disabled={!commentDraft.trim() || commentBusy}>Save <kbd>{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'}</kbd></Button></div>
+  </form>
 {/snippet}
 
 {#snippet commentThreadContent(thread: ScratchpadCommentThread)}
@@ -940,7 +963,7 @@
           <DropdownMenu.Item onclick={() => (editorFocusRequest += 1)}>
             <PencilIcon class="size-4" aria-hidden="true" /> Edit document
           </DropdownMenu.Item>
-          <DropdownMenu.Item disabled={!onCreateComment} onclick={() => beginComment(null)}>
+          <DropdownMenu.Item disabled={!onCreateComment} onclick={(event) => beginComment(null, pointAtEvent(event))}>
             <MessageSquareIcon class="size-4" aria-hidden="true" /> Comment on document
           </DropdownMenu.Item>
           {#if !read.scratchpad.archived && onArchive}
@@ -1076,7 +1099,7 @@
           onChange={handleBodyChange}
           onSave={() => void saveDraft()}
           onViewportLineChange={(line) => (viewportLine = line)}
-          onCommentSelection={(anchor) => beginComment(anchor)}
+          onCommentSelection={(anchor, point) => beginComment(anchor, point)}
           onCommentClick={focusComment}
         />
       </section>
@@ -1085,6 +1108,32 @@
 {:else}
   <div class="state">Scratchpad not found.</div>
 {/if}
+
+{#if composerAnchor !== undefined && composerPoint}
+  <span
+    bind:this={commentComposerPopoverAnchor}
+    class="comment-composer-anchor"
+    style={`left: ${composerPoint.x}px; top: ${composerPoint.y}px;`}
+    aria-hidden="true"
+  ></span>
+{/if}
+
+<Popover.Root open={composerAnchor !== undefined} onOpenChange={(open) => {
+  if (!open && !commentBusy) cancelComment();
+}}>
+  {#if composerAnchor !== undefined && commentComposerPopoverAnchor}
+    <Popover.Content
+      customAnchor={commentComposerPopoverAnchor}
+      side="bottom"
+      align="start"
+      sideOffset={8}
+      collisionPadding={12}
+      class="comment-composer-popover"
+    >
+      {@render commentComposerContent()}
+    </Popover.Content>
+  {/if}
+</Popover.Root>
 
 <Popover.Root open={commentPopoverOpen} onOpenChange={(open) => {
   if (open) commentPopoverOpen = true;
@@ -1170,10 +1219,15 @@
   .outline-list[data-scratchpad-outline='desktop']::-webkit-scrollbar-thumb, .comments-panel::-webkit-scrollbar-thumb { border-radius: var(--radius); background: var(--border-strong); }
   .comments-controls { display: flex; min-height: 34px; align-items: center; gap: 5px; border-bottom: 1px solid var(--border); padding: 4px 6px; }
   .comments-controls label { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .comment-composer { display: grid; gap: 5px; border-bottom: 1px solid var(--border); padding: 7px; }
+  .comment-composer { display: grid; height: 100%; min-height: 0; grid-template-rows: auto minmax(72px, 1fr) auto; gap: 8px; padding: 11px; }
+  .comment-composer-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
+  .comment-composer-heading span { flex: none; color: var(--muted-foreground); font-size: 10px; }
   .comment-composer small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .comment-composer :global(textarea) { height: 100%; min-height: 72px; resize: none; }
   .comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
+  .comment-composer > .comment-composer-heading { justify-content: space-between; }
   .comment-composer kbd { margin-left: 3px; color: inherit; font: var(--font-size-xs) var(--terminal-font-family); }
+  .comment-composer-anchor { position: fixed; z-index: -1; width: 1px; height: 1px; pointer-events: none; }
   .comment-list { display: grid; }
   .comment-row { display: grid; width: 100%; gap: 3px; overflow: hidden; border: 0; border-bottom: 1px solid var(--border); outline: 0; padding: 8px 9px 9px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
   .comment-row:last-child { border-bottom: 0; }
@@ -1189,6 +1243,7 @@
   .comment-preview { display: -webkit-box; overflow: hidden; color: var(--foreground); font-size: var(--font-size-xs); line-height: 1.35; line-clamp: 2; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .comments-empty { margin: 0; padding: 10px 8px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
   :global(.comment-thread-popover.comment-thread-popover) { display: grid; width: min(420px, calc(100vw - 24px)); max-height: min(640px, calc(100vh - 24px)) !important; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 0; overflow: hidden !important; padding: 0; }
+  :global(.comment-composer-popover.comment-composer-popover) { width: min(380px, calc(100vw - 24px)); min-width: min(300px, calc(100vw - 24px)); max-width: calc(100vw - 24px) !important; height: min(228px, calc(100vh - 24px)); min-height: min(180px, calc(100vh - 24px)); max-height: calc(100vh - 24px) !important; overflow: auto !important; resize: both; padding: 0; }
   .thread-header { display: flex; min-height: 48px; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 8px 10px 8px 14px; }
   .thread-header > div { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 7px; }
   .thread-header strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 680; }
@@ -1245,6 +1300,7 @@
   @media (max-width: 620px) {
     :global([data-bits-floating-content-wrapper]:has(.comment-thread-popover)) { position: fixed !important; inset: 12px !important; display: flex; min-width: 0 !important; align-items: center; justify-content: center; transform: none !important; pointer-events: none !important; }
     :global(.comment-thread-popover.comment-thread-popover) { max-height: calc(100vh - 24px) !important; pointer-events: auto; }
+    :global(.comment-composer-popover.comment-composer-popover) { width: calc(100vw - 24px); min-width: 0; resize: vertical; }
   }
 
   @media (prefers-reduced-motion: reduce) {
