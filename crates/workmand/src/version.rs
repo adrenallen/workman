@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn current_version_is_compatible_and_other_builds_are_not() {
-        assert_eq!(BUILD_VERSION, "0.1.13");
+        assert_eq!(BUILD_VERSION, "0.1.14");
         assert!(DaemonVersion::current().matches_current_build());
         assert!(
             !DaemonVersion {

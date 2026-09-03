@@ -4,6 +4,41 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.14 - 2026-09-03
+
+Workman 0.1.14 introduces Recorded Feedback on macOS: capture narrated, annotated screen feedback
+and hand the resulting transcript and screenshots directly to the place where work will continue.
+
+### Recorded Feedback
+
+- Record the display and microphone from a movable always-on-top toolbar, annotate the screen, and
+  capture any number of full-display or selected-region snapshots in sequence.
+- Pause and resume recording, mute the microphone, switch input devices, and use configurable start
+  and stop shortcuts without leaving the feedback session.
+- Preserve annotations while selecting a region, visibly confirm each capture, recover cleanly from
+  stopped or interrupted recordings, and refocus Workman when recording ends.
+- Review timestamped transcripts and embedded captures in a dedicated feedback view, then archive,
+  restore, reorder, or revisit past recordings from the project sidebar.
+
+### Agent and scratchpad handoff
+
+- Send feedback text and images directly into an existing agent at their original timeline
+  positions, or create an agent that receives the feedback automatically as soon as it is ready.
+- Customize the neutral feedback-introduction prompt in global settings so the recording supplies
+  context without instructing the receiving agent to take an action.
+- Embed feedback images inside scratchpads instead of linking to local files, and open a movable,
+  resizable comment composer beside the selected scratchpad text.
+- Place pasted image placeholders at the cursor in New Agent prompts and replace them with the real
+  images at the same positions when the initial message is delivered.
+
+### Desktop integration
+
+- Reorder sidebar sections, hide Recorded Feedback entirely, and use its context menu or middle
+  click to archive recordings consistently with other project items.
+- Keep Recorded Feedback macOS-only while unsupported platforms show no unusable recording action.
+- Improve macOS screen-recording permission detection and settings navigation, and expand the
+  development installer to clean stale app processes and permission state when explicitly asked.
+
 ## 0.1.13 - 2026-09-01
 
 Workman 0.1.13 makes agent launches and stopped sessions more reliable, clarifies process controls,
