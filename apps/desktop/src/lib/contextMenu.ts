@@ -10,6 +10,7 @@ import {
   type OpenersState
 } from './openers';
 import type { ProjectTreeSelection } from './projectTree';
+import type { RecordedFeedbackSummary } from './recordedFeedback';
 import { hotkeyPreferences, matchesHotkeyAction } from './hotkeys';
 import { projectFrequentActions } from './projectMenu';
 import type { PullRequestState, WorktreeEntry, WorktreeRepository } from './worktrees';
@@ -72,6 +73,7 @@ export type ContextMenuTarget =
     }
   | { kind: 'todo'; todo: ContextTodo; selection: ProjectTreeSelection }
   | { kind: 'draft'; draft: CreationDraft; selection: ProjectTreeSelection }
+  | { kind: 'feedback'; feedback: ContextFeedback; selection: ProjectTreeSelection }
   | { kind: 'scratchpad'; scratchpad: ContextScratchpad; selection: ProjectTreeSelection };
 
 export interface ContextMenuRequest {
@@ -90,6 +92,7 @@ export interface ContextMenuDescriptor {
 export type ShellOpenTarget = 'editor' | 'finder' | 'reveal';
 
 export type ContextTodo = Pick<TodoSummary, 'id' | 'title' | 'completed'>;
+export type ContextFeedback = Pick<RecordedFeedbackSummary, 'id' | 'title' | 'archived'>;
 export type ContextScratchpad = Pick<
   ScratchpadSummary,
   'id' | 'name' | 'revision' | 'archived'
@@ -211,6 +214,24 @@ export function describeContextMenu(
             id: 'discard-draft',
             label: 'Discard draft…',
             destructive: true
+          }
+        ]
+      };
+    case 'feedback':
+      return {
+        title: target.feedback.title,
+        subtitle: `FEEDBACK · ${target.feedback.id}`,
+        items: [
+          {
+            id: 'archive-feedback',
+            label: target.feedback.archived ? 'Restore feedback' : 'Archive feedback'
+          },
+          { id: 'copy-title', label: 'Copy title' },
+          {
+            id: 'delete-feedback',
+            label: 'Delete feedback…',
+            destructive: true,
+            separatorBefore: true
           }
         ]
       };

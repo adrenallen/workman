@@ -2656,26 +2656,18 @@
 
   async function archiveSelectedFeedback(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
-    const projectId = selectedProject.id;
-    const next = await client.recordedFeedbackArchive(projectId, selection.id, !feedbackDetail.archived);
-    feedbackDetail = next;
-    await refreshFeedback(projectId);
+    await setFeedbackArchived(
+      { kind: 'feedback', feedback: feedbackDetail, selection },
+      !feedbackDetail.archived
+    );
   }
 
   async function deleteSelectedFeedback(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback') return;
-    const projectId = selectedProject.id;
-    const feedbackId = selection.id;
-    const confirmed = await confirmInApp({
-      title: 'Delete recorded feedback?',
-      description: 'The transcript, microphone audio, screenshots, and generated packets will be permanently deleted.',
-      confirmLabel: 'Delete feedback',
-      destructive: true
-    });
-    if (!confirmed) return;
-    await client.recordedFeedbackDelete(projectId, feedbackId);
-    clearSelection();
-    await refreshFeedback(projectId);
+    const feedback = feedbackDetail
+      ?? feedbackSummaries.find((candidate) => candidate.id === selection?.id);
+    if (!feedback) return;
+    await deleteFeedback({ kind: 'feedback', feedback, selection });
   }
 
   function messageForCause(cause: unknown): string {
@@ -4822,6 +4814,11 @@
       ) ?? scratchpadRead?.scratchpad;
       return scratchpad ? { kind: 'scratchpad', scratchpad, selection } : null;
     }
+    if (selection.kind === 'feedback') {
+      const feedback = feedbackSummaries.find((candidate) => candidate.id === selection?.id)
+        ?? feedbackDetail;
+      return feedback ? { kind: 'feedback', feedback, selection } : null;
+    }
     return null;
   }
 
@@ -4847,8 +4844,10 @@
         await runTodoContextAction(action, target);
       } else if (target.kind === 'draft') {
         if (action === 'discard-draft') await requestDiscardCreationDraft(target.draft.id);
-      } else {
+      } else if (target.kind === 'scratchpad') {
         await runScratchpadContextAction(action, target);
+      } else {
+        await runFeedbackContextAction(action, target);
       }
     } catch (cause) {
       reportError(cause);
@@ -5095,6 +5094,49 @@
     await refreshCoordination(target.selection.projectId, false);
   }
 
+  async function setFeedbackArchived(
+    target: Extract<ContextMenuTarget, { kind: 'feedback' }>,
+    archived: boolean
+  ): Promise<void> {
+    if (target.feedback.archived === archived) return;
+    const next = await client.recordedFeedbackArchive(
+      target.selection.projectId,
+      target.feedback.id,
+      archived
+    );
+    if (selection?.kind === 'feedback' && selection.id === target.feedback.id) {
+      feedbackDetail = next;
+    }
+    await refreshFeedback(target.selection.projectId);
+  }
+
+  async function deleteFeedback(
+    target: Extract<ContextMenuTarget, { kind: 'feedback' }>
+  ): Promise<void> {
+    if (!(await confirmInApp({
+      title: `Delete ${target.feedback.title}?`,
+      description: 'The transcript, microphone audio, screenshots, and generated packets will be permanently deleted.',
+      confirmLabel: 'Delete feedback',
+      destructive: true
+    }))) return;
+    await client.recordedFeedbackDelete(target.selection.projectId, target.feedback.id);
+    if (selection?.kind === 'feedback' && selection.id === target.feedback.id) clearSelection();
+    await refreshFeedback(target.selection.projectId);
+  }
+
+  async function runFeedbackContextAction(
+    action: ContextActionId,
+    target: Extract<ContextMenuTarget, { kind: 'feedback' }>
+  ): Promise<void> {
+    if (action === 'copy-title') {
+      await navigator.clipboard.writeText(target.feedback.title);
+    } else if (action === 'archive-feedback') {
+      await setFeedbackArchived(target, !target.feedback.archived);
+    } else if (action === 'delete-feedback') {
+      await deleteFeedback(target);
+    }
+  }
+
   async function runTreeMiddleClick(target: ContextMenuTarget): Promise<void> {
     if (treeBulkBusy || agentCascadeBusy) return;
     treeRenameTarget = null;
@@ -5136,6 +5178,8 @@
         if (!target.todo.completed) await runTodoContextAction('complete-todo', target);
       } else if (target.kind === 'scratchpad') {
         await runScratchpadContextAction('archive-scratchpad', target);
+      } else if (target.kind === 'feedback') {
+        await setFeedbackArchived(target, true);
       }
     } catch (cause) {
       reportError(cause);

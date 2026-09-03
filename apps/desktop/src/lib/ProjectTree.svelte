@@ -453,6 +453,14 @@
     };
   }
 
+  function feedbackTarget(feedback: RecordedFeedbackSummary): ContextMenuTarget {
+    return {
+      kind: 'feedback',
+      feedback,
+      selection: projectTreeSelection('feedback', feedback.id, project.id, feedback.title)
+    };
+  }
+
   function openPointerMenu(event: MouseEvent, target: ContextMenuTarget): void {
     onContextMenu(contextMenuRequest(event, target));
   }
@@ -1115,6 +1123,10 @@
                   class:selected={selection?.key === `feedback:${item.id}`}
                   data-tree-row
                   onclick={() => onSelect(projectTreeSelection('feedback', item.id, project.id, item.title))}
+                  onmousedown={preventMiddleMouseDefault}
+                  onauxclick={(event) => handleMiddleClick(event, feedbackTarget(item))}
+                  oncontextmenu={(event) => openPointerMenu(event, feedbackTarget(item))}
+                  onkeydown={(event) => openKeyboardMenu(event, feedbackTarget(item))}
                 >
                   <StatusIndicator
                     tone={item.status === 'failed' ? 'danger' : item.status === 'recording' || item.status === 'transcribing' ? 'success' : 'neutral'}

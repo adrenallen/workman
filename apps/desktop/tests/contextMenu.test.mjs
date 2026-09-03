@@ -45,6 +45,23 @@ test('force stop is visually distinct from removal actions', () => {
   );
 });
 
+test('recorded feedback menu actions use archive and delete affordances', async () => {
+  const [menu, tree, app] = await Promise.all([
+    readFile(new URL('../src/lib/contextMenu.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(menu, /kind: 'feedback'; feedback: ContextFeedback/);
+  assert.match(menu, /target\.feedback\.archived \? 'Restore feedback' : 'Archive feedback'/);
+  assert.match(menu, /id: 'delete-feedback'/);
+  assert.equal(contextActionIcon('archive-feedback'), 'archive');
+  assert.equal(contextActionIcon('delete-feedback'), 'trash-2');
+  assert.ok(DESTRUCTIVE_CONTEXT_ACTION_IDS.includes('delete-feedback'));
+  assert.match(tree, /oncontextmenu=\{\(event\) => openPointerMenu\(event, feedbackTarget\(item\)\)\}/);
+  assert.match(app, /runFeedbackContextAction\(action, target\)/);
+});
+
 test('terminal surface menu is distinct from the sidebar process menu', () => {
   const terminalMenu = terminalContextMenuItems({
     hasSelection: false,

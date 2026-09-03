@@ -17,6 +17,7 @@ test('middle click is claimed only for removable and archivable project tree row
   assert.match(tree, /handleMiddleClick\(event, processTarget\(process\)\)/);
   assert.equal(tree.match(/handleMiddleClick\(event, processTarget\(process\)\)/g)?.length, 2);
   assert.match(tree, /handleMiddleClick\(event, scratchpadTarget\(scratchpad\)\)/);
+  assert.match(tree, /handleMiddleClick\(event, feedbackTarget\(item\)\)/);
 
   const commandBlock = tree.match(/\{:else if group === 'commands'\}([\s\S]*?)\{:else\}/)?.[1] ?? '';
   assert.doesNotMatch(commandBlock, /handleMiddleClick/);
@@ -32,5 +33,6 @@ test('middle click force-removes processes and uses recoverable coordination act
   assert.match(handler, /await client\.closeProcess\(process\.id\)/);
   assert.match(handler, /runTodoContextAction\('complete-todo', target\)/);
   assert.match(handler, /runScratchpadContextAction\('archive-scratchpad', target\)/);
+  assert.match(handler, /setFeedbackArchived\(target, true\)/);
   assert.doesNotMatch(handler, /confirmInApp/);
 });
