@@ -13,6 +13,7 @@ interface CreationDraftBase {
 
 export interface AgentCreationDraft extends CreationDraftBase {
   kind: 'agent';
+  feedbackId: number | null;
   agentToolId: number | null;
   templateId: number | null;
   name: string;
@@ -83,6 +84,7 @@ export function createCreationDraft(
     return {
       ...base,
       kind,
+      feedbackId: null,
       agentToolId: null,
       templateId: null,
       name: '',
@@ -243,6 +245,7 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
     const attachments = parseAgentAttachments(value.attachments ?? []);
     if (
       !isNullablePositiveInteger(value.agentToolId)
+      || !isNullablePositiveInteger(value.feedbackId ?? null)
       || !isNullablePositiveInteger(value.templateId)
       || !isDraftText(value.name)
       || !isDraftText(value.prompt)
@@ -253,6 +256,7 @@ function parseCreationDraft(value: unknown): CreationDraft | null {
     return {
       ...base,
       kind: value.kind,
+      feedbackId: typeof value.feedbackId === 'number' ? value.feedbackId : null,
       agentToolId: value.agentToolId,
       templateId: value.templateId,
       name: value.name,

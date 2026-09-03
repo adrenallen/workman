@@ -193,6 +193,7 @@ pub(crate) struct SpawnResult {
     kind: ProcessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_instructions: Option<String>,
+    deferred_initial_prompt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -554,6 +555,7 @@ impl WorkmanMcp {
                     None,
                     None,
                     Vec::new(),
+                    false,
                     AttachmentSourceScope::McpProject,
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
@@ -599,6 +601,7 @@ impl WorkmanMcp {
             args.model,
             args.initial_prompt,
             args.attachments,
+            false,
             AttachmentSourceScope::McpProject,
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
@@ -1044,6 +1047,7 @@ pub(crate) async fn spawn_registered_agent(
     model: Option<String>,
     initial_prompt: Option<String>,
     attachments: Vec<String>,
+    defer_initial_prompt: bool,
     attachment_source_scope: AttachmentSourceScope,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
@@ -1093,7 +1097,7 @@ pub(crate) async fn spawn_registered_agent(
             .map_err(|error| format!("could not stage agent attachments: {error}"))?,
         )
     };
-    let result = match spawn_registered_agent_for(
+    let mut result = match spawn_registered_agent_for(
         registry.clone(),
         project,
         resolved.agent_tool_id,
@@ -1153,7 +1157,9 @@ pub(crate) async fn spawn_registered_agent(
             return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
         }
     };
-    if let Some(prompt) = initial_prompt {
+    if defer_initial_prompt {
+        result.deferred_initial_prompt = initial_prompt;
+    } else if let Some(prompt) = initial_prompt {
         schedule_initial_prompt(
             registry,
             result.process_id,
@@ -2116,6 +2122,7 @@ fn spawn(
         name: running.name,
         kind: running.kind,
         agent_instructions,
+        deferred_initial_prompt: None,
     })
 }
 

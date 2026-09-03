@@ -537,6 +537,10 @@ struct SpawnAgentParams {
     /// Local image paths copied into daemon-owned per-process storage before prompt delivery.
     #[serde(default)]
     attachments: Vec<String>,
+    /// Return the fully composed prompt without scheduling it. Used by desktop feedback delivery
+    /// so text and native clipboard images can be submitted together as the first turn.
+    #[serde(default)]
+    defer_initial_prompt: bool,
     /// Automatically accept narrowly recognized first-run trust dialogs.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
@@ -629,6 +633,7 @@ async fn dispatch(
                 params.model,
                 params.prompt,
                 params.attachments,
+                params.defer_initial_prompt,
                 crate::mcp::agent_spawning::AttachmentSourceScope::DesktopControl,
                 mcp_url,
                 params.auto_acknowledge_dialogs,

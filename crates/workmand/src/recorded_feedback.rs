@@ -498,7 +498,7 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
         ("unverified", None)
     } else {
         let prompt = format!(
-            "Review and act on the recorded feedback packet at {}. Read feedback.md in order; its images directory contains the referenced screenshots.",
+            "The user recorded some feedback. The feedback packet is at {}. Read feedback.md in order; its images directory contains the referenced screenshots.",
             packet.markdown_path.display()
         );
         match registry.submit_input(params.process_id, prompt.as_bytes()) {

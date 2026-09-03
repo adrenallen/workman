@@ -1,6 +1,7 @@
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import FileImageIcon from '@lucide/svelte/icons/file-image';
+  import MessageSquareMoreIcon from '@lucide/svelte/icons/message-square-more';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
   import { invoke, isTauri } from '@tauri-apps/api/core';
@@ -460,6 +461,12 @@
   onCreate={submit}
   {onDiscard}
 >
+  {#if draft.feedbackId !== null}
+    <div class="feedback-handoff" role="note">
+      <MessageSquareMoreIcon size={17} strokeWidth={1.8} />
+      <span><strong>Feedback attached</strong>The transcript and screenshots will be sent automatically when this agent is ready.</span>
+    </div>
+  {/if}
   {#snippet secondaryAction()}
     {#if onOpenSettings}
       <Button type="button" variant="outline" disabled={busy} onclick={onOpenSettings}>Open Settings</Button>
@@ -757,6 +764,10 @@
 </CreationDraftScaffold>
 
 <style>
+  .feedback-handoff { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--signal) 34%, var(--border)); border-radius: 5px; padding: 8px 10px; background: color-mix(in srgb, var(--signal) 7%, var(--surface)); color: var(--signal); }
+  .feedback-handoff span, .feedback-handoff strong { display: block; }
+  .feedback-handoff strong { margin-bottom: 2px; color: var(--text-soft); font-size: var(--font-size-sm); }
+  .feedback-handoff span { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .agent-fields { display: grid; gap: 11px; }
   .advanced-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }

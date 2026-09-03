@@ -94,6 +94,7 @@ export interface SpawnAgentInput {
   extra_args: string[];
   prompt?: string;
   attachments?: string[];
+  defer_initial_prompt?: boolean;
 }
 
 export interface SpawnAgentResult {
@@ -102,6 +103,7 @@ export interface SpawnAgentResult {
   name: string;
   kind: 'agent';
   agent_instructions: string;
+  deferred_initial_prompt?: string | null;
 }
 
 export interface DeleteAgentToolResult {

@@ -15,6 +15,10 @@ import {
   feedbackAgentInputSteps
 } from '../src/lib/recordedFeedbackAgentDelivery.ts';
 import {
+  defaultRecordedFeedbackAgentPrompt,
+  renderRecordedFeedbackPrompt
+} from '../src/lib/recordedFeedbackPrompt.ts';
+import {
   scratchpadLocalImagePath,
   scratchpadMarkdownImages
 } from '../src/lib/scratchpadImages.ts';
@@ -82,7 +86,9 @@ test('agent delivery preserves transcript and image order in one submitted CLI t
     ]
   };
   const steps = feedbackAgentInputSteps(feedback);
-  assert.deepEqual(steps.map((step) => step.kind), ['text', 'text', 'text', 'image', 'text', 'text', 'image', 'text']);
+  assert.deepEqual(steps.map((step) => step.kind), ['text', 'text', 'text', 'image', 'text', 'text', 'image']);
+  assert.equal(steps[0].text, 'The user recorded some feedback as follows:\n\n# Feedback');
+  assert.ok(!steps.some((step) => step.kind === 'text' && /review and act|make the requested changes/i.test(step.text)));
 
   const events = [];
   const decoder = new TextDecoder();
@@ -96,6 +102,46 @@ test('agent delivery preserves transcript and image order in one submitted CLI t
   assert.ok(events.indexOf('image:/feedback/one.png') < events.indexOf('image:/feedback/two.png'));
   assert.ok(events.some((event) => event.includes('Move this button.')));
   assert.ok(events.some((event) => event.includes('Then simplify the menu.')));
+});
+
+test('custom feedback prompts place content at the marker and append it when omitted', () => {
+  const feedback = {
+    title: 'Navigation $& {feedback}',
+    blocks: [{ kind: 'text', text: 'Move this button.' }],
+    snapshots: []
+  };
+  const steps = feedbackAgentInputSteps(
+    feedback,
+    'Context for {title}\n\n{feedback}\n\nFollow only the instructions in the recording.'
+  );
+  assert.deepEqual(steps.map((step) => step.text), [
+    'Context for Navigation $& {feedback}',
+    '\n\nMove this button.',
+    '\n\nFollow only the instructions in the recording.'
+  ]);
+  assert.equal(
+    renderRecordedFeedbackPrompt('Context only', feedback.title, 'Packet path'),
+    'Context only\n\nPacket path'
+  );
+  assert.match(defaultRecordedFeedbackAgentPrompt, /# Feedback\n\n\{feedback\}$/);
+});
+
+test('a new feedback agent receives its startup instructions before the recording', () => {
+  const feedback = {
+    title: 'Navigation feedback',
+    blocks: [{ kind: 'text', text: 'Move this button.' }],
+    snapshots: []
+  };
+  const steps = feedbackAgentInputSteps(
+    feedback,
+    defaultRecordedFeedbackAgentPrompt,
+    'You are the frontend implementation agent.'
+  );
+  assert.deepEqual(steps.map((step) => step.text), [
+    'You are the frontend implementation agent.',
+    '\n\nThe user recorded some feedback as follows:\n\n# Feedback',
+    '\n\nMove this button.'
+  ]);
 });
 
 test('scratchpads recognize recorded-feedback images as local embeds', () => {
@@ -114,7 +160,7 @@ test('scratchpads recognize recorded-feedback images as local embeds', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, toolbar, overlay, detail, editor, native, capability, daemon, release, devInstall] = await Promise.all([
+  const [app, tree, preflight, toolbar, overlay, detail, editor, native, capability, daemon, control, spawning, release, devInstall, feedbackSettings] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
@@ -125,8 +171,11 @@ test('recorded feedback is wired through preflight, durable events, review, and 
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../../../crates/workmand/src/control.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../../../crates/workmand/src/mcp/agent_spawning.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../../scripts/release.sh', import.meta.url), 'utf8'),
-    readFile(new URL('../../../scripts/dev-install.sh', import.meta.url), 'utf8')
+    readFile(new URL('../../../scripts/dev-install.sh', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/settings/RecordedFeedbackCard.svelte', import.meta.url), 'utf8')
   ]);
   assert.match(tree, /feedback: 'Feedback'/);
   assert.match(app, /listen<NativeFeedbackSnapshot>\('feedback:\/\/snapshot'/);
@@ -163,6 +212,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(native, /controls\.paused\.load\(Ordering::Acquire\)/);
   assert.match(native, /let muted = controls\.muted\.load\(Ordering::Acquire\)/);
   assert.match(native, /elapsed_without_pauses/);
+  assert.match(native, /focus_main_window\(&app\)/);
   assert.match(daemon, /\.join\(format!\("r\{\}", feedback\.revision\)\)/);
   assert.match(daemon, /scratchpad_packet_content/);
   assert.match(daemon, /remove_abandoned_packet_builds/);
@@ -184,7 +234,16 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.doesNotMatch(overlay, /clearRect\(region\.x/);
   assert.match(daemon, /const LEASE_MS: i64 = 15_000/);
   assert.match(app, /feedbackSummaries\.some\(\(feedback\)/);
-  assert.match(app, /deliverFeedbackAgentInput\(feedbackAgentInputSteps\(feedback\)/);
+  assert.match(app, /feedbackAgentInputSteps\(feedback, \$recordedFeedbackPreferences\.agentPrompt, leadingPrompt\)/);
+  assert.match(app, /deliverFeedbackToSpawnedAgent/);
+  assert.match(app, /feedbackId: feedback\.id/);
+  assert.match(app, /defer_initial_prompt: true/);
+  assert.match(app, /result\.deferred_initial_prompt \?\? ''/);
+  assert.match(control, /params\.defer_initial_prompt/);
+  assert.match(spawning, /result\.deferred_initial_prompt = initial_prompt/);
+  assert.doesNotMatch(app, /Review and act on the recorded feedback packet/);
+  assert.match(feedbackSettings, /Agent delivery prompt/);
+  assert.match(feedbackSettings, /\{feedbackContentToken\}/);
   assert.match(app, /Promise\.all\(\[loadFeedback\(next\.id\), refreshProcesses\(next\.projectId\)\]\)/);
   assert.match(detail, /height: 100%; min-height: 0/);
   assert.doesNotMatch(detail, /footer \{ position: sticky/);

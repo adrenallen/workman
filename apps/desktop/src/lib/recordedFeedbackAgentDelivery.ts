@@ -1,4 +1,8 @@
 import type { RecordedFeedback } from './recordedFeedback';
+import {
+  defaultRecordedFeedbackAgentPrompt,
+  recordedFeedbackPromptFrame
+} from './recordedFeedbackPrompt.ts';
 
 export type FeedbackAgentInputStep =
   | { kind: 'text'; text: string }
@@ -16,31 +20,40 @@ const pasteEnd = '\x1b[201~';
 const maxTextChunkCharacters = 64 * 1024;
 
 /** Build the same transcript/image order the user reviewed, without reducing it to file links. */
-export function feedbackAgentInputSteps(feedback: RecordedFeedback): FeedbackAgentInputStep[] {
-  const steps: FeedbackAgentInputStep[] = [{
-    kind: 'text',
-    text: `Review and act on this recorded feedback: “${safeTerminalText(feedback.title)}”.`
-  }];
+export function feedbackAgentInputSteps(
+  feedback: RecordedFeedback,
+  promptTemplate = defaultRecordedFeedbackAgentPrompt,
+  leadingPrompt = ''
+): FeedbackAgentInputStep[] {
+  const frame = recordedFeedbackPromptFrame(
+    safeTerminalText(promptTemplate),
+    safeTerminalText(feedback.title)
+  );
+  const steps: FeedbackAgentInputStep[] = [];
+  appendTextStep(steps, leadingPrompt);
+  appendTextStep(steps, frame.before);
   for (const block of feedback.blocks) {
     if (block.kind === 'text') {
-      const text = safeTerminalText(block.text).trim();
-      if (text) steps.push({ kind: 'text', text: `\n\n${text}` });
+      appendTextStep(steps, block.text);
       continue;
     }
     const snapshot = feedback.snapshots.find((candidate) => candidate.id === block.snapshot_id);
     if (!snapshot) continue;
     const caption = safeTerminalText(snapshot.caption).trim();
-    steps.push({
-      kind: 'text',
-      text: `\n\nScreenshot #${snapshot.ordinal + 1}${caption ? ` — ${caption}` : ''}:\n`
-    });
+    appendTextStep(
+      steps,
+      `Screenshot #${snapshot.ordinal + 1}${caption ? ` — ${caption}` : ''}:`
+    );
     steps.push({ kind: 'image', path: snapshot.image_path });
   }
-  steps.push({
-    kind: 'text',
-    text: '\n\nUse the transcript and screenshots above in order, then make the requested changes.'
-  });
+  appendTextStep(steps, frame.after);
   return steps;
+}
+
+function appendTextStep(steps: FeedbackAgentInputStep[], value: string): void {
+  const text = safeTerminalText(value).trim();
+  if (!text) return;
+  steps.push({ kind: 'text', text: `${steps.length > 0 ? '\n\n' : ''}${text}` });
 }
 
 /** Paste each image into the live agent composer, then submit the assembled turn once. */

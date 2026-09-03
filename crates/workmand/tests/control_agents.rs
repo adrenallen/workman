@@ -587,6 +587,47 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    let deferred_spawn = rpc(
+        &mut socket,
+        76,
+        "agents.spawn",
+        json!({
+            "project_id": 7,
+            "agent_template_id": template_id,
+            "agent_tool_id": tool_id,
+            "name": "deferred-feedback-worker",
+            "prompt": "Keep this additional instruction.",
+            "defer_initial_prompt": true
+        }),
+    )
+    .await;
+    assert!(deferred_spawn["ok"].as_bool().unwrap());
+    assert_eq!(
+        deferred_spawn["result"]["deferred_initial_prompt"],
+        format!("{template_prompt}\n\nKeep this additional instruction.")
+    );
+    let deferred_process_id = deferred_spawn["result"]["process_id"].as_i64().unwrap();
+    let deferred_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let raw = registry
+            .lock()
+            .await
+            .raw_output(deferred_process_id, None, usize::MAX)?;
+        let output = String::from_utf8_lossy(&raw.data);
+        if output.contains("agent-ready") {
+            assert!(
+                !output.contains("agent-answer:"),
+                "a deferred initial prompt must be returned without being scheduled: {output}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deferred_deadline,
+            "deferred agent did not reach its ready prompt: {output}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     let overridden = rpc(
         &mut socket,
         27,
@@ -753,6 +794,14 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_override["result"]["status"], "stopped");
+    let closed_deferred = rpc(
+        &mut socket,
+        77,
+        "process.close",
+        json!({ "process_id": deferred_process_id }),
+    )
+    .await;
+    assert_eq!(closed_deferred["result"]["status"], "stopped");
     let closed_exiting = rpc(
         &mut socket,
         33,

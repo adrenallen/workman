@@ -24,6 +24,7 @@
   import HotkeysCard from './settings/HotkeysCard.svelte';
   import McpConnectionCard from './settings/McpConnectionCard.svelte';
   import NotificationsCard from './settings/NotificationsCard.svelte';
+  import RecordedFeedbackCard from './settings/RecordedFeedbackCard.svelte';
   import OpenersCard from './settings/OpenersCard.svelte';
   import RuntimeDoctor from './settings/RuntimeDoctor.svelte';
   import WorktreeHealthCard from './settings/WorktreeHealthCard.svelte';
@@ -249,6 +250,8 @@
         <HotkeysCard />
       {:else if $settingsSection === 'notifications'}
         <NotificationsCard />
+      {:else if $settingsSection === 'feedback'}
+        <RecordedFeedbackCard />
       {:else if $settingsSection === 'templates'}
         <AgentTemplatesCard {client} connected={connection.status === 'connected'} {onError} />
       {:else if $settingsSection === 'agents'}

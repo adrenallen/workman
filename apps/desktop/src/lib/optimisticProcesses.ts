@@ -7,6 +7,7 @@ export interface OptimisticProcess {
   error: string | null;
   retry: 'agent' | 'command' | null;
   agentSpawnInput: SpawnAgentInput | null;
+  feedbackId: number | null;
   commandDraft: CommandCreationDraft | null;
   createdAt: number;
 }
@@ -20,6 +21,7 @@ export interface OptimisticProcessInput {
   agentToolId?: number | null;
   retry?: OptimisticProcess['retry'];
   agentSpawnInput?: SpawnAgentInput | null;
+  feedbackId?: number | null;
   commandDraft?: CommandCreationDraft | null;
 }
 
@@ -69,6 +71,7 @@ export function createOptimisticProcess(input: OptimisticProcessInput): Optimist
     agentSpawnInput: input.agentSpawnInput
       ? { ...input.agentSpawnInput, extra_args: [...input.agentSpawnInput.extra_args] }
       : null,
+    feedbackId: input.feedbackId ?? null,
     commandDraft: input.commandDraft
       ? cloneCreationDraft(input.commandDraft) as CommandCreationDraft
       : null,

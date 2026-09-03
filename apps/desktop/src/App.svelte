@@ -82,7 +82,12 @@
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
-  import { getAgentToolsStore, type AgentTool, type SpawnAgentInput } from './lib/agentTools';
+  import {
+    getAgentToolsStore,
+    type AgentTool,
+    type SpawnAgentInput,
+    type SpawnAgentResult
+  } from './lib/agentTools';
   import type { QuickPrompt } from './lib/quickPrompts';
   import type { CommandInput } from './lib/commandCreation';
   import {
@@ -173,10 +178,12 @@
   } from './lib/recordedFeedbackAgentDelivery';
   import {
     recordedFeedbackCapability,
+    recordedFeedbackPreferences,
     recordedFeedbackSupported,
     refreshRecordedFeedbackCapability,
     showRecordedFeedbackSection
   } from './lib/recordedFeedbackAvailability';
+  import { renderRecordedFeedbackPrompt } from './lib/recordedFeedbackPrompt';
   import { liveStats } from './lib/liveStats';
   import {
     beginOptimisticNavigation,
@@ -263,6 +270,7 @@
     type ProjectTreeSelection
   } from './lib/projectTree';
   import {
+    agentCanReceiveFeedback,
     type NativeFeedbackFinished,
     type NativeFeedbackPreflight,
     type NativeFeedbackSession,
@@ -2659,26 +2667,109 @@
     if (!feedbackTargetProcesses.some((process) => process.id === processId)) {
       throw new Error('That agent is no longer available in this project.');
     }
+    await deliverFeedbackToAgent(feedback, processId);
+    await loadFeedback(selection.id, false);
+  }
+
+  async function deliverFeedbackToAgent(
+    feedback: RecordedFeedback,
+    processId: number,
+    leadingPrompt = ''
+  ): Promise<void> {
     // Validate the live target and retain an immutable packet before touching its composer. The
     // actual turn is assembled below from transcript text and real clipboard-image pastes.
-    await client.recordedFeedbackDeliverAgent(selectedProject.id, selection.id, processId, true);
-    await deliverFeedbackAgentInput(feedbackAgentInputSteps(feedback), {
-      send: (data) => client.sendInput(processId, data),
-      writeImageToClipboard: async (path) => {
-        const image = await invoke<{ bytes: number[]; mime_type: string }>(
-          'terminal_read_attachment_image',
-          { path }
+    await client.recordedFeedbackDeliverAgent(feedback.project_id, feedback.id, processId, true);
+    await deliverFeedbackAgentInput(
+      feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt, leadingPrompt),
+      {
+        send: (data) => client.sendInput(processId, data),
+        writeImageToClipboard: async (path) => {
+          const image = await invoke<{ bytes: number[]; mime_type: string }>(
+            'terminal_read_attachment_image',
+            { path }
+          );
+          await invoke('terminal_write_clipboard_image', {
+            bytes: image.bytes,
+            mimeType: image.mime_type
+          });
+        },
+        // Codex and Claude import clipboard images asynchronously. Keep each image on the
+        // pasteboard until its Ctrl+V has been consumed before moving to the next snapshot.
+        waitForImageImport: () => new Promise((resolve) => setTimeout(resolve, 500))
+      }
+    );
+  }
+
+  function waitForFeedbackAgent(
+    processId: number,
+    projectId: number,
+    settleInitialPrompt: boolean
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let readyTimer: ReturnType<typeof setTimeout> | null = null;
+      let stopListening = (): void => {};
+      const finish = (cause?: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (readyTimer !== null) clearTimeout(readyTimer);
+        stopListening();
+        if (cause) reject(cause);
+        else resolve();
+      };
+      const inspect = (candidates: ProcessView[], confirmed = false): void => {
+        const process = candidates.find((candidate) =>
+          candidate.id === processId && candidate.project_id === projectId
         );
-        await invoke('terminal_write_clipboard_image', {
-          bytes: image.bytes,
-          mimeType: image.mime_type
-        });
-      },
-      // Codex and Claude import clipboard images asynchronously. Keep each image on the
-      // pasteboard until its Ctrl+V has been consumed before moving to the next snapshot.
-      waitForImageImport: () => new Promise((resolve) => setTimeout(resolve, 500))
+        if (!process) return;
+        if (['stopped', 'exited', 'crashed'].includes(process.status) || process.agent_state.state === 'exited') {
+          finish(new Error(`${process.name} stopped before the feedback could be sent.`));
+          return;
+        }
+        if (!agentCanReceiveFeedback(process)) {
+          if (readyTimer !== null) clearTimeout(readyTimer);
+          readyTimer = null;
+          return;
+        }
+        if (confirmed) {
+          finish();
+        } else if (readyTimer === null) {
+          // Let the daemon's initial template/prompt scheduler claim the first idle edge. Recheck
+          // after one status interval so feedback cannot race the agent's own starting prompt.
+          readyTimer = setTimeout(() => {
+            readyTimer = null;
+            void client.processes(projectId).then((current) => inspect(current, true)).catch((cause) => finish(
+              new Error(`Could not verify that the new agent was ready: ${messageForCause(cause)}`)
+            ));
+          }, settleInitialPrompt ? 750 : 0);
+        }
+      };
+      stopListening = client.onProcessStatuses(inspect);
+      inspect(profileProcesses);
     });
-    await loadFeedback(selection.id, false);
+  }
+
+  async function deliverFeedbackToSpawnedAgent(
+    projectId: number,
+    feedbackId: number,
+    result: SpawnAgentResult
+  ): Promise<void> {
+    try {
+      await waitForFeedbackAgent(
+        result.process_id,
+        projectId,
+        result.deferred_initial_prompt === undefined
+      );
+      const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
+      await deliverFeedbackToAgent(
+        feedback,
+        result.process_id,
+        result.deferred_initial_prompt ?? ''
+      );
+      if (selectedProject?.id === projectId) await refreshFeedback(projectId);
+    } catch (cause) {
+      throw new Error(`The agent started, but its feedback could not be sent automatically: ${messageForCause(cause)}`);
+    }
   }
 
   async function sendSelectedFeedbackToScratchpad(): Promise<void> {
@@ -2692,22 +2783,26 @@
   }
 
   async function copySelectedFeedbackPacket(): Promise<void> {
-    if (!selectedProject || selection?.kind !== 'feedback') return;
+    if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
     const packet = await client.recordedFeedbackPreparePacket(selectedProject.id, selection.id);
     await invoke('terminal_write_clipboard_text', {
-      text: `Review and act on the recorded feedback packet at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+      text: renderRecordedFeedbackPrompt(
+        $recordedFeedbackPreferences.agentPrompt,
+        feedbackDetail.title,
+        `The feedback packet is at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+      )
     });
     await loadFeedback(selection.id, false);
   }
 
   async function sendSelectedFeedbackToNewAgent(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
-    const packet = await client.recordedFeedbackPreparePacket(selectedProject.id, selection.id);
+    const feedback = feedbackDetail;
     const draft = openCreationDraft('agent');
     if (draft?.kind !== 'agent') return;
     patchCreationDraft(draft.id, {
-      name: `Feedback: ${feedbackDetail.title}`,
-      prompt: `Review and act on the recorded feedback packet at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+      name: `Feedback: ${feedback.title}`,
+      feedbackId: feedback.id
     });
     await ensureAgentDraftMetadata();
   }
@@ -3243,11 +3338,16 @@
     draft: AgentCreationDraft,
     submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
   ): void {
+    const feedbackId = draft.feedbackId;
+    const input = feedbackId === null
+      ? submission.input
+      : { ...submission.input, defer_initial_prompt: true };
     if (spawnAgent(
       submission.tool,
-      submission.input,
+      input,
       submission.template,
-      () => restoreAgentCreationDraft(draft)
+      () => restoreAgentCreationDraft(draft),
+      feedbackId
     )) {
       removeCreationDraft(draft.id);
     }
@@ -3319,7 +3419,7 @@
       : agentTools.find((candidate) => candidate.id === optimistic.process.agent_tool_id) ?? null;
     dismissOptimisticProcess(optimistic.process.id);
     if (retry === 'agent' && tool && optimistic.agentSpawnInput) {
-      void spawnAgent(tool, optimistic.agentSpawnInput);
+      void spawnAgent(tool, optimistic.agentSpawnInput, null, undefined, optimistic.feedbackId);
     }
     else if (retry === 'command' && optimistic.commandDraft) {
       const restored = {
@@ -3375,7 +3475,8 @@
     tool: AgentTool,
     requestedInput?: SpawnAgentInput,
     template: AgentTemplate | null = null,
-    onFailure?: () => void
+    onFailure?: () => void,
+    feedbackId: number | null = null
   ): boolean {
     const currentProject = selectedProject;
     if (!currentProject) return false;
@@ -3399,7 +3500,8 @@
       command: tool.command,
       agentToolId: tool.id,
       retry: 'agent',
-      agentSpawnInput: input
+      agentSpawnInput: input,
+      feedbackId
     });
     optimisticProcesses = [...optimisticProcesses, optimistic];
     dialog = null;
@@ -3409,7 +3511,7 @@
     scratchpadBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
-    void finishAgentSpawn(project, input, optimisticId, onFailure);
+    void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId);
     return true;
   }
 
@@ -3417,7 +3519,8 @@
     project: Project,
     input: SpawnAgentInput,
     optimisticId: number,
-    onFailure?: () => void
+    onFailure?: () => void,
+    feedbackId: number | null = null
   ): Promise<void> {
     await tick();
     try {
@@ -3429,6 +3532,9 @@
       );
       if (process && selectedProject?.id === project.id) {
         selection = projectTreeSelection('agent', process.id, process.project_id, process.name);
+      }
+      if (feedbackId !== null) {
+        void deliverFeedbackToSpawnedAgent(project.id, feedbackId, result).catch(reportError);
       }
     } catch (cause) {
       failPendingProcess(cause, optimisticId);

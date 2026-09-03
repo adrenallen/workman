@@ -33,7 +33,8 @@ test('failed optimistic agents retain an independent exact retry payload', () =>
     name: 'reviewer',
     agentToolId: 3,
     retry: 'agent',
-    agentSpawnInput: input
+    agentSpawnInput: input,
+    feedbackId: 44
   });
   input.extra_args.push('--mutated-after-create');
 
@@ -47,11 +48,12 @@ test('failed optimistic agents retain an independent exact retry payload', () =>
     prompt: 'Review the patch.'
   });
   assert.equal(failed.error, 'spawn failed');
+  assert.equal(failed.feedbackId, 44);
 });
 
 test('the optimistic retry path resubmits its saved agent payload', async () => {
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
-  assert.match(app, /spawnAgent\(tool, optimistic\.agentSpawnInput\)/);
+  assert.match(app, /spawnAgent\(tool, optimistic\.agentSpawnInput, null, undefined, optimistic\.feedbackId\)/);
 });
 
 test('failed optimistic commands retain and restore their complete draft', async () => {

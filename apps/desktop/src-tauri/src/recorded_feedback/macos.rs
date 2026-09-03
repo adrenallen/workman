@@ -1033,6 +1033,7 @@ pub(crate) fn feedback_finish(
     let duration_ms = session_elapsed_ms(&session);
     unregister_shortcuts(&app, &session.registered_shortcuts);
     close_feedback_panels(&app);
+    focus_main_window(&app);
     drop(session.stream);
     if let Err(error) = finalize_writer(&session.writer) {
         let _ = app.emit(
@@ -1096,6 +1097,14 @@ pub(crate) fn feedback_finish(
         return Err(message);
     }
     Ok(finished)
+}
+
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn start_audio(

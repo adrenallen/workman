@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
-import { derived, writable } from 'svelte/store';
+import { derived, get, writable } from 'svelte/store';
+
+import { defaultRecordedFeedbackAgentPrompt } from './recordedFeedbackPrompt.ts';
 
 export const recordedFeedbackPreferencesStorageKey = 'workman.feedback.preferences.v1';
 
@@ -14,9 +16,14 @@ export interface RecordedFeedbackCapabilityState extends RecordedFeedbackCapabil
 
 export interface RecordedFeedbackPreferences {
   showInSidebar: boolean;
+  agentPrompt: string;
 }
 
-const defaultPreferences: RecordedFeedbackPreferences = { showInSidebar: true };
+const maxAgentPromptLength = 32_000;
+const defaultPreferences: RecordedFeedbackPreferences = {
+  showInSidebar: true,
+  agentPrompt: defaultRecordedFeedbackAgentPrompt
+};
 
 export const recordedFeedbackPreferences = writable<RecordedFeedbackPreferences>(
   loadRecordedFeedbackPreferences()
@@ -41,7 +48,18 @@ export const showRecordedFeedbackSection = derived(
 let capabilityRequest: Promise<RecordedFeedbackCapabilityState> | null = null;
 
 export function setRecordedFeedbackSidebarVisible(showInSidebar: boolean): void {
-  const preferences = { showInSidebar };
+  updateRecordedFeedbackPreferences({ showInSidebar });
+}
+
+export function setRecordedFeedbackAgentPrompt(agentPrompt: string): void {
+  if (agentPrompt.length > maxAgentPromptLength) {
+    throw new Error(`The feedback prompt cannot exceed ${maxAgentPromptLength.toLocaleString()} characters.`);
+  }
+  updateRecordedFeedbackPreferences({ agentPrompt });
+}
+
+function updateRecordedFeedbackPreferences(patch: Partial<RecordedFeedbackPreferences>): void {
+  const preferences = { ...get(recordedFeedbackPreferences), ...patch };
   recordedFeedbackPreferences.set(preferences);
   try {
     localStorage.setItem(recordedFeedbackPreferencesStorageKey, JSON.stringify(preferences));
@@ -81,7 +99,14 @@ export function platformDisplayName(platform: string): string {
 function loadRecordedFeedbackPreferences(): RecordedFeedbackPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(recordedFeedbackPreferencesStorageKey) ?? 'null');
-    if (typeof stored?.showInSidebar === 'boolean') return stored;
+    if (typeof stored?.showInSidebar === 'boolean') {
+      return {
+        showInSidebar: stored.showInSidebar,
+        agentPrompt: typeof stored.agentPrompt === 'string' && stored.agentPrompt.length <= maxAgentPromptLength
+          ? stored.agentPrompt
+          : defaultRecordedFeedbackAgentPrompt
+      };
+    }
   } catch {
     // Defaults keep the section visible when storage is unavailable or malformed.
   }
