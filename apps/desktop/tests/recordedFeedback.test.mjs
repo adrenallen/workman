@@ -135,6 +135,9 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(preflight, /showCloseButton=\{false\}/);
   assert.match(preflight, /screen_capture_authorized/);
   assert.match(native, /let screen_capture_authorized = CGPreflightScreenCaptureAccess\(\)/);
+  assert.match(native, /CGRequestScreenCaptureAccess\(\)/);
+  assert.match(native, /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_ScreenCapture/);
+  assert.match(native, /Command::new\("\/usr\/bin\/open"\)/);
   assert.match(preflight, /remove it, add the current app again/);
   assert.match(native, /let display_available = Monitor::all\(\)/);
   assert.match(app, /&& feedbackPreflightOpen\s+&& !feedbackPreflight\?\.screen_capture_available/);

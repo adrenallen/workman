@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -47,6 +48,8 @@ const EVENT_TOOL: &str = "feedback://tool";
 const EVENT_REGION: &str = "feedback://region";
 const EVENT_ANNOTATIONS: &str = "feedback://annotations";
 const EVENT_SHORTCUT: &str = "feedback://shortcut";
+const SCREEN_RECORDING_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
 const DEFAULT_SHORTCUTS: &[(&str, &str)] = &[
     ("snap", "CommandOrControl+Shift+C"),
@@ -328,11 +331,30 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
 }
 
 #[tauri::command]
-pub(crate) fn feedback_request_screen_access() -> FeedbackPreflight {
+pub(crate) fn feedback_request_screen_access() -> Result<FeedbackPreflight, String> {
     if !CGPreflightScreenCaptureAccess() {
-        let _ = CGRequestScreenCaptureAccess();
+        let granted = CGRequestScreenCaptureAccess();
+        // macOS only presents the consent prompt once. After the user has made a choice,
+        // requesting again is a no-op, so take them to the exact privacy pane instead.
+        if !granted {
+            open_screen_recording_settings()?;
+        }
     }
-    feedback_preflight()
+    Ok(feedback_preflight())
+}
+
+fn open_screen_recording_settings() -> Result<(), String> {
+    let status = Command::new("/usr/bin/open")
+        .arg(SCREEN_RECORDING_SETTINGS_URL)
+        .status()
+        .map_err(|error| format!("Could not open Screen Recording settings: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not open Screen Recording settings (open exited with {status})."
+        ))
+    }
 }
 
 #[tauri::command]
