@@ -17,6 +17,7 @@
     type DecorationSet,
     type ViewUpdate
   } from '@codemirror/view';
+  import { invoke } from '@tauri-apps/api/core';
   import BoldIcon from '@lucide/svelte/icons/bold';
   import CheckSquare2Icon from '@lucide/svelte/icons/square-check-big';
   import Code2Icon from '@lucide/svelte/icons/code-2';
@@ -46,6 +47,7 @@
     type PositionMapper,
     type ScratchpadSelectionAnchor
   } from './scratchpadAnchors';
+  import { scratchpadLocalImagePath, scratchpadMarkdownImages } from './scratchpadImages';
 
   interface Props {
     value: string;
@@ -86,6 +88,9 @@
   let appliedScrollRequest = -1;
   let appliedCommentScrollRequest = -1;
   let selectionAction = $state<({ x: number; y: number } & ScratchpadSelectionAnchor) | null>(null);
+  let imageSourceDisposed = false;
+  const imageSourceRequests = new Map<string, Promise<string>>();
+  const imageObjectUrls = new Set<string>();
 
   const externalChange = Annotation.define<boolean>();
   const setCommentDecorations = StateEffect.define<DecorationSet>();
@@ -316,6 +321,86 @@
     }
   }
 
+  interface AttachmentImageRead {
+    bytes: number[];
+    mime_type: string;
+  }
+
+  function loadLocalImageSource(path: string): Promise<string> {
+    const cached = imageSourceRequests.get(path);
+    if (cached) return cached;
+    const request = invoke<AttachmentImageRead>('terminal_read_attachment_image', { path })
+      .then((image) => {
+        const source = URL.createObjectURL(new Blob(
+          [new Uint8Array(image.bytes)],
+          { type: image.mime_type }
+        ));
+        if (imageSourceDisposed) {
+          URL.revokeObjectURL(source);
+          throw new Error('Scratchpad image view closed');
+        }
+        imageObjectUrls.add(source);
+        return source;
+      })
+      .catch((cause) => {
+        imageSourceRequests.delete(path);
+        throw cause;
+      });
+    imageSourceRequests.set(path, request);
+    return request;
+  }
+
+  class LocalImageWidget extends WidgetType {
+    private disposed = false;
+    readonly path: string;
+    readonly alt: string;
+
+    constructor(path: string, alt: string) {
+      super();
+      this.path = path;
+      this.alt = alt;
+    }
+
+    toDOM(editor: EditorView): HTMLElement {
+      const frame = document.createElement('span');
+      frame.className = 'cm-live-image';
+      frame.contentEditable = 'false';
+      frame.textContent = 'Loading image…';
+      void loadLocalImageSource(this.path)
+        .then((source) => {
+          if (this.disposed || !frame.isConnected) return;
+          const element = document.createElement('img');
+          element.src = source;
+          element.alt = this.alt || 'Embedded scratchpad image';
+          element.onload = () => {
+            if (!this.disposed) editor.requestMeasure();
+          };
+          frame.replaceChildren(element);
+          editor.requestMeasure();
+        })
+        .catch(() => {
+          if (this.disposed || !frame.isConnected) return;
+          frame.classList.add('cm-live-image-error');
+          frame.textContent = 'Image unavailable';
+          frame.title = this.path;
+          editor.requestMeasure();
+        });
+      return frame;
+    }
+
+    eq(other: LocalImageWidget): boolean {
+      return this.path === other.path && this.alt === other.alt;
+    }
+
+    destroy(): void {
+      this.disposed = true;
+    }
+
+    ignoreEvent(): boolean {
+      return false;
+    }
+  }
+
   function cursorTouches(view: EditorView, from: number, to: number): boolean {
     return view.state.selection.ranges.some((range) => range.head >= from && range.head <= to);
   }
@@ -339,29 +424,44 @@
     lineFrom: number,
     text: string
   ): void {
+    const embeddedImages = scratchpadMarkdownImages(text).flatMap((image) => {
+      const path = scratchpadLocalImagePath(image.source);
+      return path ? [{ ...image, path }] : [];
+    });
+    const overlapsEmbeddedImage = (from: number, to: number): boolean =>
+      embeddedImages.some((image) => from < image.to && to > image.from);
+
     for (const match of text.matchAll(/\*\*([^*\n]+)\*\*/g)) {
-      const start = lineFrom + (match.index ?? 0);
+      const localStart = match.index ?? 0;
+      if (overlapsEmbeddedImage(localStart, localStart + match[0].length)) continue;
+      const start = lineFrom + localStart;
       const end = start + match[0].length;
       replaceMarker(ranges, editor, start, start + 2);
       ranges.push(Decoration.mark({ class: 'cm-live-strong' }).range(start + 2, end - 2));
       replaceMarker(ranges, editor, end - 2, end);
     }
     for (const match of text.matchAll(/(?<!\*)\*([^*\n]+)\*(?!\*)/g)) {
-      const start = lineFrom + (match.index ?? 0);
+      const localStart = match.index ?? 0;
+      if (overlapsEmbeddedImage(localStart, localStart + match[0].length)) continue;
+      const start = lineFrom + localStart;
       const end = start + match[0].length;
       replaceMarker(ranges, editor, start, start + 1);
       ranges.push(Decoration.mark({ class: 'cm-live-emphasis' }).range(start + 1, end - 1));
       replaceMarker(ranges, editor, end - 1, end);
     }
     for (const match of text.matchAll(/`([^`\n]+)`/g)) {
-      const start = lineFrom + (match.index ?? 0);
+      const localStart = match.index ?? 0;
+      if (overlapsEmbeddedImage(localStart, localStart + match[0].length)) continue;
+      const start = lineFrom + localStart;
       const end = start + match[0].length;
       replaceMarker(ranges, editor, start, start + 1);
       ranges.push(Decoration.mark({ class: 'cm-live-inline-code' }).range(start + 1, end - 1));
       replaceMarker(ranges, editor, end - 1, end);
     }
     for (const match of text.matchAll(/\[([^\]\n]+)\]\(([^)\n]+)\)/g)) {
-      const start = lineFrom + (match.index ?? 0);
+      const localStart = match.index ?? 0;
+      if (overlapsEmbeddedImage(localStart, localStart + match[0].length)) continue;
+      const start = lineFrom + localStart;
       const labelEnd = start + match[1].length + 1;
       const end = start + match[0].length;
       replaceMarker(ranges, editor, start, start + 1);
@@ -372,6 +472,17 @@
         }).range(start + 1, labelEnd)
       );
       replaceMarker(ranges, editor, labelEnd, end);
+    }
+    for (const image of embeddedImages) {
+      const start = lineFrom + image.from;
+      const end = lineFrom + image.to;
+      if (cursorTouches(editor, start, end)) continue;
+      ranges.push(
+        Decoration.replace({
+          widget: new LocalImageWidget(image.path, image.alt),
+          inclusive: false
+        }).range(start, end)
+      );
     }
   }
 
@@ -504,6 +615,31 @@
       fontSize: '.9em'
     },
     '.cm-live-link': { color: 'var(--ring)', textDecoration: 'underline', textUnderlineOffset: '3px' },
+    '.cm-live-image': {
+      display: 'inline-flex',
+      width: 'min(100%, 760px)',
+      minHeight: '120px',
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+      boxSizing: 'border-box',
+      border: '1px solid var(--border)',
+      borderRadius: '8px',
+      margin: '6px 0',
+      backgroundColor: 'var(--card)',
+      color: 'var(--muted-foreground)',
+      fontFamily: "'JetBrains Mono Variable', monospace",
+      fontSize: '11px',
+      verticalAlign: 'top'
+    },
+    '.cm-live-image img': {
+      display: 'block',
+      width: '100%',
+      height: 'auto',
+      maxHeight: '560px',
+      objectFit: 'contain'
+    },
+    '.cm-live-image-error': { minHeight: '72px', borderStyle: 'dashed' },
     '.cm-live-quote': {
       borderLeft: '2px solid var(--border-strong)',
       paddingLeft: '13px',
@@ -691,6 +827,10 @@
       window.removeEventListener('scroll', hideSelectionAction, true);
       view?.destroy();
       view = null;
+      imageSourceDisposed = true;
+      for (const source of imageObjectUrls) URL.revokeObjectURL(source);
+      imageObjectUrls.clear();
+      imageSourceRequests.clear();
     };
   });
 

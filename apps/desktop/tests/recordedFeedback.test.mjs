@@ -14,6 +14,10 @@ import {
   deliverFeedbackAgentInput,
   feedbackAgentInputSteps
 } from '../src/lib/recordedFeedbackAgentDelivery.ts';
+import {
+  scratchpadLocalImagePath,
+  scratchpadMarkdownImages
+} from '../src/lib/scratchpadImages.ts';
 
 test('timeline preserves image anchors and uses the containing segment fallback', () => {
   const segments = [
@@ -94,14 +98,30 @@ test('agent delivery preserves transcript and image order in one submitted CLI t
   assert.ok(events.some((event) => event.includes('Then simplify the menu.')));
 });
 
+test('scratchpads recognize recorded-feedback images as local embeds', () => {
+  const line = 'Before ![Menu open](</Users/g/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png>) after';
+  assert.deepEqual(scratchpadMarkdownImages(line), [{
+    from: 7,
+    to: 114,
+    alt: 'Menu open',
+    source: '/Users/g/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
+  }]);
+  assert.equal(
+    scratchpadLocalImagePath(scratchpadMarkdownImages(line)[0].source),
+    '/Users/g/Library/Application Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
+  );
+  assert.equal(scratchpadLocalImagePath('https://example.com/tracker.png'), null);
+});
+
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, toolbar, overlay, detail, native, capability, daemon, release, devInstall] = await Promise.all([
+  const [app, tree, preflight, toolbar, overlay, detail, editor, native, capability, daemon, release, devInstall] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackToolbar.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/LiveMarkdownEditor.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
@@ -120,6 +140,8 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(app, /&& feedbackPreflightOpen\s+&& !feedbackPreflight\?\.screen_capture_available/);
   assert.match(detail, /onSendAgent/);
   assert.match(detail, /onSendScratchpad/);
+  assert.match(editor, /new LocalImageWidget\(image\.path, image\.alt\)/);
+  assert.match(editor, /terminal_read_attachment_image/);
   assert.match(native, /\.content_protected\(true\)/);
   assert.match(native, /\.nonactivating_panel\(\)/);
   assert.match(native, /PanelLevel::Custom\(1001\)/);
