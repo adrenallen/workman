@@ -22,7 +22,45 @@ import {
   scratchpadLocalImagePath,
   scratchpadMarkdownImages
 } from '../src/lib/scratchpadImages.ts';
-import { recordedFeedbackForView } from '../src/lib/recordedFeedback.ts';
+import {
+  agentCanReceiveInitialTurn,
+  recordedFeedbackForView
+} from '../src/lib/recordedFeedback.ts';
+
+test('new agents can receive their first turn from the fast composer signal', () => {
+  const process = (agentState, overrides = {}) => ({
+    id: 7,
+    kind: 'agent',
+    status: 'running',
+    agent_state: agentState,
+    ...overrides
+  });
+
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'working',
+    classification: 'resting_prompt',
+    composer_input_ready: true
+  })), true);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'working',
+    classification: 'resting_prompt',
+    composer_input_ready: false
+  })), false);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'needs_input',
+    classification: 'permission_dialog',
+    composer_input_ready: false
+  })), false);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'idle',
+    classification: 'resting_prompt'
+  })), true, 'older daemons retain the conservative idle fallback');
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'idle',
+    classification: 'resting_prompt',
+    composer_input_ready: true
+  }, { status: 'stopped' })), false);
+});
 
 test('feedback browser separates archived recordings and searches its selected view', () => {
   const feedback = [
@@ -259,6 +297,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(app, /feedbackSummaries\.some\(\(feedback\)/);
   assert.match(app, /feedbackAgentInputSteps\(feedback, \$recordedFeedbackPreferences\.agentPrompt\)/);
   assert.match(app, /deliverSpawnedAgentInitialTurn/);
+  assert.match(app, /agentCanReceiveInitialTurn\(process\)/);
   assert.match(app, /feedbackId: feedback\.id/);
   assert.match(app, /defer_initial_prompt: true/);
   assert.match(app, /result\.deferred_initial_prompt \?\? ''/);
@@ -271,6 +310,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(detail, /height: 100%; min-height: 0/);
   assert.doesNotMatch(detail, /footer \{ position: sticky/);
   assert.match(daemon, /params\.direct_input/);
+  assert.match(daemon, /agent_accepts_feedback_input\([\s\S]*?status\.agent_state\.composer_input_ready/);
   assert.match(capability, /core:window:allow-start-dragging/);
   const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
   const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);

@@ -481,9 +481,10 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
     if status.process.status != ProcessStatus::Running {
         return Err(("feedback_target_exited", "that agent is not running".into()));
     }
-    if !matches!(
+    if !agent_accepts_feedback_input(
         status.agent_state.state,
-        AttentionState::Idle | AttentionState::NeedsInput | AttentionState::Waiting
+        status.agent_state.composer_input_ready,
+        params.direct_input,
     ) {
         return Err((
             "feedback_target_busy",
@@ -528,6 +529,17 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
         "process": status,
         "packet_path": packet.markdown_path
     }))
+}
+
+fn agent_accepts_feedback_input(
+    state: AttentionState,
+    composer_input_ready: bool,
+    direct_input: bool,
+) -> bool {
+    matches!(
+        state,
+        AttentionState::Idle | AttentionState::NeedsInput | AttentionState::Waiting
+    ) || (direct_input && composer_input_ready)
 }
 
 fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> ControlResult {
@@ -1062,6 +1074,30 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use tempfile::tempdir;
     use workman_core::{Project, RecordedFeedbackSnapshot, Store};
+
+    #[test]
+    fn direct_feedback_accepts_fast_composer_readiness_without_weakening_queued_delivery() {
+        assert!(agent_accepts_feedback_input(
+            AttentionState::Working,
+            true,
+            true
+        ));
+        assert!(!agent_accepts_feedback_input(
+            AttentionState::Working,
+            true,
+            false
+        ));
+        assert!(!agent_accepts_feedback_input(
+            AttentionState::Working,
+            false,
+            true
+        ));
+        assert!(agent_accepts_feedback_input(
+            AttentionState::NeedsInput,
+            false,
+            false
+        ));
+    }
 
     fn ready_feedback(image_path: &Path, sha256: String) -> RecordedFeedback {
         RecordedFeedback {

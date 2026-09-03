@@ -167,6 +167,17 @@ export function agentCanReceiveFeedback(process: ProcessView): boolean {
     && ['idle', 'needs_input', 'waiting'].includes(process.agent_state.state);
 }
 
+/** A narrower first-turn gate that can use a daemon's fast, stable-composer signal. */
+export function agentCanReceiveInitialTurn(process: ProcessView): boolean {
+  if (process.kind !== 'agent' || process.status !== 'running') return false;
+  if (process.agent_state.composer_input_ready !== undefined) {
+    return process.agent_state.composer_input_ready;
+  }
+  // Older daemons do not expose the fast signal. Keep their conservative behavior, but never
+  // treat a permission or authentication prompt as the new agent's empty composer.
+  return ['idle', 'waiting'].includes(process.agent_state.state);
+}
+
 export function agentFeedbackAvailability(process: ProcessView): string {
   if (process.kind !== 'agent') return 'Not an agent';
   if (process.status !== 'running') return 'Not running';

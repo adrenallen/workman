@@ -243,6 +243,7 @@ export interface AgentState {
   exited: boolean;
   thinking: boolean;
   planning: boolean;
+  composer_input_ready?: boolean;
   tool_type: string | null;
   idle_seconds: number;
   last_output_seconds: number | null;

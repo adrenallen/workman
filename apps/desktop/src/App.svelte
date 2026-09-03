@@ -271,6 +271,7 @@
   } from './lib/projectTree';
   import {
     agentCanReceiveFeedback,
+    agentCanReceiveInitialTurn,
     type NativeFeedbackFinished,
     type NativeFeedbackPreflight,
     type NativeFeedbackSession,
@@ -2746,7 +2747,10 @@
           finish(new Error(`${process.name} stopped before its initial message could be sent.`));
           return;
         }
-        if (!agentCanReceiveFeedback(process)) {
+        const ready = settleInitialPrompt
+          ? agentCanReceiveFeedback(process)
+          : agentCanReceiveInitialTurn(process);
+        if (!ready) {
           if (readyTimer !== null) clearTimeout(readyTimer);
           readyTimer = null;
           return;
