@@ -114,6 +114,10 @@ mod unsupported {
 
     unsupported_command!(feedback_start(feedback_id: i64, project_id: i64, media_dir: String, shortcuts: Option<std::collections::HashMap<String, String>>) -> serde_json::Value);
     unsupported_command!(feedback_status() -> serde_json::Value);
+    unsupported_command!(feedback_audio_inputs() -> serde_json::Value);
+    unsupported_command!(feedback_toggle_pause(app: AppHandle) -> serde_json::Value);
+    unsupported_command!(feedback_toggle_mute(app: AppHandle) -> serde_json::Value);
+    unsupported_command!(feedback_set_input_device(device_id: String, app: AppHandle) -> serde_json::Value);
     unsupported_command!(feedback_raise_toolbar(app: AppHandle) -> bool);
     unsupported_command!(feedback_set_tool(tool: String, color: String, width: f32) -> serde_json::Value);
     unsupported_command!(feedback_record_stroke(stroke: serde_json::Value) -> serde_json::Value);

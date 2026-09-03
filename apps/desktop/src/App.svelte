@@ -2586,6 +2586,10 @@
       audio_samples: previous?.audio_samples ?? 0,
       sample_rate: previous?.sample_rate ?? 0,
       snapshot_count: previous?.snapshot_count ?? 0,
+      paused: false,
+      muted: previous?.muted ?? false,
+      input_device_id: previous?.input_device_id ?? '',
+      input_device_name: previous?.input_device_name ?? '',
       phase: 'transcribing',
       error: null
     };

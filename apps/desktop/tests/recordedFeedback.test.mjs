@@ -61,7 +61,7 @@ test('document editing helpers are immutable and reject invalid operations', () 
 test('recording shortcuts have unique session-scoped defaults', () => {
   const preferences = defaultHotkeyPreferences();
   const entries = Object.entries(recordingHotkeyBindings(preferences));
-  assert.equal(entries.length, 7);
+  assert.equal(entries.length, 9);
   assert.equal(new Set(entries.map(([, value]) => value)).size, entries.length);
   assert.ok(!entries.some(([, value]) => /Shift\+(?:Digit)?[34]$/.test(value)),
     'defaults must not take over the macOS screenshot shortcuts');
@@ -153,6 +153,13 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(native, /pub\(crate\) fn feedback_abort/);
   assert.match(native, /panel\.to_window\(\)/);
   assert.match(native, /pub\(crate\) fn feedback_raise_toolbar/);
+  assert.match(native, /pub\(crate\) fn feedback_audio_inputs/);
+  assert.match(native, /pub\(crate\) fn feedback_toggle_pause/);
+  assert.match(native, /pub\(crate\) fn feedback_toggle_mute/);
+  assert.match(native, /pub\(crate\) fn feedback_set_input_device/);
+  assert.match(native, /controls\.paused\.load\(Ordering::Acquire\)/);
+  assert.match(native, /let muted = controls\.muted\.load\(Ordering::Acquire\)/);
+  assert.match(native, /elapsed_without_pauses/);
   assert.match(daemon, /\.join\(format!\("r\{\}", feedback\.revision\)\)/);
   assert.match(daemon, /scratchpad_packet_content/);
   assert.match(daemon, /remove_abandoned_packet_builds/);
@@ -164,6 +171,11 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(toolbar, /snapshot_count/);
   assert.match(toolbar, /Screenshot saved/);
   assert.match(toolbar, /invoke\('feedback_raise_toolbar'\)/);
+  assert.match(toolbar, /invoke<NativeFeedbackSession>\('feedback_toggle_pause'\)/);
+  assert.match(toolbar, /invoke<NativeFeedbackSession>\('feedback_toggle_mute'\)/);
+  assert.match(toolbar, /invoke<NativeFeedbackSession>\('feedback_set_input_device'/);
+  assert.match(toolbar, /aria-label="Microphone input"/);
+  assert.match(toolbar, /session\?\.paused \? 'Resume feedback' : 'Pause feedback'/);
   assert.match(overlay, /feedback:\/\/snapshot/);
   assert.match(overlay, /capture-flash/);
   assert.doesNotMatch(overlay, /clearRect\(region\.x/);

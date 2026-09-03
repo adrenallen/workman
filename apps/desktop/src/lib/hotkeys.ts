@@ -71,6 +71,8 @@ export const recordingHotkeyActions = [
   'feedback-toggle-annotation',
   'feedback-undo',
   'feedback-clear',
+  'feedback-toggle-pause',
+  'feedback-toggle-mute',
   'feedback-finish'
 ] as const;
 
@@ -279,6 +281,18 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
     group: 'feedback'
   },
   {
+    id: 'feedback-toggle-pause',
+    label: 'Pause or resume feedback',
+    description: 'Pause or resume the feedback timeline and microphone',
+    group: 'feedback'
+  },
+  {
+    id: 'feedback-toggle-mute',
+    label: 'Mute or unmute microphone',
+    description: 'Toggle microphone audio while the feedback timeline continues',
+    group: 'feedback'
+  },
+  {
     id: 'feedback-finish',
     label: 'Stop feedback',
     description: 'Stop recording and begin local transcription',
@@ -420,6 +434,8 @@ const defaultPreferences: HotkeyPreferences = Object.fromEntries([
   ['feedback-toggle-annotation', { ...primaryChord('KeyA'), shift: true }],
   ['feedback-undo', { ...primaryChord('KeyU'), shift: true }],
   ['feedback-clear', { ...primaryChord('Backspace'), shift: true }],
+  ['feedback-toggle-pause', { ...primaryChord('Space'), shift: true }],
+  ['feedback-toggle-mute', { ...primaryChord('KeyM'), shift: true }],
   ['feedback-finish', { ...primaryChord('Enter'), shift: true }],
   ...projectHotkeyActions.map((action, index) => [action, primaryChord(`Digit${index + 1}`)]),
   ['new-agent', primaryChord('KeyN')],

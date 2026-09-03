@@ -11,6 +11,8 @@ export type NativeRecordingAction =
   | 'toggleAnnotation'
   | 'undo'
   | 'clear'
+  | 'togglePause'
+  | 'toggleMute'
   | 'finish';
 
 const actionMap: Record<NativeRecordingAction, RecordingHotkeyAction> = {
@@ -20,6 +22,8 @@ const actionMap: Record<NativeRecordingAction, RecordingHotkeyAction> = {
   toggleAnnotation: 'feedback-toggle-annotation',
   undo: 'feedback-undo',
   clear: 'feedback-clear',
+  togglePause: 'feedback-toggle-pause',
+  toggleMute: 'feedback-toggle-mute',
   finish: 'feedback-finish'
 };
 

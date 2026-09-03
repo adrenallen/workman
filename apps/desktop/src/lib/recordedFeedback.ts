@@ -96,8 +96,23 @@ export interface NativeFeedbackSession {
   audio_samples: number;
   sample_rate: number;
   snapshot_count: number;
+  paused: boolean;
+  muted: boolean;
+  input_device_id: string;
+  input_device_name: string;
   phase: 'recording' | 'stopping' | 'transcribing' | 'finished' | 'failed';
   error: string | null;
+}
+
+export interface NativeFeedbackAudioInput {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+export interface NativeFeedbackAudioInputs {
+  devices: NativeFeedbackAudioInput[];
+  selected_id: string;
 }
 
 export interface NativeFeedbackSnapshot {

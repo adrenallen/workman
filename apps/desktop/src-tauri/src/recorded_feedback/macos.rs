@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -55,6 +55,8 @@ const DEFAULT_SHORTCUTS: &[(&str, &str)] = &[
     ("toggleAnnotation", "CommandOrControl+Shift+A"),
     ("undo", "CommandOrControl+Shift+Z"),
     ("clear", "CommandOrControl+Shift+Backspace"),
+    ("togglePause", "CommandOrControl+Shift+Space"),
+    ("toggleMute", "CommandOrControl+Shift+M"),
     ("finish", "CommandOrControl+Shift+Return"),
 ];
 
@@ -81,6 +83,7 @@ impl FeedbackState {
             .ok()
             .and_then(|mut active| active.take());
         let Some(session) = session else { return };
+        let duration_ms = session_elapsed_ms(&session);
         unregister_shortcuts(app, &session.registered_shortcuts);
         close_feedback_panels(app);
         drop(session.stream);
@@ -90,7 +93,8 @@ impl FeedbackState {
             &json!({
                 "event": "interrupted", "reason": "desktop_exit",
                 "samples": session.audio_samples.load(Ordering::Relaxed),
-                "sample_rate": session.sample_rate, "at": now_millis()
+                "sample_rate": session.sample_rate,
+                "duration_ms": duration_ms, "at": now_millis()
             }),
         );
     }
@@ -101,12 +105,17 @@ struct FeedbackSession {
     project_id: i64,
     media_dir: PathBuf,
     started: Instant,
+    paused_at: Option<Instant>,
+    paused_duration: Duration,
     started_at_ms: i64,
     sample_rate: u32,
     audio_samples: Arc<AtomicU64>,
     audio_path: PathBuf,
     writer: SharedWriter,
     stream: Stream,
+    audio_controls: Arc<AudioControls>,
+    input_device_id: String,
+    input_device_name: String,
     snapshot_count: usize,
     annotations: Vec<AnnotationStroke>,
     tool: AnnotationTool,
@@ -115,6 +124,27 @@ struct FeedbackSession {
     registered_shortcuts: Vec<String>,
     display_ids: Vec<u32>,
     capture_in_progress: bool,
+}
+
+#[derive(Default)]
+struct AudioControls {
+    paused: AtomicBool,
+    muted: AtomicBool,
+    reset_clock: AtomicBool,
+}
+
+struct StartedAudio {
+    stream: Stream,
+    writer: SharedWriter,
+    sample_rate: u32,
+    samples: Arc<AtomicU64>,
+    controls: Arc<AudioControls>,
+    input: AudioInputView,
+}
+
+struct AudioInputCandidate {
+    device: cpal::Device,
+    view: AudioInputView,
 }
 
 #[derive(Debug)]
@@ -167,8 +197,25 @@ pub(crate) struct SessionView {
     audio_samples: u64,
     sample_rate: u32,
     snapshot_count: usize,
+    paused: bool,
+    muted: bool,
+    input_device_id: String,
+    input_device_name: String,
     phase: &'static str,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AudioInputView {
+    id: String,
+    name: String,
+    is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AudioInputsView {
+    devices: Vec<AudioInputView>,
+    selected_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -324,16 +371,15 @@ pub(crate) fn feedback_start(
     }
     let media_dir = validate_media_dir(feedback_id, &media_dir)?;
     let audio_path = media_dir.join("audio.wav");
-    let (stream, writer, sample_rate, audio_samples) =
-        start_audio(&app, feedback_id, project_id, &audio_path)?;
+    let audio = start_audio(&app, feedback_id, project_id, &audio_path)?;
     let registered_shortcuts = register_shortcuts(&app, shortcuts)?;
     let display_ids = match create_feedback_panels(&app) {
         Ok(display_ids) => display_ids,
         Err(error) => {
             unregister_shortcuts(&app, &registered_shortcuts);
             close_feedback_panels(&app);
-            drop(stream);
-            finalize_writer(&writer)?;
+            drop(audio.stream);
+            finalize_writer(&audio.writer)?;
             return Err(error);
         }
     };
@@ -342,12 +388,17 @@ pub(crate) fn feedback_start(
         project_id,
         media_dir,
         started: Instant::now(),
+        paused_at: None,
+        paused_duration: Duration::ZERO,
         started_at_ms: now_millis(),
-        sample_rate,
-        audio_samples,
+        sample_rate: audio.sample_rate,
+        audio_samples: audio.samples,
         audio_path,
-        writer,
-        stream,
+        writer: audio.writer,
+        stream: audio.stream,
+        audio_controls: audio.controls,
+        input_device_id: audio.input.id,
+        input_device_name: audio.input.name,
         snapshot_count: 0,
         annotations: Vec::new(),
         tool: AnnotationTool::Pointer,
@@ -375,6 +426,182 @@ pub(crate) fn feedback_status(
     Ok(active
         .as_ref()
         .map(|session| session_view(session, "recording", None)))
+}
+
+#[tauri::command]
+pub(crate) fn feedback_audio_inputs(
+    state: State<'_, FeedbackState>,
+) -> Result<AudioInputsView, String> {
+    let selected_id = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?
+        .as_ref()
+        .ok_or("No feedback recording is active.")?
+        .input_device_id
+        .clone();
+    let devices = audio_input_candidates()?
+        .into_iter()
+        .map(|candidate| candidate.view)
+        .collect();
+    Ok(AudioInputsView {
+        devices,
+        selected_id,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn feedback_toggle_pause(
+    app: AppHandle,
+    state: State<'_, FeedbackState>,
+) -> Result<SessionView, String> {
+    let mut active = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?;
+    let session = active.as_mut().ok_or("No feedback recording is active.")?;
+    if session.capture_in_progress {
+        return Err("Wait for the current snapshot to finish saving.".into());
+    }
+    let now = Instant::now();
+    let paused = if let Some(paused_at) = session.paused_at.take() {
+        session.paused_duration += now.saturating_duration_since(paused_at);
+        session
+            .audio_controls
+            .reset_clock
+            .store(true, Ordering::Release);
+        session
+            .audio_controls
+            .paused
+            .store(false, Ordering::Release);
+        false
+    } else {
+        session.audio_controls.paused.store(true, Ordering::Release);
+        session
+            .audio_controls
+            .reset_clock
+            .store(true, Ordering::Release);
+        session.paused_at = Some(now);
+        true
+    };
+    let view = session_view(session, "recording", None);
+    let _ = append_journal(
+        &session.media_dir.join("events.jsonl"),
+        &json!({
+            "event": if paused { "paused" } else { "resumed" },
+            "elapsed_ms": view.elapsed_ms,
+            "samples": view.audio_samples,
+            "at": now_millis()
+        }),
+    );
+    drop(active);
+    let _ = app.emit(EVENT_STATUS, &view);
+    Ok(view)
+}
+
+#[tauri::command]
+pub(crate) fn feedback_toggle_mute(
+    app: AppHandle,
+    state: State<'_, FeedbackState>,
+) -> Result<SessionView, String> {
+    let active = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?;
+    let session = active.as_ref().ok_or("No feedback recording is active.")?;
+    let muted = !session.audio_controls.muted.load(Ordering::Acquire);
+    session.audio_controls.muted.store(muted, Ordering::Release);
+    let view = session_view(session, "recording", None);
+    let _ = append_journal(
+        &session.media_dir.join("events.jsonl"),
+        &json!({
+            "event": if muted { "microphone_muted" } else { "microphone_unmuted" },
+            "elapsed_ms": view.elapsed_ms,
+            "samples": view.audio_samples,
+            "at": now_millis()
+        }),
+    );
+    drop(active);
+    let _ = app.emit(EVENT_STATUS, &view);
+    Ok(view)
+}
+
+#[tauri::command]
+pub(crate) fn feedback_set_input_device(
+    device_id: String,
+    app: AppHandle,
+    state: State<'_, FeedbackState>,
+) -> Result<SessionView, String> {
+    let input = resolve_audio_input(Some(&device_id), true)?;
+    let mut active = state
+        .session
+        .lock()
+        .map_err(|_| "feedback state is unavailable")?;
+    let session = active.as_mut().ok_or("No feedback recording is active.")?;
+    if session.input_device_id == input.view.id {
+        return Ok(session_view(session, "recording", None));
+    }
+
+    let was_paused = session.paused_at.is_some();
+    let switch_started = Instant::now();
+    session.audio_controls.paused.store(true, Ordering::Release);
+    session
+        .audio_controls
+        .reset_clock
+        .store(true, Ordering::Release);
+    let stream = match create_audio_stream(
+        &app,
+        session.feedback_id,
+        session.project_id,
+        &input.device,
+        session.sample_rate,
+        session.writer.clone(),
+        session.audio_samples.clone(),
+        session.audio_controls.clone(),
+    ) {
+        Ok(stream) => stream,
+        Err(error) => {
+            session
+                .audio_controls
+                .reset_clock
+                .store(true, Ordering::Release);
+            session
+                .audio_controls
+                .paused
+                .store(was_paused, Ordering::Release);
+            return Err(error);
+        }
+    };
+    let previous_stream = std::mem::replace(&mut session.stream, stream);
+    drop(previous_stream);
+    if !was_paused {
+        session.paused_duration += switch_started.elapsed();
+        session
+            .audio_controls
+            .reset_clock
+            .store(true, Ordering::Release);
+        session
+            .audio_controls
+            .paused
+            .store(false, Ordering::Release);
+    }
+    session.input_device_id = input.view.id;
+    session.input_device_name = input.view.name;
+    let view = session_view(session, "recording", None);
+    let _ = append_journal(
+        &session.media_dir.join("events.jsonl"),
+        &json!({
+            "event": "input_device_changed",
+            "input_device_id": session.input_device_id,
+            "input_device_name": session.input_device_name,
+            "elapsed_ms": view.elapsed_ms,
+            "samples": view.audio_samples,
+            "at": now_millis()
+        }),
+    );
+    drop(active);
+    let _ = app.emit(EVENT_STATUS, &view);
+    Ok(view)
 }
 
 #[tauri::command]
@@ -473,6 +700,9 @@ pub(crate) fn feedback_begin_region(
         .lock()
         .map_err(|_| "feedback state is unavailable")?;
     let session = active.as_ref().ok_or("No feedback recording is active.")?;
+    if session.paused_at.is_some() {
+        return Err("Resume feedback before selecting a snapshot region.".into());
+    }
     set_overlays_interactive(&app, true)?;
     let _ = app.emit(EVENT_REGION, json!({ "selecting": true }));
     Ok(session_view(session, "recording", None))
@@ -534,6 +764,9 @@ fn capture_snapshot(
             .lock()
             .map_err(|_| "feedback state is unavailable")?;
         let session = active.as_mut().ok_or("No feedback recording is active.")?;
+        if session.paused_at.is_some() {
+            return Err("Resume feedback before taking a snapshot.".into());
+        }
         if session.capture_in_progress {
             return Err("A snapshot is already being saved.".into());
         }
@@ -545,7 +778,7 @@ fn capture_snapshot(
             display_ids: session.display_ids.clone(),
             annotations: session.annotations.clone(),
             ordinal: session.snapshot_count as i64,
-            anchor_ms: session.started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            anchor_ms: session_elapsed_ms(session),
             anchor_samples: session.audio_samples.load(Ordering::Relaxed) as i64,
             invoked_at_ms: now_millis(),
         }
@@ -743,6 +976,7 @@ pub(crate) fn feedback_abort(
     }
     let session = active.take().expect("active session checked above");
     drop(active);
+    let duration_ms = session_elapsed_ms(&session);
     unregister_shortcuts(&app, &session.registered_shortcuts);
     close_feedback_panels(&app);
     drop(session.stream);
@@ -752,7 +986,8 @@ pub(crate) fn feedback_abort(
         &json!({
             "event": "interrupted", "reason": "native_error",
             "samples": session.audio_samples.load(Ordering::Relaxed),
-            "sample_rate": session.sample_rate, "at": now_millis()
+            "sample_rate": session.sample_rate,
+            "duration_ms": duration_ms, "at": now_millis()
         }),
     );
     finalize_result.map(|_| true)
@@ -773,7 +1008,7 @@ pub(crate) fn feedback_finish(
     }
     let session = active.take().expect("active session checked above");
     drop(active);
-    let duration_ms = session.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let duration_ms = session_elapsed_ms(&session);
     unregister_shortcuts(&app, &session.registered_shortcuts);
     close_feedback_panels(&app);
     drop(session.stream);
@@ -846,17 +1081,13 @@ fn start_audio(
     feedback_id: i64,
     project_id: i64,
     path: &Path,
-) -> Result<(Stream, SharedWriter, u32, Arc<AtomicU64>), String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or("No microphone is available.")?;
-    let supported = device
+) -> Result<StartedAudio, String> {
+    let input = resolve_audio_input(None, false)?;
+    let supported = input
+        .device
         .default_input_config()
         .map_err(|error| format!("Could not open the microphone: {error}"))?;
-    let channels = supported.channels() as usize;
     let sample_rate = supported.sample_rate();
-    let config: StreamConfig = supported.into();
     let writer = Arc::new(Mutex::new(Some(
         WavWriter::create(
             path,
@@ -870,6 +1101,81 @@ fn start_audio(
         .map_err(|error| error.to_string())?,
     )));
     let samples = Arc::new(AtomicU64::new(0));
+    let controls = Arc::new(AudioControls::default());
+    let stream = create_audio_stream_with_config(
+        app,
+        feedback_id,
+        project_id,
+        &input.device,
+        supported,
+        writer.clone(),
+        samples.clone(),
+        controls.clone(),
+    )?;
+    Ok(StartedAudio {
+        stream,
+        writer,
+        sample_rate,
+        samples,
+        controls,
+        input: input.view,
+    })
+}
+
+fn create_audio_stream(
+    app: &AppHandle,
+    feedback_id: i64,
+    project_id: i64,
+    device: &cpal::Device,
+    sample_rate: u32,
+    writer: SharedWriter,
+    samples: Arc<AtomicU64>,
+    controls: Arc<AudioControls>,
+) -> Result<Stream, String> {
+    let supported = device
+        .supported_input_configs()
+        .map_err(|error| format!("Could not inspect that microphone: {error}"))?
+        .filter_map(|range| range.try_with_sample_rate(sample_rate))
+        .max_by_key(|config| {
+            let format_rank = match config.sample_format() {
+                SampleFormat::F32 => 3,
+                SampleFormat::I16 => 2,
+                SampleFormat::U16 => 1,
+                _ => 0,
+            };
+            (format_rank, config.channels())
+        })
+        .ok_or_else(|| {
+            let name = device
+                .description()
+                .map(|description| description.name().to_owned())
+                .unwrap_or_else(|_| "That microphone".into());
+            format!("{name} does not support this recording's sample rate ({sample_rate} Hz).")
+        })?;
+    create_audio_stream_with_config(
+        app,
+        feedback_id,
+        project_id,
+        device,
+        supported,
+        writer,
+        samples,
+        controls,
+    )
+}
+
+fn create_audio_stream_with_config(
+    app: &AppHandle,
+    feedback_id: i64,
+    project_id: i64,
+    device: &cpal::Device,
+    supported: cpal::SupportedStreamConfig,
+    writer: SharedWriter,
+    samples: Arc<AtomicU64>,
+    controls: Arc<AudioControls>,
+) -> Result<Stream, String> {
+    let channels = supported.channels() as usize;
+    let config: StreamConfig = supported.into();
     let error_app = app.clone();
     let error_handler = move |error| {
         let _ = error_app.emit(
@@ -888,6 +1194,7 @@ fn start_audio(
             channels,
             writer.clone(),
             samples.clone(),
+            controls.clone(),
             error_handler,
             |value| value,
         ),
@@ -897,6 +1204,7 @@ fn start_audio(
             channels,
             writer.clone(),
             samples.clone(),
+            controls.clone(),
             error_handler,
             |value| value as f32 / i16::MAX as f32,
         ),
@@ -906,6 +1214,7 @@ fn start_audio(
             channels,
             writer.clone(),
             samples.clone(),
+            controls.clone(),
             error_handler,
             |value| value as f32 / u16::MAX as f32 * 2.0 - 1.0,
         ),
@@ -914,7 +1223,7 @@ fn start_audio(
     stream
         .play()
         .map_err(|error| format!("Could not start the microphone: {error}"))?;
-    Ok((stream, writer, sample_rate, samples))
+    Ok(stream)
 }
 
 fn build_stream<T>(
@@ -923,6 +1232,7 @@ fn build_stream<T>(
     channels: usize,
     writer: SharedWriter,
     samples: Arc<AtomicU64>,
+    controls: Arc<AudioControls>,
     error_handler: impl FnMut(cpal::Error) + Send + 'static,
     convert: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<Stream, String>
@@ -936,7 +1246,15 @@ where
             *config,
             move |data: &[T], _| {
                 let now = Instant::now();
+                if controls.reset_clock.swap(false, Ordering::AcqRel) {
+                    last_callback = None;
+                }
+                if controls.paused.load(Ordering::Acquire) {
+                    last_callback = Some(now);
+                    return;
+                }
                 let frames = data.len() / channels.max(1);
+                let muted = controls.muted.load(Ordering::Acquire);
                 if let Ok(mut guard) = writer.lock()
                     && let Some(writer) = guard.as_mut()
                 {
@@ -952,8 +1270,11 @@ where
                         }
                     }
                     for frame in data.chunks(channels.max(1)) {
-                        let mono =
-                            frame.iter().copied().map(&convert).sum::<f32>() / frame.len() as f32;
+                        let mono = if muted {
+                            0.0
+                        } else {
+                            frame.iter().copied().map(&convert).sum::<f32>() / frame.len() as f32
+                        };
                         let _ = writer.write_sample(mono.clamp(-1.0, 1.0));
                     }
                     samples.fetch_add(frames as u64, Ordering::Relaxed);
@@ -964,6 +1285,63 @@ where
             None,
         )
         .map_err(|error| format!("Could not create the microphone stream: {error}"))
+}
+
+fn audio_input_candidates() -> Result<Vec<AudioInputCandidate>, String> {
+    let host = cpal::default_host();
+    let default_device = host.default_input_device();
+    let devices = host
+        .input_devices()
+        .map_err(|error| format!("Could not list microphones: {error}"))?;
+    let mut candidates = Vec::new();
+    for (index, device) in devices.enumerate() {
+        let name = device
+            .description()
+            .map(|description| description.name().to_owned())
+            .unwrap_or_else(|_| format!("Microphone {}", index + 1));
+        let id = device
+            .id()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|_| format!("unavailable-{index}"));
+        let is_default = default_device
+            .as_ref()
+            .is_some_and(|default| default == &device);
+        candidates.push(AudioInputCandidate {
+            device,
+            view: AudioInputView {
+                id,
+                name,
+                is_default,
+            },
+        });
+    }
+    if candidates.is_empty() {
+        return Err("No microphone is available.".into());
+    }
+    Ok(candidates)
+}
+
+fn resolve_audio_input(
+    requested_id: Option<&str>,
+    require_requested: bool,
+) -> Result<AudioInputCandidate, String> {
+    let mut candidates = audio_input_candidates()?;
+    let requested = requested_id.and_then(|id| {
+        candidates
+            .iter()
+            .position(|candidate| candidate.view.id == id)
+    });
+    if requested_id.is_some() && requested.is_none() && require_requested {
+        return Err("That microphone is no longer available.".into());
+    }
+    let index = requested
+        .or_else(|| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.view.is_default)
+        })
+        .unwrap_or(0);
+    Ok(candidates.remove(index))
 }
 
 fn finalize_writer(writer: &SharedWriter) -> Result<(), String> {
@@ -1035,7 +1413,7 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
     let position_x = primary.x().map_err(|error| error.to_string())? as f64;
     let position_y = primary.y().map_err(|error| error.to_string())? as f64;
     let monitor_width = primary.width().map_err(|error| error.to_string())? as f64;
-    let width = 860.0_f64.min((monitor_width - 32.0).max(640.0));
+    let width = 960.0_f64.min((monitor_width - 32.0).max(720.0));
     let x = position_x + ((monitor_width - width) / 2.0).max(16.0);
     let y = position_y + 28.0;
     let toolbar = PanelBuilder::<_, FeedbackPanel>::new(app, "feedback-toolbar")
@@ -1498,13 +1876,34 @@ fn session_view(
         feedback_id: session.feedback_id,
         project_id: session.project_id,
         started_at_ms: session.started_at_ms,
-        elapsed_ms: session.started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        elapsed_ms: session_elapsed_ms(session),
         audio_samples: session.audio_samples.load(Ordering::Relaxed),
         sample_rate: session.sample_rate,
         snapshot_count: session.snapshot_count,
+        paused: session.paused_at.is_some(),
+        muted: session.audio_controls.muted.load(Ordering::Acquire),
+        input_device_id: session.input_device_id.clone(),
+        input_device_name: session.input_device_name.clone(),
         phase,
         error,
     }
+}
+
+fn session_elapsed_ms(session: &FeedbackSession) -> i64 {
+    let current_pause = session
+        .paused_at
+        .map(|paused_at| paused_at.elapsed())
+        .unwrap_or(Duration::ZERO);
+    elapsed_without_pauses(
+        session.started.elapsed(),
+        session.paused_duration + current_pause,
+    )
+    .as_millis()
+    .min(i64::MAX as u128) as i64
+}
+
+fn elapsed_without_pauses(wall_time: Duration, paused_time: Duration) -> Duration {
+    wall_time.saturating_sub(paused_time)
 }
 
 fn now_millis() -> i64 {
@@ -1518,6 +1917,18 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_time_is_removed_from_the_feedback_timeline() {
+        assert_eq!(
+            elapsed_without_pauses(Duration::from_secs(14), Duration::from_secs(5)),
+            Duration::from_secs(9)
+        );
+        assert_eq!(
+            elapsed_without_pauses(Duration::from_secs(3), Duration::from_secs(5)),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn retina_region_maps_to_physical_pixels() {
