@@ -73,7 +73,7 @@
               {:else if preflight.screen_capture_authorized}
                 Allowed, but Workman could not find an active display. Connect a display, then check again.
               {:else}
-                macOS still reports this running copy as blocked. If Workman is already enabled, toggle it off and on, then fully quit and reopen Workman.
+                macOS is still blocking this exact Workman app. If an older Workman entry is enabled, remove it, add the current app again, then fully quit and reopen Workman.
               {/if}
             </small>
           </div>

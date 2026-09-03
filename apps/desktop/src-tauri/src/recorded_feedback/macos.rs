@@ -255,7 +255,7 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     let message = if !microphone_available {
         Some("No microphone is available. Connect or enable one, then retry.".into())
     } else if !screen_capture_authorized {
-        Some("macOS has not granted Screen Recording access to this running copy of Workman. Enable it in System Settings, then fully quit and reopen Workman.".into())
+        Some("macOS is blocking this exact Workman app. Remove any older Workman entry from Screen Recording, add the current app again, then fully quit and reopen Workman.".into())
     } else if !display_available {
         Some("Screen Recording is allowed, but Workman could not find an active display. Connect a display, then check again.".into())
     } else if !model_installed {

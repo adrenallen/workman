@@ -79,6 +79,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(preflight, /showCloseButton=\{false\}/);
   assert.match(preflight, /screen_capture_authorized/);
   assert.match(native, /let screen_capture_authorized = CGPreflightScreenCaptureAccess\(\)/);
+  assert.match(preflight, /remove it, add the current app again/);
   assert.match(native, /let display_available = Monitor::all\(\)/);
   assert.match(app, /&& feedbackPreflightOpen\s+&& !feedbackPreflight\?\.screen_capture_available/);
   assert.match(detail, /onSendAgent/);
@@ -110,6 +111,10 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(release, /com\.apple\.security\.device\.audio-input/);
   assert.match(devInstall, /Developer ID Application/);
   assert.match(devInstall, /codesign --force --deep --timestamp=none --options runtime/);
+  const signSource = devInstall.indexOf('--entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$source_app"');
+  const copySource = devInstall.indexOf('ditto "$source_app" "$app_stage"');
+  assert.ok(signSource >= 0 && copySource > signSource,
+    'the indexed source app must have the stable identity before it is copied');
 });
 
 test('recorded feedback is platform-gated and its sidebar section is optional', async () => {

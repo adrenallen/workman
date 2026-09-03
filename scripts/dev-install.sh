@@ -111,6 +111,13 @@ if [[ "$source_identifier" != com.workman.dev ]]; then
   exit 1
 fi
 
+# Tauri's --no-sign bundle is indexed by macOS before it is copied into ~/Applications.
+# Give that source bundle the final stable identity first so Screen Recording never sees two
+# Workman Dev apps with the same bundle id but incompatible code requirements.
+codesign --force --deep --timestamp=none --options runtime --sign "$signing_identity" \
+  --entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$source_app"
+codesign --verify --deep --strict "$source_app"
+
 mkdir -p "$install_dir" "$bin_dir" "$(dirname "$app_path")"
 for program in wrk-dev workmand-dev; do
   case "$program" in
@@ -161,8 +168,6 @@ if [[ "$copied_identifier" != com.workman.dev ]]; then
   printf 'workman dev: staged app has unexpected bundle id %s\n' "$copied_identifier" >&2
   exit 1
 fi
-codesign --force --deep --timestamp=none --options runtime --sign "$signing_identity" \
-  --entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$app_stage"
 codesign --verify --deep --strict "$app_stage"
 if [[ "$signing_identity" == - ]]; then
   printf '  ! No Apple signing identity was found; macOS privacy access may need to be granted again after each rebuild.\n'
