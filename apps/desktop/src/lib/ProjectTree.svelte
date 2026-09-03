@@ -82,6 +82,7 @@
     todos: TodoSummary[];
     scratchpads: ScratchpadSummary[];
     feedback: RecordedFeedbackSummary[];
+    showFeedback: boolean;
     drafts: CreationDraft[];
     selection: ProjectTreeSelection | null;
     multiSelection: ProjectTreeMultiSelection | null;
@@ -124,6 +125,7 @@
     todos,
     scratchpads,
     feedback,
+    showFeedback,
     drafts,
     selection,
     multiSelection,
@@ -243,6 +245,7 @@
   let visibleFeedback = $derived(feedback
     .filter((item) => matchesQuery(item.title))
     .sort((left, right) => Number(left.archived) - Number(right.archived) || right.updated_at - left.updated_at));
+  let visibleGroupOrder = $derived(groupOrder.filter((group) => group !== 'feedback' || showFeedback));
   let projectCounts = $derived($liveStats.counts[project.id]);
 
   onMount(() => {
@@ -343,8 +346,8 @@
   }
 
   function moveGroupFromKeyboard(id: number, direction: ReorderDirection): void {
-    const index = groupOrder.findIndex((group) => groupId[group] === id);
-    const target = groupOrder[index + direction];
+    const index = visibleGroupOrder.findIndex((group) => groupId[group] === id);
+    const target = visibleGroupOrder[index + direction];
     if (!target) return;
     handleGroupDrop({
       sourceId: id,
@@ -779,7 +782,7 @@
   </header>
 
   <div class="tree-groups" aria-label="Project items" role="tree" tabindex="-1" onkeydown={handleTreeKeys}>
-    {#each groupOrder as group}
+    {#each visibleGroupOrder as group}
       {@const GroupIcon = groupIcon[group]}
       <section class="tree-group" class:closed={!openGroups[group]}>
         <div class="group-header" use:reorderItem={groupReorderOptions(group)}>

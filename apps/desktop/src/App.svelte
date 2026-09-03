@@ -167,6 +167,12 @@
     type CreationHotkeyAction
   } from './lib/hotkeys';
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
+  import {
+    recordedFeedbackCapability,
+    recordedFeedbackSupported,
+    refreshRecordedFeedbackCapability,
+    showRecordedFeedbackSection
+  } from './lib/recordedFeedbackAvailability';
   import { liveStats } from './lib/liveStats';
   import {
     beginOptimisticNavigation,
@@ -762,8 +768,16 @@
     void seedFlatProjectOrder();
   });
 
+  $effect(() => {
+    const capability = $recordedFeedbackCapability;
+    if (!capability.checked || capability.supported) return;
+    feedbackPreflightOpen = false;
+    if (selection?.kind === 'feedback') clearSelection();
+  });
+
   onMount(() => {
     justUpdatedVersion = localStorage.getItem('workman.just-updated-to');
+    void refreshRecordedFeedbackCapability();
     void invoke<{ supported: boolean; app_bundle: string | null }>('desktop_relaunch_capability')
       .then((capability) => {
         nativeRelaunchAvailable = capability.supported;
@@ -1179,6 +1193,7 @@
     if (action === 'unfocus-terminal' && !terminalTarget) return false;
     if (action === 'search-terminal' && (!terminalTarget || terminalView === null)) return false;
     if ((recordingHotkeyActions as readonly string[]).includes(action)) return false;
+    if (action === 'start-feedback' && !$recordedFeedbackSupported) return false;
 
     event.preventDefault();
     event.stopPropagation();
@@ -1845,6 +1860,11 @@
   async function resolveNavigationRequest(request: AppNavigationRequest): Promise<void> {
     try {
       const target = request.target;
+      if (
+        target.type === 'item'
+        && target.selection.kind === 'feedback'
+        && !$recordedFeedbackSupported
+      ) return;
       const projectId = navigationProjectId(target);
       const switchingProjects = projectId !== null && selectedProject?.id !== projectId;
       if (projectId !== null && !activateProject(projectId)) return;
@@ -2316,6 +2336,7 @@
 
   async function selectTreeItem(next: ProjectTreeSelection): Promise<void> {
     if (!selectedProject || next.projectId !== selectedProject.id) return;
+    if (next.kind === 'feedback' && !$recordedFeedbackSupported) return;
     treeMultiSelection = null;
     todoCommentFocusId = next.kind === 'todo' && pendingTodoCommentFocus?.todoId === next.id
       ? pendingTodoCommentFocus.commentId
@@ -2414,7 +2435,7 @@
   }
 
   async function openFeedbackPreflight(): Promise<void> {
-    if (!selectedProject) return;
+    if (!selectedProject || !$recordedFeedbackSupported) return;
     feedbackPreflightOpen = true;
     feedbackPreflightError = null;
     feedbackPreflightLoading = true;
@@ -6015,6 +6036,7 @@
         todos={coordination?.todos ?? []}
         scratchpads={coordination?.scratchpads ?? []}
         feedback={feedbackSummaries}
+        showFeedback={$showRecordedFeedbackSection}
         drafts={creationDrafts.filter((draft) => draft.projectId === selectedProject.id)}
         {selection}
         multiSelection={treeMultiSelection}
@@ -6401,6 +6423,7 @@
     currentProjectId={selectedProject?.id ?? null}
     {agentTools}
     {keepAwakeSupported}
+    feedbackSupported={$recordedFeedbackSupported}
     recentKeys={quickJumpRecentKeys}
     loading={quickJumpLoading}
     onChoose={chooseQuickJumpTarget}

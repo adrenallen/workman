@@ -20,6 +20,7 @@
   import {
     primaryModifierLabel as mod
   } from '../primaryModifier';
+  import { recordedFeedbackSupported } from '../recordedFeedbackAvailability';
 
   let recording = $state<HotkeyAction | null>(null);
   let message = $state('');
@@ -187,7 +188,7 @@
     <small>Escape cancels · Delete clears</small>
   </div>
 
-  {#each groups as group (group.id)}
+  {#each groups.filter((group) => group.id !== 'feedback' || $recordedFeedbackSupported) as group (group.id)}
     <section class="group" aria-labelledby={`${group.id}-hotkeys-title`}>
       <div class="group-heading">
         <div>

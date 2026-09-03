@@ -111,3 +111,33 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(devInstall, /Developer ID Application/);
   assert.match(devInstall, /codesign --force --deep --timestamp=none --options runtime/);
 });
+
+test('recorded feedback is platform-gated and its sidebar section is optional', async () => {
+  const [app, native, availability, tree, quickJump, sidebar, hotkeys] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src-tauri/src/recorded_feedback.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/recordedFeedbackAvailability.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/QuickJumpPalette.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/settings/SidebarCard.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/settings/HotkeysCard.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(native, /pub\(crate\) fn feedback_capability\(\)/);
+  assert.match(native, /supported: cfg!\(target_os = "macos"\)/);
+  assert.match(availability, /workman\.feedback\.preferences\.v1/);
+  assert.match(availability, /capability\.supported && preferences\.showInSidebar/);
+  assert.match(tree, /group !== 'feedback' \|\| showFeedback/);
+  assert.match(quickJump, /if \(feedbackSupported\) \{/);
+  assert.match(sidebar, /id="feedback-sidebar-visible"/);
+  assert.match(sidebar, /Hiding it keeps existing recordings and hotkeys available/);
+  assert.match(hotkeys, /group\.id !== 'feedback' \|\| \$recordedFeedbackSupported/);
+  assert.match(app, /void refreshRecordedFeedbackCapability\(\)/);
+  assert.match(app, /if \(selection\?\.kind === 'feedback'\) clearSelection\(\)/);
+  assert.match(app, /next\.kind === 'feedback' && !\$recordedFeedbackSupported/);
+  const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
+  const supportGuard = app.indexOf("action === 'start-feedback' && !$recordedFeedbackSupported", shortcutHandler);
+  const preventDefault = app.indexOf('event.preventDefault()', shortcutHandler);
+  assert.ok(supportGuard > shortcutHandler && supportGuard < preventDefault,
+    'unsupported feedback launch shortcuts must not be swallowed');
+});

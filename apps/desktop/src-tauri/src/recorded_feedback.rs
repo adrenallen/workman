@@ -3,6 +3,21 @@
 use std::{fs, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub(crate) struct FeedbackCapability {
+    supported: bool,
+    platform: &'static str,
+}
+
+#[tauri::command]
+pub(crate) fn feedback_capability() -> FeedbackCapability {
+    FeedbackCapability {
+        supported: cfg!(target_os = "macos"),
+        platform: std::env::consts::OS,
+    }
+}
 
 #[tauri::command]
 pub(crate) fn feedback_read_image(feedback_id: i64, path: String) -> Result<String, String> {

@@ -1,9 +1,17 @@
 <script lang="ts">
+  import Mic2Icon from '@lucide/svelte/icons/mic-2';
   import { onMount } from 'svelte';
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
+  import { Switch } from '$lib/components/ui/switch';
 
   import { loadPanelPreference, type PanelPreference } from '../panelPreferences';
   import { hotkeyDisplayLabel, hotkeyPreferences } from '../hotkeys';
+  import {
+    platformDisplayName,
+    recordedFeedbackCapability,
+    recordedFeedbackPreferences,
+    setRecordedFeedbackSidebarVisible
+  } from '../recordedFeedbackAvailability';
 
   const projectFallback = { collapsed: false, width: 238 };
   const treeFallback = { collapsed: false, width: 280 };
@@ -46,13 +54,49 @@
     </div>
   </div>
 
+  <div class="feature-row">
+    <span class="feature-icon" aria-hidden="true"><Mic2Icon size={16} /></span>
+    <label for="feedback-sidebar-visible">
+      <strong>Feedback section</strong>
+      <small>
+        {#if !$recordedFeedbackCapability.checked}
+          Checking platform support…
+        {:else if !$recordedFeedbackCapability.supported}
+          Recorded Feedback is unavailable on {platformDisplayName($recordedFeedbackCapability.platform)} in this release.
+        {:else}
+          Show Recorded Feedback in each project sidebar. Hiding it keeps existing recordings and hotkeys available.
+        {/if}
+      </small>
+    </label>
+    <div class="feature-control">
+      <Switch
+        id="feedback-sidebar-visible"
+        size="sm"
+        checked={$recordedFeedbackCapability.supported && $recordedFeedbackPreferences.showInSidebar}
+        disabled={!$recordedFeedbackCapability.checked || !$recordedFeedbackCapability.supported}
+        onCheckedChange={(checked) => setRecordedFeedbackSidebarVisible(checked === true)}
+      />
+      <output>
+        {#if !$recordedFeedbackCapability.checked}
+          Checking
+        {:else if !$recordedFeedbackCapability.supported}
+          Unavailable
+        {:else if $recordedFeedbackPreferences.showInSidebar}
+          Shown
+        {:else}
+          Hidden
+        {/if}
+      </output>
+    </div>
+  </div>
+
   <div class="guidance">
     <span aria-hidden="true">↔</span>
     <p><strong>Resize directly in the workspace</strong><small>Drag either rail edge, or focus its resize handle and use the arrow keys. Changes are saved automatically.</small></p>
   </div>
 
   <footer>
-    <span>More sidebar display options will live here as they become available.</span>
+    <span>Sidebar display preferences are saved locally and never remove project data.</span>
   </footer>
 </section>
 
@@ -80,6 +124,15 @@
   .rail-preview i:last-child { flex: 1; background: transparent; }
   .rail-preview.tree i:first-child { width: 5px; }
   .rail-preview.tree i:nth-child(2) { width: 15px; background: color-mix(in srgb, var(--signal) 18%, var(--surface)); }
+
+  .feature-row { display: grid; min-height: 64px; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 11px; border-top: 1px solid var(--border); padding: 8px 12px; }
+  .feature-icon { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--border); border-radius: 3px; background: var(--night); color: var(--muted); }
+  .feature-row label { min-width: 0; }
+  .feature-row strong, .feature-row small { display: block; }
+  .feature-row strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 660; }
+  .feature-row small { margin-top: 3px; color: var(--muted); font-size: var(--font-size-xs); line-height: 1.4; }
+  .feature-control { display: grid; justify-items: end; gap: 5px; }
+  .feature-control output { min-width: 64px; }
 
   .guidance { display: grid; grid-template-columns: 29px minmax(0, 1fr); align-items: center; gap: 9px; border-top: 1px solid var(--border); padding: 9px 12px; background: color-mix(in srgb, var(--night) 68%, var(--surface)); }
   .guidance > span { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--border); border-radius: 3px; color: var(--signal); font-size: 13px; }
