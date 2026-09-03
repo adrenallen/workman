@@ -378,6 +378,19 @@ pub(crate) fn feedback_status(
 }
 
 #[tauri::command]
+pub(crate) fn feedback_raise_toolbar(app: AppHandle) -> Result<(), String> {
+    let toolbar = app
+        .get_webview_panel("feedback-toolbar")
+        .map_err(|error| format!("{error:?}"))?;
+    // Reassert after the toolbar webview has mounted. Ordering the panel during construction can
+    // be too early for AppKit when Workman is not the active application.
+    toolbar.set_level(PanelLevel::Custom(1001).value());
+    toolbar.show();
+    toolbar.order_front_regardless();
+    Ok(())
+}
+
+#[tauri::command]
 pub(crate) fn feedback_set_tool(
     tool: AnnotationTool,
     color: String,

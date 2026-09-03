@@ -70,8 +70,12 @@
     for (const snapshot of feedback.snapshots) {
       if (!images[snapshot.id]) void loadImage(feedback.id, snapshot.id, snapshot.image_path);
     }
-    if (!selectedAgentId || !eligibleAgents.some((agent) => agent.id === selectedAgentId)) {
-      selectedAgentId = eligibleAgents[0]?.id ?? null;
+  });
+
+  $effect(() => {
+    const available = eligibleAgents;
+    if (!selectedAgentId || !available.some((agent) => agent.id === selectedAgentId)) {
+      selectedAgentId = available[0]?.id ?? null;
     }
   });
 
@@ -201,7 +205,7 @@
 {/if}
 
 <style>
-  .feedback-detail { display: grid; width: min(980px, 100%); min-height: 100%; margin: 0 auto; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--background); color: var(--foreground); }
+  .feedback-detail { display: grid; width: min(980px, 100%); height: 100%; min-height: 0; margin: 0 auto; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--background); color: var(--foreground); }
   header { border-bottom: 1px solid var(--border); padding: 18px 22px 13px; }
   .title-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
   .title-row input { min-width: 0; border: 0; border-bottom: 1px solid transparent; outline: 0; padding: 2px 0; background: transparent; color: var(--foreground); font-size: 20px; font-weight: 720; }
@@ -212,7 +216,7 @@
   .duration, .metadata { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .metadata { display: flex; gap: 9px; margin: 7px 0 0 20px; }
   .metadata span + span::before { margin-right: 9px; content: '·'; }
-  .document { overflow: auto; min-height: 0; padding: 18px 22px 90px; }
+  .document { overflow: auto; min-height: 0; padding: 18px 22px max(32px, env(safe-area-inset-bottom)); }
   .block { position: relative; margin: 0 auto 12px; border: 1px solid transparent; border-radius: 6px; padding: 8px 40px 8px 8px; }
   .block:hover, .block:focus-within { border-color: var(--border); background: color-mix(in srgb, var(--card) 75%, transparent); }
   .block-tools { position: absolute; top: 7px; right: 6px; display: grid; opacity: 0; }
@@ -234,7 +238,7 @@
   .recording-card { border-color: rgb(255 77 94 / 35%); }
   .failed-card { border-color: color-mix(in srgb, var(--destructive) 40%, var(--border)); }
   :global(.spin) { animation: spin 1s linear infinite; }
-  footer { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; border-top: 1px solid var(--border); padding: 10px 14px; background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(12px); }
+  footer { position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; border-top: 1px solid var(--border); padding: 10px 14px max(10px, env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(12px); }
   .manage-actions, .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
   .send-actions select { max-width: 210px; height: 32px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 7px; background: var(--background); color: var(--foreground); font-size: var(--font-size-xs); }
   :global(.delete) { color: var(--destructive); }

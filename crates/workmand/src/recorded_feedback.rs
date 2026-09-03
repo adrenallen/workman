@@ -133,6 +133,8 @@ struct DeliverAgentParams {
     project_id: ProjectId,
     feedback_id: RecordedFeedbackId,
     process_id: i64,
+    #[serde(default)]
+    direct_input: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -489,14 +491,20 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
         ));
     }
     let packet = compile_packet(data_dir, &feedback)?;
-    let prompt = format!(
-        "Review and act on the recorded feedback packet at {}. Read feedback.md in order; its images directory contains the referenced screenshots.",
-        packet.markdown_path.display()
-    );
-    let sent = registry.submit_input(params.process_id, prompt.as_bytes());
-    let (delivery_status, error_message) = match sent {
-        Ok(_) => ("queued", None),
-        Err(error) => ("failed", Some(error.to_string())),
+    let (delivery_status, error_message) = if params.direct_input {
+        // The desktop will paste the ordered transcript and image blocks into the validated live
+        // agent immediately after this response. Keep the immutable packet as the durable audit
+        // copy, while describing PTY image import honestly as unverified.
+        ("unverified", None)
+    } else {
+        let prompt = format!(
+            "Review and act on the recorded feedback packet at {}. Read feedback.md in order; its images directory contains the referenced screenshots.",
+            packet.markdown_path.display()
+        );
+        match registry.submit_input(params.process_id, prompt.as_bytes()) {
+            Ok(_) => ("queued", None),
+            Err(error) => ("failed", Some(error.to_string())),
+        }
     };
     let delivery = RecordedFeedbackService::new(registry.store())
         .record_delivery(
@@ -515,7 +523,11 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
     if let Some(error) = error_message {
         return Err(("feedback_delivery_failed", error));
     }
-    Ok(json!({ "delivery": delivery, "process": status }))
+    Ok(json!({
+        "delivery": delivery,
+        "process": status,
+        "packet_path": packet.markdown_path
+    }))
 }
 
 fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> ControlResult {

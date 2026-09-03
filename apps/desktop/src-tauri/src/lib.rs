@@ -1414,6 +1414,7 @@ pub fn run() {
             recorded_feedback::feedback_install_model,
             recorded_feedback::feedback_start,
             recorded_feedback::feedback_status,
+            recorded_feedback::feedback_raise_toolbar,
             recorded_feedback::feedback_set_tool,
             recorded_feedback::feedback_record_stroke,
             recorded_feedback::feedback_undo,

@@ -136,13 +136,27 @@
   function paint(): void {
     if (!context || !canvas) return;
     context.clearRect(0, 0, window.innerWidth, window.innerHeight);
-    if (selecting) {
-      context.fillStyle = 'rgb(4 6 10 / 0.16)';
-      context.fillRect(0, 0, window.innerWidth, window.innerHeight);
-    }
     for (const stroke of strokes) drawStroke(stroke);
     if (draft) drawStroke(draft);
-    if (selecting && selectionStart && selectionEnd) drawSelection(selectionStart, selectionEnd);
+    if (selecting) {
+      drawSelectionMask(selectionStart && selectionEnd
+        ? normalizedRegion(selectionStart, selectionEnd)
+        : null);
+      if (selectionStart && selectionEnd) drawSelection(selectionStart, selectionEnd);
+    }
+  }
+
+  function drawSelectionMask(region: ReturnType<typeof normalizedRegion> | null): void {
+    if (!context) return;
+    context.fillStyle = 'rgb(4 6 10 / 0.22)';
+    if (!region) {
+      context.fillRect(0, 0, window.innerWidth, window.innerHeight);
+      return;
+    }
+    context.fillRect(0, 0, window.innerWidth, region.y);
+    context.fillRect(0, region.y + region.height, window.innerWidth, window.innerHeight - region.y - region.height);
+    context.fillRect(0, region.y, region.x, region.height);
+    context.fillRect(region.x + region.width, region.y, window.innerWidth - region.x - region.width, region.height);
   }
 
   function drawStroke(stroke: Stroke): void {
@@ -189,7 +203,6 @@
   function drawSelection(start: Point, end: Point): void {
     if (!context) return;
     const region = normalizedRegion(start, end);
-    context.clearRect(region.x, region.y, region.width, region.height);
     context.save();
     context.strokeStyle = '#ffffff';
     context.lineWidth = 1;

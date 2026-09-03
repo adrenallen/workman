@@ -44,6 +44,7 @@
   let captureConfirmed = $state(false);
   let ticker: ReturnType<typeof setInterval> | null = null;
   let captureConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
+  let raiseTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
     try {
@@ -52,6 +53,8 @@
     } catch {
       // The split button still works when webview storage is unavailable.
     }
+    void raiseToolbar();
+    raiseTimer = setTimeout(() => void raiseToolbar(), 120);
     void refreshStatus();
     ticker = setInterval(refreshStatus, 500);
     const unlisteners = Promise.all([
@@ -65,6 +68,7 @@
     return () => {
       if (ticker) clearInterval(ticker);
       if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
+      if (raiseTimer) clearTimeout(raiseTimer);
       void unlisteners.then((values) => values.forEach((unlisten) => unlisten()));
     };
   });
@@ -75,6 +79,13 @@
       if (next) session = next;
     } catch {
       // A closing toolbar can race the final status request.
+    }
+  }
+
+  async function raiseToolbar(): Promise<void> {
+    try { await invoke('feedback_raise_toolbar'); }
+    catch {
+      // Construction and teardown can briefly race this best-effort AppKit ordering pass.
     }
   }
 

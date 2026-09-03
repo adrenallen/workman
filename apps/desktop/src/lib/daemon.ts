@@ -710,12 +710,14 @@ export class DaemonClient
   recordedFeedbackDeliverAgent(
     projectId: number,
     feedbackId: number,
-    processId: number
+    processId: number,
+    directInput = false
   ): Promise<{ delivery: unknown; process: ProcessView }> {
     return this.request('recorded_feedback.deliver_agent', {
       project_id: projectId,
       feedback_id: feedbackId,
-      process_id: processId
+      process_id: processId,
+      direct_input: directInput
     });
   }
 

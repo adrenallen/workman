@@ -168,6 +168,10 @@
   } from './lib/hotkeys';
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
   import {
+    deliverFeedbackAgentInput,
+    feedbackAgentInputSteps
+  } from './lib/recordedFeedbackAgentDelivery';
+  import {
     recordedFeedbackCapability,
     recordedFeedbackSupported,
     refreshRecordedFeedbackCapability,
@@ -599,6 +603,21 @@
     ...visibleProcesses.filter((process) => process.kind === 'terminal'),
     ...visibleProcesses.filter((process) => process.kind === 'command')
   ]);
+  let feedbackTargetProcesses = $derived.by(() => {
+    const projectId = selectedProject?.id;
+    if (projectId === undefined) return [];
+    const byId = new Map<number, ProcessView>();
+    for (const process of navigationIndex[projectId]?.processes ?? []) {
+      if (process.kind === 'agent') byId.set(process.id, process);
+    }
+    for (const process of profileProcesses) {
+      if (process.project_id === projectId && process.kind === 'agent') byId.set(process.id, process);
+    }
+    for (const process of treeProcesses) {
+      if (process.kind === 'agent') byId.set(process.id, process);
+    }
+    return [...byId.values()];
+  });
   let treeCycleSelections = $derived.by(() => {
     if (!selectedProject) return [];
     const projectId = selectedProject.id;
@@ -2382,7 +2401,9 @@
     } else if (next.kind === 'scratchpad') {
       await loadScratchpad(next.id);
     } else if (next.kind === 'feedback') {
-      await loadFeedback(next.id);
+      // Feedback can be opened from cached navigation state before the periodic process stream
+      // publishes. Fetch targets alongside the document so Send to agent is immediately usable.
+      await Promise.all([loadFeedback(next.id), refreshProcesses(next.projectId)]);
     }
   }
 
@@ -2629,8 +2650,30 @@
   }
 
   async function sendSelectedFeedbackToAgent(processId: number): Promise<void> {
-    if (!selectedProject || selection?.kind !== 'feedback') return;
-    await client.recordedFeedbackDeliverAgent(selectedProject.id, selection.id, processId);
+    if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
+    const feedback = feedbackDetail;
+    if (!feedbackTargetProcesses.some((process) => process.id === processId)) {
+      throw new Error('That agent is no longer available in this project.');
+    }
+    // Validate the live target and retain an immutable packet before touching its composer. The
+    // actual turn is assembled below from transcript text and real clipboard-image pastes.
+    await client.recordedFeedbackDeliverAgent(selectedProject.id, selection.id, processId, true);
+    await deliverFeedbackAgentInput(feedbackAgentInputSteps(feedback), {
+      send: (data) => client.sendInput(processId, data),
+      writeImageToClipboard: async (path) => {
+        const image = await invoke<{ bytes: number[]; mime_type: string }>(
+          'terminal_read_attachment_image',
+          { path }
+        );
+        await invoke('terminal_write_clipboard_image', {
+          bytes: image.bytes,
+          mimeType: image.mime_type
+        });
+      },
+      // Codex and Claude import clipboard images asynchronously. Keep each image on the
+      // pasteboard until its Ctrl+V has been consumed before moving to the next snapshot.
+      waitForImageImport: () => new Promise((resolve) => setTimeout(resolve, 500))
+    });
     await loadFeedback(selection.id, false);
   }
 
@@ -6317,7 +6360,7 @@
             feedback={feedbackDetail}
             loading={detailLoading}
             busy={detailBusy}
-            processes={treeProcesses}
+            processes={feedbackTargetProcesses}
             onSave={saveSelectedFeedback}
             onSendAgent={sendSelectedFeedbackToAgent}
             onSendNewAgent={sendSelectedFeedbackToNewAgent}
