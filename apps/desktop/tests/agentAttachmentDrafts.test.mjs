@@ -1,12 +1,74 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+  agentDraftImageToken,
+  agentDraftPromptInputSteps,
   attachmentName,
   attachImagePaths,
   handleNativePromptDrop,
-  isPlatformAbsolutePath
+  insertAgentDraftImageTokens,
+  isPlatformAbsolutePath,
+  removeAgentDraftAttachment
 } from '../src/lib/agentAttachmentDrafts.ts';
+
+test('pasted image tokens are inserted at the exact prompt selection', () => {
+  assert.deepEqual(insertAgentDraftImageTokens('move this button', 5, 9, 0, 2), {
+    prompt: 'move [Image 1] [Image 2] button',
+    caret: 24
+  });
+  assert.equal(agentDraftImageToken(2), '[Image 3]');
+});
+
+test('removing an image removes its token and renumbers later placeholders', () => {
+  assert.deepEqual(
+    removeAgentDraftAttachment(
+      'Before [Image 1] middle [Image 2] after',
+      ['/tmp/one.png', '/tmp/two.png'],
+      '/tmp/one.png'
+    ),
+    {
+      prompt: 'Before middle [Image 1] after',
+      attachments: ['/tmp/two.png']
+    }
+  );
+});
+
+test('prompt image tokens become real image steps in exact text order', () => {
+  assert.deepEqual(
+    agentDraftPromptInputSteps(
+      'Words before [Image 2] words between [Image 1] words after',
+      ['/tmp/one.png', '/tmp/two.png']
+    ),
+    [
+      { kind: 'text', text: 'Words before ' },
+      { kind: 'image', path: '/tmp/two.png' },
+      { kind: 'text', text: ' words between ' },
+      { kind: 'image', path: '/tmp/one.png' },
+      { kind: 'text', text: ' words after' }
+    ]
+  );
+  assert.deepEqual(agentDraftPromptInputSteps('Legacy prompt', ['/tmp/one.png']), [
+    { kind: 'text', text: 'Legacy prompt' },
+    { kind: 'text', text: '\n\n' },
+    { kind: 'image', path: '/tmp/one.png' }
+  ]);
+});
+
+test('new-agent creation defers tokenized prompts for real inline image delivery', async () => {
+  const [app, panel, spawning] = await Promise.all([
+    readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../../../crates/workmand/src/mcp/agent_spawning.rs', import.meta.url), 'utf8')
+  ]);
+  assert.match(panel, /agentDraftImageToken\(index\)/);
+  assert.match(panel, /insertAgentDraftImageTokens/);
+  assert.match(app, /feedbackId !== null \|\| Boolean\(submission\.input\.attachments\?\.length\)/);
+  assert.match(app, /agentDraftPromptInputSteps\(/);
+  assert.match(app, /result\.deferred_attachments \?\? \[\]/);
+  assert.match(spawning, /result\.deferred_attachments = deferred_attachments/);
+});
 
 test('native attachment paths filter extensions, dedupe, and respect the eight-item cap', () => {
   const current = ['/tmp/current.png'];

@@ -97,7 +97,9 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /Inherits \{inheritedLaunchOptions\.model/);
   assert.match(source, /lastWordBoundary = excerpt\.lastIndexOf\(' '\)/);
   assert.match(source, /agentOverridden \? 'Override' : 'Template default'/);
-  assert.match(source, /selectedTemplate \? 'Additional instructions' : 'Instructions'\} can be empty/);
+  assert.match(source, /Paste images to place them at the cursor/);
+  assert.match(source, /insertAgentDraftImageTokens/);
+  assert.match(source, /removeAgentDraftAttachment/);
   assert.match(source, /let templateInstructionsOpen = \$state\(false\)/);
   assert.match(source, /let templateAgentOpen = \$state\(false\)/);
   assert.match(source, /hotkeyPreferences\['submit-focused-form'\]/);

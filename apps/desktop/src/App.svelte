@@ -172,10 +172,9 @@
     type CreationHotkeyAction
   } from './lib/hotkeys';
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
-  import {
-    deliverFeedbackAgentInput,
-    feedbackAgentInputSteps
-  } from './lib/recordedFeedbackAgentDelivery';
+  import { deliverAgentInput, type AgentInputStep } from './lib/agentInputDelivery';
+  import { agentDraftPromptInputSteps } from './lib/agentAttachmentDrafts';
+  import { feedbackAgentInputSteps } from './lib/recordedFeedbackAgentDelivery';
   import {
     recordedFeedbackCapability,
     recordedFeedbackPreferences,
@@ -2673,34 +2672,47 @@
 
   async function deliverFeedbackToAgent(
     feedback: RecordedFeedback,
-    processId: number,
-    leadingPrompt = ''
+    processId: number
   ): Promise<void> {
     // Validate the live target and retain an immutable packet before touching its composer. The
     // actual turn is assembled below from transcript text and real clipboard-image pastes.
     await client.recordedFeedbackDeliverAgent(feedback.project_id, feedback.id, processId, true);
-    await deliverFeedbackAgentInput(
-      feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt, leadingPrompt),
-      {
-        send: (data) => client.sendInput(processId, data),
-        writeImageToClipboard: async (path) => {
-          const image = await invoke<{ bytes: number[]; mime_type: string }>(
-            'terminal_read_attachment_image',
-            { path }
-          );
-          await invoke('terminal_write_clipboard_image', {
-            bytes: image.bytes,
-            mimeType: image.mime_type
-          });
-        },
-        // Codex and Claude import clipboard images asynchronously. Keep each image on the
-        // pasteboard until its Ctrl+V has been consumed before moving to the next snapshot.
-        waitForImageImport: () => new Promise((resolve) => setTimeout(resolve, 500))
-      }
+    await deliverAgentSteps(
+      processId,
+      feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt)
     );
   }
 
-  function waitForFeedbackAgent(
+  async function deliverAgentSteps(processId: number, steps: AgentInputStep[]): Promise<void> {
+    await deliverAgentInput(steps, {
+      send: (data) => client.sendInput(processId, data),
+      writeImageToClipboard: async (path) => {
+        const image = await invoke<{ bytes: number[]; mime_type: string }>(
+          'terminal_read_attachment_image',
+          { path }
+        );
+        await invoke('terminal_write_clipboard_image', {
+          bytes: image.bytes,
+          mimeType: image.mime_type
+        });
+      },
+      // Codex and Claude import clipboard images asynchronously. Keep each image on the
+      // pasteboard until its Ctrl+V has been consumed before moving to the next image.
+      waitForImageImport: () => new Promise((resolve) => setTimeout(resolve, 500))
+    });
+  }
+
+  function appendAgentInputGroup(
+    target: AgentInputStep[],
+    addition: AgentInputStep[]
+  ): void {
+    if (target.length > 0 && addition.length > 0) {
+      target.push({ kind: 'text', text: '\n\n' });
+    }
+    target.push(...addition);
+  }
+
+  function waitForAgentInitialInput(
     processId: number,
     projectId: number,
     settleInitialPrompt: boolean
@@ -2722,8 +2734,11 @@
           candidate.id === processId && candidate.project_id === projectId
         );
         if (!process) return;
-        if (['stopped', 'exited', 'crashed'].includes(process.status) || process.agent_state.state === 'exited') {
-          finish(new Error(`${process.name} stopped before the feedback could be sent.`));
+        if (
+          ['stopped', 'exited', 'crashed'].includes(process.status)
+          || process.agent_state.state === 'exited'
+        ) {
+          finish(new Error(`${process.name} stopped before its initial message could be sent.`));
           return;
         }
         if (!agentCanReceiveFeedback(process)) {
@@ -2734,8 +2749,8 @@
         if (confirmed) {
           finish();
         } else if (readyTimer === null) {
-          // Let the daemon's initial template/prompt scheduler claim the first idle edge. Recheck
-          // after one status interval so feedback cannot race the agent's own starting prompt.
+          // Let a legacy daemon's prompt scheduler claim the first idle edge before we deliver
+          // feedback. New daemons return the full deferred turn, so their recheck is immediate.
           readyTimer = setTimeout(() => {
             readyTimer = null;
             void client.processes(projectId).then((current) => inspect(current, true)).catch((cause) => finish(
@@ -2749,26 +2764,44 @@
     });
   }
 
-  async function deliverFeedbackToSpawnedAgent(
+  async function deliverSpawnedAgentInitialTurn(
     projectId: number,
-    feedbackId: number,
+    feedbackId: number | null,
     result: SpawnAgentResult
   ): Promise<void> {
     try {
-      await waitForFeedbackAgent(
+      const legacyDaemon = result.deferred_initial_prompt === undefined;
+      if (legacyDaemon && feedbackId === null) return;
+      await waitForAgentInitialInput(
         result.process_id,
         projectId,
-        result.deferred_initial_prompt === undefined
+        legacyDaemon
       );
-      const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
-      await deliverFeedbackToAgent(
-        feedback,
-        result.process_id,
-        result.deferred_initial_prompt ?? ''
+      if (legacyDaemon && feedbackId !== null) {
+        const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
+        await deliverFeedbackToAgent(feedback, result.process_id);
+        if (selectedProject?.id === projectId) await refreshFeedback(projectId);
+        return;
+      }
+
+      const steps = agentDraftPromptInputSteps(
+        result.deferred_initial_prompt ?? '',
+        result.deferred_attachments ?? []
       );
-      if (selectedProject?.id === projectId) await refreshFeedback(projectId);
+      if (feedbackId !== null) {
+        const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
+        await client.recordedFeedbackDeliverAgent(projectId, feedbackId, result.process_id, true);
+        appendAgentInputGroup(
+          steps,
+          feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt)
+        );
+      }
+      await deliverAgentSteps(result.process_id, steps);
+      if (feedbackId !== null && selectedProject?.id === projectId) {
+        await refreshFeedback(projectId);
+      }
     } catch (cause) {
-      throw new Error(`The agent started, but its feedback could not be sent automatically: ${messageForCause(cause)}`);
+      throw new Error(`The agent started, but its initial message could not be sent automatically: ${messageForCause(cause)}`);
     }
   }
 
@@ -3339,9 +3372,10 @@
     submission: { input: SpawnAgentInput; tool: AgentTool; template: AgentTemplate | null }
   ): void {
     const feedbackId = draft.feedbackId;
-    const input = feedbackId === null
-      ? submission.input
-      : { ...submission.input, defer_initial_prompt: true };
+    const deferInitialPrompt = feedbackId !== null || Boolean(submission.input.attachments?.length);
+    const input = deferInitialPrompt
+      ? { ...submission.input, defer_initial_prompt: true }
+      : submission.input;
     if (spawnAgent(
       submission.tool,
       input,
@@ -3533,8 +3567,8 @@
       if (process && selectedProject?.id === project.id) {
         selection = projectTreeSelection('agent', process.id, process.project_id, process.name);
       }
-      if (feedbackId !== null) {
-        void deliverFeedbackToSpawnedAgent(project.id, feedbackId, result).catch(reportError);
+      if (input.defer_initial_prompt) {
+        void deliverSpawnedAgentInitialTurn(project.id, feedbackId, result).catch(reportError);
       }
     } catch (cause) {
       failPendingProcess(cause, optimisticId);

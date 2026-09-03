@@ -194,6 +194,7 @@ pub(crate) struct SpawnResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_instructions: Option<String>,
     deferred_initial_prompt: Option<String>,
+    deferred_attachments: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1146,26 +1147,43 @@ pub(crate) async fn spawn_registered_agent(
             }
         }
     };
-    let initial_prompt = compose_attachment_prompt(
-        &resolved.agent_tool_type,
-        resolved.initial_prompt,
-        &saved_attachments,
-    );
-    let initial_prompt = match initial_prompt {
-        Ok(prompt) => prompt,
-        Err(error) => {
-            return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
-        }
-    };
     if defer_initial_prompt {
-        result.deferred_initial_prompt = initial_prompt;
-    } else if let Some(prompt) = initial_prompt {
-        schedule_initial_prompt(
-            registry,
-            result.process_id,
-            prompt,
-            is_kimi_tool_type(&resolved.agent_tool_type),
+        let deferred_attachments = saved_attachments
+            .iter()
+            .map(|path| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "saved attachment path is not valid UTF-8".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let deferred_attachments = match deferred_attachments {
+            Ok(paths) => paths,
+            Err(error) => {
+                return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
+            }
+        };
+        result.deferred_initial_prompt = resolved.initial_prompt;
+        result.deferred_attachments = deferred_attachments;
+    } else {
+        let initial_prompt = compose_attachment_prompt(
+            &resolved.agent_tool_type,
+            resolved.initial_prompt,
+            &saved_attachments,
         );
+        let initial_prompt = match initial_prompt {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                return Err(close_spawn_after_failure(&registry, result.process_id, error).await);
+            }
+        };
+        if let Some(prompt) = initial_prompt {
+            schedule_initial_prompt(
+                registry,
+                result.process_id,
+                prompt,
+                is_kimi_tool_type(&resolved.agent_tool_type),
+            );
+        }
     }
     Ok(result)
 }
@@ -2123,6 +2141,7 @@ fn spawn(
         kind: running.kind,
         agent_instructions,
         deferred_initial_prompt: None,
+        deferred_attachments: Vec::new(),
     })
 }
 

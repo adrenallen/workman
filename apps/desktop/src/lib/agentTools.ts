@@ -104,6 +104,7 @@ export interface SpawnAgentResult {
   kind: 'agent';
   agent_instructions: string;
   deferred_initial_prompt?: string | null;
+  deferred_attachments?: string[];
 }
 
 export interface DeleteAgentToolResult {

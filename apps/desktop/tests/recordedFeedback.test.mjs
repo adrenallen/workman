@@ -234,13 +234,13 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.doesNotMatch(overlay, /clearRect\(region\.x/);
   assert.match(daemon, /const LEASE_MS: i64 = 15_000/);
   assert.match(app, /feedbackSummaries\.some\(\(feedback\)/);
-  assert.match(app, /feedbackAgentInputSteps\(feedback, \$recordedFeedbackPreferences\.agentPrompt, leadingPrompt\)/);
-  assert.match(app, /deliverFeedbackToSpawnedAgent/);
+  assert.match(app, /feedbackAgentInputSteps\(feedback, \$recordedFeedbackPreferences\.agentPrompt\)/);
+  assert.match(app, /deliverSpawnedAgentInitialTurn/);
   assert.match(app, /feedbackId: feedback\.id/);
   assert.match(app, /defer_initial_prompt: true/);
   assert.match(app, /result\.deferred_initial_prompt \?\? ''/);
   assert.match(control, /params\.defer_initial_prompt/);
-  assert.match(spawning, /result\.deferred_initial_prompt = initial_prompt/);
+  assert.match(spawning, /result\.deferred_initial_prompt = resolved\.initial_prompt/);
   assert.doesNotMatch(app, /Review and act on the recorded feedback packet/);
   assert.match(feedbackSettings, /Agent delivery prompt/);
   assert.match(feedbackSettings, /\{feedbackContentToken\}/);

@@ -537,8 +537,8 @@ struct SpawnAgentParams {
     /// Local image paths copied into daemon-owned per-process storage before prompt delivery.
     #[serde(default)]
     attachments: Vec<String>,
-    /// Return the fully composed prompt without scheduling it. Used by desktop feedback delivery
-    /// so text and native clipboard images can be submitted together as the first turn.
+    /// Return the composed prompt and saved attachments without scheduling them. The desktop uses
+    /// this to submit native clipboard images inline with text and recorded feedback in one turn.
     #[serde(default)]
     defer_initial_prompt: bool,
     /// Automatically accept narrowly recognized first-run trust dialogs.

@@ -10,9 +10,12 @@
 
   import AgentBrandMark from './AgentBrandMark.svelte';
   import {
+    agentDraftImageToken,
     attachmentName,
     attachImagePaths as selectAttachmentPaths,
     handleNativePromptDrop as resolveNativePromptDrop,
+    insertAgentDraftImageTokens,
+    removeAgentDraftAttachment,
     maxAgentDraftAttachments
   } from './agentAttachmentDrafts.ts';
   import {
@@ -59,6 +62,11 @@
     input: SpawnAgentInput;
     tool: AgentTool;
     template: AgentTemplate | null;
+  }
+
+  interface PromptSelection {
+    start: number;
+    end: number;
   }
 
   interface Props {
@@ -265,7 +273,17 @@
     });
   }
 
-  async function attachImages(files: File[]): Promise<void> {
+  function currentPromptSelection(): PromptSelection {
+    return {
+      start: promptTextarea?.selectionStart ?? draft.prompt.length,
+      end: promptTextarea?.selectionEnd ?? draft.prompt.length
+    };
+  }
+
+  async function attachImages(
+    files: File[],
+    insertion = currentPromptSelection()
+  ): Promise<void> {
     if (attachmentSaving) {
       onError('Image attachments are already being saved.');
       return;
@@ -289,7 +307,7 @@
         paths.push(path);
         previews[path] = URL.createObjectURL(image);
       }
-      commitAttachmentPaths(paths, previews);
+      commitAttachmentPaths(paths, previews, insertion);
     } catch (cause) {
       for (const preview of Object.values(previews)) URL.revokeObjectURL(preview);
       onError(`Could not attach image: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -298,7 +316,10 @@
     }
   }
 
-  async function importAttachmentPaths(paths: string[]): Promise<void> {
+  async function importAttachmentPaths(
+    paths: string[],
+    insertion = currentPromptSelection()
+  ): Promise<void> {
     if (attachmentSaving) {
       onError('Image attachments are already being saved.');
       return;
@@ -316,7 +337,7 @@
       for (const path of selection.added) {
         imported.push(await invoke<string>('terminal_import_draft_image', { path }));
       }
-      commitAttachmentPaths(imported);
+      commitAttachmentPaths(imported, {}, insertion);
       await loadAttachmentPreviews(imported, false);
     } catch (cause) {
       onError(`Could not attach image: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -327,7 +348,8 @@
 
   function commitAttachmentPaths(
     paths: string[],
-    previews: Record<string, string> = {}
+    previews: Record<string, string> = {},
+    insertion = currentPromptSelection()
   ): void {
     const current = draft.attachments;
     const available = Math.max(0, maxAgentDraftAttachments - current.length);
@@ -341,7 +363,23 @@
       ...attachmentPreviews,
       ...Object.fromEntries(Object.entries(previews).filter(([path]) => committedSet.has(path)))
     };
-    if (committed.length > 0) onChange({ attachments: [...current, ...committed] });
+    if (committed.length > 0) {
+      const nextPrompt = insertAgentDraftImageTokens(
+        draft.prompt,
+        insertion.start,
+        insertion.end,
+        current.length,
+        committed.length
+      );
+      onChange({
+        attachments: [...current, ...committed],
+        prompt: nextPrompt.prompt
+      });
+      requestAnimationFrame(() => {
+        promptTextarea?.focus();
+        promptTextarea?.setSelectionRange(nextPrompt.caret, nextPrompt.caret);
+      });
+    }
     if (committed.length < paths.length) {
       onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
     }
@@ -355,7 +393,7 @@
     if (images.length === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    void attachImages(images);
+    void attachImages(images, currentPromptSelection());
   }
 
   function handlePromptDrop(event: DragEvent): void {
@@ -364,7 +402,7 @@
     event.preventDefault();
     event.stopPropagation();
     attachmentDropActive = false;
-    void attachImages(files);
+    void attachImages(files, currentPromptSelection());
   }
 
   function handleNativePromptDrop(payload: DragDropEvent): void {
@@ -376,7 +414,7 @@
     );
     attachmentDropActive = result.dropActive;
     if (result.selection?.added.length) {
-      void importAttachmentPaths(result.selection.added);
+      void importAttachmentPaths(result.selection.added, currentPromptSelection());
     } else if (result.selection?.capReached) {
       onError(`A new-agent draft can have at most ${maxAgentDraftAttachments} image attachments.`);
     }
@@ -389,7 +427,7 @@
     attachmentPreviews = remainingPreviews;
     const { [path]: __, ...remainingFailures } = failedAttachmentPreviews;
     failedAttachmentPreviews = remainingFailures;
-    onChange({ attachments: draft.attachments.filter((candidate) => candidate !== path) });
+    onChange(removeAgentDraftAttachment(draft.prompt, draft.attachments, path));
   }
 
   function attachmentPreview(path: string): string {
@@ -423,8 +461,11 @@
     if (destroyed) return;
     attachmentPreviews = { ...attachmentPreviews, ...loaded };
     if (dead.length > 0) {
-      const deadSet = new Set(dead);
-      onChange({ attachments: draft.attachments.filter((path) => !deadSet.has(path)) });
+      const next = dead.reduce(
+        (current, path) => removeAgentDraftAttachment(current.prompt, current.attachments, path),
+        { prompt: draft.prompt, attachments: [...draft.attachments] }
+      );
+      onChange(next);
       onError(`Removed ${dead.length} missing or unreadable image attachment${dead.length === 1 ? '' : 's'} from this draft.`);
     }
   }
@@ -642,7 +683,7 @@
           bind:ref={promptTextarea}
           value={draft.prompt}
           placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
-          disabled={busy}
+          disabled={busy || attachmentSaving}
           oninput={(event) => onChange({ prompt: event.currentTarget.value })}
           onpaste={handlePromptPaste}
         />
@@ -659,7 +700,10 @@
                 {:else}
                   <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
                 {/if}
-                <span>{attachmentName(attachment)}</span>
+                <span class="attachment-copy">
+                  <strong>{agentDraftImageToken(index)}</strong>
+                  <small>{attachmentName(attachment)}</small>
+                </span>
                 <IconButton
                   class="size-6 rounded-sm"
                   label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
@@ -672,8 +716,8 @@
           </div>
         {/if}
         <div class="prompt-actions">
-          <small id={`draft-agent-create-help-${draft.id}`}>
-            {selectedTemplate ? 'Additional instructions' : 'Instructions'} can be empty · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
+          <small id={`draft-agent-create-help-${draft.id}`} aria-live="polite">
+            {attachmentSaving ? 'Saving image…' : 'Paste images to place them at the cursor'} · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
           </small>
           <Button
             type="submit"
@@ -839,7 +883,10 @@
   .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; border-top: 1px solid var(--border); padding: 8px 10px; }
   .attachment-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 5px 3px 3px; background: var(--muted); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 500; }
   .attachment-chip img { width: 28px; height: 28px; flex: 0 0 auto; border-radius: calc(var(--radius) - 2px); object-fit: cover; }
-  .attachment-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attachment-copy { display: grid; min-width: 0; line-height: 1.2; }
+  .attachment-copy strong, .attachment-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attachment-copy strong { color: var(--signal); font: 600 var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .attachment-copy small { color: var(--muted-foreground); font-size: 10px; }
   @media (max-width: 620px) {
     .advanced-grid, .launch-tuning-fields, .roster-options, .override-options { grid-template-columns: 1fr; }
     .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }

@@ -597,6 +597,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
             "agent_tool_id": tool_id,
             "name": "deferred-feedback-worker",
             "prompt": "Keep this additional instruction.",
+            "attachments": [source_icon],
             "defer_initial_prompt": true
         }),
     )
@@ -607,6 +608,13 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
         format!("{template_prompt}\n\nKeep this additional instruction.")
     );
     let deferred_process_id = deferred_spawn["result"]["process_id"].as_i64().unwrap();
+    let deferred_attachment =
+        data_dir.join(format!("agent-attachments/{deferred_process_id}/01.png"));
+    assert_eq!(
+        deferred_spawn["result"]["deferred_attachments"],
+        json!([deferred_attachment])
+    );
+    assert!(deferred_attachment.is_file());
     let deferred_deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let raw = registry
@@ -802,6 +810,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     )
     .await;
     assert_eq!(closed_deferred["result"]["status"], "stopped");
+    assert!(!deferred_attachment.parent().unwrap().exists());
     let closed_exiting = rpc(
         &mut socket,
         33,
