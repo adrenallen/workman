@@ -183,6 +183,13 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(release, /com\.apple\.security\.device\.audio-input/);
   assert.match(devInstall, /Developer ID Application/);
   assert.match(devInstall, /codesign --force --deep --timestamp=none --options runtime/);
+  assert.match(devInstall, /ensure_external_installer_shell/);
+  assert.match(devInstall, /terminate_processes app 'Workman Dev\.app'/);
+  assert.match(devInstall, /terminate_processes daemon 'the Workman Dev daemon and its sessions'/);
+  assert.match(devInstall, /tccutil reset ScreenCapture "\$bundle_id"/);
+  assert.match(devInstall, /tccutil reset Microphone "\$bundle_id"/);
+  assert.match(devInstall, /"\$lsregister" -f "\$app_path"/);
+  assert.match(devInstall, /"\$install_dir\/wrk-dev" app/);
   const signSource = devInstall.indexOf('--entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$source_app"');
   const copySource = devInstall.indexOf('ditto "$source_app" "$app_stage"');
   assert.ok(signSource >= 0 && copySource > signSource,

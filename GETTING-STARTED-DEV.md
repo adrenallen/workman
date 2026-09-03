@@ -13,6 +13,11 @@ The script builds the current checkout and installs three names that never repla
 - `workmand-dev` — development daemon, started automatically by `wrk-dev` or the app.
 - `~/Applications/Workman Dev.app` — bundle id `com.workman.dev`, with an amber `DEV` Dock badge.
 
+After a successful build, the installer stops the existing Dev app and daemon, replaces the
+binaries and app, registers that exact bundle with macOS, and reopens it. Run it from Terminal.app
+or another shell outside Workman Dev: stopping the daemon also stops the agents and terminals it
+hosts, and the installer refuses to terminate its own parent daemon.
+
 On macOS, the zero-flag defaults are:
 
 | Identity | CLI / daemon | Data and config | Desktop app |
@@ -37,4 +42,11 @@ identity. Stable `wrk update` continues to manage only the stable `wrk`/`workman
 
 The local installer accepts environment overrides for isolated testing or alternate locations:
 `WORKMAN_DEV_BIN_DIR`, `WORKMAN_DEV_INSTALL_DIR`, `WORKMAN_DEV_APP_PATH`, and
-`WORKMAN_DEV_BUILD_DIR`.
+`WORKMAN_DEV_BUILD_DIR`. Pass `--no-relaunch` (or set `WORKMAN_DEV_RELAUNCH=0`) to leave the app
+closed after installation.
+
+Screen Recording and Microphone access are preserved when the rebuilt app has the same stable
+code-signing requirement. The installer automatically resets both permissions when that identity
+changes or only ad hoc signing is available, so macOS can grant them to the newly installed app.
+Pass `--reset-permissions` to force that repair when System Settings and Workman disagree; the next
+feedback recording will ask for access again.
