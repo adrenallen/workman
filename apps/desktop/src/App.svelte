@@ -955,7 +955,18 @@
     }, 1000);
     const feedbackLeaseTimer = setInterval(() => {
       const session = activeFeedbackSession;
-      if (!active || !session || connection.status !== 'connected') return;
+      if (!active || connection.status !== 'connected') return;
+      if (!session) {
+        // A native crash clears the in-memory recorder but not its durable lease. Keep checking
+        // while cached UI still says it is active so the daemon can mark the expired run as
+        // interrupted without requiring a project switch or another relaunch.
+        if (
+          selectedProject
+          && feedbackSummaries.some((feedback) =>
+            feedback.status === 'recording' || feedback.status === 'transcribing')
+        ) void refreshFeedback(selectedProject.id);
+        return;
+      }
       void client.recordedFeedbackRenewLease(
         session.project_id,
         session.feedback_id,

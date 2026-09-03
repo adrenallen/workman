@@ -19,6 +19,8 @@
   let selecting = $state(false);
   let selectionStart = $state<Point | null>(null);
   let selectionEnd = $state<Point | null>(null);
+  let captureConfirmed = $state(false);
+  let captureConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
     resizeCanvas();
@@ -39,11 +41,15 @@
       listen<Stroke[]>('feedback://annotations', (event) => {
         strokes = event.payload.filter((stroke) => stroke.display_index === displayIndex);
         paint();
+      }),
+      listen<{ display_index: number }>('feedback://snapshot', (event) => {
+        if (event.payload.display_index === displayIndex) confirmCapture();
       })
     ]);
     return () => {
       window.removeEventListener('resize', resizeCanvas);
       window.removeEventListener('keydown', handleKeydown);
+      if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
       void unlisteners.then((values) => values.forEach((unlisten) => unlisten()));
     };
   });
@@ -217,6 +223,15 @@
   function messageFor(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
+
+  function confirmCapture(): void {
+    captureConfirmed = false;
+    if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
+    requestAnimationFrame(() => {
+      captureConfirmed = true;
+      captureConfirmationTimer = setTimeout(() => (captureConfirmed = false), 700);
+    });
+  }
 </script>
 
 <canvas
@@ -230,9 +245,19 @@
   onpointercancel={(event) => void pointerUp(event)}
 ></canvas>
 
+{#if captureConfirmed}
+  <div class="capture-flash" aria-hidden="true">
+    <span>✓ Screenshot saved</span>
+  </div>
+{/if}
+
 <style>
   :global(html), :global(body), :global(#app) { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent !important; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   canvas.drawing { cursor: crosshair; }
   canvas.selecting { cursor: cell; }
+  .capture-flash { position: fixed; inset: 0; box-sizing: border-box; display: grid; place-items: center; border: 5px solid rgb(255 255 255 / 88%); background: rgb(255 255 255 / 10%); pointer-events: none; animation: capture-flash 700ms ease-out both; }
+  .capture-flash span { border: 1px solid rgb(255 255 255 / 32%); border-radius: 999px; padding: 8px 13px; background: rgb(10 12 16 / 88%); box-shadow: 0 8px 28px rgb(0 0 0 / 36%); color: white; font: 700 12px/1.1 system-ui, sans-serif; }
+  @keyframes capture-flash { 0% { opacity: 0; } 12% { opacity: 1; } 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .capture-flash { animation-duration: 1ms; } }
 </style>

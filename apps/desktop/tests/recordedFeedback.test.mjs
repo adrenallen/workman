@@ -60,11 +60,12 @@ test('recording shortcuts have unique session-scoped defaults', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, toolbar, detail, native, capability, daemon, release, devInstall] = await Promise.all([
+  const [app, tree, preflight, toolbar, overlay, detail, native, capability, daemon, release, devInstall] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackToolbar.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
@@ -93,6 +94,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(native, /capture_in_progress/);
   assert.match(native, /"feedback_id": feedback_id, "project_id": project_id/);
   assert.match(native, /pub\(crate\) fn feedback_abort/);
+  assert.match(native, /panel\.to_window\(\)/);
   assert.match(daemon, /\.join\(format!\("r\{\}", feedback\.revision\)\)/);
   assert.match(daemon, /scratchpad_packet_content/);
   assert.match(daemon, /remove_abandoned_packet_builds/);
@@ -102,6 +104,11 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(toolbar, /> Snap region/);
   assert.match(toolbar, /Snap display/);
   assert.match(toolbar, /snapshot_count/);
+  assert.match(toolbar, /Screenshot saved/);
+  assert.match(overlay, /feedback:\/\/snapshot/);
+  assert.match(overlay, /capture-flash/);
+  assert.match(daemon, /const LEASE_MS: i64 = 15_000/);
+  assert.match(app, /feedbackSummaries\.some\(\(feedback\)/);
   assert.match(capability, /core:window:allow-start-dragging/);
   const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
   const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);

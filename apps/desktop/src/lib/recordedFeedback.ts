@@ -103,6 +103,7 @@ export interface NativeFeedbackSession {
 export interface NativeFeedbackSnapshot {
   feedback_id: number;
   project_id: number;
+  display_index: number;
   ordinal: number;
   anchor_ms: number;
   anchor_samples: number;

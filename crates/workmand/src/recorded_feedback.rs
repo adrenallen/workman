@@ -26,7 +26,9 @@ pub(crate) type ControlResult = Result<Value, (&'static str, String)>;
 
 const FEEDBACK_DIRECTORY: &str = "recorded-feedback";
 const PACKET_DIRECTORY: &str = "feedback-packets";
-const LEASE_MS: i64 = 60_000;
+// The desktop renews every five seconds. Three missed renewals distinguish a crashed recorder
+// from a brief daemon hiccup without leaving the sidebar stuck for a full minute.
+const LEASE_MS: i64 = 15_000;
 
 #[derive(Debug, Deserialize)]
 struct CreateParams {
@@ -197,6 +199,9 @@ fn list(params: Value, registry: &ProcessRegistry) -> ControlResult {
 
 fn get(params: Value, registry: &ProcessRegistry) -> ControlResult {
     let params: FeedbackParams = params_as(params)?;
+    RecordedFeedbackService::new(registry.store())
+        .fail_expired(params.project_id, now_millis())
+        .map_err(feedback_error)?;
     require_feedback(registry, params.project_id, params.feedback_id).map(json_value)
 }
 

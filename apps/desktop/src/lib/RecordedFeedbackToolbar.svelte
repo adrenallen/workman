@@ -1,6 +1,7 @@
 <script lang="ts">
   import ArrowUpRightIcon from '@lucide/svelte/icons/arrow-up-right';
   import CameraIcon from '@lucide/svelte/icons/camera';
+  import CheckIcon from '@lucide/svelte/icons/check';
   import CircleIcon from '@lucide/svelte/icons/circle';
   import EraserIcon from '@lucide/svelte/icons/eraser';
   import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical';
@@ -13,7 +14,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
 
-  import type { NativeFeedbackSession } from './recordedFeedback';
+  import type { NativeFeedbackSession, NativeFeedbackSnapshot } from './recordedFeedback';
 
   type Tool = 'pointer' | 'pen' | 'arrow' | 'rectangle' | 'ellipse';
   type SnapMode = 'region' | 'full';
@@ -40,7 +41,9 @@
   let selecting = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let captureConfirmed = $state(false);
   let ticker: ReturnType<typeof setInterval> | null = null;
+  let captureConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(() => {
     try {
@@ -55,11 +58,13 @@
       listen<NativeFeedbackSession>('feedback://status', (event) => (session = event.payload)),
       listen<string>('feedback://shortcut', (event) => void handleShortcut(event.payload)),
       listen<{ selecting: boolean }>('feedback://region', (event) => (selecting = event.payload.selecting)),
+      listen<NativeFeedbackSnapshot>('feedback://snapshot', (event) => confirmCapture(event.payload)),
       listen<{ message: string }>('feedback://error', (event) => (error = event.payload.message)),
       listen<{ message: string }>('feedback://ui-error', (event) => (error = event.payload.message))
     ]);
     return () => {
       if (ticker) clearInterval(ticker);
+      if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
       void unlisteners.then((values) => values.forEach((unlisten) => unlisten()));
     };
   });
@@ -156,6 +161,17 @@
     }
   }
 
+  function confirmCapture(snapshot: NativeFeedbackSnapshot): void {
+    if (session && snapshot.feedback_id !== session.feedback_id) return;
+    if (session) session = { ...session, snapshot_count: snapshot.ordinal + 1 };
+    captureConfirmed = false;
+    if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
+    requestAnimationFrame(() => {
+      captureConfirmed = true;
+      captureConfirmationTimer = setTimeout(() => (captureConfirmed = false), 1_250);
+    });
+  }
+
   async function handleShortcut(action: string): Promise<void> {
     if (action === 'snap') await snap(snapMode);
     else if (action === 'snapRegion') await snap('region');
@@ -176,7 +192,7 @@
   }
 </script>
 
-<div class="toolbar-shell" class:drawing={tool !== 'pointer'}>
+<div class="toolbar-shell" class:drawing={tool !== 'pointer'} class:capture-confirmed={captureConfirmed}>
   <button
     class="drag-handle"
     type="button"
@@ -239,7 +255,7 @@
       <button class="cancel-snap" type="button" disabled={busy} onclick={() => void cancelRegion()}>Cancel region</button>
     {:else}
       <button class="snap-main" type="button" disabled={busy} onclick={() => void snap('region')}>
-        <CameraIcon size={15} /> Snap region
+        {#if captureConfirmed}<CheckIcon size={15} /> Saved{:else}<CameraIcon size={15} /> Snap region{/if}
       </button>
       <button class="snap-display" type="button" disabled={busy} onclick={() => void snap('full')}>
         Snap display
@@ -249,6 +265,12 @@
   <button class="finish" type="button" disabled={busy} title="Stop recording and transcribe" onclick={() => void finish()}>Stop</button>
 </div>
 
+{#if captureConfirmed}
+  <div class="capture-confirmation" role="status" aria-live="polite">
+    <CheckIcon size={13} strokeWidth={2.5} /> Screenshot saved
+  </div>
+{/if}
+
 {#if error}
   <button class="error" type="button" onclick={() => (error = null)}>{error}</button>
 {/if}
@@ -257,6 +279,7 @@
   :global(html), :global(body), :global(#app) { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent !important; }
   .toolbar-shell { box-sizing: border-box; display: flex; width: 100%; height: 60px; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--border) 82%, white 8%); border-radius: 10px; padding: 8px 9px 8px 5px; background: color-mix(in srgb, var(--popover) 93%, transparent); box-shadow: 0 12px 32px rgb(0 0 0 / 38%); color: var(--foreground); user-select: none; backdrop-filter: blur(18px) saturate(1.15); }
   .toolbar-shell.drawing { border-color: color-mix(in srgb, var(--ring) 48%, var(--border)); }
+  .toolbar-shell.capture-confirmed { animation: capture-shell 520ms ease-out; }
   button { display: inline-grid; box-sizing: border-box; min-width: 32px; height: 32px; place-items: center; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted-foreground); cursor: pointer; }
   button:hover { border-color: var(--border); background: var(--muted); color: var(--foreground); }
   button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
@@ -286,5 +309,8 @@
   button.finish { min-width: 58px; padding: 0 10px; background: #ff4d5e; color: white; font-size: 12px; font-weight: 700; }
   button.finish:hover { border-color: #ff8892; background: #e63e4f; }
   .error { position: fixed; right: 8px; bottom: 4px; left: 8px; display: block; overflow: hidden; width: calc(100% - 16px); height: 22px; border-color: color-mix(in srgb, var(--destructive) 65%, var(--border)); background: var(--popover); color: var(--destructive); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  .capture-confirmation { position: fixed; top: 4px; left: 50%; z-index: 4; display: flex; height: 24px; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, #4ade80 58%, var(--border)); border-radius: 999px; padding: 0 9px; background: color-mix(in srgb, var(--popover) 94%, #4ade80 6%); box-shadow: 0 6px 18px rgb(0 0 0 / 28%); color: #4ade80; font-size: 10px; font-weight: 750; pointer-events: none; transform: translateX(-50%); animation: capture-toast 1.25s ease both; }
+  @keyframes capture-shell { 0% { border-color: #4ade80; box-shadow: 0 0 0 3px rgb(74 222 128 / 24%), 0 12px 32px rgb(0 0 0 / 38%); } 100% { border-color: color-mix(in srgb, var(--border) 82%, white 8%); box-shadow: 0 12px 32px rgb(0 0 0 / 38%); } }
+  @keyframes capture-toast { 0% { opacity: 0; transform: translate(-50%, -5px) scale(.94); } 14%, 72% { opacity: 1; transform: translate(-50%, 0) scale(1); } 100% { opacity: 0; transform: translate(-50%, -3px) scale(.98); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation-duration: 1ms !important; } }
 </style>

@@ -133,6 +133,7 @@ struct SnapshotCapture {
 #[derive(Debug)]
 struct CapturedSnapshot {
     capture: SnapshotCapture,
+    display_index: usize,
     completed_at_ms: i64,
     image_path: PathBuf,
     sha256: String,
@@ -174,6 +175,7 @@ pub(crate) struct SessionView {
 pub(crate) struct SnapshotView {
     feedback_id: i64,
     project_id: i64,
+    display_index: usize,
     ordinal: i64,
     anchor_ms: i64,
     anchor_samples: i64,
@@ -603,6 +605,7 @@ fn capture_snapshot_image(
     })?;
     Ok(CapturedSnapshot {
         capture,
+        display_index,
         completed_at_ms: now_millis(),
         image_path: path,
         sha256,
@@ -616,6 +619,7 @@ fn commit_snapshot(app: &AppHandle, captured: CapturedSnapshot) -> Result<Snapsh
         &captured.capture.media_dir.join("events.jsonl"),
         &json!({
             "event": "snapshot", "ordinal": captured.capture.ordinal,
+            "display_index": captured.display_index,
             "anchor_ms": captured.capture.anchor_ms,
             "anchor_samples": captured.capture.anchor_samples,
             "invoked_at_ms": captured.capture.invoked_at_ms,
@@ -648,6 +652,7 @@ fn commit_snapshot(app: &AppHandle, captured: CapturedSnapshot) -> Result<Snapsh
     let view = SnapshotView {
         feedback_id: captured.capture.feedback_id,
         project_id: captured.capture.project_id,
+        display_index: captured.display_index,
         ordinal: captured.capture.ordinal,
         anchor_ms: captured.capture.anchor_ms,
         anchor_samples: captured.capture.anchor_samples,
@@ -1058,9 +1063,23 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
 }
 
 fn close_feedback_panels(app: &AppHandle) {
-    for (_, window) in app.webview_windows() {
-        if window.label().starts_with("feedback-") {
-            let _ = window.destroy();
+    let labels = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| label.starts_with("feedback-"))
+        .collect::<Vec<_>>();
+    for label in labels {
+        // tauri-nspanel changes the native Objective-C class behind Tauri's window. Restore
+        // that class and unregister the panel before asking Tauri to close the webview;
+        // destroying the converted NSPanel directly can raise an Objective-C exception on the
+        // next event-loop turn and abort the entire app.
+        if let Ok(panel) = app.get_webview_panel(&label) {
+            panel.hide();
+            if let Some(window) = panel.to_window() {
+                let _ = window.close();
+            }
+        } else if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
         }
     }
 }
