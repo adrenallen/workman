@@ -18,6 +18,9 @@ Environment overrides:
   WORKMAN_DEV_INSTALL_DIR   Private binary directory (default: ~/.local/share/workman-dev)
   WORKMAN_DEV_APP_PATH      App destination (default: ~/Applications/Workman Dev.app)
   WORKMAN_DEV_BUILD_DIR     Cargo/Tauri target directory (default: target)
+  WORKMAN_DEV_SIGNING_IDENTITY
+                            macOS signing identity (default: first Apple Development
+                            or Developer ID Application identity; use - for ad hoc)
 EOF
 }
 
@@ -50,7 +53,7 @@ if [[ $(uname -s) != Darwin ]]; then
   printf 'workman dev: Workman Dev.app currently requires macOS\n' >&2
   exit 1
 fi
-for required in cargo npm ditto /usr/libexec/PlistBuddy; do
+for required in cargo npm ditto codesign security /usr/libexec/PlistBuddy; do
   if [[ "$required" == /* ]]; then
     [[ -x "$required" ]] || { printf 'workman dev: required tool not found: %s\n' "$required" >&2; exit 1; }
   elif ! command -v "$required" >/dev/null 2>&1; then
@@ -59,9 +62,22 @@ for required in cargo npm ditto /usr/libexec/PlistBuddy; do
   fi
 done
 
+signing_identity=${WORKMAN_DEV_SIGNING_IDENTITY:-}
+if [[ -z "$signing_identity" ]]; then
+  signing_identities=$(security find-identity -v -p codesigning 2>/dev/null || true)
+  signing_identity=$(sed -nE 's/^[[:space:]]*[0-9]+\) [[:xdigit:]]+ "(Apple Development: [^"]+)"$/\1/p' <<<"$signing_identities" | sed -n '1p')
+  if [[ -z "$signing_identity" ]]; then
+    signing_identity=$(sed -nE 's/^[[:space:]]*[0-9]+\) [[:xdigit:]]+ "(Developer ID Application: [^"]+)"$/\1/p' <<<"$signing_identities" | sed -n '1p')
+  fi
+fi
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=-
+fi
+
 printf '\n  Workman Dev · current-tree installer\n\n'
 printf '  Identity  wrk-dev · workmand-dev · Workman Dev.app\n'
 printf '  Bundle    com.workman.dev\n'
+printf '  Signing   %s\n' "$signing_identity"
 printf '  Source    %s\n\n' "$repo_root"
 
 printf '  ▸ Installing desktop dependencies\n'
@@ -144,6 +160,12 @@ copied_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
 if [[ "$copied_identifier" != com.workman.dev ]]; then
   printf 'workman dev: staged app has unexpected bundle id %s\n' "$copied_identifier" >&2
   exit 1
+fi
+codesign --force --deep --timestamp=none --options runtime --sign "$signing_identity" \
+  --entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$app_stage"
+codesign --verify --deep --strict "$app_stage"
+if [[ "$signing_identity" == - ]]; then
+  printf '  ! No Apple signing identity was found; macOS privacy access may need to be granted again after each rebuild.\n'
 fi
 if [[ -e "$app_path" ]]; then
   mv "$app_path" "$app_backup"

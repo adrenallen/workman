@@ -60,7 +60,7 @@ test('recording shortcuts have unique session-scoped defaults', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, toolbar, detail, native, capability, daemon, release] = await Promise.all([
+  const [app, tree, preflight, toolbar, detail, native, capability, daemon, release, devInstall] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
@@ -69,12 +69,18 @@ test('recorded feedback is wired through preflight, durable events, review, and 
     readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
-    readFile(new URL('../../../scripts/release.sh', import.meta.url), 'utf8')
+    readFile(new URL('../../../scripts/release.sh', import.meta.url), 'utf8'),
+    readFile(new URL('../../../scripts/dev-install.sh', import.meta.url), 'utf8')
   ]);
   assert.match(tree, /feedback: 'Feedback'/);
   assert.match(app, /listen<NativeFeedbackSnapshot>\('feedback:\/\/snapshot'/);
   assert.match(app, /compileFeedbackTimeline\(result\.segments, current\.snapshots\)/);
   assert.match(preflight, /Audio, images, and transcription stay on this computer/);
+  assert.match(preflight, /showCloseButton=\{false\}/);
+  assert.match(preflight, /screen_capture_authorized/);
+  assert.match(native, /let screen_capture_authorized = CGPreflightScreenCaptureAccess\(\)/);
+  assert.match(native, /let display_available = Monitor::all\(\)/);
+  assert.match(app, /&& feedbackPreflightOpen\s+&& !feedbackPreflight\?\.screen_capture_available/);
   assert.match(detail, /onSendAgent/);
   assert.match(detail, /onSendScratchpad/);
   assert.match(native, /\.content_protected\(true\)/);
@@ -102,4 +108,6 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.ok(recordingGuard > shortcutHandler && recordingGuard < preventDefault,
     'inactive recording shortcuts must return before the app swallows the key');
   assert.match(release, /com\.apple\.security\.device\.audio-input/);
+  assert.match(devInstall, /Developer ID Application/);
+  assert.match(devInstall, /codesign --force --deep --timestamp=none --options runtime/);
 });

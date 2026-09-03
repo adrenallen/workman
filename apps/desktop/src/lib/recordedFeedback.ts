@@ -78,6 +78,8 @@ export interface NativeFeedbackPreflight {
   supported: boolean;
   platform: string;
   microphone_available: boolean;
+  screen_capture_authorized: boolean;
+  display_available: boolean;
   screen_capture_available: boolean;
   model_installed: boolean;
   model_name: string;

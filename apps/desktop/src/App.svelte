@@ -825,7 +825,21 @@
       else stop();
     }).catch(reportError);
     let stopWindowFocus = (): void => {};
-    void getCurrentWindow().onFocusChanged(updateDocumentVisibility).then((stop) => {
+    void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      updateDocumentVisibility();
+      // The Screen Recording sheet lives in System Settings. Refresh as soon as Workman regains
+      // focus so the setup modal reflects a permission change without another button press.
+      if (
+        focused
+        && feedbackPreflightOpen
+        && !feedbackPreflight?.screen_capture_available
+        && !feedbackPreflightLoading
+        && !feedbackModelInstalling
+        && !feedbackStarting
+      ) {
+        void refreshFeedbackPreflight();
+      }
+    }).then((stop) => {
       if (active) stopWindowFocus = stop;
       else stop();
     }).catch(reportError);
@@ -2423,12 +2437,29 @@
     }
   }
 
-  async function requestFeedbackScreenAccess(): Promise<void> {
+  async function refreshFeedbackPreflight(): Promise<void> {
+    if (!feedbackPreflightOpen || feedbackPreflightLoading) return;
     feedbackPreflightError = null;
+    feedbackPreflightLoading = true;
+    try {
+      feedbackPreflight = await invoke<NativeFeedbackPreflight>('feedback_preflight');
+    } catch (cause) {
+      feedbackPreflightError = messageForCause(cause);
+    } finally {
+      feedbackPreflightLoading = false;
+    }
+  }
+
+  async function requestFeedbackScreenAccess(): Promise<void> {
+    if (feedbackPreflightLoading) return;
+    feedbackPreflightError = null;
+    feedbackPreflightLoading = true;
     try {
       feedbackPreflight = await invoke<NativeFeedbackPreflight>('feedback_request_screen_access');
     } catch (cause) {
       feedbackPreflightError = messageForCause(cause);
+    } finally {
+      feedbackPreflightLoading = false;
     }
   }
 
@@ -6331,7 +6362,7 @@
     starting={feedbackStarting}
     progress={feedbackModelProgress}
     error={feedbackPreflightError}
-    onRefresh={() => void openFeedbackPreflight()}
+    onRefresh={() => void refreshFeedbackPreflight()}
     onRequestScreen={() => void requestFeedbackScreenAccess()}
     onInstall={() => void installFeedbackModel()}
     onStart={() => void startFeedbackRecording()}

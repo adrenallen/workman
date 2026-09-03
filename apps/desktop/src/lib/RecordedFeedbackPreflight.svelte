@@ -40,7 +40,10 @@
 </script>
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !installing && !starting) onClose(); }}>
-  <Dialog.Content class="w-[min(590px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0">
+  <Dialog.Content
+    class="w-[min(590px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0"
+    showCloseButton={false}
+  >
     <Dialog.Header class="border-b border-border px-5 py-4 text-left">
       <div class="eyebrow"><MicIcon size={13} /> Recorded Feedback</div>
       <Dialog.Title class="mt-1 text-lg">Record feedback for {projectName}</Dialog.Title>
@@ -62,11 +65,24 @@
         </div>
         <div class:ready={preflight.screen_capture_available} class="requirement">
           <span class="icon"><MonitorIcon size={17} /></span>
-          <div><strong>Screen Recording</strong><small>{preflight.screen_capture_available ? 'Allowed' : 'Allow Workman in macOS Privacy & Security. Reopen Workman if macOS asks.'}</small></div>
+          <div>
+            <strong>Screen Recording</strong>
+            <small>
+              {#if preflight.screen_capture_available}
+                Allowed
+              {:else if preflight.screen_capture_authorized}
+                Allowed, but Workman could not find an active display. Connect a display, then check again.
+              {:else}
+                macOS still reports this running copy as blocked. If Workman is already enabled, toggle it off and on, then fully quit and reopen Workman.
+              {/if}
+            </small>
+          </div>
           {#if preflight.screen_capture_available}
             <CheckIcon class="check" size={16} />
+          {:else if preflight.screen_capture_authorized}
+            <Button variant="outline" size="sm" disabled={loading} onclick={onRefresh}>Check again</Button>
           {:else}
-            <Button variant="outline" size="sm" onclick={onRequestScreen}>Request access</Button>
+            <Button variant="outline" size="sm" disabled={loading} onclick={onRequestScreen}>Open settings</Button>
           {/if}
         </div>
         <div class:ready={preflight.model_installed} class="requirement">

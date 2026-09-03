@@ -147,6 +147,8 @@ pub(crate) struct FeedbackPreflight {
     supported: bool,
     platform: &'static str,
     microphone_available: bool,
+    screen_capture_authorized: bool,
+    display_available: bool,
     screen_capture_available: bool,
     model_installed: bool,
     model_name: &'static str,
@@ -240,8 +242,11 @@ pub(crate) struct Region {
 #[tauri::command]
 pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     let microphone_available = cpal::default_host().default_input_device().is_some();
-    let screen_capture_available = CGPreflightScreenCaptureAccess()
-        && Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
+    // Keep the TCC result separate from display discovery. A disconnected display or a
+    // transient xcap lookup failure must not be presented as a denied macOS permission.
+    let screen_capture_authorized = CGPreflightScreenCaptureAccess();
+    let display_available = Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
+    let screen_capture_available = screen_capture_authorized && display_available;
     let model_path = model_path();
     let model_installed = model_path
         .metadata()
@@ -249,8 +254,10 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
         && sha256_file(&model_path).is_ok_and(|sha| sha == MODEL_SHA256);
     let message = if !microphone_available {
         Some("No microphone is available. Connect or enable one, then retry.".into())
-    } else if !screen_capture_available {
-        Some("Screen capture is off. Enable Workman in System Settings → Privacy & Security → Screen Recording, then reopen Workman.".into())
+    } else if !screen_capture_authorized {
+        Some("macOS has not granted Screen Recording access to this running copy of Workman. Enable it in System Settings, then fully quit and reopen Workman.".into())
+    } else if !display_available {
+        Some("Screen Recording is allowed, but Workman could not find an active display. Connect a display, then check again.".into())
     } else if !model_installed {
         Some("Install the local transcription model before recording.".into())
     } else {
@@ -260,6 +267,8 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
         supported: true,
         platform: "macos",
         microphone_available,
+        screen_capture_authorized,
+        display_available,
         screen_capture_available,
         model_installed,
         model_name: MODEL_NAME,
