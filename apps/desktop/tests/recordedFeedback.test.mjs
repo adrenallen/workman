@@ -22,6 +22,21 @@ import {
   scratchpadLocalImagePath,
   scratchpadMarkdownImages
 } from '../src/lib/scratchpadImages.ts';
+import { recordedFeedbackForView } from '../src/lib/recordedFeedback.ts';
+
+test('feedback browser separates archived recordings and searches its selected view', () => {
+  const feedback = [
+    { id: 1, title: 'Old navigation notes', status: 'ready', archived: true, error_code: null, updated_at: 10 },
+    { id: 2, title: 'Current toolbar pass', status: 'ready', archived: false, error_code: null, updated_at: 30 },
+    { id: 3, title: 'Permission retry', status: 'failed', archived: true, error_code: 'capture_denied', updated_at: 20 }
+  ];
+
+  assert.deepEqual(recordedFeedbackForView(feedback, 'active').map((item) => item.id), [2]);
+  assert.deepEqual(recordedFeedbackForView(feedback, 'archived').map((item) => item.id), [3, 1]);
+  assert.deepEqual(recordedFeedbackForView(feedback, 'archived', 'navigation').map((item) => item.id), [1]);
+  assert.deepEqual(recordedFeedbackForView(feedback, 'archived', '#3').map((item) => item.id), [3]);
+  assert.deepEqual(recordedFeedbackForView(feedback, 'active', 'navigation'), []);
+});
 
 test('timeline preserves image anchors and uses the containing segment fallback', () => {
   const segments = [
@@ -160,9 +175,10 @@ test('scratchpads recognize recorded-feedback images as local embeds', () => {
 });
 
 test('recorded feedback is wired through preflight, durable events, review, and delivery', async () => {
-  const [app, tree, preflight, toolbar, overlay, detail, editor, native, capability, daemon, control, spawning, release, devInstall, feedbackSettings] = await Promise.all([
+  const [app, tree, browser, preflight, toolbar, overlay, detail, editor, native, capability, daemon, control, spawning, release, devInstall, feedbackSettings] = await Promise.all([
     readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/ProjectTree.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/RecordedFeedbackBrowser.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackPreflight.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackToolbar.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8'),
@@ -178,6 +194,13 @@ test('recorded feedback is wired through preflight, durable events, review, and 
     readFile(new URL('../src/lib/settings/RecordedFeedbackCard.svelte', import.meta.url), 'utf8')
   ]);
   assert.match(tree, /feedback: 'Feedback'/);
+  assert.match(tree, /recordedFeedbackForView\(feedback, 'active'\)/);
+  assert.match(browser, /value="archived">Archived/);
+  assert.match(browser, /aria-label="Search feedback"/);
+  assert.match(browser, /onArchive\(item, !item\.archived\)/);
+  assert.match(app, /\{:else if feedbackBrowserOpen\}/);
+  assert.match(app, /if \(selected && archived\) openFeedbackBrowser\('active'\)/);
+  assert.match(detail, /All feedback/);
   assert.match(app, /listen<NativeFeedbackSnapshot>\('feedback:\/\/snapshot'/);
   assert.match(app, /compileFeedbackTimeline\(result\.segments, current\.snapshots\)/);
   assert.match(preflight, /Audio, images, and transcription stay on this computer/);
@@ -287,6 +310,7 @@ test('recorded feedback is platform-gated and its sidebar section is optional', 
   assert.match(availability, /capability\.supported && preferences\.showInSidebar/);
   assert.match(tree, /group !== 'feedback' \|\| showFeedback/);
   assert.match(quickJump, /if \(feedbackSupported\) \{/);
+  assert.match(quickJump, /\.filter\(\(item\) => !item\.archived\)/);
   assert.match(sidebar, /id="feedback-sidebar-visible"/);
   assert.match(sidebar, /Hiding it keeps existing recordings and hotkeys available/);
   assert.match(hotkeys, /group\.id !== 'feedback' \|\| \$recordedFeedbackSupported/);

@@ -273,14 +273,14 @@
       }
 
       if (feedbackSupported) {
-        for (const feedback of snapshot?.feedback ?? []) {
+        for (const feedback of (snapshot?.feedback ?? []).filter((item) => !item.archived)) {
           const selection = projectTreeSelection('feedback', feedback.id, project.id, feedback.title);
           const feedbackTarget: AppNavigationTarget = { type: 'item', selection };
           next.push({
             key: navigationTargetKey(feedbackTarget),
             kind: 'feedback',
             label: feedback.title,
-            detail: `${feedback.archived ? 'Archived · ' : ''}${feedbackStatusLabel(feedback.status)} · ${feedback.snapshot_count} snapshots`,
+            detail: `${feedbackStatusLabel(feedback.status)} · ${feedback.snapshot_count} snapshots`,
             projectName: name,
             searchText: `${feedback.title} ${feedback.status} ${name} recorded feedback recording`,
             target: feedbackTarget,

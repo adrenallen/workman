@@ -44,11 +44,15 @@ test('drops malformed and transient selections without losing valid panes', () =
       1: { type: 'selection', selection: { kind: 'agent', id: -1, label: 'starting' } },
       2: { type: 'processes', kind: 'unknown' },
       3: { type: 'scratchpads' },
+      4: { type: 'feedback' },
       nope: { type: 'settings' }
     })
   });
 
-  assert.deepEqual(loadProjectPaneMemory(target), { 3: { type: 'scratchpads' } });
+  assert.deepEqual(loadProjectPaneMemory(target), {
+    3: { type: 'scratchpads' },
+    4: { type: 'feedback' }
+  });
 });
 
 test('persists negative draft selections while rejecting transient negative processes', () => {

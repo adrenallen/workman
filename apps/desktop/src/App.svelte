@@ -44,6 +44,7 @@
   import RegisterProjectDialog from './lib/RegisterProjectDialog.svelte';
   import ProjectSettingsDialog from './lib/ProjectSettingsDialog.svelte';
   import ProjectTree from './lib/ProjectTree.svelte';
+  import RecordedFeedbackBrowser from './lib/RecordedFeedbackBrowser.svelte';
   import RecordedFeedbackDetailView from './lib/RecordedFeedbackDetailView.svelte';
   import RecordedFeedbackPreflight from './lib/RecordedFeedbackPreflight.svelte';
   import QuickJumpPalette from './lib/QuickJumpPalette.svelte';
@@ -277,7 +278,8 @@
     type NativeFeedbackTranscript,
     type RecordedFeedback,
     type RecordedFeedbackBlock,
-    type RecordedFeedbackSummary
+    type RecordedFeedbackSummary,
+    type RecordedFeedbackView
   } from './lib/recordedFeedback';
   import { compileFeedbackTimeline } from './lib/recordedFeedbackTimeline';
   import {
@@ -396,6 +398,9 @@
   let todoBrowserOpen = $state(false);
   let todoNavigationIds = $state<number[]>([]);
   let scratchpadBrowserOpen = $state(false);
+  let feedbackBrowserOpen = $state(false);
+  let feedbackBrowserView = $state<RecordedFeedbackView>('active');
+  let feedbackBrowserBusyId = $state<number | null>(null);
   let feedbackPreflightOpen = $state(false);
   let feedbackPreflight = $state<NativeFeedbackPreflight | null>(null);
   let feedbackPreflightLoading = $state(false);
@@ -652,6 +657,7 @@
       selectedProcess === null &&
       !todoBrowserOpen &&
       !scratchpadBrowserOpen &&
+      !feedbackBrowserOpen &&
       processOverviewKind === null &&
       selection === null
   );
@@ -664,11 +670,13 @@
           ? 'Todos'
           : scratchpadBrowserOpen
             ? 'Scratchpads'
-            : processOverviewKind
-              ? `${processOverviewKind[0].toUpperCase()}${processOverviewKind.slice(1)}s`
-              : projectOverviewOpen && selectedProject
-                ? projectLabel(selectedProject)
-                : (selection?.label ?? 'Project')
+            : feedbackBrowserOpen
+              ? 'Feedback'
+              : processOverviewKind
+                ? `${processOverviewKind[0].toUpperCase()}${processOverviewKind.slice(1)}s`
+                : projectOverviewOpen && selectedProject
+                  ? projectLabel(selectedProject)
+                  : (selection?.label ?? 'Project')
   );
   let windowTitle = $derived(
     settingsOpen
@@ -739,6 +747,7 @@
       settingsOpen = false;
       todoBrowserOpen = false;
       scratchpadBrowserOpen = false;
+      feedbackBrowserOpen = false;
       processOverviewKind = null;
       loadedProjectId = null;
       return;
@@ -798,6 +807,7 @@
     const capability = $recordedFeedbackCapability;
     if (!capability.checked || capability.supported) return;
     feedbackPreflightOpen = false;
+    feedbackBrowserOpen = false;
     if (selection?.kind === 'feedback') clearSelection();
   });
 
@@ -1171,6 +1181,7 @@
       else if (settingsOpen) settingsOpen = false;
       else if (selection?.kind === 'todo') openTodosBrowser();
       else if (selection?.kind === 'scratchpad') openScratchpadsBrowser();
+      else if (selection?.kind === 'feedback') openFeedbackBrowser();
       else clearSelection();
     }
   }
@@ -1930,6 +1941,7 @@
           if (selectedProject) {
             todoBrowserOpen = false;
             scratchpadBrowserOpen = false;
+            feedbackBrowserOpen = false;
             processOverviewKind = null;
             settingsOpen = true;
           }
@@ -2171,6 +2183,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     selection = null;
   }
@@ -2387,6 +2400,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = next;
@@ -2461,15 +2475,6 @@
       if (request === detailRequest) reportError(cause);
     } finally {
       if (showLoading && request === detailRequest) detailLoading = false;
-    }
-  }
-
-  function browseFeedback(): void {
-    const item = feedbackSummaries[0];
-    if (item && selectedProject) {
-      void selectTreeItem(projectTreeSelection('feedback', item.id, selectedProject.id, item.title));
-    } else {
-      void openFeedbackPreflight();
     }
   }
 
@@ -2846,6 +2851,41 @@
       { kind: 'feedback', feedback: feedbackDetail, selection },
       !feedbackDetail.archived
     );
+  }
+
+  async function setBrowserFeedbackArchived(
+    feedback: RecordedFeedbackSummary,
+    archived: boolean
+  ): Promise<void> {
+    if (feedbackBrowserBusyId !== null || !selectedProject) return;
+    feedbackBrowserBusyId = feedback.id;
+    try {
+      await setFeedbackArchived({
+        kind: 'feedback',
+        feedback,
+        selection: projectTreeSelection('feedback', feedback.id, selectedProject.id, feedback.title)
+      }, archived);
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      feedbackBrowserBusyId = null;
+    }
+  }
+
+  async function deleteBrowserFeedback(feedback: RecordedFeedbackSummary): Promise<void> {
+    if (feedbackBrowserBusyId !== null || !selectedProject) return;
+    feedbackBrowserBusyId = feedback.id;
+    try {
+      await deleteFeedback({
+        kind: 'feedback',
+        feedback,
+        selection: projectTreeSelection('feedback', feedback.id, selectedProject.id, feedback.title)
+      });
+    } catch (cause) {
+      reportError(cause);
+    } finally {
+      feedbackBrowserBusyId = null;
+    }
   }
 
   async function deleteSelectedFeedback(): Promise<void> {
@@ -3264,6 +3304,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('command', id, project.id, input.name);
     return id;
@@ -3543,6 +3584,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
     void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId);
@@ -3838,6 +3880,7 @@
     if (settingsOpen) return { type: 'settings' };
     if (todoBrowserOpen) return { type: 'todos' };
     if (scratchpadBrowserOpen) return { type: 'scratchpads' };
+    if (feedbackBrowserOpen) return { type: 'feedback' };
     if (processOverviewKind) return { type: 'processes', kind: processOverviewKind };
     if (selection) {
       if (selection.id <= 0 && selection.kind !== 'draft') return null;
@@ -3945,6 +3988,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     activeWorktreeOperationId = null;
 
@@ -3958,6 +4002,9 @@
         return;
       case 'scratchpads':
         scratchpadBrowserOpen = true;
+        return;
+      case 'feedback':
+        feedbackBrowserOpen = true;
         return;
       case 'processes':
         processOverviewKind = pane.kind;
@@ -3978,6 +4025,7 @@
     feedbackDetail = null;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     activeWorktreeOperationId = null;
   }
@@ -3988,6 +4036,7 @@
     settingsOpen = false;
     todoBrowserOpen = true;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = null;
@@ -4006,11 +4055,38 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = true;
+    feedbackBrowserOpen = false;
     processOverviewKind = null;
     activeWorktreeOperationId = null;
     selection = null;
     todoDetail = null;
     scratchpadRead = null;
+  }
+
+  function openFeedbackBrowser(view: RecordedFeedbackView = feedbackBrowserView): void {
+    if (!selectedProject || !$recordedFeedbackSupported) return;
+    feedbackBrowserView = view;
+    treeMultiSelection = null;
+    settingsOpen = false;
+    todoBrowserOpen = false;
+    scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = true;
+    processOverviewKind = null;
+    activeWorktreeOperationId = null;
+    selection = null;
+    todoDetail = null;
+    scratchpadRead = null;
+    feedbackDetail = null;
+  }
+
+  function openBrowserFeedback(feedback: RecordedFeedbackSummary): void {
+    feedbackBrowserView = feedback.archived ? 'archived' : 'active';
+    void selectTreeItem(projectTreeSelection(
+      'feedback',
+      feedback.id,
+      feedback.project_id,
+      feedback.title
+    ));
   }
 
   function openProcessOverview(kind: ProcessKind): void {
@@ -4019,6 +4095,7 @@
     settingsOpen = false;
     todoBrowserOpen = false;
     scratchpadBrowserOpen = false;
+    feedbackBrowserOpen = false;
     processOverviewKind = kind;
     activeWorktreeOperationId = null;
     selection = null;
@@ -5302,10 +5379,12 @@
       target.feedback.id,
       archived
     );
-    if (selection?.kind === 'feedback' && selection.id === target.feedback.id) {
+    const selected = selection?.kind === 'feedback' && selection.id === target.feedback.id;
+    if (selected) {
       feedbackDetail = next;
     }
     await refreshFeedback(target.selection.projectId);
+    if (selected && archived) openFeedbackBrowser('active');
   }
 
   async function deleteFeedback(
@@ -5318,8 +5397,9 @@
       destructive: true
     }))) return;
     await client.recordedFeedbackDelete(target.selection.projectId, target.feedback.id);
-    if (selection?.kind === 'feedback' && selection.id === target.feedback.id) clearSelection();
+    const selected = selection?.kind === 'feedback' && selection.id === target.feedback.id;
     await refreshFeedback(target.selection.projectId);
+    if (selected) openFeedbackBrowser();
   }
 
   async function runFeedbackContextAction(
@@ -6290,7 +6370,7 @@
         onCreateTodo={openTodoDraft}
         onBrowseTodos={openTodosBrowser}
         onBrowseScratchpads={openScratchpadsBrowser}
-        onBrowseFeedback={browseFeedback}
+        onBrowseFeedback={openFeedbackBrowser}
         onBrowseProcesses={openProcessOverview}
         onAddAgent={() => void openAgentDraft()}
         onAddTerminal={() => void spawnTerminal()}
@@ -6301,7 +6381,7 @@
         onStartProcess={(process) => void startOrReviewProcess(process)}
         onStopCommand={(process) => void stopProcess(process)}
         onRestartCommand={(process) => void restartProcess(process)}
-        onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
+        onOpenSettings={() => { todoBrowserOpen = false; scratchpadBrowserOpen = false; feedbackBrowserOpen = false; processOverviewKind = null; settingsOpen = true; dialog = null; }}
         onToggleCollapse={toggleTreeRail}
         reordering={processReorderBusy || coordinationReorderBusy}
         onReorderProcesses={(kind, orderedIds) => void persistProcessOrder(kind, orderedIds)}
@@ -6395,6 +6475,7 @@
                 onOpenSettings={() => {
                   todoBrowserOpen = false;
                   scratchpadBrowserOpen = false;
+                  feedbackBrowserOpen = false;
                   processOverviewKind = null;
                   selectSettingsSection('templates');
                   settingsOpen = true;
@@ -6485,6 +6566,18 @@
             onArchive={(scratchpad) => void archiveBrowserScratchpad(scratchpad)}
             onDelete={(scratchpad) => void deleteBrowserScratchpad(scratchpad)}
           />
+        {:else if feedbackBrowserOpen}
+          <RecordedFeedbackBrowser
+            project={selectedProject}
+            feedback={feedbackSummaries}
+            view={feedbackBrowserView}
+            busyId={feedbackBrowserBusyId}
+            onOpen={openBrowserFeedback}
+            onViewChange={(view) => (feedbackBrowserView = view)}
+            onRecord={() => void openFeedbackPreflight()}
+            onArchive={(feedback, archived) => void setBrowserFeedbackArchived(feedback, archived)}
+            onDelete={(feedback) => void deleteBrowserFeedback(feedback)}
+          />
         {:else if processOverviewKind}
           <ProcessOverview
             project={selectedProject}
@@ -6505,6 +6598,7 @@
             loading={detailLoading}
             busy={detailBusy}
             processes={feedbackTargetProcesses}
+            onBack={openFeedbackBrowser}
             onSave={saveSelectedFeedback}
             onSendAgent={sendSelectedFeedbackToAgent}
             onSendNewAgent={sendSelectedFeedbackToNewAgent}

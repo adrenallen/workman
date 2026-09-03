@@ -1,6 +1,7 @@
 <script lang="ts">
   import ArchiveIcon from '@lucide/svelte/icons/archive';
   import ArchiveRestoreIcon from '@lucide/svelte/icons/archive-restore';
+  import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
   import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
   import BotIcon from '@lucide/svelte/icons/bot';
@@ -30,6 +31,7 @@
     loading: boolean;
     busy: boolean;
     processes: ProcessView[];
+    onBack: () => void;
     onSave: (title: string, blocks: RecordedFeedbackBlock[], captions: Array<{ snapshot_id: number; caption: string }>) => Promise<void>;
     onSendAgent: (processId: number) => Promise<void>;
     onSendNewAgent: () => Promise<void>;
@@ -39,7 +41,7 @@
     onDelete: () => void;
   }
 
-  let { feedback, loading, busy, processes, onSave, onSendAgent, onSendNewAgent,
+  let { feedback, loading, busy, processes, onBack, onSave, onSendAgent, onSendNewAgent,
     onSendScratchpad, onCopy, onArchive, onDelete }: Props = $props();
 
   let title = $state('');
@@ -136,6 +138,7 @@
 {:else if feedback}
   <section class="feedback-detail" aria-labelledby="feedback-title">
     <header>
+      <button class="back-link" type="button" onclick={() => onBack()}><ArrowLeftIcon size={14} />All feedback</button>
       <div class="title-row">
         <span class:recording={feedback.status === 'recording'} class:failed={feedback.status === 'failed'} class="status-dot"></span>
         <input id="feedback-title" aria-label="Feedback title" bind:value={title} disabled={feedback.status !== 'ready' || localBusy || busy} />
@@ -206,7 +209,10 @@
 
 <style>
   .feedback-detail { display: grid; width: min(980px, 100%); height: 100%; min-height: 0; margin: 0 auto; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--background); color: var(--foreground); }
-  header { border-bottom: 1px solid var(--border); padding: 18px 22px 13px; }
+  header { border-bottom: 1px solid var(--border); padding: 12px 22px 13px; }
+  .back-link { display: flex; align-items: center; gap: 5px; margin: 0 0 8px -4px; border: 0; border-radius: 4px; padding: 4px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 620; cursor: pointer; }
+  .back-link:hover { background: var(--muted); color: var(--foreground); }
+  .back-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
   .title-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
   .title-row input { min-width: 0; border: 0; border-bottom: 1px solid transparent; outline: 0; padding: 2px 0; background: transparent; color: var(--foreground); font-size: 20px; font-weight: 720; }
   .title-row input:focus { border-bottom-color: var(--ring); }

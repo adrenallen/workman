@@ -53,6 +53,26 @@ export interface RecordedFeedbackSummary {
   updated_at: number;
 }
 
+export type RecordedFeedbackView = 'active' | 'archived';
+
+export function recordedFeedbackForView(
+  feedback: readonly RecordedFeedbackSummary[],
+  view: RecordedFeedbackView,
+  query = ''
+): RecordedFeedbackSummary[] {
+  const archived = view === 'archived';
+  const needle = query.trim().toLocaleLowerCase();
+  return feedback
+    .filter((item) => item.archived === archived)
+    .filter((item) => {
+      if (!needle) return true;
+      return `#${item.id} ${item.title} ${feedbackStatusLabel(item.status)} ${item.error_code ?? ''}`
+        .toLocaleLowerCase()
+        .includes(needle);
+    })
+    .sort((left, right) => right.updated_at - left.updated_at || right.id - left.id);
+}
+
 export interface RecordedFeedback extends Omit<RecordedFeedbackSummary, 'snapshot_count'> {
   audio_path: string | null;
   transcript: RecordedFeedbackTranscriptSegment[];

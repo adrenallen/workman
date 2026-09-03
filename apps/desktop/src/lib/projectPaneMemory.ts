@@ -6,6 +6,7 @@ export type ProjectPane =
   | { type: 'selection'; selection: ProjectTreeSelection }
   | { type: 'todos' }
   | { type: 'scratchpads' }
+  | { type: 'feedback' }
   | { type: 'processes'; kind: ProcessKind }
   | { type: 'settings' };
 
@@ -102,6 +103,7 @@ function parseProjectPane(value: unknown, projectId: number): ProjectPane | null
     value.type === 'overview'
     || value.type === 'todos'
     || value.type === 'scratchpads'
+    || value.type === 'feedback'
     || value.type === 'settings'
   ) return { type: value.type };
   if (value.type === 'processes' && processKinds.has(value.kind as ProcessKind)) {

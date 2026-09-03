@@ -36,7 +36,12 @@
   import type { ProcessKind, ProcessView, Project } from './daemon';
   import type { AgentTool } from './agentTools';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
-  import { feedbackDuration, feedbackStatusLabel, type RecordedFeedbackSummary } from './recordedFeedback';
+  import {
+    feedbackDuration,
+    feedbackStatusLabel,
+    recordedFeedbackForView,
+    type RecordedFeedbackSummary
+  } from './recordedFeedback';
   import type { CreationDraft } from './creationDrafts';
   import {
     contextMenuRequest,
@@ -242,9 +247,8 @@
   let visibleScratchpads = $derived(
     orderedScratchpads.filter((scratchpad) => matchesQuery(`${scratchpad.name} ${scratchpad.tags.join(' ')}`))
   );
-  let visibleFeedback = $derived(feedback
-    .filter((item) => matchesQuery(item.title))
-    .sort((left, right) => Number(left.archived) - Number(right.archived) || right.updated_at - left.updated_at));
+  let activeFeedback = $derived(recordedFeedbackForView(feedback, 'active'));
+  let visibleFeedback = $derived(recordedFeedbackForView(feedback, 'active', query));
   let visibleGroupOrder = $derived(groupOrder.filter((group) => group !== 'feedback' || showFeedback));
   let projectCounts = $derived($liveStats.counts[project.id]);
 
@@ -535,7 +539,7 @@
       case 'agents': return `${projectCounts?.agent_running ?? agents.filter(isRunning).length}/${projectCounts?.agent_total ?? agents.length}`;
       case 'terminals': return `${projectCounts?.terminal_running ?? terminals.filter(isRunning).length}/${projectCounts?.terminal_total ?? terminals.length}`;
       case 'commands': return `${projectCounts?.command_running ?? commands.filter(isRunning).length}/${projectCounts?.command_total ?? commands.length}`;
-      case 'feedback': return String(feedback.length);
+      case 'feedback': return String(activeFeedback.length);
       case 'scratchpads': return String(scratchpads.length);
     }
   }
@@ -1119,7 +1123,6 @@
                 <button
                   type="button"
                   class="tree-row feedback-row"
-                  class:archived={item.archived}
                   class:selected={selection?.key === `feedback:${item.id}`}
                   data-tree-row
                   onclick={() => onSelect(projectTreeSelection('feedback', item.id, project.id, item.title))}
@@ -1133,12 +1136,12 @@
                     state={item.status === 'recording' || item.status === 'transcribing' ? 'working' : item.status === 'failed' ? 'crashed' : 'idle'}
                     label={feedbackStatusLabel(item.status)}
                   />
-                  <span class="row-copy"><strong>{item.title}</strong><small>{item.archived ? 'Archived · ' : ''}{feedbackStatusLabel(item.status)} · {feedbackDuration(item.duration_ms)} · {item.snapshot_count} snap{item.snapshot_count === 1 ? '' : 's'}</small></span>
+                  <span class="row-copy"><strong>{item.title}</strong><small>{feedbackStatusLabel(item.status)} · {feedbackDuration(item.duration_ms)} · {item.snapshot_count} snap{item.snapshot_count === 1 ? '' : 's'}</small></span>
                 </button>
               {:else}
                 <p class="empty-row">{query ? 'No matching feedback' : 'No recorded feedback'}</p>
               {/each}
-              {#if feedback.length === 0}
+              {#if activeFeedback.length === 0}
                 <button class="add-row" type="button" data-tree-row onclick={onStartFeedback}>+ Record feedback</button>
               {/if}
             {:else}
@@ -1246,7 +1249,6 @@
   .agent-row-shell.agent-child .agent-row { grid-template-columns: 12px 17px minmax(0, 1fr) auto; }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
   .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
-  .feedback-row.archived:not(.selected) { opacity: 0.58; }
   .tree-row.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
   .process-row-shell { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-radius: 3px; }
   .process-row-shell.has-actions { grid-template-columns: minmax(0, 1fr) 28px; }
