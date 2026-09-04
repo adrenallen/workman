@@ -58,6 +58,22 @@ struct LeaseParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AppendParams {
+    project_id: ProjectId,
+    feedback_id: RecordedFeedbackId,
+    expected_revision: i64,
+    lease_owner: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinishDeliveryParams {
+    project_id: ProjectId,
+    feedback_id: RecordedFeedbackId,
+    delivery_id: i64,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SnapshotParams {
     project_id: ProjectId,
     feedback_id: RecordedFeedbackId,
@@ -135,6 +151,7 @@ struct DeliverAgentParams {
     process_id: i64,
     #[serde(default)]
     direct_input: bool,
+    expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +188,8 @@ pub(crate) fn dispatch(
         "recorded_feedback.list" => list(params, registry),
         "recorded_feedback.get" => get(params, registry),
         "recorded_feedback.create" => create(params, registry, data_dir),
+        "recorded_feedback.append" => append(params, registry, data_dir),
+        "recorded_feedback.discard_append" => discard_append(params, registry),
         "recorded_feedback.renew_lease" => renew_lease(params, registry),
         "recorded_feedback.add_snapshot" => add_snapshot(params, registry, data_dir),
         "recorded_feedback.begin_transcription" => begin_transcription(params, registry, data_dir),
@@ -181,6 +200,7 @@ pub(crate) fn dispatch(
         "recorded_feedback.delete" => delete(params, registry, data_dir),
         "recorded_feedback.prepare_packet" => prepare_packet(params, registry, data_dir),
         "recorded_feedback.deliver_agent" => deliver_agent(params, registry, data_dir),
+        "recorded_feedback.finish_delivery" => finish_delivery(params, registry),
         "recorded_feedback.to_scratchpad" => to_scratchpad(params, registry, data_dir),
         _ => return None,
     };
@@ -240,6 +260,55 @@ fn create(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> Control
         return Err(("feedback_storage_error", error.to_string()));
     }
     Ok(json!({ "feedback": feedback, "media_dir": directory }))
+}
+
+fn append(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> ControlResult {
+    let params: AppendParams = params_as(params)?;
+    if params.lease_owner.trim().is_empty() || params.lease_owner.len() > 120 {
+        return Err(("invalid_params", "lease_owner is invalid".into()));
+    }
+    require_feedback(registry, params.project_id, params.feedback_id)?;
+    // Every addition gets its own directory; native capture starts its filenames at zero.
+    let directory = feedback_directory(data_dir, params.feedback_id)
+        .join(format!("segment-{}", Uuid::new_v4()));
+    create_private_directory(&directory).map_err(storage_error)?;
+    let service = RecordedFeedbackService::new(registry.store());
+    match service.begin_append(
+        params.project_id,
+        params.feedback_id,
+        params.expected_revision,
+        &params.lease_owner,
+        now_millis(),
+        LEASE_MS,
+    ) {
+        Ok(feedback) => Ok(json!({ "feedback": feedback, "media_dir": directory })),
+        Err(error) => {
+            let _ = fs::remove_dir(&directory);
+            Err(feedback_error(error))
+        }
+    }
+}
+
+fn discard_append(params: Value, registry: &ProcessRegistry) -> ControlResult {
+    let params: FeedbackParams = params_as(params)?;
+    RecordedFeedbackService::new(registry.store())
+        .discard_append(params.project_id, params.feedback_id, now_millis())
+        .map(json_value)
+        .map_err(feedback_error)
+}
+
+fn finish_delivery(params: Value, registry: &ProcessRegistry) -> ControlResult {
+    let params: FinishDeliveryParams = params_as(params)?;
+    RecordedFeedbackService::new(registry.store())
+        .finish_delivery(
+            params.project_id,
+            params.feedback_id,
+            params.delivery_id,
+            params.error.as_deref(),
+            now_millis(),
+        )
+        .map(json_value)
+        .map_err(feedback_error)
 }
 
 fn renew_lease(params: Value, registry: &ProcessRegistry) -> ControlResult {
@@ -454,7 +523,8 @@ fn prepare_packet(params: Value, registry: &ProcessRegistry, data_dir: &Path) ->
             NewRecordedFeedbackDelivery {
                 target_kind: "clipboard".into(),
                 target_id: None,
-                status: "queued".into(),
+                target_name: None,
+                status: "pending".into(),
                 packet_path: Some(packet.markdown_path.to_string_lossy().into_owned()),
                 error_message: None,
                 now_ms: now_millis(),
@@ -469,6 +539,14 @@ fn prepare_packet(params: Value, registry: &ProcessRegistry, data_dir: &Path) ->
 fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path) -> ControlResult {
     let params: DeliverAgentParams = params_as(params)?;
     let feedback = require_feedback(registry, params.project_id, params.feedback_id)?;
+    if let Some(expected) = params.expected_revision
+        && expected != feedback.revision
+    {
+        return Err(feedback_error(RecordedFeedbackError::RevisionConflict {
+            expected,
+            current: feedback.revision,
+        }));
+    }
     let status = registry
         .get_status(params.process_id)
         .map_err(registry_error)?;
@@ -494,9 +572,9 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
     let packet = compile_packet(data_dir, &feedback)?;
     let (delivery_status, error_message) = if params.direct_input {
         // The desktop will paste the ordered transcript and image blocks into the validated live
-        // agent immediately after this response. Keep the immutable packet as the durable audit
-        // copy, while describing PTY image import honestly as unverified.
-        ("unverified", None)
+        // agent immediately after this response, then acknowledge success or failure. "Sent"
+        // means the turn was submitted; it does not claim the agent has processed the images.
+        ("pending", None)
     } else {
         let prompt = format!(
             "The user recorded some feedback. The feedback packet is at {}. Read feedback.md in order; its images directory contains the referenced screenshots.",
@@ -514,6 +592,7 @@ fn deliver_agent(params: Value, registry: &mut ProcessRegistry, data_dir: &Path)
             NewRecordedFeedbackDelivery {
                 target_kind: "agent".into(),
                 target_id: Some(params.process_id),
+                target_name: Some(status.process.name.clone()),
                 status: delivery_status.into(),
                 packet_path: Some(packet.markdown_path.to_string_lossy().into_owned()),
                 error_message: error_message.clone(),
@@ -558,7 +637,8 @@ fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> 
             NewRecordedFeedbackDelivery {
                 target_kind: "scratchpad".into(),
                 target_id: Some(scratchpad.id),
-                status: "queued".into(),
+                target_name: Some(scratchpad.name.clone()),
+                status: "sent".into(),
                 packet_path: Some(packet.markdown_path.to_string_lossy().into_owned()),
                 error_message: None,
                 now_ms: now_millis(),
@@ -1132,6 +1212,7 @@ mod tests {
                 sha256,
             }],
             deliveries: vec![],
+            append_state: None,
             error_code: None,
             archived: false,
             lease_owner: None,
@@ -1156,6 +1237,127 @@ mod tests {
     #[test]
     fn duration_is_compact() {
         assert_eq!(format_duration(65_900), "1:05");
+    }
+
+    #[test]
+    fn append_rpc_keeps_old_media_packets_and_scratchpad_history() {
+        let temp = tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 3,
+                path: "/tmp/feedback-rpc-project".into(),
+                name: "Feedback".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut rpc = |method: &str, params: Value| {
+            dispatch(method, params, &mut registry, temp.path())
+                .expect("known method")
+                .unwrap()
+        };
+        let started = rpc(
+            "recorded_feedback.create",
+            json!({"project_id":3,"title":"Checkout notes","lease_owner":"desktop"}),
+        );
+        let id = started["feedback"]["id"].as_i64().unwrap();
+        let root = PathBuf::from(started["media_dir"].as_str().unwrap());
+        let old_image = root.join("snapshot-001.png");
+        let old_hash = test_png(&old_image);
+        let old_bytes = fs::read(&old_image).unwrap();
+        let captured = rpc(
+            "recorded_feedback.add_snapshot",
+            json!({
+                "project_id":3,"feedback_id":id,"ordinal":0,"anchor_ms":500,"anchor_samples":8000,
+                "invoked_at_ms":1000,"completed_at_ms":1100,"image_path":old_image,"sha256":old_hash
+            }),
+        );
+        let old_snapshot = captured["snapshots"][0]["id"].as_i64().unwrap();
+        rpc(
+            "recorded_feedback.begin_transcription",
+            json!({"project_id":3,"feedback_id":id,"duration_ms":2000}),
+        );
+        let original = rpc(
+            "recorded_feedback.complete",
+            json!({
+                "project_id":3,"feedback_id":id,"transcript":[],
+                "blocks":[{"kind":"text","text":"Keep my edits","start_ms":0,"end_ms":900}, {"kind":"image","snapshot_id":old_snapshot}]
+            }),
+        );
+        let packet = rpc(
+            "recorded_feedback.prepare_packet",
+            json!({"project_id":3,"feedback_id":id}),
+        );
+        assert_eq!(packet["delivery"]["status"], "pending");
+        rpc(
+            "recorded_feedback.finish_delivery",
+            json!({"project_id":3,"feedback_id":id,"delivery_id":packet["delivery"]["id"]}),
+        );
+        let packet_path = PathBuf::from(packet["packet_path"].as_str().unwrap());
+        let packet_bytes = fs::read(&packet_path).unwrap();
+        let scratchpad = rpc(
+            "recorded_feedback.to_scratchpad",
+            json!({"project_id":3,"feedback_id":id}),
+        );
+        assert_eq!(scratchpad["delivery"]["status"], "sent");
+        assert_eq!(
+            scratchpad["delivery"]["target_name"],
+            scratchpad["scratchpad"]["name"]
+        );
+        let appended = rpc(
+            "recorded_feedback.append",
+            json!({
+                "project_id":3,"feedback_id":id,"expected_revision":original["revision"],"lease_owner":"desktop"
+            }),
+        );
+        let added_dir = PathBuf::from(appended["media_dir"].as_str().unwrap());
+        assert_ne!(root, added_dir);
+        assert!(added_dir.starts_with(&root));
+        let added_image = added_dir.join("snapshot-001.png");
+        let added_hash = test_png(&added_image);
+        let captured = rpc(
+            "recorded_feedback.add_snapshot",
+            json!({
+                "project_id":3,"feedback_id":id,"ordinal":0,"anchor_ms":500,"anchor_samples":8000,
+                "invoked_at_ms":4000,"completed_at_ms":4100,"image_path":added_image,"sha256":added_hash
+            }),
+        );
+        assert_eq!(captured["snapshots"][1]["ordinal"], 1);
+        assert_eq!(captured["snapshots"][1]["anchor_ms"], 2500);
+        rpc(
+            "recorded_feedback.begin_transcription",
+            json!({"project_id":3,"feedback_id":id,"duration_ms":1000}),
+        );
+        let completed = rpc(
+            "recorded_feedback.complete",
+            json!({
+                "project_id":3,"feedback_id":id,"transcript":[{"text":"One more thing","start_ms":100,"end_ms":800}],
+                "blocks":[{"kind":"text","text":"One more thing","start_ms":100,"end_ms":800},
+                    {"kind":"image","snapshot_id":captured["snapshots"][1]["id"]}]
+            }),
+        );
+        assert_eq!(completed["id"], id);
+        assert_eq!(completed["blocks"][0], original["blocks"][0]);
+        assert_eq!(completed["blocks"][2]["start_ms"], 2100);
+        assert_eq!(completed["duration_ms"], 3000);
+        assert_eq!(completed["deliveries"].as_array().unwrap().len(), 2);
+        let new_packet = rpc(
+            "recorded_feedback.prepare_packet",
+            json!({"project_id":3,"feedback_id":id}),
+        );
+        assert_ne!(new_packet["packet_path"], packet["packet_path"]);
+        assert!(
+            new_packet["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("One more thing")
+        );
+        assert_eq!(fs::read(old_image).unwrap(), old_bytes);
+        assert_eq!(fs::read(packet_path).unwrap(), packet_bytes);
     }
 
     #[test]

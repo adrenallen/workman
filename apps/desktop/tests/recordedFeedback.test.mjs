@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   compileFeedbackTimeline,
+  compileFeedbackRecording,
   moveFeedbackBlock,
   removeFeedbackBlock,
   replaceFeedbackText
@@ -12,6 +13,7 @@ import { defaultHotkeyPreferences } from '../src/lib/hotkeys.ts';
 import { recordingHotkeyBindings } from '../src/lib/recordedFeedbackHotkeys.ts';
 import {
   deliverFeedbackAgentInput,
+  trackFeedbackDelivery,
   feedbackAgentInputSteps
 } from '../src/lib/recordedFeedbackAgentDelivery.ts';
 import {
@@ -24,8 +26,69 @@ import {
 } from '../src/lib/scratchpadImages.ts';
 import {
   agentCanReceiveInitialTurn,
+  feedbackDeliveryLabel,
+  feedbackSendSummary,
   recordedFeedbackForView
 } from '../src/lib/recordedFeedback.ts';
+
+test('append timeline uses only new snapshots and local segment timestamps', () => {
+  const feedback = {
+    append_state: { duration_ms: 5_000, next_ordinal: 2 },
+    snapshots: [
+      { id: 1, ordinal: 0, anchor_ms: 500, anchor_samples: 8_000 },
+      { id: 2, ordinal: 1, anchor_ms: 4_000, anchor_samples: 64_000 },
+      { id: 3, ordinal: 2, anchor_ms: 5_600, anchor_samples: 9_600 },
+      { id: 4, ordinal: 3, anchor_ms: 6_500, anchor_samples: 24_000 }
+    ]
+  };
+  const segments = [{ start_ms: 100, end_ms: 900, text: 'One more thing.' }];
+  assert.deepEqual(compileFeedbackRecording(feedback, segments), [
+    { kind: 'text', start_ms: 100, end_ms: 900, text: 'One more thing.' },
+    { kind: 'image', snapshot_id: 3 },
+    { kind: 'image', snapshot_id: 4 }
+  ]);
+  assert.equal(feedback.snapshots[2].anchor_ms, 5_600, 'does not mutate stored anchors');
+  assert.deepEqual(compileFeedbackRecording({ ...feedback, append_state: null }, segments),
+    compileFeedbackTimeline(segments, feedback.snapshots));
+});
+
+test('delivery history distinguishes real sends, failures, copies, and legacy uncertainty', () => {
+  const sent = { target_kind: 'agent', status: 'sent' };
+  const copied = { target_kind: 'clipboard', status: 'sent' };
+  assert.equal(feedbackSendSummary([]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([copied]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([{ ...sent, status: 'failed' }]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([{ ...sent, status: 'unverified' }]), 'Delivery unconfirmed');
+  assert.equal(feedbackSendSummary([sent, copied]), 'Sent 1 time');
+  assert.equal(feedbackSendSummary([sent, { ...sent, target_kind: 'scratchpad' }]), 'Sent 2 times');
+  assert.equal(feedbackDeliveryLabel(sent), 'Sent');
+  assert.equal(feedbackDeliveryLabel(copied), 'Copied');
+  assert.equal(feedbackDeliveryLabel({ ...sent, status: 'pending' }), 'Unconfirmed');
+});
+
+test('delivery receipt and agent focus follow submission; failed sends never focus', async () => {
+  const events = [];
+  await trackFeedbackDelivery(
+    async () => { events.push('submitted'); },
+    async (error) => { events.push(error === null ? 'sent receipt' : error); },
+    async () => { events.push('focus agent'); }
+  );
+  assert.deepEqual(events, ['submitted', 'focus agent', 'sent receipt']);
+  events.length = 0;
+  await assert.rejects(trackFeedbackDelivery(
+    async () => { throw new Error('Agent exited'); },
+    async (error) => { events.push(error); },
+    async () => { events.push('focus agent'); }
+  ), /Agent exited/);
+  assert.deepEqual(events, ['Agent exited']);
+  events.length = 0;
+  await assert.rejects(trackFeedbackDelivery(
+    async () => { events.push('submitted'); },
+    async () => { throw new Error('Daemon disconnected'); },
+    async () => { events.push('focus agent'); }
+  ), /Feedback was sent, but delivery history could not be updated/);
+  assert.deepEqual(events, ['submitted', 'focus agent'], 'failed receipt must not retry or undo a send');
+});
 
 test('new agents can receive their first turn from the fast composer signal', () => {
   const process = (agentState, overrides = {}) => ({
@@ -240,7 +303,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(app, /if \(selected && archived\) openFeedbackBrowser\('active'\)/);
   assert.match(detail, /All feedback/);
   assert.match(app, /listen<NativeFeedbackSnapshot>\('feedback:\/\/snapshot'/);
-  assert.match(app, /compileFeedbackTimeline\(result\.segments, current\.snapshots\)/);
+  assert.match(app, /compileFeedbackRecording\(current, result\.segments\)/);
   assert.match(preflight, /Audio, images, and transcription stay on this computer/);
   assert.match(preflight, /showCloseButton=\{false\}/);
   assert.match(preflight, /screen_capture_authorized/);

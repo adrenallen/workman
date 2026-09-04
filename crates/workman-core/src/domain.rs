@@ -419,6 +419,8 @@ pub struct RecordedFeedback {
     pub blocks: Vec<RecordedFeedbackBlock>,
     pub snapshots: Vec<RecordedFeedbackSnapshot>,
     pub deliveries: Vec<RecordedFeedbackDelivery>,
+    #[serde(default)]
+    pub append_state: Option<RecordedFeedbackAppendState>,
     pub error_code: Option<String>,
     pub archived: bool,
     pub lease_owner: Option<String>,
@@ -440,6 +442,15 @@ pub struct RecordedFeedbackSummary {
     pub error_code: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Checkpoint of the original document while an additional recording is in progress.
+/// Original text and transcript remain untouched until the new segment completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedFeedbackAppendState {
+    pub duration_ms: i64,
+    pub audio_path: Option<String>,
+    pub next_ordinal: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +495,8 @@ pub struct RecordedFeedbackDelivery {
     pub feedback_id: RecordedFeedbackId,
     pub target_kind: String,
     pub target_id: Option<i64>,
+    pub target_name: Option<String>,
+    pub feedback_revision: Option<i64>,
     pub status: String,
     pub packet_path: Option<String>,
     pub error_message: Option<String>,

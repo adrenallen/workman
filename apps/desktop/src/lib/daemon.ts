@@ -75,6 +75,7 @@ import type {
   FeedbackStartResult,
   RecordedFeedback,
   RecordedFeedbackBlock,
+  RecordedFeedbackDelivery,
   RecordedFeedbackSnapshot,
   RecordedFeedbackSummary,
   RecordedFeedbackTranscriptSegment
@@ -635,6 +636,22 @@ export class DaemonClient
     });
   }
 
+  recordedFeedbackAppend(projectId: number, feedbackId: number, expectedRevision: number, leaseOwner: string): Promise<FeedbackStartResult> {
+    return this.request('recorded_feedback.append', {
+      project_id: projectId, feedback_id: feedbackId, expected_revision: expectedRevision, lease_owner: leaseOwner
+    });
+  }
+
+  recordedFeedbackDiscardAppend(projectId: number, feedbackId: number): Promise<RecordedFeedback> {
+    return this.request('recorded_feedback.discard_append', { project_id: projectId, feedback_id: feedbackId });
+  }
+
+  recordedFeedbackFinishDelivery(projectId: number, feedbackId: number, deliveryId: number, error: string | null): Promise<RecordedFeedbackDelivery> {
+    return this.request('recorded_feedback.finish_delivery', {
+      project_id: projectId, feedback_id: feedbackId, delivery_id: deliveryId, error
+    });
+  }
+
   recordedFeedbackAddSnapshot(
     projectId: number,
     snapshot: Omit<RecordedFeedbackSnapshot, 'id' | 'feedback_id' | 'caption' | 'width' | 'height'> & { feedback_id: number }
@@ -712,13 +729,15 @@ export class DaemonClient
     projectId: number,
     feedbackId: number,
     processId: number,
-    directInput = false
-  ): Promise<{ delivery: unknown; process: ProcessView }> {
+    directInput = false,
+    expectedRevision?: number
+  ): Promise<{ delivery: RecordedFeedbackDelivery; process: ProcessView }> {
     return this.request('recorded_feedback.deliver_agent', {
       project_id: projectId,
       feedback_id: feedbackId,
       process_id: processId,
-      direct_input: directInput
+      direct_input: directInput,
+      expected_revision: expectedRevision
     });
   }
 
@@ -726,7 +745,7 @@ export class DaemonClient
     projectId: number,
     feedbackId: number,
     name?: string
-  ): Promise<{ scratchpad: Scratchpad; delivery: unknown }> {
+  ): Promise<{ scratchpad: Scratchpad; delivery: RecordedFeedbackDelivery }> {
     return this.request('recorded_feedback.to_scratchpad', {
       project_id: projectId,
       feedback_id: feedbackId,

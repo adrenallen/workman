@@ -8,6 +8,8 @@
   import CheckIcon from '@lucide/svelte/icons/check';
   import ClipboardIcon from '@lucide/svelte/icons/clipboard';
   import ImageIcon from '@lucide/svelte/icons/image';
+  import HistoryIcon from '@lucide/svelte/icons/history';
+  import MicIcon from '@lucide/svelte/icons/mic';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -20,6 +22,8 @@
     agentCanReceiveFeedback,
     agentFeedbackAvailability,
     feedbackDuration,
+    feedbackDeliveryLabel,
+    feedbackSendSummary,
     feedbackStatusLabel,
     type RecordedFeedback,
     type RecordedFeedbackBlock
@@ -32,6 +36,8 @@
     busy: boolean;
     processes: ProcessView[];
     onBack: () => void;
+    onAppend: () => Promise<void>;
+    onDiscardAppend: () => Promise<void>;
     onSave: (title: string, blocks: RecordedFeedbackBlock[], captions: Array<{ snapshot_id: number; caption: string }>) => Promise<void>;
     onSendAgent: (processId: number) => Promise<void>;
     onSendNewAgent: () => Promise<void>;
@@ -42,18 +48,19 @@
   }
 
   let { feedback, loading, busy, processes, onBack, onSave, onSendAgent, onSendNewAgent,
-    onSendScratchpad, onCopy, onArchive, onDelete }: Props = $props();
+    onSendScratchpad, onCopy, onArchive, onDelete, onAppend, onDiscardAppend }: Props = $props();
 
   let title = $state('');
   let blocks = $state<RecordedFeedbackBlock[]>([]);
   let captions = $state<Record<number, string>>({});
-  let images = $state<Record<number, string>>({});
+  let images = $state<Record<string, string>>({});
   let selectedAgentId = $state<number | null>(null);
   let localBusy = $state(false);
   let localError = $state<string | null>(null);
   let syncedKey = '';
 
   let agents = $derived(processes.filter((process) => process.kind === 'agent'));
+  let editable = $derived(feedback?.status === 'ready' && !localBusy && !busy);
   let eligibleAgents = $derived(agents.filter(agentCanReceiveFeedback));
   let dirty = $derived(Boolean(feedback && (
     title !== feedback.title
@@ -70,7 +77,7 @@
     blocks = feedback.blocks.map((block) => ({ ...block }));
     captions = Object.fromEntries(feedback.snapshots.map((snapshot) => [snapshot.id, snapshot.caption]));
     for (const snapshot of feedback.snapshots) {
-      if (!images[snapshot.id]) void loadImage(feedback.id, snapshot.id, snapshot.image_path);
+      if (!images[snapshot.image_path]) void loadImage(feedback.id, snapshot.image_path);
     }
   });
 
@@ -81,10 +88,10 @@
     }
   });
 
-  async function loadImage(feedbackId: number, snapshotId: number, path: string): Promise<void> {
+  async function loadImage(feedbackId: number, path: string): Promise<void> {
     try {
       const source = await invoke<string>('feedback_read_image', { feedbackId, path });
-      if (feedback?.id === feedbackId) images = { ...images, [snapshotId]: source };
+      if (feedback?.id === feedbackId) images = { ...images, [path]: source };
     } catch (cause) { localError = messageFor(cause); }
   }
 
@@ -131,6 +138,10 @@
   function messageFor(cause: unknown): string {
     return cause instanceof Error ? cause.message : String(cause);
   }
+
+  function deliveryTime(value: number): string {
+    return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(value);
+  }
 </script>
 
 {#if loading && !feedback}
@@ -138,7 +149,12 @@
 {:else if feedback}
   <section class="feedback-detail" aria-labelledby="feedback-title">
     <header>
-      <button class="back-link" type="button" onclick={() => onBack()}><ArrowLeftIcon size={14} />All feedback</button>
+      <div class="header-actions">
+        <button class="back-link" type="button" onclick={() => onBack()}><ArrowLeftIcon size={14} />All feedback</button>
+        {#if feedback.status === 'ready'}
+          <Button variant="outline" size="sm" disabled={!editable} onclick={() => void afterSave(onAppend)}><MicIcon size={14} />Record more</Button>
+        {/if}
+      </div>
       <div class="title-row">
         <span class:recording={feedback.status === 'recording'} class:failed={feedback.status === 'failed'} class="status-dot"></span>
         <input id="feedback-title" aria-label="Feedback title" bind:value={title} disabled={feedback.status !== 'ready' || localBusy || busy} />
@@ -147,44 +163,75 @@
       <div class="metadata">
         {#if feedback.archived}<span>Archived</span>{/if}<span>{feedbackStatusLabel(feedback.status)}</span><span>{feedback.snapshots.length} snapshot{feedback.snapshots.length === 1 ? '' : 's'}</span><span>Revision {feedback.revision}</span>
       </div>
+      {#if feedback.deliveries.length}
+        <details class="delivery-history">
+          <summary><HistoryIcon size={14} /><span>{feedbackSendSummary(feedback.deliveries)}</span><span class="history-label">Delivery history ({feedback.deliveries.length})</span></summary>
+          <ul>
+            {#each feedback.deliveries as delivery (delivery.id)}
+              {@const deliveredAt = delivery.status === 'sent' ? (delivery.updated_at ?? delivery.created_at) : delivery.created_at}
+              <li class:delivery-failed={delivery.status === 'failed'}>
+                <span class="delivery-icon">
+                  {#if delivery.target_kind === 'agent'}<BotIcon size={15} />{:else if delivery.target_kind === 'scratchpad'}<NotebookTextIcon size={15} />{:else}<ClipboardIcon size={15} />{/if}
+                </span>
+                <div class="delivery-target">
+                  <strong>{delivery.target_name || (delivery.target_kind === 'clipboard' ? 'Clipboard' : `${delivery.target_kind === 'agent' ? 'Agent' : 'Scratchpad'} #${delivery.target_id}`)}</strong>
+                  <span>{delivery.target_kind === 'agent' ? 'Agent' : delivery.target_kind === 'scratchpad' ? 'Scratchpad' : 'Copy'}{delivery.feedback_revision ? ` · Revision ${delivery.feedback_revision}` : ''}</span>
+                  {#if delivery.error_message}<p>{delivery.error_message}</p>{/if}
+                </div>
+                <div class="delivery-result">
+                  <span class:sent={delivery.status === 'sent'}>{feedbackDeliveryLabel(delivery)}</span>
+                  <time datetime={new Date(deliveredAt).toISOString()} title={new Date(deliveredAt).toLocaleString()}>{deliveryTime(deliveredAt)}</time>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        </details>
+      {:else}
+        <div class="unsent"><HistoryIcon size={14} />Not sent yet</div>
+      {/if}
     </header>
 
+    <div class="content-scroll">
     {#if feedback.status === 'transcribing'}
-      <div class="state-card"><LoaderCircleIcon class="spin" size={20} /><div><strong>Creating your local transcript</strong><span>The recording is ready; Whisper is processing it entirely on this computer.</span></div></div>
+      <div class="state-card"><LoaderCircleIcon class="spin" size={20} /><div><strong>{feedback.append_state ? 'Transcribing the added recording' : 'Creating your local transcript'}</strong><span>The recording is ready; Whisper is processing it entirely on this computer.</span></div></div>
     {:else if feedback.status === 'recording'}
-      <div class="state-card recording-card"><span class="live-dot"></span><div><strong>Recording in progress</strong><span>Use the floating control to snap a region or display, then Finish.</span></div></div>
+      <div class="state-card recording-card"><span class="live-dot"></span><div><strong>{feedback.append_state ? 'Recording more feedback' : 'Recording in progress'}</strong><span>Use the floating control to snap a region or display, then Finish.</span></div></div>
     {:else if feedback.status === 'failed'}
-      <div class="state-card failed-card"><div><strong>This recording needs attention</strong><span>{feedback.error_code ?? 'The recording could not be completed.'} Start a new recording when you’re ready.</span></div></div>
-    {:else}
+      <div class="state-card failed-card"><div><strong>{feedback.append_state ? 'The added recording could not finish' : 'This recording needs attention'}</strong><span>{feedback.append_state ? 'Your original feedback is safe. Keep the original to continue editing or try recording more again.' : `${feedback.error_code ?? 'The recording could not be completed.'} Start a new recording when you’re ready.`}</span></div></div>
+    {/if}
+    {#if feedback.status === 'ready' || feedback.append_state}
       <div class="document" aria-label="Editable feedback transcript">
         {#each blocks as block, index (`${block.kind}-${block.kind === 'image' ? block.snapshot_id : index}`)}
           <article class:image-block={block.kind === 'image'} class="block">
             <div class="block-tools">
-              <button type="button" aria-label="Move block up" disabled={index === 0 || localBusy} onclick={() => (blocks = moveFeedbackBlock(blocks, index, index - 1))}><ArrowUpIcon size={13} /></button>
-              <button type="button" aria-label="Move block down" disabled={index === blocks.length - 1 || localBusy} onclick={() => (blocks = moveFeedbackBlock(blocks, index, index + 1))}><ArrowDownIcon size={13} /></button>
-              <button type="button" aria-label="Remove block" disabled={localBusy} onclick={() => (blocks = removeFeedbackBlock(blocks, index))}><Trash2Icon size={13} /></button>
+              <button type="button" aria-label="Move block up" disabled={index === 0 || !editable} onclick={() => (blocks = moveFeedbackBlock(blocks, index, index - 1))}><ArrowUpIcon size={13} /></button>
+              <button type="button" aria-label="Move block down" disabled={index === blocks.length - 1 || !editable} onclick={() => (blocks = moveFeedbackBlock(blocks, index, index + 1))}><ArrowDownIcon size={13} /></button>
+              <button type="button" aria-label="Remove block" disabled={!editable} onclick={() => (blocks = removeFeedbackBlock(blocks, index))}><Trash2Icon size={13} /></button>
             </div>
             {#if block.kind === 'text'}
-              <textarea aria-label={`Transcript block ${index + 1}`} value={block.text} rows={Math.max(3, Math.ceil(block.text.length / 95))} oninput={(event) => (blocks = replaceFeedbackText(blocks, index, event.currentTarget.value))}></textarea>
+              <textarea readonly={!editable} aria-label={`Transcript block ${index + 1}`} value={block.text} rows={Math.max(3, Math.ceil(block.text.length / 95))} oninput={(event) => (blocks = replaceFeedbackText(blocks, index, event.currentTarget.value))}></textarea>
             {:else}
               {@const snapshot = feedback.snapshots.find((candidate) => candidate.id === block.snapshot_id)}
               {#if snapshot}
                 <div class="image-frame">
-                  {#if images[snapshot.id]}<img src={images[snapshot.id]} alt={captions[snapshot.id] || `Feedback snapshot ${snapshot.ordinal + 1}`} />{:else}<ImageIcon size={24} />{/if}
+                  {#if images[snapshot.image_path]}<img src={images[snapshot.image_path]} alt={captions[snapshot.id] || `Feedback snapshot ${snapshot.ordinal + 1}`} />{:else}<ImageIcon size={24} />{/if}
                 </div>
-                <div class="caption-row"><span>#{snapshot.ordinal + 1} · {feedbackDuration(snapshot.anchor_ms)}</span><input aria-label={`Caption for snapshot ${snapshot.ordinal + 1}`} placeholder="Add a caption…" value={captions[snapshot.id] ?? ''} oninput={(event) => (captions = { ...captions, [snapshot.id]: event.currentTarget.value })} /></div>
+                <div class="caption-row"><span>#{snapshot.ordinal + 1} · {feedbackDuration(snapshot.anchor_ms)}</span><input readonly={!editable} aria-label={`Caption for snapshot ${snapshot.ordinal + 1}`} placeholder="Add a caption…" value={captions[snapshot.id] ?? ''} oninput={(event) => (captions = { ...captions, [snapshot.id]: event.currentTarget.value })} /></div>
               {/if}
             {/if}
           </article>
         {/each}
-        <button class="add-text" type="button" onclick={addText}><PlusIcon size={14} /> Add text</button>
+        {#if feedback.status === 'ready'}<button class="add-text" type="button" disabled={!editable} onclick={addText}><PlusIcon size={14} /> Add text</button>{/if}
       </div>
     {/if}
 
+    </div>
+    <div class="footer-area">
     {#if localError}<button class="inline-error" type="button" onclick={() => (localError = null)}>{localError}<span>Dismiss</span></button>{/if}
 
     <footer>
       <div class="manage-actions">
+        {#if feedback.append_state && feedback.status === 'failed'}<Button variant="outline" size="sm" disabled={localBusy || busy} onclick={() => void run(onDiscardAppend)}>Keep original</Button>{/if}
         {#if feedback.status === 'ready'}<Button variant="outline" size="sm" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={13} />{/if}</Button>{/if}
         <Button variant="ghost" size="sm" disabled={localBusy || busy || feedback.status === 'recording'} onclick={() => void archive()}>
           {#if feedback.archived}<ArchiveRestoreIcon size={14} />Restore{:else}<ArchiveIcon size={14} />Archive{/if}
@@ -204,12 +251,15 @@
         </div>
       {/if}
     </footer>
+    </div>
   </section>
 {/if}
 
 <style>
   .feedback-detail { display: grid; width: min(980px, 100%); height: 100%; min-height: 0; margin: 0 auto; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--background); color: var(--foreground); }
   header { border-bottom: 1px solid var(--border); padding: 12px 22px 13px; }
+  .header-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .header-actions .back-link { margin-bottom: 0; }
   .back-link { display: flex; align-items: center; gap: 5px; margin: 0 0 8px -4px; border: 0; border-radius: 4px; padding: 4px; background: transparent; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 620; cursor: pointer; }
   .back-link:hover { background: var(--muted); color: var(--foreground); }
   .back-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -220,9 +270,25 @@
   .status-dot.recording, .live-dot { background: #ff4d5e; box-shadow: 0 0 0 3px rgb(255 77 94 / 14%); }
   .status-dot.failed { background: var(--destructive); }
   .duration, .metadata { color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
-  .metadata { display: flex; gap: 9px; margin: 7px 0 0 20px; }
+  .metadata { display: flex; flex-wrap: wrap; gap: 9px; margin: 7px 0 0 20px; }
   .metadata span + span::before { margin-right: 9px; content: '·'; }
-  .document { overflow: auto; min-height: 0; padding: 18px 22px max(32px, env(safe-area-inset-bottom)); }
+  .content-scroll { overflow: auto; min-height: 0; }
+  .document { padding: 18px 22px max(32px, env(safe-area-inset-bottom)); }
+  .unsent, .delivery-history summary { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .delivery-history summary { cursor: pointer; list-style: none; border-radius: 4px; padding: 5px 0; }
+  .delivery-history summary::-webkit-details-marker { display: none; }
+  .delivery-history summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+  .delivery-history summary:hover { color: var(--foreground); }
+  .history-label { margin-left: auto; text-decoration: underline; text-underline-offset: 3px; }
+  .delivery-history ul { max-height: 180px; overflow: auto; list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--border); }
+  .delivery-history li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 10px 2px; border-bottom: 1px solid var(--border); }
+  .delivery-icon { color: var(--muted-foreground); padding-top: 2px; }
+  .delivery-target strong { display: block; overflow-wrap: anywhere; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 600; }
+  .delivery-target > span, .delivery-result time { display: block; margin-top: 3px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .delivery-target p { margin: 5px 0 0; color: var(--destructive); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
+  .delivery-result { text-align: right; font-size: var(--font-size-xs); color: var(--muted-foreground); }
+  .delivery-result .sent { color: var(--success); }
+  .delivery-failed .delivery-result > span { color: var(--destructive); }
   .block { position: relative; margin: 0 auto 12px; border: 1px solid transparent; border-radius: 6px; padding: 8px 40px 8px 8px; }
   .block:hover, .block:focus-within { border-color: var(--border); background: color-mix(in srgb, var(--card) 75%, transparent); }
   .block-tools { position: absolute; top: 7px; right: 6px; display: grid; opacity: 0; }

@@ -1,10 +1,24 @@
 import type {
+  RecordedFeedback,
   RecordedFeedbackBlock,
   RecordedFeedbackSnapshot,
   RecordedFeedbackTranscriptSegment
 } from './recordedFeedback';
 
 const PARAGRAPH_GAP_MS = 700;
+
+/** Only compile the new segment; the daemon appends it to the saved, possibly edited document. */
+export function compileFeedbackRecording(
+  feedback: RecordedFeedback,
+  segments: RecordedFeedbackTranscriptSegment[]
+): RecordedFeedbackBlock[] {
+  const checkpoint = feedback.append_state;
+  const snapshots = checkpoint
+    ? feedback.snapshots.filter((snapshot) => snapshot.ordinal >= checkpoint.next_ordinal)
+      .map((snapshot) => ({ ...snapshot, anchor_ms: snapshot.anchor_ms - checkpoint.duration_ms }))
+    : feedback.snapshots;
+  return compileFeedbackTimeline(segments, snapshots);
+}
 
 /** Build an ordered review document from timed speech and sample-anchored screenshots. */
 export function compileFeedbackTimeline(

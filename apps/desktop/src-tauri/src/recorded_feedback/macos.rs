@@ -1858,7 +1858,9 @@ fn validate_media_dir(feedback_id: i64, value: &str) -> Result<PathBuf, String> 
     let supplied = Path::new(value)
         .canonicalize()
         .map_err(|error| format!("Feedback storage is unavailable: {error}"))?;
-    if supplied != expected {
+    // Append recordings use a fresh child directory so audio.wav and snapshots never
+    // overwrite previous segments. Canonical paths still confine all capture to this feedback.
+    if !supplied.starts_with(&expected) || !supplied.is_dir() {
         return Err("Feedback media directory is outside Workman's private storage.".into());
     }
     Ok(supplied)

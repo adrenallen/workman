@@ -13,6 +13,7 @@
 
   interface Props {
     projectName: string;
+    appendTitle?: string | null;
     preflight: NativeFeedbackPreflight | null;
     loading: boolean;
     installing: boolean;
@@ -26,7 +27,7 @@
     onClose: () => void;
   }
 
-  let { projectName, preflight, loading, installing, starting, progress, error,
+  let { projectName, appendTitle = null, preflight, loading, installing, starting, progress, error,
     onRefresh, onRequestScreen, onInstall, onStart, onClose }: Props = $props();
 
   let ready = $derived(Boolean(preflight?.supported
@@ -41,14 +42,14 @@
 
 <Dialog.Root open onOpenChange={(open) => { if (!open && !installing && !starting) onClose(); }}>
   <Dialog.Content
-    class="w-[min(590px,calc(100vw-24px))] !max-w-none gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0"
+    class="max-h-[calc(100dvh-24px)] w-[min(590px,calc(100vw-24px))] !max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-lg border border-border bg-popover p-0"
     showCloseButton={false}
   >
     <Dialog.Header class="border-b border-border px-5 py-4 text-left">
       <div class="eyebrow"><MicIcon size={13} /> Recorded Feedback</div>
-      <Dialog.Title class="mt-1 text-lg">Record feedback for {projectName}</Dialog.Title>
+      <Dialog.Title class="mt-1 min-w-0 break-words pr-5 text-lg">{appendTitle ? `Record more for ${appendTitle}` : `Record feedback for ${projectName}`}</Dialog.Title>
       <Dialog.Description class="mt-1 text-sm leading-relaxed">
-        Workman records your microphone and saves a screenshot only when you click Snap. Audio, images, and transcription stay on this computer.
+        {#if appendTitle}New speech and snapshots will be added to the end. Your existing text, screenshots, and delivery history will stay intact.{:else}Workman records your microphone and saves a screenshot only when you click Snap. Audio, images, and transcription stay on this computer.{/if}
       </Dialog.Description>
     </Dialog.Header>
 
@@ -121,7 +122,7 @@
 
 <style>
   .eyebrow { display: flex; align-items: center; gap: 6px; color: var(--signal); font: 700 var(--font-size-xs) 'JetBrains Mono Variable', monospace; letter-spacing: .08em; text-transform: uppercase; }
-  .requirements { display: grid; gap: 8px; padding: 14px 16px; }
+  .requirements { display: grid; min-height: 0; overflow: auto; gap: 8px; padding: 14px 16px; }
   .requirement { display: grid; min-height: 58px; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--surface); }
   .requirement.ready { border-color: color-mix(in srgb, var(--success) 28%, var(--border)); }
   .icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 5px; background: var(--muted); color: var(--muted-foreground); }
