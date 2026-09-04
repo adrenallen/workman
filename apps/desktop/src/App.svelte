@@ -175,7 +175,7 @@
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
   import { deliverAgentInput, type AgentInputStep } from './lib/agentInputDelivery';
   import { agentDraftPromptInputSteps } from './lib/agentAttachmentDrafts';
-  import { feedbackAgentInputSteps } from './lib/recordedFeedbackAgentDelivery';
+  import { feedbackAgentInputSteps, trackFeedbackDelivery } from './lib/recordedFeedbackAgentDelivery';
   import {
     recordedFeedbackCapability,
     recordedFeedbackPreferences,
@@ -271,6 +271,7 @@
   } from './lib/projectTree';
   import {
     agentCanReceiveFeedback,
+    agentCanReceiveInitialTurn,
     type NativeFeedbackFinished,
     type NativeFeedbackPreflight,
     type NativeFeedbackSession,
@@ -281,7 +282,7 @@
     type RecordedFeedbackSummary,
     type RecordedFeedbackView
   } from './lib/recordedFeedback';
-  import { compileFeedbackTimeline } from './lib/recordedFeedbackTimeline';
+  import { compileFeedbackRecording } from './lib/recordedFeedbackTimeline';
   import {
     bulkFailureMessage,
     type ProjectTreeBulkAction,
@@ -402,6 +403,7 @@
   let feedbackBrowserView = $state<RecordedFeedbackView>('active');
   let feedbackBrowserBusyId = $state<number | null>(null);
   let feedbackPreflightOpen = $state(false);
+  let feedbackAppendTarget = $state<RecordedFeedback | null>(null);
   let feedbackPreflight = $state<NativeFeedbackPreflight | null>(null);
   let feedbackPreflightLoading = $state(false);
   let feedbackModelInstalling = $state(false);
@@ -2478,8 +2480,9 @@
     }
   }
 
-  async function openFeedbackPreflight(): Promise<void> {
+  async function openFeedbackPreflight(appendTo: RecordedFeedback | null = null): Promise<void> {
     if (!selectedProject || !$recordedFeedbackSupported) return;
+    feedbackAppendTarget = appendTo;
     feedbackPreflightOpen = true;
     feedbackPreflightError = null;
     feedbackPreflightLoading = true;
@@ -2545,32 +2548,70 @@
   async function startFeedbackRecording(): Promise<void> {
     const project = selectedProject;
     if (!project || feedbackStarting) return;
+    const appendTo = feedbackAppendTarget;
+    if (appendTo && appendTo.project_id !== project.id) {
+      feedbackPreflightError = 'Return to the feedback’s project before recording more.';
+      return;
+    }
     feedbackStarting = true;
     feedbackPreflightError = null;
     let created: Awaited<ReturnType<DaemonClient['recordedFeedbackCreate']>> | null = null;
+    let nativeStarted = false;
     try {
-      const title = `Feedback · ${new Intl.DateTimeFormat(undefined, {
+      const title = appendTo?.title ?? `Feedback · ${new Intl.DateTimeFormat(undefined, {
         month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
       }).format(new Date())}`;
-      created = await client.recordedFeedbackCreate(project.id, title, feedbackLeaseOwner);
+      created = appendTo
+        ? await client.recordedFeedbackAppend(project.id, appendTo.id, appendTo.revision, feedbackLeaseOwner)
+        : await client.recordedFeedbackCreate(project.id, title, feedbackLeaseOwner);
       activeFeedbackSession = await invoke<NativeFeedbackSession>('feedback_start', {
         feedbackId: created.feedback.id,
         projectId: project.id,
         mediaDir: created.media_dir,
         shortcuts: recordingHotkeyBindings($hotkeyPreferences)
       });
+      nativeStarted = true;
       feedbackPreflightOpen = false;
+      feedbackAppendTarget = null;
       await refreshFeedback(project.id);
       await selectTreeItem(projectTreeSelection('feedback', created.feedback.id, project.id, title));
     } catch (cause) {
-      if (created) {
-        await client.recordedFeedbackDelete(project.id, created.feedback.id).catch(() => undefined);
+      if (created && !nativeStarted) {
+        if (appendTo) {
+          try {
+            await client.recordedFeedbackFailed(project.id, created.feedback.id, 'recording_start_failed');
+            const restored = await client.recordedFeedbackDiscardAppend(project.id, created.feedback.id);
+            feedbackAppendTarget = restored;
+            if (selection?.kind === 'feedback' && selection.id === restored.id) feedbackDetail = restored;
+          } catch (recoveryCause) {
+            feedbackPreflightError = `${messageForCause(cause)} Could not restore the original automatically: ${messageForCause(recoveryCause)}. Reopen the feedback and choose Keep original.`;
+            return;
+          }
+        } else {
+          await client.recordedFeedbackDelete(project.id, created.feedback.id).catch(() => undefined);
+        }
         await refreshFeedback(project.id);
       }
-      feedbackPreflightError = messageForCause(cause);
+      if (nativeStarted) reportError(cause);
+      else feedbackPreflightError = messageForCause(cause);
     } finally {
       feedbackStarting = false;
     }
+  }
+
+  async function appendSelectedFeedback(): Promise<void> {
+    if (!feedbackDetail || feedbackDetail.status !== 'ready') return;
+    await openFeedbackPreflight(feedbackDetail);
+  }
+
+  async function discardSelectedFeedbackAppend(): Promise<void> {
+    const feedback = feedbackDetail;
+    if (!feedback?.append_state || feedback.status !== 'failed') return;
+    const native = await invoke<NativeFeedbackSession | null>('feedback_status');
+    if (native?.feedback_id === feedback.id) throw new Error('Finish the active recording before keeping the original.');
+    const restored = await client.recordedFeedbackDiscardAppend(feedback.project_id, feedback.id);
+    if (selection?.kind === 'feedback' && selection.id === feedback.id) feedbackDetail = restored;
+    await refreshFeedback(feedback.project_id);
   }
 
   function enqueueFeedbackEvent(action: () => Promise<void>): void {
@@ -2633,7 +2674,7 @@
       return;
     }
     if (current.status === 'ready' || (current.status === 'failed' && !interrupted)) return;
-    const blocks = compileFeedbackTimeline(result.segments, current.snapshots);
+    const blocks = compileFeedbackRecording(current, result.segments);
     const next = await client.recordedFeedbackComplete(
       result.project_id,
       result.feedback_id,
@@ -2668,24 +2709,41 @@
   async function sendSelectedFeedbackToAgent(processId: number): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
     const feedback = feedbackDetail;
-    if (!feedbackTargetProcesses.some((process) => process.id === processId)) {
+    const target = feedbackTargetProcesses.find((process) => process.id === processId);
+    if (!target) {
       throw new Error('That agent is no longer available in this project.');
     }
-    await deliverFeedbackToAgent(feedback, processId);
-    await loadFeedback(selection.id, false);
+    try {
+      await deliverFeedbackToAgent(feedback, processId, undefined, async () => {
+        if (!activateProject(feedback.project_id)) return;
+        await selectTreeItem(projectTreeSelection('agent', processId, feedback.project_id, target.name));
+        await tick();
+        terminalView?.focusInput();
+      });
+    } catch (cause) {
+      if (selection?.kind !== 'feedback' || selection.id !== feedback.id) reportError(cause);
+      throw cause;
+    }
   }
 
   async function deliverFeedbackToAgent(
     feedback: RecordedFeedback,
-    processId: number
+    processId: number,
+    steps = feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt),
+    onSent: () => Promise<void> = async () => {}
   ): Promise<void> {
     // Validate the live target and retain an immutable packet before touching its composer. The
     // actual turn is assembled below from transcript text and real clipboard-image pastes.
-    await client.recordedFeedbackDeliverAgent(feedback.project_id, feedback.id, processId, true);
-    await deliverAgentSteps(
-      processId,
-      feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt)
-    );
+    const { delivery } = await client.recordedFeedbackDeliverAgent(feedback.project_id, feedback.id, processId, true, feedback.revision);
+    try {
+      await trackFeedbackDelivery(
+        () => deliverAgentSteps(processId, steps),
+        (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, delivery.id, error),
+        onSent
+      );
+    } finally {
+      if (selection?.kind === 'feedback' && selection.id === feedback.id) await loadFeedback(feedback.id, false);
+    }
   }
 
   async function deliverAgentSteps(processId: number, steps: AgentInputStep[]): Promise<void> {
@@ -2746,7 +2804,10 @@
           finish(new Error(`${process.name} stopped before its initial message could be sent.`));
           return;
         }
-        if (!agentCanReceiveFeedback(process)) {
+        const ready = settleInitialPrompt
+          ? agentCanReceiveFeedback(process)
+          : agentCanReceiveInitialTurn(process);
+        if (!ready) {
           if (readyTimer !== null) clearTimeout(readyTimer);
           readyTimer = null;
           return;
@@ -2795,18 +2856,19 @@
       );
       if (feedbackId !== null) {
         const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
-        await client.recordedFeedbackDeliverAgent(projectId, feedbackId, result.process_id, true);
         appendAgentInputGroup(
           steps,
           feedbackAgentInputSteps(feedback, $recordedFeedbackPreferences.agentPrompt)
         );
+        await deliverFeedbackToAgent(feedback, result.process_id, steps);
+      } else {
+        await deliverAgentSteps(result.process_id, steps);
       }
-      await deliverAgentSteps(result.process_id, steps);
       if (feedbackId !== null && selectedProject?.id === projectId) {
         await refreshFeedback(projectId);
       }
     } catch (cause) {
-      throw new Error(`The agent started, but its initial message could not be sent automatically: ${messageForCause(cause)}`);
+      throw new Error(`The agent started, but automatic delivery reported a problem: ${messageForCause(cause)}`);
     }
   }
 
@@ -2822,15 +2884,19 @@
 
   async function copySelectedFeedbackPacket(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback' || !feedbackDetail) return;
-    const packet = await client.recordedFeedbackPreparePacket(selectedProject.id, selection.id);
-    await invoke('terminal_write_clipboard_text', {
-      text: renderRecordedFeedbackPrompt(
-        $recordedFeedbackPreferences.agentPrompt,
-        feedbackDetail.title,
-        `The feedback packet is at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
-      )
-    });
-    await loadFeedback(selection.id, false);
+    const feedback = feedbackDetail;
+    const packet = await client.recordedFeedbackPreparePacket(feedback.project_id, feedback.id);
+    try {
+      await trackFeedbackDelivery(() => invoke('terminal_write_clipboard_text', {
+        text: renderRecordedFeedbackPrompt(
+          $recordedFeedbackPreferences.agentPrompt,
+          feedback.title,
+          `The feedback packet is at ${packet.packet_path}. Read feedback.md in order; its images directory contains the referenced screenshots.`
+        )
+      }), (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, packet.delivery.id, error));
+    } finally {
+      if (selection?.kind === 'feedback' && selection.id === feedback.id) await loadFeedback(feedback.id, false);
+    }
   }
 
   async function sendSelectedFeedbackToNewAgent(): Promise<void> {
@@ -6600,6 +6666,8 @@
             processes={feedbackTargetProcesses}
             onBack={openFeedbackBrowser}
             onSave={saveSelectedFeedback}
+            onAppend={appendSelectedFeedback}
+            onDiscardAppend={discardSelectedFeedbackAppend}
             onSendAgent={sendSelectedFeedbackToAgent}
             onSendNewAgent={sendSelectedFeedbackToNewAgent}
             onSendScratchpad={sendSelectedFeedbackToScratchpad}
@@ -6714,6 +6782,7 @@
 {#if feedbackPreflightOpen && selectedProject}
   <RecordedFeedbackPreflight
     projectName={projectDisplayName(selectedProject)}
+    appendTitle={feedbackAppendTarget?.title ?? null}
     preflight={feedbackPreflight}
     loading={feedbackPreflightLoading}
     installing={feedbackModelInstalling}

@@ -13,6 +13,31 @@ import {
 export type FeedbackAgentInputStep = AgentInputStep;
 export type FeedbackAgentInputActions = AgentInputActions;
 
+/** Record the actual submission result, without confusing a failed receipt with a failed send. */
+export async function trackFeedbackDelivery(
+  send: () => Promise<void>,
+  acknowledge: (error: string | null) => Promise<unknown>,
+  onSent: () => Promise<void> = async () => {}
+): Promise<void> {
+  try {
+    await send();
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    try { await acknowledge(message); }
+    catch { throw new Error(`${message} Delivery history could not be updated; this attempt is unconfirmed.`); }
+    throw cause;
+  }
+  try {
+    await onSent();
+  } finally {
+    try {
+      await acknowledge(null);
+    } catch (cause) {
+      throw new Error(`Feedback was sent, but delivery history could not be updated: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+}
+
 /** Build the same transcript/image order the user reviewed, without reducing it to file links. */
 export function feedbackAgentInputSteps(
   feedback: RecordedFeedback,

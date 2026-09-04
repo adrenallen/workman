@@ -32,7 +32,9 @@ export interface RecordedFeedbackDelivery {
   feedback_id: number;
   target_kind: 'agent' | 'scratchpad' | 'clipboard';
   target_id: number | null;
-  status: 'queued' | 'unverified' | 'failed';
+  target_name?: string | null;
+  feedback_revision?: number | null;
+  status: 'pending' | 'sent' | 'queued' | 'unverified' | 'failed';
   packet_path: string | null;
   error_message: string | null;
   created_at: number;
@@ -74,6 +76,7 @@ export function recordedFeedbackForView(
 }
 
 export interface RecordedFeedback extends Omit<RecordedFeedbackSummary, 'snapshot_count'> {
+  append_state?: { duration_ms: number; audio_path: string | null; next_ordinal: number } | null;
   audio_path: string | null;
   transcript: RecordedFeedbackTranscriptSegment[];
   blocks: RecordedFeedbackBlock[];
@@ -81,6 +84,21 @@ export interface RecordedFeedback extends Omit<RecordedFeedbackSummary, 'snapsho
   deliveries: RecordedFeedbackDelivery[];
   lease_owner: string | null;
   lease_expires_at: number | null;
+}
+
+export function feedbackDeliveryLabel(delivery: RecordedFeedbackDelivery): string {
+  if (delivery.status === 'sent') return delivery.target_kind === 'clipboard' ? 'Copied' : 'Sent';
+  if (delivery.status === 'failed') return 'Failed';
+  if (delivery.status === 'queued') return 'Queued';
+  return 'Unconfirmed';
+}
+
+export function feedbackSendSummary(deliveries: readonly RecordedFeedbackDelivery[]): string {
+  const sends = deliveries.filter((delivery) => delivery.target_kind !== 'clipboard');
+  const sent = sends.filter((delivery) => delivery.status === 'sent');
+  if (sent.length) return `Sent ${sent.length} time${sent.length === 1 ? '' : 's'}`;
+  if (sends.some((delivery) => delivery.status !== 'failed')) return 'Delivery unconfirmed';
+  return 'Not sent yet';
 }
 
 export interface FeedbackStartResult {
@@ -165,6 +183,17 @@ export function agentCanReceiveFeedback(process: ProcessView): boolean {
   return process.kind === 'agent'
     && process.status === 'running'
     && ['idle', 'needs_input', 'waiting'].includes(process.agent_state.state);
+}
+
+/** A narrower first-turn gate that can use a daemon's fast, stable-composer signal. */
+export function agentCanReceiveInitialTurn(process: ProcessView): boolean {
+  if (process.kind !== 'agent' || process.status !== 'running') return false;
+  if (process.agent_state.composer_input_ready !== undefined) {
+    return process.agent_state.composer_input_ready;
+  }
+  // Older daemons do not expose the fast signal. Keep their conservative behavior, but never
+  // treat a permission or authentication prompt as the new agent's empty composer.
+  return ['idle', 'waiting'].includes(process.agent_state.state);
 }
 
 export function agentFeedbackAvailability(process: ProcessView): string {

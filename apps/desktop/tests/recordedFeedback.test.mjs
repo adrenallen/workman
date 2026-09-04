@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   compileFeedbackTimeline,
+  compileFeedbackRecording,
   moveFeedbackBlock,
   removeFeedbackBlock,
   replaceFeedbackText
@@ -12,6 +13,7 @@ import { defaultHotkeyPreferences } from '../src/lib/hotkeys.ts';
 import { recordingHotkeyBindings } from '../src/lib/recordedFeedbackHotkeys.ts';
 import {
   deliverFeedbackAgentInput,
+  trackFeedbackDelivery,
   feedbackAgentInputSteps
 } from '../src/lib/recordedFeedbackAgentDelivery.ts';
 import {
@@ -22,7 +24,106 @@ import {
   scratchpadLocalImagePath,
   scratchpadMarkdownImages
 } from '../src/lib/scratchpadImages.ts';
-import { recordedFeedbackForView } from '../src/lib/recordedFeedback.ts';
+import {
+  agentCanReceiveInitialTurn,
+  feedbackDeliveryLabel,
+  feedbackSendSummary,
+  recordedFeedbackForView
+} from '../src/lib/recordedFeedback.ts';
+
+test('append timeline uses only new snapshots and local segment timestamps', () => {
+  const feedback = {
+    append_state: { duration_ms: 5_000, next_ordinal: 2 },
+    snapshots: [
+      { id: 1, ordinal: 0, anchor_ms: 500, anchor_samples: 8_000 },
+      { id: 2, ordinal: 1, anchor_ms: 4_000, anchor_samples: 64_000 },
+      { id: 3, ordinal: 2, anchor_ms: 5_600, anchor_samples: 9_600 },
+      { id: 4, ordinal: 3, anchor_ms: 6_500, anchor_samples: 24_000 }
+    ]
+  };
+  const segments = [{ start_ms: 100, end_ms: 900, text: 'One more thing.' }];
+  assert.deepEqual(compileFeedbackRecording(feedback, segments), [
+    { kind: 'text', start_ms: 100, end_ms: 900, text: 'One more thing.' },
+    { kind: 'image', snapshot_id: 3 },
+    { kind: 'image', snapshot_id: 4 }
+  ]);
+  assert.equal(feedback.snapshots[2].anchor_ms, 5_600, 'does not mutate stored anchors');
+  assert.deepEqual(compileFeedbackRecording({ ...feedback, append_state: null }, segments),
+    compileFeedbackTimeline(segments, feedback.snapshots));
+});
+
+test('delivery history distinguishes real sends, failures, copies, and legacy uncertainty', () => {
+  const sent = { target_kind: 'agent', status: 'sent' };
+  const copied = { target_kind: 'clipboard', status: 'sent' };
+  assert.equal(feedbackSendSummary([]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([copied]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([{ ...sent, status: 'failed' }]), 'Not sent yet');
+  assert.equal(feedbackSendSummary([{ ...sent, status: 'unverified' }]), 'Delivery unconfirmed');
+  assert.equal(feedbackSendSummary([sent, copied]), 'Sent 1 time');
+  assert.equal(feedbackSendSummary([sent, { ...sent, target_kind: 'scratchpad' }]), 'Sent 2 times');
+  assert.equal(feedbackDeliveryLabel(sent), 'Sent');
+  assert.equal(feedbackDeliveryLabel(copied), 'Copied');
+  assert.equal(feedbackDeliveryLabel({ ...sent, status: 'pending' }), 'Unconfirmed');
+});
+
+test('delivery receipt and agent focus follow submission; failed sends never focus', async () => {
+  const events = [];
+  await trackFeedbackDelivery(
+    async () => { events.push('submitted'); },
+    async (error) => { events.push(error === null ? 'sent receipt' : error); },
+    async () => { events.push('focus agent'); }
+  );
+  assert.deepEqual(events, ['submitted', 'focus agent', 'sent receipt']);
+  events.length = 0;
+  await assert.rejects(trackFeedbackDelivery(
+    async () => { throw new Error('Agent exited'); },
+    async (error) => { events.push(error); },
+    async () => { events.push('focus agent'); }
+  ), /Agent exited/);
+  assert.deepEqual(events, ['Agent exited']);
+  events.length = 0;
+  await assert.rejects(trackFeedbackDelivery(
+    async () => { events.push('submitted'); },
+    async () => { throw new Error('Daemon disconnected'); },
+    async () => { events.push('focus agent'); }
+  ), /Feedback was sent, but delivery history could not be updated/);
+  assert.deepEqual(events, ['submitted', 'focus agent'], 'failed receipt must not retry or undo a send');
+});
+
+test('new agents can receive their first turn from the fast composer signal', () => {
+  const process = (agentState, overrides = {}) => ({
+    id: 7,
+    kind: 'agent',
+    status: 'running',
+    agent_state: agentState,
+    ...overrides
+  });
+
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'working',
+    classification: 'resting_prompt',
+    composer_input_ready: true
+  })), true);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'working',
+    classification: 'resting_prompt',
+    composer_input_ready: false
+  })), false);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'needs_input',
+    classification: 'permission_dialog',
+    composer_input_ready: false
+  })), false);
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'idle',
+    classification: 'resting_prompt'
+  })), true, 'older daemons retain the conservative idle fallback');
+  assert.equal(agentCanReceiveInitialTurn(process({
+    state: 'idle',
+    classification: 'resting_prompt',
+    composer_input_ready: true
+  }, { status: 'stopped' })), false);
+});
 
 test('feedback browser separates archived recordings and searches its selected view', () => {
   const feedback = [
@@ -184,7 +285,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
     readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/LiveMarkdownEditor.svelte', import.meta.url), 'utf8'),
-    readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src-tauri/src/recorded_feedback/capture.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/control.rs', import.meta.url), 'utf8'),
@@ -202,11 +303,13 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(app, /if \(selected && archived\) openFeedbackBrowser\('active'\)/);
   assert.match(detail, /All feedback/);
   assert.match(app, /listen<NativeFeedbackSnapshot>\('feedback:\/\/snapshot'/);
-  assert.match(app, /compileFeedbackTimeline\(result\.segments, current\.snapshots\)/);
+  assert.match(app, /compileFeedbackRecording\(current, result\.segments\)/);
   assert.match(preflight, /Audio, images, and transcription stay on this computer/);
   assert.match(preflight, /showCloseButton=\{false\}/);
   assert.match(preflight, /screen_capture_authorized/);
-  assert.match(native, /let screen_capture_authorized = CGPreflightScreenCaptureAccess\(\)/);
+  // Preflight now asks the platform helper; macOS still answers with TCC.
+  assert.match(native, /let screen_capture_authorized = screen_capture_authorized\(\);/);
+  assert.match(native, /CGPreflightScreenCaptureAccess\(\)/);
   assert.match(native, /CGRequestScreenCaptureAccess\(\)/);
   assert.match(native, /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_ScreenCapture/);
   assert.match(native, /Command::new\("\/usr\/bin\/open"\)/);
@@ -259,6 +362,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(app, /feedbackSummaries\.some\(\(feedback\)/);
   assert.match(app, /feedbackAgentInputSteps\(feedback, \$recordedFeedbackPreferences\.agentPrompt\)/);
   assert.match(app, /deliverSpawnedAgentInitialTurn/);
+  assert.match(app, /agentCanReceiveInitialTurn\(process\)/);
   assert.match(app, /feedbackId: feedback\.id/);
   assert.match(app, /defer_initial_prompt: true/);
   assert.match(app, /result\.deferred_initial_prompt \?\? ''/);
@@ -271,6 +375,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(detail, /height: 100%; min-height: 0/);
   assert.doesNotMatch(detail, /footer \{ position: sticky/);
   assert.match(daemon, /params\.direct_input/);
+  assert.match(daemon, /agent_accepts_feedback_input\([\s\S]*?status\.agent_state\.composer_input_ready/);
   assert.match(capability, /core:window:allow-start-dragging/);
   const shortcutHandler = app.indexOf('function handleConfiguredHotkey');
   const recordingGuard = app.indexOf('recordingHotkeyActions as readonly string[]', shortcutHandler);
@@ -305,7 +410,7 @@ test('recorded feedback is platform-gated and its sidebar section is optional', 
   ]);
 
   assert.match(native, /pub\(crate\) fn feedback_capability\(\)/);
-  assert.match(native, /supported: cfg!\(target_os = "macos"\)/);
+  assert.match(native, /supported: cfg!\(any\(target_os = "macos", windows\)\)/);
   assert.match(availability, /workman\.feedback\.preferences\.v1/);
   assert.match(availability, /capability\.supported && preferences\.showInSidebar/);
   assert.match(tree, /group !== 'feedback' \|\| showFeedback/);
@@ -322,4 +427,48 @@ test('recorded feedback is platform-gated and its sidebar section is optional', 
   const preventDefault = app.indexOf('event.preventDefault()', shortcutHandler);
   assert.ok(supportGuard > shortcutHandler && supportGuard < preventDefault,
     'unsupported feedback launch shortcuts must not be swallowed');
+});
+
+test('the capture module keeps a windows implementation beside every macos one', async () => {
+  // Carriage returns are stripped so the assertions hold whatever line endings
+  // the checkout uses.
+  const capture = (await readFile(
+    new URL('../src-tauri/src/recorded_feedback/capture.rs', import.meta.url),
+    'utf8'
+  )).split(String.fromCharCode(13)).join('');
+
+  // The capture pipeline itself is shared. Only the window layer, the screen
+  // capture permission model, and the settings deep link may differ per
+  // platform, and each must offer both sides or Windows loses the feature.
+  const macosAttribute = '#[cfg(target_os = "macos")]';
+  const windowsAttribute = '#[cfg(windows)]';
+  for (const symbol of [
+    'fn screen_capture_authorized',
+    'fn request_screen_access_inner',
+    'fn open_screen_recording_settings',
+    'fn build_overlay_window',
+    'fn build_toolbar_window',
+    'fn close_feedback_window',
+    'fn raise_toolbar',
+    'fn set_overlays_interactive'
+  ]) {
+    assert.ok(
+      capture.includes(macosAttribute + String.fromCharCode(10) + symbol),
+      symbol + ' is missing its macOS implementation'
+    );
+    assert.ok(
+      capture.includes(windowsAttribute + String.fromCharCode(10) + symbol),
+      symbol + ' is missing its Windows implementation'
+    );
+  }
+
+  // AppKit-only bindings must never be reachable from a Windows build.
+  for (const line of capture.split(String.fromCharCode(10))) {
+    if (line.includes('objc2_core_graphics') || line.includes('tauri_nspanel::')) {
+      assert.ok(
+        capture.includes(macosAttribute + String.fromCharCode(10) + line),
+        line.trim() + ' must be gated to macOS'
+      );
+    }
+  }
 });

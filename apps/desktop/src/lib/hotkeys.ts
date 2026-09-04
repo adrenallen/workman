@@ -722,7 +722,13 @@ function deduplicatePreferences(preferences: HotkeyPreferences): HotkeyPreferenc
 
 function canShareHotkey(left: HotkeyAction, right: HotkeyAction): boolean {
   return (left === 'new-quick-prompt' && right === 'new-agent')
-    || (left === 'new-agent' && right === 'new-quick-prompt');
+    || (left === 'new-agent' && right === 'new-quick-prompt')
+    // Off macOS the terminal unfocuses with primary+Shift+U, because primary+U
+    // is line-kill in a shell. That is the recorder's undo chord too, but the
+    // recorder registers its shortcuts globally only while a session runs, so
+    // the two never listen at once and undo must not be deduplicated away.
+    || (left === 'unfocus-terminal' && right === 'feedback-undo')
+    || (left === 'feedback-undo' && right === 'unfocus-terminal');
 }
 
 function clonePreferences(preferences: HotkeyPreferences): HotkeyPreferences {

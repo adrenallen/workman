@@ -2150,6 +2150,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_stream_delivers_fast_initial_composer_edge() {
+        let server = TestServer::start().await;
+        {
+            let registry = server.registry.lock().await;
+            registry
+                .store()
+                .put_project(&workman_core::Project {
+                    id: 1,
+                    path: "/tmp/workman-initial-input-invalidation-test".into(),
+                    name: "initial-input-invalidation".into(),
+                    display_name: None,
+                    icon: None,
+                    selected: true,
+                    sort_order: 0,
+                })
+                .unwrap();
+            registry
+                .store()
+                .put_agent_tool(&workman_core::AgentTool {
+                    id: 90,
+                    name: "Scripted Claude".into(),
+                    command: "scripted-claude".into(),
+                    tool_type: "claude_code".into(),
+                    enabled: true,
+                    source: workman_core::AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        let mut params = process_params(
+            100,
+            "agent",
+            "initial-input-edge",
+            "printf '\\033[2J\\033[HReady\\n❯ '; sleep 30",
+        );
+        params["agent_tool_id"] = json!(90);
+        rpc(&mut socket, 1, "process.create", params).await;
+        rpc(
+            &mut socket,
+            2,
+            "process.start",
+            json!({ "process_id": 100 }),
+        )
+        .await;
+        rpc(&mut socket, 3, "process.status_subscribe", json!({})).await;
+
+        let edge = timeout(Duration::from_secs(3), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(message) = message else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(&message).unwrap();
+                if event["event"] != "process.statuses" {
+                    continue;
+                }
+                let Some(process) = event["processes"]
+                    .as_array()
+                    .and_then(|processes| processes.iter().find(|process| process["id"] == 100))
+                else {
+                    continue;
+                };
+                if process["agent_state"]["composer_input_ready"] == true {
+                    assert_eq!(process["agent_state"]["state"], "working");
+                    let ready_at = process["agent_state"]["last_output_at"].as_i64().unwrap() + 750;
+                    break timers::now_millis().saturating_sub(ready_at);
+                }
+            }
+        })
+        .await
+        .expect("initial composer status edge was not delivered");
+        assert!(
+            (0..=750).contains(&edge),
+            "initial composer edge arrived {edge} ms after its readiness deadline"
+        );
+
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn status_stream_delivers_time_driven_working_to_idle_edge_promptly() {
         let server = TestServer::start().await;
         server

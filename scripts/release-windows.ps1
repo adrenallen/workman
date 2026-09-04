@@ -29,6 +29,33 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     else { throw 'cargo was not found. Install Rust from https://rustup.rs, then re-run.' }
 }
 
+# Recorded feedback transcribes locally with whisper.cpp, whose Rust bindings are
+# generated during the build. That needs cmake (the Visual Studio Build Tools ship
+# one) and libclang from LLVM. Resolve both here so the build does not fail deep
+# inside a dependency with an opaque message.
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $bundledCMake = Get-ChildItem -Path @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')
+    ) -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($bundledCMake) {
+        $env:Path = "$($bundledCMake.DirectoryName);$env:Path"
+    }
+    else {
+        throw 'cmake was not found. Add the C++ workload to the Visual Studio Build Tools, or install cmake from https://cmake.org, then re-run.'
+    }
+}
+
+if (-not $env:LIBCLANG_PATH) {
+    $libclangDir = Join-Path $env:ProgramFiles 'LLVM\bin'
+    if (Test-Path (Join-Path $libclangDir 'libclang.dll')) {
+        $env:LIBCLANG_PATH = $libclangDir
+    }
+    else {
+        throw 'libclang was not found. Install LLVM with "winget install -e --id LLVM.LLVM", or set LIBCLANG_PATH to a folder containing libclang.dll, then re-run.'
+    }
+}
+
 $versionLine = Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1
 if (-not $versionLine) { throw 'workspace version was not found in Cargo.toml' }
 $version = $versionLine.Matches[0].Groups[1].Value
@@ -47,9 +74,41 @@ if (-not $SkipFrontend) {
 
 # Ship self-contained binaries: the MSVC runtime links statically so the
 # archive runs on machines without a Visual C++ redistributable installed.
-if ($env:RUSTFLAGS -notmatch 'crt-static') {
-    $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
+#
+# Rust also embeds source paths for panic messages and backtraces, which would
+# publish the building account's home directory inside the binaries. Remap the
+# repository and the home directory to stable placeholders so the archive says
+# nothing about the machine that produced it. CARGO_ENCODED_RUSTFLAGS is used
+# rather than RUSTFLAGS because it separates arguments with a unit separator and
+# therefore survives paths containing spaces.
+# C dependencies compiled by cmake (whisper.cpp, aws-lc) bake the absolute path
+# of every source file into their objects, and their sources live in the cargo
+# registry. Set CARGO_HOME to a path outside your home directory before running
+# this to keep the account name out of those too; a directory junction pointing
+# at the usual cargo home works and keeps the existing download cache.
+# whisper.cpp is compiled by cmake, which bakes the absolute path of each source
+# file into the objects it produces. Those paths sit under the cargo target
+# directory, so with the default location the archive would name the building
+# account no matter what Rust remaps. Build into a neutral directory instead;
+# an explicit CARGO_TARGET_DIR is respected.
+if (-not $env:CARGO_TARGET_DIR) {
+    $neutralTarget = Join-Path $env:SystemDrive 'workman-build'
+    try {
+        New-Item -ItemType Directory -Force $neutralTarget -ErrorAction Stop | Out-Null
+        $env:CARGO_TARGET_DIR = $neutralTarget
+    }
+    catch {
+        Write-Host "  could not create $neutralTarget; building in the default target directory, which will embed its path"
+    }
 }
+$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo 'target' }
+
+$rustFlags = @(
+    '-C', 'target-feature=+crt-static',
+    "--remap-path-prefix=$repo=/workman",
+    "--remap-path-prefix=$($env:USERPROFILE)=/home/build"
+)
+$env:CARGO_ENCODED_RUSTFLAGS = ($rustFlags -join [char]0x1f)
 
 Push-Location $repo
 try {
@@ -65,7 +124,7 @@ New-Item -ItemType Directory -Force $outputDir | Out-Null
 $archivePath = Join-Path $outputDir 'workman-windows-x86_64.zip'
 if (Test-Path $archivePath) { Remove-Item $archivePath -Force }
 
-$distDir = Join-Path $repo 'target\dist'
+$distDir = Join-Path $targetRoot 'dist'
 $thirdPartyNotices = Join-Path $distDir 'THIRD_PARTY_NOTICES.md'
 node (Join-Path $repo 'scripts\generate-third-party-notices.mjs') $thirdPartyNotices
 if ($LASTEXITCODE -ne 0) { throw 'third-party notice generation failed' }

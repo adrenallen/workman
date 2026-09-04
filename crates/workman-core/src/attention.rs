@@ -21,6 +21,12 @@ pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(5);
 /// redraw their composer between bursts while a turn is still running.
 pub const DEFAULT_IDLE_CONFIRMATION: Duration = Duration::from_secs(5);
 
+/// Short stable-prompt window before a recognized composer may receive injected input.
+///
+/// This is intentionally separate from orchestration idle: a recognized, unobstructed
+/// composer is safe for initial input before it is safe to call a completed turn idle.
+pub const DEFAULT_COMPOSER_INPUT_CONFIRMATION: Duration = Duration::from_millis(750);
+
 /// Grace period in which newly delivered input keeps a process out of idle.
 pub const RECENT_INPUT_GRACE: Duration = Duration::from_secs(2);
 
@@ -122,6 +128,9 @@ pub struct AgentState {
     pub exited: bool,
     pub thinking: bool,
     pub planning: bool,
+    /// A recognized composer has remained unobstructed long enough to accept direct input.
+    #[serde(default)]
+    pub composer_input_ready: bool,
     /// Tool family used to select the adapter.
     pub tool_type: Option<String>,
     /// Seconds since the last attention-relevant PTY output, with sub-second precision.
@@ -159,6 +168,17 @@ impl AgentState {
     ) -> Self {
         let idle_since = last_output_at.unwrap_or(started_at);
         let idle_seconds = elapsed_seconds(now_ms, idle_since);
+        let stable_since = latest_activity_at(
+            started_at,
+            last_output_at,
+            last_content_change_at,
+            last_input_at,
+        );
+        let composer_input_ready = state == AttentionState::Idle
+            || (state == AttentionState::Working
+                && flags.resting_prompt
+                && content_follows_input(last_content_change_at, last_input_at)
+                && elapsed(now_ms, stable_since) >= DEFAULT_COMPOSER_INPUT_CONFIRMATION);
         Self {
             state,
             working: state == AttentionState::Working,
@@ -170,6 +190,7 @@ impl AgentState {
             exited: state == AttentionState::Exited,
             thinking: flags.thinking,
             planning: flags.planning,
+            composer_input_ready,
             tool_type,
             idle_seconds,
             last_output_seconds: last_output_at.map(|at| elapsed_seconds(now_ms, at)),
@@ -332,16 +353,12 @@ impl AttentionEngine {
         // Treat idle as a stable state, not a single prompt-shaped frame. PTY
         // output, rendered state changes, and input all reset the same candidate
         // window so every downstream consumer sees one debounced stream.
-        let stable_since = [
-            Some(self.started_at),
+        let stable_since = latest_activity_at(
+            self.started_at,
             self.last_output_at,
             self.last_content_change_at,
             self.last_input_at,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(self.started_at);
+        );
         let stable_for = elapsed(now_ms, stable_since);
         let confirmation = self.adapter.idle_confirmation().max(self.config.quiescence);
         if stable_for < confirmation {
@@ -363,30 +380,32 @@ impl AttentionEngine {
             return None;
         }
 
-        if let Some(last_input_at) = self.last_input_at {
-            let recent_input_ends_at =
-                last_input_at.saturating_add(duration_millis(RECENT_INPUT_GRACE));
-            if recent_input_ends_at > now_ms {
-                return Some(recent_input_ends_at);
-            }
-        }
+        let recent_input_ends_at = self
+            .last_input_at
+            .map(|at| at.saturating_add(duration_millis(RECENT_INPUT_GRACE)))
+            .filter(|at| *at > now_ms);
         if self.flags.needs_input || self.flags.busy {
-            return None;
+            return recent_input_ends_at;
         }
 
-        let stable_since = [
-            Some(self.started_at),
+        let stable_since = latest_activity_at(
+            self.started_at,
             self.last_output_at,
             self.last_content_change_at,
             self.last_input_at,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(self.started_at);
+        );
+        let composer_input_at = (self.flags.resting_prompt
+            && content_follows_input(self.last_content_change_at, self.last_input_at))
+        .then_some(
+            stable_since.saturating_add(duration_millis(DEFAULT_COMPOSER_INPUT_CONFIRMATION)),
+        );
         let confirmation = self.adapter.idle_confirmation().max(self.config.quiescence);
         let idle_at = stable_since.saturating_add(duration_millis(confirmation));
-        (idle_at > now_ms).then_some(idle_at)
+        [recent_input_ends_at, composer_input_at, Some(idle_at)]
+            .into_iter()
+            .flatten()
+            .filter(|at| *at > now_ms)
+            .min()
     }
 }
 
@@ -1007,6 +1026,32 @@ fn elapsed(now_ms: i64, since_ms: i64) -> Duration {
     Duration::from_millis(now_ms.saturating_sub(since_ms).max(0) as u64)
 }
 
+fn latest_activity_at(
+    started_at: i64,
+    last_output_at: Option<i64>,
+    last_content_change_at: Option<i64>,
+    last_input_at: Option<i64>,
+) -> i64 {
+    [
+        Some(started_at),
+        last_output_at,
+        last_content_change_at,
+        last_input_at,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(started_at)
+}
+
+fn content_follows_input(last_content_change_at: Option<i64>, last_input_at: Option<i64>) -> bool {
+    match (last_content_change_at, last_input_at) {
+        (Some(content_at), Some(input_at)) => content_at >= input_at,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 fn elapsed_seconds(now_ms: i64, since_ms: i64) -> f64 {
     elapsed(now_ms, since_ms).as_secs_f64()
 }
@@ -1079,6 +1124,9 @@ mod tests {
     fn codex_adapter_distinguishes_a_visible_draft_from_a_started_turn() {
         let mut session = ScriptedSession::codex();
         session.emit(1_100, "\x1b[2J\x1b[H› queued wake body".as_bytes());
+        let composer_ready = session.tracker.snapshot_at(1_850);
+        assert_eq!(composer_ready.state, AttentionState::Working);
+        assert!(composer_ready.composer_input_ready);
         assert_eq!(
             session.tracker.snapshot_at(6_099).state,
             AttentionState::Working
@@ -1175,6 +1223,7 @@ mod tests {
         let working = session.tracker.snapshot_at(3_000);
         assert_eq!(working.state, AttentionState::Working);
         assert!(working.thinking);
+        assert!(!working.composer_input_ready);
         assert_eq!(working.classification.as_deref(), Some("busy_spinner"));
 
         session.emit(
@@ -1186,6 +1235,7 @@ mod tests {
         assert!(waiting.needs_input);
         assert!(!waiting.idle);
         assert!(!waiting.exited);
+        assert!(!waiting.composer_input_ready);
         assert_eq!(waiting.classification.as_deref(), Some("permission_dialog"));
 
         session.emit(
@@ -1247,12 +1297,20 @@ mod tests {
             b"\xe2\x9c\xbb Thinking\xe2\x80\xa6\r\nAnswer complete\r\n\xe2\x9d\xaf ",
         );
 
-        assert_eq!(
-            session.tracker.snapshot_at(6_999).state,
-            AttentionState::Working
-        );
+        let settling = session.tracker.snapshot_at(2_749);
+        assert_eq!(settling.state, AttentionState::Working);
+        assert!(!settling.composer_input_ready);
+
+        let composer_ready = session.tracker.snapshot_at(2_750);
+        assert_eq!(composer_ready.state, AttentionState::Working);
+        assert!(composer_ready.composer_input_ready);
+
+        let not_yet_idle = session.tracker.snapshot_at(6_999);
+        assert_eq!(not_yet_idle.state, AttentionState::Working);
+        assert!(not_yet_idle.composer_input_ready);
         let state = session.tracker.snapshot_at(7_000);
         assert_eq!(state.state, AttentionState::Idle);
+        assert!(state.composer_input_ready);
         assert_eq!(state.classification.as_deref(), Some("resting_prompt"));
     }
 
@@ -1362,14 +1420,36 @@ mod tests {
         assert_eq!(prompted.state, AttentionState::Working);
         assert_eq!(prompted.last_input_at, Some(7_100));
         assert_eq!(prompted.last_input_seconds, Some(0.0));
-        assert_eq!(
-            session.tracker.snapshot_at(12_099).state,
-            AttentionState::Working
-        );
+        let fast_window = session.tracker.snapshot_at(7_850);
+        assert_eq!(fast_window.state, AttentionState::Working);
+        assert!(!fast_window.composer_input_ready);
+        let not_yet_idle = session.tracker.snapshot_at(12_099);
+        assert_eq!(not_yet_idle.state, AttentionState::Working);
+        assert!(!not_yet_idle.composer_input_ready);
         assert_eq!(
             session.tracker.snapshot_at(12_100).state,
             AttentionState::Idle
         );
+    }
+
+    #[test]
+    fn composer_redraw_after_startup_dialog_allows_fast_initial_input() {
+        let mut session = ScriptedSession::claude();
+        session.emit(
+            2_000,
+            b"Claude needs workspace trust\r\nDo you want to proceed?\r\n\xe2\x9d\xaf 1. Yes\r\n  2. No",
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(2_050).state,
+            AttentionState::NeedsInput
+        );
+        session.tracker.observe_input_at(2_100);
+        session.emit(2_200, b"\x1b[2J\x1b[HReady\r\n\xe2\x9d\xaf ");
+
+        assert!(!session.tracker.snapshot_at(2_949).composer_input_ready);
+        let ready = session.tracker.snapshot_at(2_950);
+        assert_eq!(ready.state, AttentionState::Working);
+        assert!(ready.composer_input_ready);
     }
 
     #[test]
@@ -1387,7 +1467,7 @@ mod tests {
         observed.lock().unwrap().clear();
 
         tracker.observe_output_at(b"done\r\n\xe2\x9d\xaf ", "done\r\n\u{276f} ", false, 2_000);
-        assert_eq!(*observed.lock().unwrap(), [Some(7_000)]);
+        assert_eq!(*observed.lock().unwrap(), [Some(2_750)]);
 
         tracker.observe_input_at(7_100);
         assert_eq!(observed.lock().unwrap().last(), Some(&Some(9_100)));

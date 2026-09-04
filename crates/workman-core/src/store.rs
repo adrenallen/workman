@@ -180,10 +180,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "recorded_feedback",
         include_str!("../migrations/0033_recorded_feedback.sql"),
     ),
+    (
+        34,
+        "feedback_append_history",
+        include_str!("../migrations/0034_feedback_append_history.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 33;
+pub const LATEST_SCHEMA_VERSION: i64 = 34;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -2636,4 +2641,42 @@ fn query_strings(connection: &Connection, sql: &str, id: i64) -> StoreResult<Vec
         .query_map([id], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(strings)
+}
+
+#[cfg(test)]
+#[test]
+fn feedback_history_migration_preserves_legacy_attempts_and_scratchpad_receipts() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 33) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection.execute_batch(
+        "INSERT INTO projects (id, path, name, selected) VALUES (1, '/tmp/feedback-migration', 'Feedback', 1);
+         INSERT INTO recorded_feedback (id, project_id, title, status, created_at, updated_at) VALUES (1, 1, 'Legacy feedback', 'ready', 1000, 1000);
+         INSERT INTO recorded_feedback_deliveries (id, feedback_id, target_kind, target_id, status, created_at, updated_at)
+             VALUES (1, 1, 'agent', 42, 'unverified', 2000, 2000),
+                    (2, 1, 'scratchpad', 12, 'queued', 3000, 3000);"
+    ).unwrap();
+    let store = Store::from_connection(connection).unwrap();
+    let feedback = crate::RecordedFeedbackService::new(&store)
+        .get(1, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(feedback.deliveries.len(), 2);
+    assert_eq!(feedback.deliveries[0].id, 2);
+    assert_eq!(feedback.deliveries[0].status, "sent");
+    assert_eq!(feedback.deliveries[1].status, "unverified");
+    assert_eq!(feedback.deliveries[1].target_id, Some(42));
+    assert!(feedback.append_state.is_none());
 }

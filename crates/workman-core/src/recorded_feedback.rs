@@ -5,9 +5,9 @@ use std::{error::Error, fmt};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    ProjectId, RecordedFeedback, RecordedFeedbackBlock, RecordedFeedbackDelivery,
-    RecordedFeedbackId, RecordedFeedbackSnapshot, RecordedFeedbackStatus, RecordedFeedbackSummary,
-    RecordedFeedbackTranscriptSegment, Store, StoreError,
+    ProjectId, RecordedFeedback, RecordedFeedbackAppendState, RecordedFeedbackBlock,
+    RecordedFeedbackDelivery, RecordedFeedbackId, RecordedFeedbackSnapshot, RecordedFeedbackStatus,
+    RecordedFeedbackSummary, RecordedFeedbackTranscriptSegment, Store, StoreError,
 };
 
 const MAX_TITLE_CHARS: usize = 160;
@@ -104,6 +104,7 @@ pub struct RecordedFeedbackDocumentUpdate {
 pub struct NewRecordedFeedbackDelivery {
     pub target_kind: String,
     pub target_id: Option<i64>,
+    pub target_name: Option<String>,
     pub status: String,
     pub packet_path: Option<String>,
     pub error_message: Option<String>,
@@ -196,7 +197,7 @@ impl<'store> RecordedFeedbackService<'store> {
             .query_row(
                 "SELECT id, project_id, title, status, revision, duration_ms, audio_path,
                     transcript_json, blocks_json, error_code, archived, lease_owner,
-                    lease_expires_at, created_at, updated_at
+                    lease_expires_at, created_at, updated_at, append_state_json
              FROM recorded_feedback WHERE id = ?1 AND project_id = ?2",
                 params![feedback_id, project_id],
                 |row| {
@@ -216,6 +217,7 @@ impl<'store> RecordedFeedbackService<'store> {
                         row.get(12)?,
                         row.get(13)?,
                         row.get(14)?,
+                        row.get::<_, Option<String>>(15)?,
                     ))
                 },
             )
@@ -236,6 +238,7 @@ impl<'store> RecordedFeedbackService<'store> {
             lease_expires_at,
             created_at,
             updated_at,
+            append_state_json,
         )) = feedback
         else {
             return Ok(None);
@@ -254,6 +257,10 @@ impl<'store> RecordedFeedbackService<'store> {
             blocks: serde_json::from_str::<Vec<RecordedFeedbackBlock>>(&blocks_json)?,
             snapshots: self.snapshots(id)?,
             deliveries: self.deliveries(id)?,
+            append_state: append_state_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             error_code,
             archived,
             lease_owner,
@@ -261,6 +268,95 @@ impl<'store> RecordedFeedbackService<'store> {
             created_at,
             updated_at,
         }))
+    }
+
+    pub fn begin_append(
+        &self,
+        project_id: ProjectId,
+        feedback_id: RecordedFeedbackId,
+        expected_revision: i64,
+        lease_owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> RecordedFeedbackResult<RecordedFeedback> {
+        let current = self.require(project_id, feedback_id)?;
+        if current.status != RecordedFeedbackStatus::Ready {
+            return Err(RecordedFeedbackError::InvalidState {
+                expected: "ready",
+                actual: current.status,
+            });
+        }
+        if current.revision != expected_revision {
+            return Err(RecordedFeedbackError::RevisionConflict {
+                expected: expected_revision,
+                current: current.revision,
+            });
+        }
+        let checkpoint = RecordedFeedbackAppendState {
+            duration_ms: current.duration_ms,
+            audio_path: current.audio_path,
+            next_ordinal: current
+                .snapshots
+                .iter()
+                .map(|snapshot| snapshot.ordinal)
+                .max()
+                .unwrap_or(-1)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    RecordedFeedbackError::InvalidInput("snapshot ordinal is too large".into())
+                })?,
+        };
+        self.store.connection().execute(
+            "UPDATE recorded_feedback SET append_state_json = ?1, status = 'recording',
+                audio_path = NULL, lease_owner = ?2, lease_expires_at = ?3,
+                error_code = NULL, revision = revision + 1, updated_at = ?4 WHERE id = ?5",
+            params![
+                serde_json::to_string(&checkpoint)?,
+                lease_owner,
+                now_ms + lease_ms,
+                now_ms,
+                feedback_id
+            ],
+        )?;
+        self.require(project_id, feedback_id)
+    }
+
+    /// Restore the original after a failed addition. Captured files remain local for recovery.
+    pub fn discard_append(
+        &self,
+        project_id: ProjectId,
+        feedback_id: RecordedFeedbackId,
+        now_ms: i64,
+    ) -> RecordedFeedbackResult<RecordedFeedback> {
+        let current = self.require(project_id, feedback_id)?;
+        if current.status != RecordedFeedbackStatus::Failed {
+            return Err(RecordedFeedbackError::InvalidState {
+                expected: "failed",
+                actual: current.status,
+            });
+        }
+        let checkpoint = current.append_state.ok_or_else(|| {
+            RecordedFeedbackError::InvalidInput("there is no added recording to discard".into())
+        })?;
+        let transaction = self.store.connection().unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM recorded_feedback_snapshots WHERE feedback_id = ?1 AND ordinal >= ?2",
+            params![feedback_id, checkpoint.next_ordinal],
+        )?;
+        transaction.execute(
+            "UPDATE recorded_feedback SET status = 'ready', append_state_json = NULL,
+                duration_ms = ?1, audio_path = ?2, error_code = NULL,
+                lease_owner = NULL, lease_expires_at = NULL, revision = revision + 1,
+                updated_at = ?3 WHERE id = ?4",
+            params![
+                checkpoint.duration_ms,
+                checkpoint.audio_path,
+                now_ms,
+                feedback_id
+            ],
+        )?;
+        transaction.commit()?;
+        self.require(project_id, feedback_id)
     }
 
     pub fn renew_lease(
@@ -317,7 +413,7 @@ impl<'store> RecordedFeedbackService<'store> {
         &self,
         project_id: ProjectId,
         feedback_id: RecordedFeedbackId,
-        snapshot: NewRecordedFeedbackSnapshot,
+        mut snapshot: NewRecordedFeedbackSnapshot,
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
@@ -328,6 +424,21 @@ impl<'store> RecordedFeedbackService<'store> {
             });
         }
         validate_snapshot(&snapshot)?;
+        if let Some(checkpoint) = &current.append_state {
+            snapshot.ordinal = snapshot
+                .ordinal
+                .checked_add(checkpoint.next_ordinal)
+                .ok_or_else(|| {
+                    RecordedFeedbackError::InvalidInput("snapshot ordinal is too large".into())
+                })?;
+            snapshot.anchor_ms = snapshot
+                .anchor_ms
+                .checked_add(checkpoint.duration_ms)
+                .ok_or_else(|| {
+                    RecordedFeedbackError::InvalidInput("snapshot time is too large".into())
+                })?;
+            // Sample offsets are local to the audio file, whose sample rate can vary by segment.
+        }
         let transaction = self.store.connection().unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO recorded_feedback_snapshots (
@@ -372,6 +483,17 @@ impl<'store> RecordedFeedbackService<'store> {
                 actual: current.status,
             });
         }
+        let duration_ms = duration_ms
+            .max(0)
+            .checked_add(
+                current
+                    .append_state
+                    .as_ref()
+                    .map_or(0, |state| state.duration_ms),
+            )
+            .ok_or_else(|| {
+                RecordedFeedbackError::InvalidInput("recording duration is too large".into())
+            })?;
         self.store.connection().execute(
             "UPDATE recorded_feedback SET status = 'transcribing', duration_ms = ?1,
                     audio_path = ?2, error_code = NULL, revision = revision + 1,
@@ -385,8 +507,8 @@ impl<'store> RecordedFeedbackService<'store> {
         &self,
         project_id: ProjectId,
         feedback_id: RecordedFeedbackId,
-        transcript: Vec<RecordedFeedbackTranscriptSegment>,
-        blocks: Vec<RecordedFeedbackBlock>,
+        mut transcript: Vec<RecordedFeedbackTranscriptSegment>,
+        mut blocks: Vec<RecordedFeedbackBlock>,
         now_ms: i64,
     ) -> RecordedFeedbackResult<RecordedFeedback> {
         let current = self.require(project_id, feedback_id)?;
@@ -397,9 +519,43 @@ impl<'store> RecordedFeedbackService<'store> {
             });
         }
         validate_document(&transcript, &blocks)?;
+        if let Some(checkpoint) = &current.append_state {
+            let offset = |value: i64| {
+                value.checked_add(checkpoint.duration_ms).ok_or_else(|| {
+                    RecordedFeedbackError::InvalidInput("transcript time is too large".into())
+                })
+            };
+            for segment in &mut transcript {
+                segment.start_ms = offset(segment.start_ms)?;
+                segment.end_ms = offset(segment.end_ms)?;
+            }
+            for block in &mut blocks {
+                match block {
+                    RecordedFeedbackBlock::Text {
+                        start_ms, end_ms, ..
+                    } => {
+                        *start_ms = offset(*start_ms)?;
+                        *end_ms = offset(*end_ms)?;
+                    }
+                    RecordedFeedbackBlock::Image { snapshot_id } => {
+                        if !current.snapshots.iter().any(|snapshot| {
+                            snapshot.id == *snapshot_id
+                                && snapshot.ordinal >= checkpoint.next_ordinal
+                        }) {
+                            return Err(RecordedFeedbackError::InvalidInput(
+                                "added recording references an original snapshot".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            transcript.splice(0..0, current.transcript);
+            blocks.splice(0..0, current.blocks);
+            validate_document(&transcript, &blocks)?;
+        }
         self.store.connection().execute(
             "UPDATE recorded_feedback SET status = 'ready', transcript_json = ?1, blocks_json = ?2,
-                    error_code = NULL, lease_owner = NULL, lease_expires_at = NULL,
+                    append_state_json = NULL, error_code = NULL, lease_owner = NULL, lease_expires_at = NULL,
                     revision = revision + 1, updated_at = ?3 WHERE id = ?4",
             params![
                 serde_json::to_string(&transcript)?,
@@ -549,12 +705,14 @@ impl<'store> RecordedFeedbackService<'store> {
         feedback_id: RecordedFeedbackId,
         delivery: NewRecordedFeedbackDelivery,
     ) -> RecordedFeedbackResult<RecordedFeedbackDelivery> {
-        self.require(project_id, feedback_id)?;
+        let feedback = self.require(project_id, feedback_id)?;
         if !matches!(
             delivery.target_kind.as_str(),
             "agent" | "scratchpad" | "clipboard"
-        ) || !matches!(delivery.status.as_str(), "queued" | "unverified" | "failed")
-        {
+        ) || !matches!(
+            delivery.status.as_str(),
+            "pending" | "sent" | "queued" | "unverified" | "failed"
+        ) {
             return Err(RecordedFeedbackError::InvalidInput(
                 "delivery metadata is invalid".into(),
             ));
@@ -562,8 +720,8 @@ impl<'store> RecordedFeedbackService<'store> {
         self.store.connection().execute(
             "INSERT INTO recorded_feedback_deliveries (
                 feedback_id, target_kind, target_id, status, packet_path, error_message,
-                created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                created_at, updated_at, target_name, feedback_revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
             params![
                 feedback_id,
                 delivery.target_kind,
@@ -571,7 +729,9 @@ impl<'store> RecordedFeedbackService<'store> {
                 delivery.status,
                 delivery.packet_path,
                 delivery.error_message,
-                delivery.now_ms
+                delivery.now_ms,
+                delivery.target_name,
+                feedback.revision
             ],
         )?;
         let id = self.store.connection().last_insert_rowid();
@@ -579,7 +739,7 @@ impl<'store> RecordedFeedbackService<'store> {
             .connection()
             .query_row(
                 "SELECT id, feedback_id, target_kind, target_id, status, packet_path,
-                    error_message, created_at, updated_at
+                    error_message, created_at, updated_at, target_name, feedback_revision
              FROM recorded_feedback_deliveries WHERE id = ?1",
                 [id],
                 |row| {
@@ -593,10 +753,37 @@ impl<'store> RecordedFeedbackService<'store> {
                         error_message: row.get(6)?,
                         created_at: row.get(7)?,
                         updated_at: row.get(8)?,
+                        target_name: row.get(9)?,
+                        feedback_revision: row.get(10)?,
                     })
                 },
             )
             .map_err(Into::into)
+    }
+
+    pub fn finish_delivery(
+        &self,
+        project_id: ProjectId,
+        feedback_id: RecordedFeedbackId,
+        delivery_id: i64,
+        error: Option<&str>,
+        now_ms: i64,
+    ) -> RecordedFeedbackResult<RecordedFeedbackDelivery> {
+        self.require(project_id, feedback_id)?;
+        let status = if error.is_some() { "failed" } else { "sent" };
+        self.store.connection().execute(
+            "UPDATE recorded_feedback_deliveries SET status = ?1, error_message = ?2, updated_at = ?3
+             WHERE id = ?4 AND feedback_id = ?5 AND status = 'pending'",
+            params![status, error.map(|message| message.chars().take(1000).collect::<String>()), now_ms, delivery_id, feedback_id],
+        )?;
+        self.deliveries(feedback_id)?
+            .into_iter()
+            .find(|delivery| delivery.id == delivery_id)
+            .ok_or_else(|| {
+                RecordedFeedbackError::InvalidInput(
+                    "delivery was not found in this feedback".into(),
+                )
+            })
     }
 
     fn snapshots(
@@ -634,7 +821,7 @@ impl<'store> RecordedFeedbackService<'store> {
     ) -> RecordedFeedbackResult<Vec<RecordedFeedbackDelivery>> {
         let mut statement = self.store.connection().prepare(
             "SELECT id, feedback_id, target_kind, target_id, status, packet_path,
-                    error_message, created_at, updated_at
+                    error_message, created_at, updated_at, target_name, feedback_revision
              FROM recorded_feedback_deliveries WHERE feedback_id = ?1 ORDER BY created_at DESC, id DESC",
         )?;
         Ok(statement
@@ -649,6 +836,8 @@ impl<'store> RecordedFeedbackService<'store> {
                     error_message: row.get(6)?,
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
+                    target_name: row.get(9)?,
+                    feedback_revision: row.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -775,6 +964,257 @@ mod tests {
             })
             .unwrap();
         store
+    }
+
+    fn snapshot(ordinal: i64) -> NewRecordedFeedbackSnapshot {
+        NewRecordedFeedbackSnapshot {
+            ordinal,
+            anchor_ms: 500,
+            anchor_samples: 8_000,
+            invoked_at_ms: 1_500,
+            completed_at_ms: 1_550,
+            image_path: format!("/managed/snapshot-{ordinal}.png"),
+            caption: "Keep this caption".into(),
+            width: 100,
+            height: 80,
+            sha256: "a".repeat(64),
+        }
+    }
+
+    fn ready_document(service: &RecordedFeedbackService<'_>) -> RecordedFeedback {
+        let created = service
+            .create(1, "Checkout feedback", "desktop", 12_000, 1_000)
+            .unwrap();
+        let captured = service
+            .add_snapshot(1, created.id, snapshot(0), 1_600)
+            .unwrap();
+        service
+            .begin_transcription(1, created.id, 2_000, Some("/managed/original.wav"), 3_000)
+            .unwrap();
+        service
+            .complete(
+                1,
+                created.id,
+                vec![RecordedFeedbackTranscriptSegment {
+                    text: "Original speech".into(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                }],
+                vec![
+                    RecordedFeedbackBlock::Text {
+                        text: "User-edited text".into(),
+                        start_ms: 0,
+                        end_ms: 1_000,
+                    },
+                    RecordedFeedbackBlock::Image {
+                        snapshot_id: captured.snapshots[0].id,
+                    },
+                ],
+                3_100,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn repeated_appends_preserve_edits_media_and_delivery_history() {
+        let store = store_with_project();
+        let service = RecordedFeedbackService::new(&store);
+        let original = ready_document(&service);
+        let receipt = service
+            .record_delivery(
+                1,
+                original.id,
+                NewRecordedFeedbackDelivery {
+                    target_kind: "agent".into(),
+                    target_id: Some(42),
+                    target_name: Some("Layout agent".into()),
+                    status: "pending".into(),
+                    packet_path: Some("/packet/r4/feedback.md".into()),
+                    error_message: None,
+                    now_ms: 3_200,
+                },
+            )
+            .unwrap();
+        service
+            .finish_delivery(1, original.id, receipt.id, None, 3_300)
+            .unwrap();
+        let mut previous = original.clone();
+        for addition in 0..2 {
+            let now = 4_000 + addition * 4_000;
+            assert!(matches!(
+                service.begin_append(
+                    1,
+                    original.id,
+                    previous.revision - 1,
+                    "desktop",
+                    now,
+                    15_000
+                ),
+                Err(RecordedFeedbackError::RevisionConflict { .. })
+            ));
+            service
+                .begin_append(1, original.id, previous.revision, "desktop", now, 15_000)
+                .unwrap();
+            assert!(
+                service
+                    .begin_append(1, original.id, previous.revision, "desktop", now, 15_000)
+                    .is_err()
+            );
+            let captured = service
+                .add_snapshot(1, original.id, snapshot(0), now + 500)
+                .unwrap();
+            let latest = captured.snapshots.last().unwrap();
+            assert_eq!(latest.ordinal, addition + 1);
+            assert_eq!(latest.anchor_ms, previous.duration_ms + 500);
+            let transcribing = service
+                .begin_transcription(
+                    1,
+                    original.id,
+                    1_000,
+                    Some("/managed/segment/audio.wav"),
+                    now + 1_000,
+                )
+                .unwrap();
+            assert_eq!(transcribing.duration_ms, previous.duration_ms + 1_000);
+            let ready = service
+                .complete(
+                    1,
+                    original.id,
+                    vec![RecordedFeedbackTranscriptSegment {
+                        text: "More feedback".into(),
+                        start_ms: 100,
+                        end_ms: 900,
+                    }],
+                    vec![
+                        RecordedFeedbackBlock::Text {
+                            text: "More feedback".into(),
+                            start_ms: 100,
+                            end_ms: 900,
+                        },
+                        RecordedFeedbackBlock::Image {
+                            snapshot_id: latest.id,
+                        },
+                    ],
+                    now + 1_100,
+                )
+                .unwrap();
+            assert_eq!(&ready.blocks[..previous.blocks.len()], &previous.blocks);
+            assert_eq!(
+                ready.transcript.last().unwrap().start_ms,
+                previous.duration_ms + 100
+            );
+            assert_eq!(ready.snapshots[0], original.snapshots[0]);
+            assert_eq!(ready.deliveries[0].status, "sent");
+            assert_eq!(
+                ready.deliveries[0].feedback_revision,
+                Some(original.revision)
+            );
+            assert_eq!(
+                ready.deliveries[0].target_name.as_deref(),
+                Some("Layout agent")
+            );
+            assert!(ready.append_state.is_none());
+            previous = ready;
+        }
+        assert_eq!(service.list(1, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn interrupted_append_checkpoint_survives_reopen_and_can_keep_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("feedback.sqlite");
+        let original;
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .put_project(&store_with_project().get_project(1).unwrap().unwrap())
+                .unwrap();
+            let service = RecordedFeedbackService::new(&store);
+            original = ready_document(&service);
+            service
+                .begin_append(1, original.id, original.revision, "desktop", 4_000, 1_000)
+                .unwrap();
+            service
+                .add_snapshot(1, original.id, snapshot(0), 4_500)
+                .unwrap();
+            service
+                .begin_transcription(1, original.id, 1_000, Some("/managed/added.wav"), 4_900)
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let service = RecordedFeedbackService::new(&store);
+        assert_eq!(service.fail_expired(1, 5_001).unwrap(), 1);
+        let failed = service.get(1, original.id).unwrap().unwrap();
+        assert_eq!(failed.blocks, original.blocks);
+        assert!(failed.append_state.is_some());
+        assert!(service.discard_append(2, original.id, 5_100).is_err());
+        let restored = service.discard_append(1, original.id, 5_100).unwrap();
+        assert_eq!(restored.status, RecordedFeedbackStatus::Ready);
+        assert_eq!(restored.blocks, original.blocks);
+        assert_eq!(restored.transcript, original.transcript);
+        assert_eq!(restored.snapshots, original.snapshots);
+        assert_eq!(restored.duration_ms, original.duration_ms);
+        assert_eq!(restored.audio_path, original.audio_path);
+        assert!(restored.append_state.is_none());
+    }
+
+    #[test]
+    fn delivery_receipts_are_scoped_and_terminal_results_are_idempotent() {
+        let store = store_with_project();
+        let service = RecordedFeedbackService::new(&store);
+        let feedback = ready_document(&service);
+        let other = ready_document(&service);
+        for error in [None, Some("Clipboard image import failed")] {
+            let receipt = service
+                .record_delivery(
+                    1,
+                    feedback.id,
+                    NewRecordedFeedbackDelivery {
+                        target_kind: "agent".into(),
+                        target_id: Some(42),
+                        target_name: Some("Original name".into()),
+                        status: "pending".into(),
+                        packet_path: None,
+                        error_message: None,
+                        now_ms: 4_000,
+                    },
+                )
+                .unwrap();
+            assert!(
+                service
+                    .finish_delivery(2, feedback.id, receipt.id, None, 4_100)
+                    .is_err()
+            );
+            assert!(
+                service
+                    .finish_delivery(1, other.id, receipt.id, None, 4_100)
+                    .is_err()
+            );
+            let finished = service
+                .finish_delivery(1, feedback.id, receipt.id, error, 4_200)
+                .unwrap();
+            assert_eq!(
+                finished.status,
+                if error.is_some() { "failed" } else { "sent" }
+            );
+            assert_eq!(finished.error_message.as_deref(), error);
+            assert_eq!(finished.updated_at, 4_200);
+            assert_eq!(
+                service
+                    .finish_delivery(1, feedback.id, receipt.id, Some("late duplicate"), 4_300)
+                    .unwrap(),
+                finished
+            );
+        }
+        assert_eq!(
+            service
+                .get(1, feedback.id)
+                .unwrap()
+                .unwrap()
+                .deliveries
+                .len(),
+            2
+        );
     }
 
     #[test]
