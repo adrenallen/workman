@@ -14,7 +14,7 @@ pub(crate) struct FeedbackCapability {
 #[tauri::command]
 pub(crate) fn feedback_capability() -> FeedbackCapability {
     FeedbackCapability {
-        supported: cfg!(target_os = "macos"),
+        supported: cfg!(any(target_os = "macos", windows)),
         platform: std::env::consts::OS,
     }
 }
@@ -40,13 +40,13 @@ pub(crate) fn feedback_read_image(feedback_id: i64, path: String) -> Result<Stri
     Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
 }
 
-#[cfg(target_os = "macos")]
-mod macos;
+#[cfg(any(target_os = "macos", windows))]
+mod capture;
 
-#[cfg(target_os = "macos")]
-pub(crate) use macos::*;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use capture::*;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod unsupported {
     use serde::Serialize;
     use tauri::{AppHandle, State};
@@ -86,7 +86,9 @@ mod unsupported {
             model_name: "Whisper base.en",
             model_size_bytes: 0,
             model_path: String::new(),
-            message: Some("Recorded Feedback is currently available on macOS 14 or newer.".into()),
+            message: Some(
+                "Recorded Feedback is available on macOS 14 or newer and on Windows.".into(),
+            ),
         }
     }
 
@@ -99,7 +101,7 @@ mod unsupported {
     pub(crate) async fn feedback_install_model(
         _app: AppHandle,
     ) -> Result<FeedbackPreflight, String> {
-        Err("Recorded Feedback is currently available on macOS 14 or newer.".into())
+        Err("Recorded Feedback is available on macOS 14 or newer and on Windows.".into())
     }
 
     macro_rules! unsupported_command {
@@ -107,7 +109,7 @@ mod unsupported {
             #[tauri::command]
             pub(crate) fn $name($($arg: $ty,)* _state: State<'_, FeedbackState>) -> Result<$return, String> {
                 $(let _ = $arg;)*
-                Err("Recorded Feedback is currently available on macOS 14 or newer.".into())
+                Err("Recorded Feedback is available on macOS 14 or newer and on Windows.".into())
             }
         };
     }
@@ -130,5 +132,5 @@ mod unsupported {
     unsupported_command!(feedback_finish(app: AppHandle) -> serde_json::Value);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) use unsupported::*;

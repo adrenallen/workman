@@ -285,7 +285,7 @@ test('recorded feedback is wired through preflight, durable events, review, and 
     readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/RecordedFeedbackDetailView.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/LiveMarkdownEditor.svelte', import.meta.url), 'utf8'),
-    readFile(new URL('../src-tauri/src/recorded_feedback/macos.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src-tauri/src/recorded_feedback/capture.rs', import.meta.url), 'utf8'),
     readFile(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/recorded_feedback.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../../crates/workmand/src/control.rs', import.meta.url), 'utf8'),
@@ -307,7 +307,9 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(preflight, /Audio, images, and transcription stay on this computer/);
   assert.match(preflight, /showCloseButton=\{false\}/);
   assert.match(preflight, /screen_capture_authorized/);
-  assert.match(native, /let screen_capture_authorized = CGPreflightScreenCaptureAccess\(\)/);
+  // Preflight now asks the platform helper; macOS still answers with TCC.
+  assert.match(native, /let screen_capture_authorized = screen_capture_authorized\(\);/);
+  assert.match(native, /CGPreflightScreenCaptureAccess\(\)/);
   assert.match(native, /CGRequestScreenCaptureAccess\(\)/);
   assert.match(native, /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_ScreenCapture/);
   assert.match(native, /Command::new\("\/usr\/bin\/open"\)/);
@@ -408,7 +410,7 @@ test('recorded feedback is platform-gated and its sidebar section is optional', 
   ]);
 
   assert.match(native, /pub\(crate\) fn feedback_capability\(\)/);
-  assert.match(native, /supported: cfg!\(target_os = "macos"\)/);
+  assert.match(native, /supported: cfg!\(any\(target_os = "macos", windows\)\)/);
   assert.match(availability, /workman\.feedback\.preferences\.v1/);
   assert.match(availability, /capability\.supported && preferences\.showInSidebar/);
   assert.match(tree, /group !== 'feedback' \|\| showFeedback/);
@@ -425,4 +427,48 @@ test('recorded feedback is platform-gated and its sidebar section is optional', 
   const preventDefault = app.indexOf('event.preventDefault()', shortcutHandler);
   assert.ok(supportGuard > shortcutHandler && supportGuard < preventDefault,
     'unsupported feedback launch shortcuts must not be swallowed');
+});
+
+test('the capture module keeps a windows implementation beside every macos one', async () => {
+  // Carriage returns are stripped so the assertions hold whatever line endings
+  // the checkout uses.
+  const capture = (await readFile(
+    new URL('../src-tauri/src/recorded_feedback/capture.rs', import.meta.url),
+    'utf8'
+  )).split(String.fromCharCode(13)).join('');
+
+  // The capture pipeline itself is shared. Only the window layer, the screen
+  // capture permission model, and the settings deep link may differ per
+  // platform, and each must offer both sides or Windows loses the feature.
+  const macosAttribute = '#[cfg(target_os = "macos")]';
+  const windowsAttribute = '#[cfg(windows)]';
+  for (const symbol of [
+    'fn screen_capture_authorized',
+    'fn request_screen_access_inner',
+    'fn open_screen_recording_settings',
+    'fn build_overlay_window',
+    'fn build_toolbar_window',
+    'fn close_feedback_window',
+    'fn raise_toolbar',
+    'fn set_overlays_interactive'
+  ]) {
+    assert.ok(
+      capture.includes(macosAttribute + String.fromCharCode(10) + symbol),
+      symbol + ' is missing its macOS implementation'
+    );
+    assert.ok(
+      capture.includes(windowsAttribute + String.fromCharCode(10) + symbol),
+      symbol + ' is missing its Windows implementation'
+    );
+  }
+
+  // AppKit-only bindings must never be reachable from a Windows build.
+  for (const line of capture.split(String.fromCharCode(10))) {
+    if (line.includes('objc2_core_graphics') || line.includes('tauri_nspanel::')) {
+      assert.ok(
+        capture.includes(macosAttribute + String.fromCharCode(10) + line),
+        line.trim() + ' must be gated to macOS'
+      );
+    }
+  }
 });

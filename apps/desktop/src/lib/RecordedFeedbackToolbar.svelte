@@ -52,6 +52,10 @@
   let busy = $state(false);
   let controlBusy = $state(false);
   let error = $state<string | null>(null);
+  // The session carries notices the recording survived, such as a shortcut another
+  // app already owns. They are dismissible and must not be confused with failures.
+  let noticeDismissed = $state(false);
+  const banner = $derived(error ?? (noticeDismissed ? null : (session?.error ?? null)));
   let captureConfirmed = $state(false);
   let ticker: ReturnType<typeof setInterval> | null = null;
   let captureConfirmationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -409,8 +413,15 @@
   </div>
 {/if}
 
-{#if error}
-  <button class="error" type="button" onclick={() => (error = null)}>{error}</button>
+{#if banner}
+  <button
+    class="error"
+    type="button"
+    onclick={() => {
+      if (error) error = null;
+      else noticeDismissed = true;
+    }}
+  >{banner}</button>
 {/if}
 
 <style>

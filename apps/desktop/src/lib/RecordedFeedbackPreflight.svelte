@@ -55,7 +55,7 @@
 
     <div class="requirements" aria-busy={loading || installing}>
       {#if !preflight && loading}
-        <p class="loading">Checking this Mac…</p>
+        <p class="loading">Checking this computer…</p>
       {:else if preflight && !preflight.supported}
         <div class="unsupported"><strong>Not available on {preflight.platform}</strong><span>{preflight.message}</span></div>
       {:else if preflight}
