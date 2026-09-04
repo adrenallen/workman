@@ -74,9 +74,19 @@ if (-not $SkipFrontend) {
 
 # Ship self-contained binaries: the MSVC runtime links statically so the
 # archive runs on machines without a Visual C++ redistributable installed.
-if ($env:RUSTFLAGS -notmatch 'crt-static') {
-    $env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
-}
+#
+# Rust also embeds source paths for panic messages and backtraces, which would
+# publish the building account's home directory inside the binaries. Remap the
+# repository and the home directory to stable placeholders so the archive says
+# nothing about the machine that produced it. CARGO_ENCODED_RUSTFLAGS is used
+# rather than RUSTFLAGS because it separates arguments with a unit separator and
+# therefore survives paths containing spaces.
+$rustFlags = @(
+    '-C', 'target-feature=+crt-static',
+    "--remap-path-prefix=$repo=/workman",
+    "--remap-path-prefix=$($env:USERPROFILE)=/home/build"
+)
+$env:CARGO_ENCODED_RUSTFLAGS = ($rustFlags -join [char]0x1f)
 
 Push-Location $repo
 try {
