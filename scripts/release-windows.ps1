@@ -29,6 +29,33 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     else { throw 'cargo was not found. Install Rust from https://rustup.rs, then re-run.' }
 }
 
+# Recorded feedback transcribes locally with whisper.cpp, whose Rust bindings are
+# generated during the build. That needs cmake (the Visual Studio Build Tools ship
+# one) and libclang from LLVM. Resolve both here so the build does not fail deep
+# inside a dependency with an opaque message.
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $bundledCMake = Get-ChildItem -Path @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')
+    ) -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($bundledCMake) {
+        $env:Path = "$($bundledCMake.DirectoryName);$env:Path"
+    }
+    else {
+        throw 'cmake was not found. Add the C++ workload to the Visual Studio Build Tools, or install cmake from https://cmake.org, then re-run.'
+    }
+}
+
+if (-not $env:LIBCLANG_PATH) {
+    $libclangDir = Join-Path $env:ProgramFiles 'LLVM\bin'
+    if (Test-Path (Join-Path $libclangDir 'libclang.dll')) {
+        $env:LIBCLANG_PATH = $libclangDir
+    }
+    else {
+        throw 'libclang was not found. Install LLVM with "winget install -e --id LLVM.LLVM", or set LIBCLANG_PATH to a folder containing libclang.dll, then re-run.'
+    }
+}
+
 $versionLine = Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1
 if (-not $versionLine) { throw 'workspace version was not found in Cargo.toml' }
 $version = $versionLine.Matches[0].Groups[1].Value
