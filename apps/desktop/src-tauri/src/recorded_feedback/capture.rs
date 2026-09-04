@@ -18,13 +18,15 @@ use cpal::{
 use hound::{SampleFormat as WavSampleFormat, WavReader, WavSpec, WavWriter};
 use image::{DynamicImage, Rgba, RgbaImage, imageops};
 use imageproc::drawing::{draw_filled_circle_mut, draw_hollow_ellipse_mut};
+#[cfg(target_os = "macos")]
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
-};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl};
+#[cfg(target_os = "macos")]
+use tauri::{Position, Size};
+#[cfg(target_os = "macos")]
 use tauri_nspanel::{
     CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask, tauri_panel,
 };
@@ -48,8 +50,13 @@ const EVENT_TOOL: &str = "feedback://tool";
 const EVENT_REGION: &str = "feedback://region";
 const EVENT_ANNOTATIONS: &str = "feedback://annotations";
 const EVENT_SHORTCUT: &str = "feedback://shortcut";
+#[cfg(target_os = "macos")]
 const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+// Windows never gates display capture. Recording still needs the microphone,
+// which the account can revoke, so point at that pane instead.
+#[cfg(windows)]
+const SCREEN_RECORDING_SETTINGS_URL: &str = "ms-settings:privacy-microphone";
 
 const DEFAULT_SHORTCUTS: &[(&str, &str)] = &[
     ("snap", "CommandOrControl+Shift+C"),
@@ -63,6 +70,7 @@ const DEFAULT_SHORTCUTS: &[(&str, &str)] = &[
     ("finish", "CommandOrControl+Shift+Return"),
 ];
 
+#[cfg(target_os = "macos")]
 tauri_panel! {
     panel!(FeedbackPanel {
         config: {
@@ -294,9 +302,9 @@ pub(crate) struct Region {
 #[tauri::command]
 pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     let microphone_available = cpal::default_host().default_input_device().is_some();
-    // Keep the TCC result separate from display discovery. A disconnected display or a
-    // transient xcap lookup failure must not be presented as a denied macOS permission.
-    let screen_capture_authorized = CGPreflightScreenCaptureAccess();
+    // Keep the permission result separate from display discovery. A disconnected display or a
+    // transient xcap lookup failure must not be presented as a denied permission.
+    let screen_capture_authorized = screen_capture_authorized();
     let display_available = Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
     let screen_capture_available = screen_capture_authorized && display_available;
     let model_path = model_path();
@@ -307,9 +315,9 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     let message = if !microphone_available {
         Some("No microphone is available. Connect or enable one, then retry.".into())
     } else if !screen_capture_authorized {
-        Some("macOS is blocking this exact Workman app. Remove any older Workman entry from Screen Recording, add the current app again, then fully quit and reopen Workman.".into())
+        Some(BLOCKED_CAPTURE_MESSAGE.into())
     } else if !display_available {
-        Some("Screen Recording is allowed, but Workman could not find an active display. Connect a display, then check again.".into())
+        Some(NO_DISPLAY_MESSAGE.into())
     } else if !model_installed {
         Some("Install the local transcription model before recording.".into())
     } else {
@@ -317,7 +325,7 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     };
     FeedbackPreflight {
         supported: true,
-        platform: "macos",
+        platform: std::env::consts::OS,
         microphone_available,
         screen_capture_authorized,
         display_available,
@@ -332,6 +340,34 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
 
 #[tauri::command]
 pub(crate) fn feedback_request_screen_access() -> Result<FeedbackPreflight, String> {
+    request_screen_access_inner()?;
+    Ok(feedback_preflight())
+}
+
+/// macOS gates display capture behind TCC; Windows does not gate it at all.
+#[cfg(target_os = "macos")]
+fn screen_capture_authorized() -> bool {
+    CGPreflightScreenCaptureAccess()
+}
+
+#[cfg(windows)]
+fn screen_capture_authorized() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+const BLOCKED_CAPTURE_MESSAGE: &str = "macOS is blocking this exact Workman app. Remove any older Workman entry from Screen Recording, add the current app again, then fully quit and reopen Workman.";
+#[cfg(windows)]
+const BLOCKED_CAPTURE_MESSAGE: &str = "Windows is not reporting a capturable display. Check that a display is attached, then try again.";
+
+#[cfg(target_os = "macos")]
+const NO_DISPLAY_MESSAGE: &str = "Screen Recording is allowed, but Workman could not find an active display. Connect a display, then check again.";
+#[cfg(windows)]
+const NO_DISPLAY_MESSAGE: &str =
+    "Workman could not find an active display. Connect a display, then check again.";
+
+#[cfg(target_os = "macos")]
+fn request_screen_access_inner() -> Result<(), String> {
     if !CGPreflightScreenCaptureAccess() {
         let granted = CGRequestScreenCaptureAccess();
         // macOS only presents the consent prompt once. After the user has made a choice,
@@ -340,9 +376,20 @@ pub(crate) fn feedback_request_screen_access() -> Result<FeedbackPreflight, Stri
             open_screen_recording_settings()?;
         }
     }
-    Ok(feedback_preflight())
+    Ok(())
 }
 
+/// Windows grants display capture without a prompt. The microphone can still be
+/// switched off for the account, so offer that pane when no input device exists.
+#[cfg(windows)]
+fn request_screen_access_inner() -> Result<(), String> {
+    if cpal::default_host().default_input_device().is_none() {
+        open_screen_recording_settings()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn open_screen_recording_settings() -> Result<(), String> {
     let status = Command::new("/usr/bin/open")
         .arg(SCREEN_RECORDING_SETTINGS_URL)
@@ -353,6 +400,23 @@ fn open_screen_recording_settings() -> Result<(), String> {
     } else {
         Err(format!(
             "Could not open Screen Recording settings (open exited with {status})."
+        ))
+    }
+}
+
+/// `ms-settings:` links are shell protocol handlers, so they need the shell to
+/// resolve them; the empty argument is the title `start` would otherwise eat.
+#[cfg(windows)]
+fn open_screen_recording_settings() -> Result<(), String> {
+    let status = Command::new("cmd")
+        .args(["/c", "start", "", SCREEN_RECORDING_SETTINGS_URL])
+        .status()
+        .map_err(|error| format!("Could not open microphone settings: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not open microphone settings (start exited with {status})."
         ))
     }
 }
@@ -628,6 +692,11 @@ pub(crate) fn feedback_set_input_device(
 
 #[tauri::command]
 pub(crate) fn feedback_raise_toolbar(app: AppHandle) -> Result<(), String> {
+    raise_toolbar(&app)
+}
+
+#[cfg(target_os = "macos")]
+fn raise_toolbar(app: &AppHandle) -> Result<(), String> {
     let toolbar = app
         .get_webview_panel("feedback-toolbar")
         .map_err(|error| format!("{error:?}"))?;
@@ -636,6 +705,20 @@ pub(crate) fn feedback_raise_toolbar(app: AppHandle) -> Result<(), String> {
     toolbar.set_level(PanelLevel::Custom(1001).value());
     toolbar.show();
     toolbar.order_front_regardless();
+    Ok(())
+}
+
+/// Windows drops a window out of the topmost band whenever another app is
+/// activated, so reassert it once the toolbar webview has mounted.
+#[cfg(windows)]
+fn raise_toolbar(app: &AppHandle) -> Result<(), String> {
+    let toolbar = app
+        .get_webview_window("feedback-toolbar")
+        .ok_or("The recorder toolbar is not open.")?;
+    toolbar
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    toolbar.show().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -1402,39 +1485,7 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
             monitor.width().map_err(|error| error.to_string())? as f64,
             monitor.height().map_err(|error| error.to_string())? as f64,
         );
-        let overlay =
-            PanelBuilder::<_, FeedbackPanel>::new(app, format!("feedback-overlay-{index}"))
-                .url(WebviewUrl::App("index.html".into()))
-                .position(Position::Logical(position))
-                .size(Size::Logical(size))
-                .level(PanelLevel::ScreenSaver)
-                .has_shadow(false)
-                .opaque(false)
-                .transparent(true)
-                .hides_on_deactivate(false)
-                .ignores_mouse_events(true)
-                .works_when_modal(true)
-                .no_activate(true)
-                .collection_behavior(
-                    CollectionBehavior::new()
-                        .can_join_all_spaces()
-                        .full_screen_auxiliary()
-                        .stationary()
-                        .ignores_cycle(),
-                )
-                .style_mask(StyleMask::empty().borderless().nonactivating_panel())
-                .with_window(|window| {
-                    window
-                        .decorations(false)
-                        .transparent(true)
-                        .always_on_top(true)
-                        .skip_taskbar(true)
-                        .focusable(false)
-                        .content_protected(true)
-                })
-                .build()
-                .map_err(|error| error.to_string())?;
-        overlay.show();
+        build_overlay_window(app, &format!("feedback-overlay-{index}"), position, size)?;
     }
     let primary = monitors
         .iter()
@@ -1447,10 +1498,97 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
     let width = 960.0_f64.min((monitor_width - 32.0).max(720.0));
     let x = position_x + ((monitor_width - width) / 2.0).max(16.0);
     let y = position_y + 28.0;
+    build_toolbar_window(
+        app,
+        LogicalPosition::new(x, y),
+        LogicalSize::new(width, 60.0),
+    )?;
+    Ok(display_ids)
+}
+
+/// The recorder floats above every space as a non-activating NSPanel on macOS.
+#[cfg(target_os = "macos")]
+fn build_overlay_window(
+    app: &AppHandle,
+    label: &str,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    let overlay = PanelBuilder::<_, FeedbackPanel>::new(app, label)
+        .url(WebviewUrl::App("index.html".into()))
+        .position(Position::Logical(position))
+        .size(Size::Logical(size))
+        .level(PanelLevel::ScreenSaver)
+        .has_shadow(false)
+        .opaque(false)
+        .transparent(true)
+        .hides_on_deactivate(false)
+        .ignores_mouse_events(true)
+        .works_when_modal(true)
+        .no_activate(true)
+        .collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary()
+                .stationary()
+                .ignores_cycle(),
+        )
+        .style_mask(StyleMask::empty().borderless().nonactivating_panel())
+        .with_window(|window| {
+            window
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focusable(false)
+                .content_protected(true)
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
+    overlay.show();
+    Ok(())
+}
+
+/// Windows has no panel class, so the overlay is an ordinary borderless window
+/// that stays on top and passes every click through to whatever is beneath it.
+#[cfg(windows)]
+fn build_overlay_window(
+    app: &AppHandle,
+    label: &str,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    let overlay =
+        tauri::WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+            .position(position.x, position.y)
+            .inner_size(size.width, size.height)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .resizable(false)
+            .shadow(false)
+            .content_protected(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+    overlay
+        .set_ignore_cursor_events(true)
+        .map_err(|error| error.to_string())?;
+    overlay.show().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn build_toolbar_window(
+    app: &AppHandle,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
     let toolbar = PanelBuilder::<_, FeedbackPanel>::new(app, "feedback-toolbar")
         .url(WebviewUrl::App("index.html".into()))
-        .position(Position::Logical(LogicalPosition::new(x, y)))
-        .size(Size::Logical(LogicalSize::new(width, 60.0)))
+        .position(Position::Logical(position))
+        .size(Size::Logical(size))
         .level(PanelLevel::Custom(1001))
         .has_shadow(true)
         .corner_radius(10.0)
@@ -1481,7 +1619,35 @@ fn create_feedback_panels(app: &AppHandle) -> Result<Vec<u32>, String> {
         .map_err(|error| error.to_string())?;
     toolbar.show();
     toolbar.order_front_regardless();
-    Ok(display_ids)
+    Ok(())
+}
+
+/// The toolbar is the one recorder window that accepts clicks, so unlike the
+/// overlays it keeps cursor events and is dragged by its own background.
+#[cfg(windows)]
+fn build_toolbar_window(
+    app: &AppHandle,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    let toolbar = tauri::WebviewWindowBuilder::new(
+        app,
+        "feedback-toolbar",
+        WebviewUrl::App("index.html".into()),
+    )
+    .position(position.x, position.y)
+    .inner_size(size.width, size.height)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .resizable(false)
+    .content_protected(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+    toolbar.show().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn close_feedback_panels(app: &AppHandle) {
@@ -1491,21 +1657,34 @@ fn close_feedback_panels(app: &AppHandle) {
         .filter(|label| label.starts_with("feedback-"))
         .collect::<Vec<_>>();
     for label in labels {
-        // tauri-nspanel changes the native Objective-C class behind Tauri's window. Restore
-        // that class and unregister the panel before asking Tauri to close the webview;
-        // destroying the converted NSPanel directly can raise an Objective-C exception on the
-        // next event-loop turn and abort the entire app.
-        if let Ok(panel) = app.get_webview_panel(&label) {
-            panel.hide();
-            if let Some(window) = panel.to_window() {
-                let _ = window.close();
-            }
-        } else if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.close();
-        }
+        close_feedback_window(app, &label);
     }
 }
 
+#[cfg(target_os = "macos")]
+fn close_feedback_window(app: &AppHandle, label: &str) {
+    // tauri-nspanel changes the native Objective-C class behind Tauri's window. Restore
+    // that class and unregister the panel before asking Tauri to close the webview;
+    // destroying the converted NSPanel directly can raise an Objective-C exception on the
+    // next event-loop turn and abort the entire app.
+    if let Ok(panel) = app.get_webview_panel(label) {
+        panel.hide();
+        if let Some(window) = panel.to_window() {
+            let _ = window.close();
+        }
+    } else if let Some(window) = app.get_webview_window(label) {
+        let _ = window.close();
+    }
+}
+
+#[cfg(windows)]
+fn close_feedback_window(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.close();
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), String> {
     for (label, _) in app.webview_windows() {
         if label.starts_with("feedback-overlay-") {
@@ -1521,6 +1700,20 @@ fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), St
     toolbar.set_level(PanelLevel::Custom(1001).value());
     toolbar.order_front_regardless();
     Ok(())
+}
+
+/// Annotation needs the overlays to accept the cursor; every other moment they
+/// must let clicks reach the app being recorded.
+#[cfg(windows)]
+fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), String> {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("feedback-overlay-") {
+            window
+                .set_ignore_cursor_events(!interactive)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    raise_toolbar(app)
 }
 
 fn register_shortcuts(
@@ -1886,9 +2079,18 @@ fn append_journal(path: &Path, value: &serde_json::Value) -> Result<(), String> 
     set_private_permissions(path)
 }
 
+#[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())
+}
+
+/// Windows has no mode bits. Recordings live under the per-user data directory,
+/// whose inherited ACL already limits the files to this account, so there is
+/// nothing to tighten without hand-writing a DACL.
+#[cfg(windows)]
+fn set_private_permissions(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
