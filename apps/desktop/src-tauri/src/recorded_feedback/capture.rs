@@ -458,7 +458,7 @@ pub(crate) fn feedback_start(
     let media_dir = validate_media_dir(feedback_id, &media_dir)?;
     let audio_path = media_dir.join("audio.wav");
     let audio = start_audio(&app, feedback_id, project_id, &audio_path)?;
-    let registered_shortcuts = register_shortcuts(&app, shortcuts)?;
+    let (registered_shortcuts, unavailable_shortcuts) = register_shortcuts(&app, shortcuts);
     let display_ids = match create_feedback_panels(&app) {
         Ok(display_ids) => display_ids,
         Err(error) => {
@@ -495,9 +495,25 @@ pub(crate) fn feedback_start(
         capture_in_progress: false,
     };
     let view = session_view(&session, "recording", None);
+    let feedback_id = session.feedback_id;
+    let project_id = session.project_id;
     *active = Some(session);
     drop(active);
     let _ = app.emit(EVENT_STATUS, &view);
+    if !unavailable_shortcuts.is_empty() {
+        let _ = app.emit(
+            EVENT_ERROR,
+            json!({
+                "feedback_id": feedback_id, "project_id": project_id,
+                "code": "shortcuts_unavailable",
+                "message": format!(
+                    "Another app already owns {}, so {} off for this recording. Use the toolbar, or pick different chords in Settings.",
+                    unavailable_shortcuts.join(", "),
+                    if unavailable_shortcuts.len() == 1 { "it is" } else { "they are" }
+                )
+            }),
+        );
+    }
     Ok(view)
 }
 
@@ -1558,24 +1574,40 @@ fn build_overlay_window(
     position: LogicalPosition<f64>,
     size: LogicalSize<f64>,
 ) -> Result<(), String> {
-    let overlay =
-        tauri::WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-            .position(position.x, position.y)
-            .inner_size(size.width, size.height)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focused(false)
-            .resizable(false)
-            .shadow(false)
-            .content_protected(true)
-            .build()
-            .map_err(|error| error.to_string())?;
-    overlay
-        .set_ignore_cursor_events(true)
-        .map_err(|error| error.to_string())?;
-    overlay.show().map_err(|error| error.to_string())?;
+    let app = app.clone();
+    let label = label.to_owned();
+    // WebView2 finishes creating on the main thread's message loop, and this runs
+    // from a command occupying that loop, so building here waits on a message that
+    // can never arrive and Windows eventually kills the app as unresponsive. Hand
+    // the build to the async runtime and let the loop deliver it; the recorder
+    // only needs the window once its own webview mounts and calls back in.
+    tauri::async_runtime::spawn(async move {
+        let built =
+            tauri::WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
+                .position(position.x, position.y)
+                .inner_size(size.width, size.height)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .resizable(false)
+                .shadow(false)
+                .content_protected(true)
+                .build();
+        match built {
+            Ok(overlay) => {
+                let _ = overlay.set_ignore_cursor_events(true);
+                let _ = overlay.show();
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    EVENT_ERROR,
+                    json!({ "code": "overlay_failed", "message": error.to_string() }),
+                );
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1630,23 +1662,36 @@ fn build_toolbar_window(
     position: LogicalPosition<f64>,
     size: LogicalSize<f64>,
 ) -> Result<(), String> {
-    let toolbar = tauri::WebviewWindowBuilder::new(
-        app,
-        "feedback-toolbar",
-        WebviewUrl::App("index.html".into()),
-    )
-    .position(position.x, position.y)
-    .inner_size(size.width, size.height)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .resizable(false)
-    .content_protected(true)
-    .build()
-    .map_err(|error| error.to_string())?;
-    toolbar.show().map_err(|error| error.to_string())?;
+    let app = app.clone();
+    // Built off the command thread for the same reason as the overlays.
+    tauri::async_runtime::spawn(async move {
+        let built = tauri::WebviewWindowBuilder::new(
+            &app,
+            "feedback-toolbar",
+            WebviewUrl::App("index.html".into()),
+        )
+        .position(position.x, position.y)
+        .inner_size(size.width, size.height)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .resizable(false)
+        .content_protected(true)
+        .build();
+        match built {
+            Ok(toolbar) => {
+                let _ = toolbar.show();
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    EVENT_ERROR,
+                    json!({ "code": "toolbar_failed", "message": error.to_string() }),
+                );
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1716,10 +1761,16 @@ fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), St
     raise_toolbar(app)
 }
 
+/// Registers what the platform will give us and reports the rest.
+///
+/// Global accelerators are first come, first served across the whole machine, so
+/// a chord an already running app owns cannot be had. Losing one is not worth
+/// abandoning the recording, because every shortcut has a toolbar button: claim
+/// what is free and hand back the losers for the session to report.
 fn register_shortcuts(
     app: &AppHandle,
     requested: Option<HashMap<String, String>>,
-) -> Result<Vec<String>, String> {
+) -> (Vec<String>, Vec<String>) {
     let values = if let Some(requested) = requested {
         DEFAULT_SHORTCUTS
             .iter()
@@ -1736,22 +1787,30 @@ fn register_shortcuts(
             .collect::<Vec<_>>()
     };
     let manager = app.global_shortcut();
+    // Releasing a shortcut is best effort, so a session that ended badly can leave
+    // one claimed by this process for the rest of its life. Reclaim ours first.
+    for (_, shortcut) in &values {
+        if manager.is_registered(shortcut.as_str()) {
+            let _ = manager.unregister(shortcut.as_str());
+        }
+    }
     let mut registered = Vec::new();
+    let mut unavailable = Vec::new();
     for (action, shortcut) in values {
         let emitted_action = action.clone();
-        manager
-            .on_shortcut(shortcut.as_str(), move |app, _, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = app.emit(EVENT_SHORTCUT, &emitted_action);
-                }
-            })
-            .map_err(|error| {
-                unregister_shortcuts(app, &registered);
-                format!("Could not register {action} ({shortcut}): {error}")
-            })?;
-        registered.push(shortcut);
+        match manager.on_shortcut(shortcut.as_str(), move |app, _, event| {
+            if event.state() == ShortcutState::Pressed {
+                let _ = app.emit(EVENT_SHORTCUT, &emitted_action);
+            }
+        }) {
+            Ok(()) => registered.push(shortcut),
+            Err(_) => {
+                let _ = manager.unregister(shortcut.as_str());
+                unavailable.push(format!("{action} ({shortcut})"));
+            }
+        }
     }
-    Ok(registered)
+    (registered, unavailable)
 }
 
 fn unregister_shortcuts(app: &AppHandle, shortcuts: &[String]) {
