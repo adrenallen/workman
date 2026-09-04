@@ -133,6 +133,8 @@ struct FeedbackSession {
     color: String,
     width: f32,
     registered_shortcuts: Vec<String>,
+    /// Chords another app already owned when this session started.
+    shortcut_notice: Option<String>,
     display_ids: Vec<u32>,
     capture_in_progress: bool,
 }
@@ -491,29 +493,20 @@ pub(crate) fn feedback_start(
         color: "#ff4d5e".into(),
         width: 4.0,
         registered_shortcuts,
+        shortcut_notice: (!unavailable_shortcuts.is_empty()).then(|| {
+            format!(
+                "Another app already owns {}, so {} off for this recording. Use the toolbar, or pick different chords in Settings.",
+                unavailable_shortcuts.join(", "),
+                if unavailable_shortcuts.len() == 1 { "it is" } else { "they are" }
+            )
+        }),
         display_ids,
         capture_in_progress: false,
     };
     let view = session_view(&session, "recording", None);
-    let feedback_id = session.feedback_id;
-    let project_id = session.project_id;
     *active = Some(session);
     drop(active);
     let _ = app.emit(EVENT_STATUS, &view);
-    if !unavailable_shortcuts.is_empty() {
-        let _ = app.emit(
-            EVENT_ERROR,
-            json!({
-                "feedback_id": feedback_id, "project_id": project_id,
-                "code": "shortcuts_unavailable",
-                "message": format!(
-                    "Another app already owns {}, so {} off for this recording. Use the toolbar, or pick different chords in Settings.",
-                    unavailable_shortcuts.join(", "),
-                    if unavailable_shortcuts.len() == 1 { "it is" } else { "they are" }
-                )
-            }),
-        );
-    }
     Ok(view)
 }
 
@@ -2164,6 +2157,9 @@ fn session_view(
     phase: &'static str,
     error: Option<String>,
 ) -> SessionView {
+    // A shortcut this session could not claim is worth saying once, but it is not
+    // a failure: the error channel aborts the recording, so it rides along here.
+    let error = error.or_else(|| session.shortcut_notice.clone());
     SessionView {
         feedback_id: session.feedback_id,
         project_id: session.project_id,
