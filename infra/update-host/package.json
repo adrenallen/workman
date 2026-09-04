@@ -14,9 +14,9 @@
     "types": "wrangler types"
   },
   "devDependencies": {
-    "@types/node": "24.2.0",
-    "typescript": "5.9.2",
-    "wrangler": "4.119.0"
+    "@types/node": "26.4.0",
+    "typescript": "7.0.2",
+    "wrangler": "4.127.1"
   },
   "overrides": {
     "undici": "7.29.0"
