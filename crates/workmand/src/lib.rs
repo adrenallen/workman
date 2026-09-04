@@ -2149,6 +2149,20 @@ mod tests {
         response
     }
 
+    /// Draws a resting composer prompt on a cleared screen, then stays alive
+    /// so the status stream has a working agent to report readiness for.
+    #[cfg(unix)]
+    fn composer_prompt_command() -> &'static str {
+        "printf '\\033[2J\\033[HReady\\n❯ '; sleep 30"
+    }
+
+    /// PowerShell has no printf, and the console code page would draw the
+    /// prompt glyph as a question mark, so ask for UTF-8 before writing it.
+    #[cfg(windows)]
+    fn composer_prompt_command() -> &'static str {
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Write-Host -NoNewline \"$([char]27)[2J$([char]27)[HReady`n❯ \"; Start-Sleep 30"
+    }
+
     #[tokio::test]
     async fn status_stream_delivers_fast_initial_composer_edge() {
         let server = TestServer::start().await;
@@ -2185,7 +2199,7 @@ mod tests {
             100,
             "agent",
             "initial-input-edge",
-            "printf '\\033[2J\\033[HReady\\n❯ '; sleep 30",
+            composer_prompt_command(),
         );
         params["agent_tool_id"] = json!(90);
         rpc(&mut socket, 1, "process.create", params).await;
