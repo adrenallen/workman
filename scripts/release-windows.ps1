@@ -81,6 +81,28 @@ if (-not $SkipFrontend) {
 # nothing about the machine that produced it. CARGO_ENCODED_RUSTFLAGS is used
 # rather than RUSTFLAGS because it separates arguments with a unit separator and
 # therefore survives paths containing spaces.
+# C dependencies compiled by cmake (whisper.cpp, aws-lc) bake the absolute path
+# of every source file into their objects, and their sources live in the cargo
+# registry. Set CARGO_HOME to a path outside your home directory before running
+# this to keep the account name out of those too; a directory junction pointing
+# at the usual cargo home works and keeps the existing download cache.
+# whisper.cpp is compiled by cmake, which bakes the absolute path of each source
+# file into the objects it produces. Those paths sit under the cargo target
+# directory, so with the default location the archive would name the building
+# account no matter what Rust remaps. Build into a neutral directory instead;
+# an explicit CARGO_TARGET_DIR is respected.
+if (-not $env:CARGO_TARGET_DIR) {
+    $neutralTarget = Join-Path $env:SystemDrive 'workman-build'
+    try {
+        New-Item -ItemType Directory -Force $neutralTarget -ErrorAction Stop | Out-Null
+        $env:CARGO_TARGET_DIR = $neutralTarget
+    }
+    catch {
+        Write-Host "  could not create $neutralTarget; building in the default target directory, which will embed its path"
+    }
+}
+$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo 'target' }
+
 $rustFlags = @(
     '-C', 'target-feature=+crt-static',
     "--remap-path-prefix=$repo=/workman",
@@ -102,7 +124,7 @@ New-Item -ItemType Directory -Force $outputDir | Out-Null
 $archivePath = Join-Path $outputDir 'workman-windows-x86_64.zip'
 if (Test-Path $archivePath) { Remove-Item $archivePath -Force }
 
-$distDir = Join-Path $repo 'target\dist'
+$distDir = Join-Path $targetRoot 'dist'
 $thirdPartyNotices = Join-Path $distDir 'THIRD_PARTY_NOTICES.md'
 node (Join-Path $repo 'scripts\generate-third-party-notices.mjs') $thirdPartyNotices
 if ($LASTEXITCODE -ne 0) { throw 'third-party notice generation failed' }
