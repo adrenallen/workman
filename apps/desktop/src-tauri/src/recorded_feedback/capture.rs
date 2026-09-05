@@ -1250,7 +1250,7 @@ fn start_audio(
                 sample_format: WavSampleFormat::Float,
             },
         )
-        .map_err(|error| error.to_string())?,
+        .map_err(|error| format!("Could not create the recording audio file: {error}"))?,
     )));
     let samples = Arc::new(AtomicU64::new(0));
     let controls = Arc::new(AudioControls::default());
@@ -2185,7 +2185,17 @@ fn append_journal(path: &Path, value: &serde_json::Value) -> Result<(), String> 
 #[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())
+    // Directories need owner execute permission to create, read, and remove their contents.
+    // Applying the private file mode to a recording directory makes audio.wav inaccessible.
+    let mode = if fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .is_dir()
+    {
+        0o700
+    } else {
+        0o600
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| error.to_string())
 }
 
 /// Windows has no mode bits. Recordings live under the per-user data directory,

@@ -8,6 +8,19 @@ pub(super) struct DictationSession {
 }
 
 impl DictationSession {
+    fn create(id: String, directory: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Could not create voice input storage: {error}"))?;
+        let session = Self {
+            id,
+            directory,
+            audio: None,
+        };
+        set_private_permissions(&session.directory)
+            .map_err(|error| format!("Could not prepare voice input storage: {error}"))?;
+        Ok(session)
+    }
+
     fn stop_audio(&mut self) -> Result<u32, String> {
         let audio = self
             .audio
@@ -87,13 +100,7 @@ pub(crate) fn dictation_start(
         return Err("Install the local transcription model before using voice input.".into());
     }
     let directory = workmand::default_data_dir().join("dictation").join(&id);
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let mut session = DictationSession {
-        id: id.clone(),
-        directory,
-        audio: None,
-    };
-    set_private_permissions(&session.directory)?;
+    let mut session = DictationSession::create(id.clone(), directory)?;
     let path = session.directory.join("audio.wav");
     session.audio = Some(start_audio(
         &app,
@@ -142,6 +149,47 @@ pub(crate) async fn dictation_finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictation_storage_allows_private_audio_creation_reading_and_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("dictation").join("session");
+        let session = DictationSession::create("session".into(), directory.clone()).unwrap();
+        let path = directory.join("audio.wav");
+        let mut writer = WavWriter::create(
+            &path,
+            WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 32,
+                sample_format: WavSampleFormat::Float,
+            },
+        )
+        .expect("a private dictation directory must still allow creating the recording");
+        set_private_permissions(&path).unwrap();
+        writer.write_sample(0.25_f32).unwrap();
+        writer.finalize().unwrap();
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.samples::<f32>().next().unwrap().unwrap(), 0.25);
+        drop(reader);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(session);
+        assert!(
+            !directory.exists(),
+            "cancellation must remove the recording and directory"
+        );
+    }
 
     #[test]
     fn transcription_removes_temporary_audio_on_silence_and_failure() {
