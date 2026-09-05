@@ -251,7 +251,7 @@
     <footer>
       {#if feedback.status === 'ready'}
         <div class="send-actions">
-          <div class="agent-send-row">
+          <div class="agent-send-row" role="group" aria-label="Send feedback to an agent">
             <Select.Root
               type="single"
               value={selectedAgentId?.toString() ?? ''}
@@ -259,15 +259,15 @@
               onValueChange={(value) => { selectedAgentId = value ? Number(value) : null; }}
             >
               <Select.Trigger
-                class="feedback-agent-trigger data-[size=default]:h-[40px] w-full min-w-0 rounded-md text-[1rem] disabled:opacity-70"
+                class="feedback-agent-trigger data-[size=default]:h-[40px] w-[220px] min-w-0 rounded-md rounded-r-none text-[1rem] focus-visible:relative focus-visible:z-10 disabled:opacity-70"
                 aria-label="Agent target"
-                aria-describedby="feedback-agent-help"
+                aria-describedby={!canSendAgent ? 'feedback-agent-help' : undefined}
+                title={selectedAgent ? `${selectedAgent.name} · ${agentFeedbackAvailability(selectedAgent)}` : agents.length ? 'No agents ready' : 'No agents in this project'}
               >
                 <span class="agent-choice">
                   {#if selectedAgent}
                     <StatusIndicator state={agentStatusState(selectedAgent)} tone={processActivityTone(agentStatusState(selectedAgent))} label={agentFeedbackAvailability(selectedAgent)} />
                     <span class="agent-name">{selectedAgent.name}</span>
-                    <small>{agentFeedbackAvailability(selectedAgent)}</small>
                     {#if !canSendAgent}<LockKeyholeIcon size={15} aria-hidden="true" />{/if}
                   {:else}
                     <LockKeyholeIcon size={16} aria-hidden="true" />
@@ -275,7 +275,7 @@
                   {/if}
                 </span>
               </Select.Trigger>
-              <Select.Content class="w-[max(320px,var(--bits-select-anchor-width))]">
+              <Select.Content class="w-[320px] max-w-[calc(100vw-24px)]">
                 {#each agents as agent (agent.id)}
                   {@const ready = agentCanReceiveFeedback(agent)}
                   <Select.Item
@@ -294,24 +294,25 @@
                 {/each}
               </Select.Content>
             </Select.Root>
-            <Button class="h-[40px] px-4 text-[1rem]" disabled={!canSendAgent || localBusy || busy} onclick={() => void sendToAgent()}><BotIcon size={17} />Send to agent</Button>
+            <Button class="-ml-px h-[40px] shrink-0 rounded-md rounded-l-none px-4 text-[1rem] focus-visible:relative focus-visible:z-10" disabled={!canSendAgent || localBusy || busy} onclick={() => void sendToAgent()}><BotIcon size={17} />Send to agent</Button>
           </div>
-          <p id="feedback-agent-help" class="agent-help">
-            {#if agents.length === 0}Create a new agent to send this feedback.
-            {:else if !canSendAgent}Wait for an agent to be ready, or create a new one. Open the list to see each agent’s status.
-            {:else}Send to the selected agent, or choose another destination below.{/if}
-          </p>
           <div class="other-destinations">
             <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} onclick={() => void afterSave(onSendNewAgent)}><PlusIcon size={17} />New agent</Button>
             <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} onclick={() => void afterSave(onSendScratchpad)}><NotebookTextIcon size={17} />Send to scratchpad</Button>
             <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} aria-label="Copy packet prompt" title="Copy a prompt that points to the immutable local packet" onclick={() => void afterSave(onCopy)}><ClipboardIcon size={17} />Copy prompt</Button>
           </div>
+          {#if !canSendAgent}
+            <p id="feedback-agent-help" class="agent-help">
+              {#if agents.length === 0}Create a new agent to send this feedback.
+              {:else}Wait for an agent to be ready, or create a new one. Open the list to see each agent’s status.{/if}
+            </p>
+          {/if}
         </div>
       {/if}
       <div class="manage-row">
         <div class="manage-actions">
           {#if feedback.append_state && feedback.status === 'failed'}<Button variant="outline" class="h-[40px] px-3 text-[1rem]" disabled={localBusy || busy} onclick={() => void run(onDiscardAppend)}>Keep original</Button>{/if}
-          {#if feedback.status === 'ready'}<Button variant="outline" class="h-[40px] px-3 text-[1rem]" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={16} />{/if}</Button>{/if}
+          {#if feedback.status === 'ready'}<Button variant="ghost" class="h-[40px] px-3 text-[1rem]" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={16} />{/if}</Button>{/if}
           <Button variant="ghost" class="h-[40px] px-3 text-[1rem]" disabled={localBusy || busy || feedback.status === 'recording'} onclick={() => void archive()}>
             {#if feedback.archived}<ArchiveRestoreIcon size={17} />Restore{:else}<ArchiveIcon size={17} />Archive{/if}
           </Button>
@@ -381,17 +382,16 @@
   .recording-card { border-color: rgb(255 77 94 / 35%); }
   .failed-card { border-color: color-mix(in srgb, var(--destructive) 40%, var(--border)); }
   :global(.spin) { animation: spin 1s linear infinite; }
-  footer { display: grid; gap: 14px; max-height: 50vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 16px 22px max(14px, env(safe-area-inset-bottom)); background: var(--card); }
-  .send-actions { display: grid; gap: 8px; }
-  .agent-send-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+  footer { display: grid; gap: 10px; max-height: 50vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 14px 22px max(12px, env(safe-area-inset-bottom)); background: var(--card); }
+  .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .agent-send-row { display: flex; width: max-content; max-width: 100%; align-items: center; }
   .agent-choice { display: flex; align-items: center; width: 100%; min-width: 0; gap: 9px; text-align: left; }
   .agent-name { overflow: hidden; flex: 1; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
   .agent-choice small { flex: none; color: var(--muted-foreground); font-size: .875rem; }
   .agent-choice.unavailable .agent-name { color: var(--muted-foreground); opacity: .65; }
-  .agent-help { margin: 0; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
-  .other-destinations { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .agent-help { flex-basis: 100%; margin: 0; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
+  .other-destinations { display: flex; flex-wrap: wrap; gap: 8px; }
   .manage-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-  .send-actions + .manage-row { border-top: 1px solid var(--border); padding-top: 12px; }
   .manage-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .archive-note { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   :global(.delete) { color: var(--destructive); }
@@ -399,6 +399,6 @@
   .inline-error span { font-weight: 700; }
   .loading { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 8px; color: var(--muted-foreground); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 540px) { footer { padding-inline: 14px; } .agent-send-row { grid-template-columns: 1fr; } .other-destinations :global(button) { flex: 1; } }
+  @media (max-width: 540px) { footer { padding-inline: 14px; } }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }
 </style>

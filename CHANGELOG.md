@@ -18,8 +18,9 @@ All notable changes to Workman are recorded here.
 - Dictate new-agent and template instructions with the same local microphone and Whisper pipeline
   used for Recorded Feedback, without needing screen capture.
 - Move the collapsed Model settings section above agent instructions, alongside template options.
-- Enlarge feedback delivery actions and show agent status icons in the target picker, keeping
-  unavailable agents visible and disabled. Simplify feedback sidebar entries to a single title line.
+- Enlarge feedback delivery actions, join a compact agent picker to Send, and align destination
+  buttons in a wrapping row. Keep unavailable agents visible with status icons and simplify
+  feedback sidebar entries to a single title line.
 - Automatically archive feedback after a confirmed send to an agent or scratchpad, with an opt-out
   in Feedback settings. Failed sends, copies, and newer unsent edits stay active.
 
