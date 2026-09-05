@@ -38,6 +38,25 @@ pub async fn native_notification_show(
     show_notification(app, notification_id, title, body).await
 }
 
+#[tauri::command]
+pub async fn native_notification_dismiss(notification_ids: Vec<i64>) -> Result<(), String> {
+    if notification_ids.len() > 1_000 || notification_ids.iter().any(|id| *id <= 0) {
+        return Err("invalid notification IDs".into());
+    }
+    #[cfg(target_os = "macos")]
+    for id in notification_ids {
+        let identifier = notification_identifier(id);
+        mac_usernotifications::cancel_pending(&identifier).await;
+        mac_usernotifications::close_delivered(&identifier).await;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn notification_identifier(id: i64) -> String {
+    format!("workman.notification.{id}")
+}
+
 #[cfg(target_os = "macos")]
 async fn show_notification(
     app: AppHandle,
@@ -45,9 +64,15 @@ async fn show_notification(
     title: String,
     body: String,
 ) -> Result<(), String> {
-    let handle = mac_usernotifications::Notification::new()
+    let mut notification = mac_usernotifications::Notification::new()
         .title(title)
-        .message(body)
+        .message(body);
+    if notification_id > 0 {
+        // The durable notification ID lets reading an agent clear the matching Notification
+        // Center entry, including notifications delivered before the desktop was restarted.
+        notification = notification.id(&notification_identifier(notification_id));
+    }
+    let handle = notification
         .send()
         .await
         .map_err(|error| format!("could not show the OS notification: {error}"))?;

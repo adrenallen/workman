@@ -14,6 +14,7 @@
     requestNativeNotificationPermission,
     setNativeNotificationsEnabled,
     setNeedsInputNotificationsEnabled,
+    setTopLevelNotificationsOnly,
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
 
@@ -64,7 +65,7 @@
   <Separator />
 
   <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
-    <div class="flex min-w-0 items-center gap-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
       <Switch
         id="native-notifications-enabled"
         size="sm"
@@ -84,7 +85,7 @@
   <Separator />
 
   <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
-    <div class="flex min-w-0 items-center gap-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
       <Switch
         id="needs-input-notifications-enabled"
         size="sm"
@@ -99,6 +100,27 @@
     </div>
     <span class="font-mono text-xs text-muted-foreground">
       {$nativeNotificationPreferences.needsInput ? 'On' : 'Off'}
+    </span>
+  </div>
+
+  <Separator />
+
+  <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
+      <Switch
+        id="top-level-notifications-only"
+        size="sm"
+        checked={$nativeNotificationPreferences.topLevelOnly}
+        disabled={!$nativeNotificationPreferences.enabled}
+        onCheckedChange={(checked) => setTopLevelNotificationsOnly(checked === true)}
+      />
+      <label for="top-level-notifications-only" class="min-w-0">
+        <span class="block text-sm font-medium">Top-level agents only</span>
+        <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Skip completion and input banners for agents spawned by another agent. Their activity remains in Workman.</span>
+      </label>
+    </div>
+    <span class="font-mono text-xs text-muted-foreground">
+      {$nativeNotificationPreferences.topLevelOnly ? 'On' : 'Off'}
     </span>
   </div>
 
@@ -140,5 +162,6 @@
 
   <footer class="bg-muted/40 px-4 py-3 text-xs leading-5 text-muted-foreground">
     Notification-center rows and the Dock unread badge remain active even when OS banners are off or denied.
+    Click a banner to open its agent. On macOS, viewing that agent also clears its notifications from Notification Center.
   </footer>
 </section>

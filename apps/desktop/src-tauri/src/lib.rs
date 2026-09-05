@@ -1408,6 +1408,7 @@ pub fn run() {
             native_notifications::native_notification_permission_state,
             native_notifications::native_notification_request_permission,
             native_notifications::native_notification_show,
+            native_notifications::native_notification_dismiss,
             recorded_feedback::feedback_capability,
             recorded_feedback::dictation_preflight,
             recorded_feedback::dictation_install_model,

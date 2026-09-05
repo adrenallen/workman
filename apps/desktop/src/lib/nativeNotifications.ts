@@ -3,7 +3,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { get, writable } from 'svelte/store';
 
-import type { Notification } from './daemon';
+import type { Notification, ProcessView } from './daemon';
+import { isTopLevelAgentNotification } from './notificationAttention.ts';
 
 export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
 
@@ -12,6 +13,7 @@ const preferencesKey = 'workman.native-notifications.v1';
 export interface NativeNotificationPreferences {
   enabled: boolean;
   needsInput: boolean;
+  topLevelOnly: boolean;
 }
 
 export type NativeNotificationPermissionState =
@@ -40,7 +42,8 @@ interface NativeNotificationAction {
 
 const fallbackPreferences: NativeNotificationPreferences = {
   enabled: true,
-  needsInput: true
+  needsInput: true,
+  topLevelOnly: true
 };
 
 const checkingPermission: NativeNotificationPermission = {
@@ -60,6 +63,15 @@ export const nativeNotificationRuntime = writable<NativeNotificationRuntime>({
 });
 
 let permissionRequest: Promise<NativeNotificationPermission> | null = null;
+let nativeCommandQueue: Promise<unknown> = Promise.resolve();
+const readNotificationIds = new Set<number>();
+const dismissedNotificationIds = new Set<number>();
+
+function enqueueNativeCommand<T>(action: () => Promise<T>): Promise<T> {
+  const next = nativeCommandQueue.catch(() => undefined).then(action);
+  nativeCommandQueue = next;
+  return next;
+}
 
 export function setNativeNotificationsEnabled(enabled: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), enabled });
@@ -67,6 +79,10 @@ export function setNativeNotificationsEnabled(enabled: boolean): void {
 
 export function setNeedsInputNotificationsEnabled(needsInput: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), needsInput });
+}
+
+export function setTopLevelNotificationsOnly(topLevelOnly: boolean): void {
+  savePreferences({ ...get(nativeNotificationPreferences), topLevelOnly });
 }
 
 export async function refreshNativeNotificationPermission(): Promise<NativeNotificationPermission> {
@@ -109,10 +125,16 @@ export async function requestNativeNotificationPermission(): Promise<NativeNotif
   return permissionRequest;
 }
 
-export async function deliverNativeNotification(notification: Notification): Promise<boolean> {
+export async function deliverNativeNotification(
+  notification: Notification,
+  processes: ProcessView[] = [],
+  isUnread: () => boolean = () => notification.read_at === null
+): Promise<boolean> {
   const preferences = get(nativeNotificationPreferences);
   if (!preferences.enabled) return false;
   if (notification.type === 'needs_input' && !preferences.needsInput) return false;
+  if (preferences.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
+  if (!isUnread() || readNotificationIds.has(notification.id)) return false;
   try {
     if (await getCurrentWindow().isFocused()) return false;
   } catch (cause) {
@@ -134,16 +156,39 @@ export async function deliverNativeNotification(notification: Notification): Pro
   if (permission.state !== 'granted') return false;
 
   try {
-    await invoke('native_notification_show', {
-      notificationId: notification.id,
-      title: notificationTitle(notification),
-      body: notification.body
+    return await enqueueNativeCommand(async () => {
+      // Permission sheets and earlier deliveries can take time. Recheck before displaying so a
+      // banner cannot arrive after the user has returned to Workman or read the matching agent.
+      const current = get(nativeNotificationPreferences);
+      if (!current.enabled || (notification.type === 'needs_input' && !current.needsInput)) return false;
+      if (current.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
+      if (await getCurrentWindow().isFocused()) return false;
+      if (!isUnread() || readNotificationIds.has(notification.id)) return false;
+      await invoke('native_notification_show', {
+        notificationId: notification.id,
+        title: notificationTitle(notification),
+        body: notification.body
+      });
+      nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+      return true;
     });
-    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
-    return true;
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
     return false;
+  }
+}
+
+/** Call only after a confirmed read; failed optimistic updates must retain OS notifications. */
+export async function dismissNativeNotifications(notificationIds: number[]): Promise<void> {
+  const ids = [...new Set(notificationIds)].filter((id) => id > 0 && !dismissedNotificationIds.has(id));
+  if (ids.length === 0) return;
+  for (const id of ids) readNotificationIds.add(id);
+  try {
+    await enqueueNativeCommand(() => invoke('native_notification_dismiss', { notificationIds: ids }));
+    for (const id of ids) dismissedNotificationIds.add(id);
+  } catch (cause) {
+    // The authoritative read list retries removal on the next refresh.
+    nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
   }
 }
 
@@ -219,7 +264,7 @@ function loadPreferences(): NativeNotificationPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(preferencesKey) ?? 'null');
     if (typeof stored?.enabled === 'boolean' && typeof stored?.needsInput === 'boolean') {
-      return stored;
+      return { ...stored, topLevelOnly: typeof stored.topLevelOnly === 'boolean' ? stored.topLevelOnly : true };
     }
   } catch {
     // Defaults keep notifications enabled when local storage is unavailable or malformed.

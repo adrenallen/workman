@@ -214,10 +214,12 @@
   } from './lib/workspaceViewHistory';
   import {
     deliverNativeNotification,
+    dismissNativeNotifications,
     listenForNativeNotificationActions,
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
+  import { isAgentNotificationViewed } from './lib/notificationAttention';
   import {
     sidebarIdentityColorValue,
     type ProjectSettingsInput
@@ -351,6 +353,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let windowFocused = $state(false);
   let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let autoKeepAwakeEnabled = $state(false);
@@ -601,6 +604,18 @@
       ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
       : null
   );
+  let displayedAgentId = $derived(
+    !settingsOpen && activeWorktreeOperationId === null && !selectedOptimisticProcess
+      && selectedProject !== null && selectedProcess?.kind === 'agent'
+      ? selectedProcess.id
+      : null
+  );
+  $effect(() => {
+    const process = selectedProcess;
+    if (process?.agent_state.unread && isAgentNotificationViewed(
+      process.id, windowFocused, documentVisible, displayedAgentId
+    )) void markAgentRead(process.id, process.project_id);
+  });
   let selectedDraft = $derived.by(() => {
     const currentSelection = selection;
     if (currentSelection?.kind !== 'draft') return null;
@@ -885,8 +900,16 @@
       else stop();
     }).catch(reportError);
     let stopWindowFocus = (): void => {};
+    let focusRequest = 0;
+    const initialFocusRequest = focusRequest;
+    void getCurrentWindow().isFocused().then((focused) => {
+      if (active && initialFocusRequest === focusRequest) windowFocused = focused;
+    }).catch(reportError);
     void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      ++focusRequest;
+      windowFocused = focused;
       updateDocumentVisibility();
+      if (focused) void refreshNativeNotificationPermission();
       // The Screen Recording sheet lives in System Settings. Refresh as soon as Workman regains
       // focus so the setup modal reflects a permission change without another button press.
       if (
@@ -992,7 +1015,6 @@
     const notificationTimer = setInterval(() => {
       if (
         active
-        && documentVisible
         && connection.status === 'connected'
         && connection.version_compatible
       ) {
@@ -1124,9 +1146,9 @@
       startupUpdatePort = null;
     }
     if (reconnected) {
+      if (status.version_compatible) void refreshNotifications();
       if (documentVisible) {
         void refreshProjects();
-        if (status.version_compatible) void refreshNotifications();
       }
     }
   }
@@ -1548,6 +1570,7 @@
     let succeeded = false;
     try {
       await client.markProjectRead(projectId);
+      await dismissNativeNotifications([...unreadNotificationIds]);
       succeeded = true;
     } catch (cause) {
       const restore = (process: ProcessView): ProcessView =>
@@ -1602,9 +1625,14 @@
       for (const notification of next) seenNativeNotificationIds.add(notification.id);
       nativeNotificationBaselineReady = true;
       notifications = next;
+      void dismissNativeNotifications(next.filter((notification) => notification.read_at !== null).map((notification) => notification.id));
       if (fresh.length > 0) {
         nativeDeliveryQueue = nativeDeliveryQueue.catch(() => undefined).then(async () => {
-          for (const notification of fresh) await deliverNativeNotification(notification);
+          for (const notification of fresh) {
+            await deliverNativeNotification(notification, profileProcesses, () =>
+              notifications.some((current) => current.id === notification.id && current.read_at === null)
+            );
+          }
         });
       }
     } catch (cause) {
@@ -1622,6 +1650,11 @@
     if (notification.process_id !== null) clearAgentUnreadLocally(notification.process_id);
     try {
       await client.markNotificationRead(notification.id);
+      await dismissNativeNotifications(previous.filter((candidate) =>
+        candidate.id === notification.id
+        || (notification.process_id !== null && candidate.process_id === notification.process_id)
+      ).map((candidate) => candidate.id));
+      await refreshNotifications();
     } catch (cause) {
       notifications = previous;
       reportError(cause);
@@ -1647,6 +1680,8 @@
     for (const processId of processIds) clearAgentUnreadLocally(processId);
     try {
       await client.markAllNotificationsRead();
+      await dismissNativeNotifications(previous.map((notification) => notification.id));
+      await refreshNotifications();
     } catch (cause) {
       notifications = previous;
       reportError(cause);
@@ -1710,9 +1745,12 @@
   async function markAgentRead(processId: number, projectId: number): Promise<void> {
     if (markReadPending.has(processId)) return;
     markReadPending.add(processId);
+    const notificationIds = notifications.filter((notification) => notification.process_id === processId).map((notification) => notification.id);
     clearAgentUnreadLocally(processId);
     try {
       await client.markProcessRead(processId);
+      await dismissNativeNotifications(notificationIds);
+      await refreshNotifications();
     } catch (cause) {
       reportError(cause);
       await refreshProcesses(projectId);
@@ -1745,9 +1783,9 @@
     for (const process of next) {
       if (process.kind !== 'agent' || !process.agent_state.unread) continue;
       if (markReadPending.has(process.id)) continue;
-      const alreadyViewing = selectedProject?.id === process.project_id
-        && selection?.kind === 'agent'
-        && selection.id === process.id;
+      const alreadyViewing = isAgentNotificationViewed(
+        process.id, windowFocused, documentVisible, displayedAgentId
+      );
       if (alreadyViewing) {
         void markAgentRead(process.id, process.project_id);
         continue;
@@ -2421,11 +2459,6 @@
 
     if (next.kind === 'todo' && !todoNavigationIds.includes(next.id)) {
       todoNavigationIds = (coordination?.todos ?? []).map((todo) => todo.id);
-    }
-
-    if (next.kind === 'agent') {
-      const process = processes.find((candidate) => candidate.id === next.id);
-      if (process?.agent_state.unread) void markAgentRead(process.id, process.project_id);
     }
 
     if (next.kind === 'todo') {

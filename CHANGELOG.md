@@ -4,6 +4,9 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Keep agent completions unread while Workman is unfocused or minimized, and clear the matching
+  macOS Notification Center entries after reading them. Add a default-on top-level agent banner filter.
+
 - Keep recent agent prompts in local history, including template instructions, model settings, and
   attachment references. Copy them or reopen them as a draft, including from a stopped agent's footer.
 - Dictate new-agent and template instructions with the same local microphone and Whisper pipeline
