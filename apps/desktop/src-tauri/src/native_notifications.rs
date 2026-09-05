@@ -7,6 +7,7 @@ pub const ACTION_EVENT: &str = "notification://action";
 mod badge;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
+mod settings;
 #[cfg(windows)]
 #[path = "native_notifications/windows.rs"]
 mod windows_backend;
@@ -43,6 +44,14 @@ pub async fn native_notification_request_permission(
     app: AppHandle,
 ) -> Result<NotificationPermission, String> {
     request_permission(&app).await
+}
+
+#[tauri::command]
+pub async fn native_notification_open_settings(app: AppHandle) -> Result<(), String> {
+    let app_id = app.config().identifier.clone();
+    tauri::async_runtime::spawn_blocking(move || settings::open(&app_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

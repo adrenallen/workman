@@ -1408,6 +1408,7 @@ pub fn run() {
             terminal_clipboard::terminal_write_clipboard_text,
             native_notifications::native_notification_permission_state,
             native_notifications::native_notification_request_permission,
+            native_notifications::native_notification_open_settings,
             native_notifications::native_notification_show,
             native_notifications::native_notification_dismiss,
             native_notifications::native_notification_set_badge,

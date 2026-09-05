@@ -125,6 +125,16 @@ export async function requestNativeNotificationPermission(): Promise<NativeNotif
   return permissionRequest;
 }
 
+export async function openNativeNotificationSettings(): Promise<void> {
+  try {
+    await invoke('native_notification_open_settings');
+    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+  } catch (cause) {
+    nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
+    throw cause;
+  }
+}
+
 export async function deliverNativeNotification(
   notification: Notification,
   processes: ProcessView[] = [],

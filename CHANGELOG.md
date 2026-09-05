@@ -5,7 +5,8 @@ All notable changes to Workman are recorded here.
 ## Unreleased
 
 - Clarify the saved Computer notifications setting: turn it off for in-app only alerts, including
-  hiding Dock/taskbar badges while retaining Workman's unread notifications.
+  hiding Dock/taskbar badges while retaining Workman's unread notifications. Add an Open system
+  settings shortcut when notification permission is blocked.
 
 - Extend native agent notifications to Windows and Linux: open the matching agent on click, clear
   read alerts, and show a numeric Windows taskbar overlay. Linux integration follows desktop capabilities.

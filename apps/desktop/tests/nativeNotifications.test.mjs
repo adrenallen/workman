@@ -5,7 +5,7 @@ import { get } from 'svelte/store';
 import { isAgentNotificationViewed, isTopLevelAgentNotification } from '../src/lib/notificationAttention.ts';
 import {
   deliverNativeNotification, deliverNativeSystemNotification, dismissNativeNotifications, nativeNotificationPreferences,
-  nativeNotificationRuntime, setNativeNotificationsEnabled, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
+  nativeNotificationRuntime, openNativeNotificationSettings, setNativeNotificationsEnabled, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
 } from '../src/lib/nativeNotifications.ts';
 
 const allowed = { state: 'granted', platform: 'macos', detail: null };
@@ -43,6 +43,27 @@ const deferred = () => {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 };
+
+test('opening system settings keeps permission denied until the OS reports a change', async () => {
+  const denied = { ...allowed, state: 'denied' };
+  nativeNotificationRuntime.set({ permission: denied, busy: false, error: 'Old error' });
+  await openNativeNotificationSettings();
+  assert.deepEqual(calls, [{ command: 'native_notification_open_settings', args: {} }]);
+  assert.deepEqual(get(nativeNotificationRuntime), { permission: denied, busy: false, error: null });
+  assert.equal(get(nativeNotificationPreferences).enabled, true);
+});
+
+test('settings launch failures stay visible and can be retried without changing preferences', async () => {
+  nativeNotificationRuntime.set({ permission: { ...allowed, state: 'denied' }, busy: false, error: null });
+  handle = () => { throw new Error('The desktop notification settings app could not be found.'); };
+  await assert.rejects(openNativeNotificationSettings(), /could not be found/);
+  assert.match(get(nativeNotificationRuntime).error, /could not be found/);
+  assert.equal(get(nativeNotificationRuntime).permission.state, 'denied');
+  handle = () => undefined;
+  await openNativeNotificationSettings();
+  assert.equal(get(nativeNotificationRuntime).error, null);
+  assert.equal(get(nativeNotificationPreferences).enabled, true);
+});
 
 test('a selected agent stays unread while switched away, minimized, or behind another view', () => {
   assert.equal(isAgentNotificationViewed(7, false, true, 7), false);

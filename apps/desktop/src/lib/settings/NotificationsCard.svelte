@@ -1,6 +1,7 @@
 <script lang="ts">
   import BellIcon from '@lucide/svelte/icons/bell';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+  import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -9,6 +10,7 @@
   import {
     nativeNotificationPreferences,
     nativeNotificationRuntime,
+    openNativeNotificationSettings,
     refreshNativeNotificationPermission,
     requestNativeNotificationPermission,
     setNativeNotificationsEnabled,
@@ -16,6 +18,22 @@
     setTopLevelNotificationsOnly,
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
+
+  let openingSettings = $state(false);
+  let showSettingsShortcut = $derived(
+    $nativeNotificationPreferences.enabled && (
+      ['denied', 'unavailable', 'unknown'].includes($nativeNotificationRuntime.permission.state)
+      || $nativeNotificationRuntime.permission.platform === 'linux'
+    )
+  );
+
+  async function openSettings(): Promise<void> {
+    if (openingSettings) return;
+    openingSettings = true;
+    try { await openNativeNotificationSettings(); }
+    catch { /* The notification runtime displays the launch error below. */ }
+    finally { openingSettings = false; }
+  }
 
   let permissionLabel = $derived.by(() => {
     switch ($nativeNotificationRuntime.permission.state) {
@@ -138,6 +156,11 @@
       {#if $nativeNotificationPreferences.enabled && $nativeNotificationRuntime.error}
         <p class="mt-1 font-mono text-xs leading-5 text-destructive">{$nativeNotificationRuntime.error}</p>
       {/if}
+      {#if showSettingsShortcut}
+        <p class="mt-1 text-xs leading-5 text-muted-foreground">
+          Enable notifications for Workman in system settings. Permission updates when you return to the app.
+        </p>
+      {/if}
     </div>
     <div class="flex flex-wrap gap-2">
       <Button
@@ -156,6 +179,16 @@
           onclick={() => void requestNativeNotificationPermission().catch(() => undefined)}
         >
           Allow notifications
+        </Button>
+      {/if}
+      {#if showSettingsShortcut}
+        <Button
+          size="sm"
+          disabled={openingSettings || $nativeNotificationRuntime.busy}
+          onclick={() => void openSettings()}
+        >
+          <ExternalLinkIcon aria-hidden="true" />
+          {openingSettings ? 'Opening settings…' : 'Open system settings'}
         </Button>
       {/if}
     </div>

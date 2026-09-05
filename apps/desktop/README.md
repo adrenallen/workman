@@ -23,6 +23,10 @@ The same page controls the default top-level agent filter.
 Viewing an agent in the focused window clears its unread state and matching OS alerts. Unread
 state remains available in Workman when OS notifications are disabled.
 
+When permission is blocked, **Open system settings** opens Workman's notification controls on
+macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
+other desktops show manual directions. Permission refreshes when Workman regains focus.
+
 - macOS uses Notification Center and the Dock badge.
 - Windows uses Workman's Start menu application identity, tagged toasts, and a numeric taskbar
   overlay. Existing shortcut targets, arguments, and icons are preserved when registering the identity.
