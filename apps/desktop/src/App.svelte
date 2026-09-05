@@ -127,6 +127,13 @@
     type TodoCreationDraft
   } from './lib/creationDrafts';
   import {
+    boundAgentPromptHistory,
+    loadAgentPromptHistory,
+    saveAgentPromptHistory,
+    snapshotAgentPrompt,
+    type AgentPromptHistoryEntry
+  } from './lib/agentPromptHistory';
+  import {
     contextMenuRequest,
     describeContextMenu,
     dispatchTerminalContextAction,
@@ -427,6 +434,7 @@
   let dialog = $state<'command' | null>(null);
   let commandDialogProcess = $state<ProcessView | null>(null);
   let creationDrafts = $state<CreationDraft[]>([]);
+  let agentPromptHistory = $state<AgentPromptHistoryEntry[]>([]);
   let activeProfileId = $state<number | null>(null);
   let creationDraftsLoaded = $state(false);
   let draftFocusRequestId = $state<number | null>(null);
@@ -2317,6 +2325,7 @@
     flushCreationDraftPersistence();
     activeProfileId = profileId;
     creationDrafts = loadCreationDrafts(profileId);
+    agentPromptHistory = loadAgentPromptHistory(profileId);
     creationDraftsLoaded = true;
   }
 
@@ -3483,15 +3492,47 @@
     const input = deferInitialPrompt
       ? { ...submission.input, defer_initial_prompt: true }
       : submission.input;
+    const profileId = activeProfileId;
+    const savedPrompt = snapshotAgentPrompt(
+      draft, submission.tool, submission.template, input, crypto.randomUUID()
+    );
+    replaceAgentPromptHistory([savedPrompt, ...agentPromptHistory]);
     if (spawnAgent(
       submission.tool,
       input,
       submission.template,
       () => restoreAgentCreationDraft(draft),
-      feedbackId
+      feedbackId,
+      (processId) => {
+        // A launch can finish after the user changes profiles. Never write its ID into another profile.
+        if (activeProfileId !== profileId) return;
+        replaceAgentPromptHistory(agentPromptHistory.map((entry) =>
+          entry.id === savedPrompt.id ? { ...entry, processId } : entry
+        ));
+      }
     )) {
       removeCreationDraft(draft.id);
     }
+  }
+
+  function replaceAgentPromptHistory(next: AgentPromptHistoryEntry[]): void {
+    agentPromptHistory = boundAgentPromptHistory(next);
+    if (activeProfileId !== null && !saveAgentPromptHistory(activeProfileId, agentPromptHistory)) {
+      reportError('Prompt history is available for this session, but could not be saved on this computer.');
+    }
+  }
+
+  function recoverAgentPrompt(entry: AgentPromptHistoryEntry): void {
+    if (selectedProject?.id !== entry.draft.projectId) return;
+    const draft: AgentCreationDraft = {
+      ...entry.draft,
+      id: nextCreationDraftId(creationDrafts),
+      createdAt: Date.now(),
+      attachments: [...entry.draft.attachments]
+    };
+    replaceCreationDrafts([...creationDrafts, draft]);
+    draftFocusRequestId = draft.id;
+    void selectTreeItem(projectTreeSelection('draft', draft.id, draft.projectId, creationDraftLabel(draft)));
   }
 
   function restoreAgentCreationDraft(draft: AgentCreationDraft): void {
@@ -3617,7 +3658,8 @@
     requestedInput?: SpawnAgentInput,
     template: AgentTemplate | null = null,
     onFailure?: () => void,
-    feedbackId: number | null = null
+    feedbackId: number | null = null,
+    onSpawned?: (processId: number) => void
   ): boolean {
     const currentProject = selectedProject;
     if (!currentProject) return false;
@@ -3653,7 +3695,7 @@
     feedbackBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
-    void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId);
+    void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId, onSpawned);
     return true;
   }
 
@@ -3662,11 +3704,13 @@
     input: SpawnAgentInput,
     optimisticId: number,
     onFailure?: () => void,
-    feedbackId: number | null = null
+    feedbackId: number | null = null,
+    onSpawned?: (processId: number) => void
   ): Promise<void> {
     await tick();
     try {
       const result = await client.spawnAgent(input);
+      onSpawned?.(result.process_id);
       await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
       optimisticProcesses = optimisticProcesses.filter(
@@ -6526,6 +6570,9 @@
             {#if draft.kind === 'agent'}
               <NewAgentDraftPanel
                 {draft}
+                promptHistory={agentPromptHistory.filter((entry) => entry.draft.projectId === draft.projectId)}
+                onRestorePrompt={recoverAgentPrompt}
+                onClearPromptHistory={() => replaceAgentPromptHistory(agentPromptHistory.filter((entry) => entry.draft.projectId !== draft.projectId))}
                 projectName={projectDisplayName(selectedProject)}
                 tools={registeredAgentTools}
                 templates={agentTemplates}
@@ -6584,6 +6631,7 @@
             onDismiss={() => dismissOptimisticProcess(selectedOptimisticProcess!.process.id)}
           />
         {:else if selectedProcess}
+          {@const savedPrompt = agentPromptHistory.find((entry) => entry.processId === selectedProcess.id && entry.draft.projectId === selectedProcess.project_id)}
           {#key selectedProcess.id}
             <div class="terminal-view">
               <TerminalView
@@ -6594,6 +6642,7 @@
                 visible={documentVisible}
                 busy={processBusyId === selectedProcess.id}
                 onStart={(process) => void startOrReviewProcess(process)}
+                onRecoverPrompt={selectedProcess.kind === 'agent' && savedPrompt ? () => recoverAgentPrompt(savedPrompt) : undefined}
                 onError={reportError}
                 onContextMenu={showContextMenu}
                 onAppShortcut={handleAppShortcut}

@@ -9,6 +9,9 @@
   import { onDestroy, onMount } from 'svelte';
 
   import AgentBrandMark from './AgentBrandMark.svelte';
+  import AgentPromptHistory from './AgentPromptHistory.svelte';
+  import VoiceInputButton from './VoiceInputButton.svelte';
+  import type { AgentPromptHistoryEntry } from './agentPromptHistory';
   import {
     agentDraftImageToken,
     attachmentName,
@@ -71,6 +74,9 @@
 
   interface Props {
     draft: AgentCreationDraft;
+    promptHistory?: AgentPromptHistoryEntry[];
+    onRestorePrompt?: (entry: AgentPromptHistoryEntry) => void;
+    onClearPromptHistory?: () => void;
     projectName: string;
     tools: AgentTool[];
     templates: AgentTemplate[];
@@ -89,6 +95,9 @@
 
   let {
     draft,
+    promptHistory = [],
+    onRestorePrompt = () => undefined,
+    onClearPromptHistory = () => undefined,
     projectName,
     tools,
     templates,
@@ -105,12 +114,13 @@
     onError = () => undefined
   }: Props = $props();
 
-  let advancedOpen = $state(false);
+  let modelSettingsOpen = $state(false);
   let templateInstructionsOpen = $state(false);
   let templateAgentOpen = $state(false);
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   let promptField = $state<HTMLDivElement | null>(null);
   let attachmentSaving = $state(false);
+  let dictationBusy = $state(false);
   let attachmentDropActive = $state(false);
   let attachmentPreviews = $state<Record<string, string>>({});
   let failedAttachmentPreviews = $state<Record<string, true>>({});
@@ -149,6 +159,7 @@
   const canCreate = $derived(
     !loading
       && !attachmentSaving
+      && !dictationBusy
       && selectedTool !== null
       && !choice.missingTemplate
       && !choice.missingTool
@@ -514,6 +525,7 @@
     {/if}
   {/snippet}
   <section class="agent-fields">
+    <AgentPromptHistory entries={promptHistory} {busy} onRestore={onRestorePrompt} onClear={onClearPromptHistory} {onError} />
     <fieldset
       class="launch-fieldset"
       disabled={loading || busy}
@@ -658,85 +670,14 @@
       </section>
     {/if}
 
-    <div
-      bind:this={promptField}
-      class="prompt-field"
-      role="group"
-      aria-label={selectedTemplate ? 'Additional instructions and image attachments' : 'Instructions and image attachments'}
-      class:attachment-drop-active={attachmentDropActive}
-      ondragover={(event) => {
-        if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
-        event.preventDefault();
-        attachmentDropActive = true;
-      }}
-      ondragleave={() => { attachmentDropActive = false; }}
-      ondrop={handlePromptDrop}
-    >
-      <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
-        <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
-        <small>{selectedTemplate ? `Combined with ${selectedTemplate.name}'s instructions in one starting prompt.` : 'Tell this agent what to do.'}</small>
-      </label>
-      <div class="prompt-composer">
-        <Textarea
-          id={`draft-agent-prompt-${draft.id}`}
-          class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
-          bind:ref={promptTextarea}
-          value={draft.prompt}
-          placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
-          disabled={busy || attachmentSaving}
-          oninput={(event) => onChange({ prompt: event.currentTarget.value })}
-          onpaste={handlePromptPaste}
-        />
-        {#if draft.attachments.length > 0}
-          <div class="attachment-list" role="group" aria-label="Attached images">
-            {#each draft.attachments as attachment, index (attachment)}
-              <div class="attachment-chip">
-                {#if attachmentPreview(attachment)}
-                  <img
-                    src={attachmentPreview(attachment)}
-                    alt=""
-                    onerror={() => handleAttachmentPreviewError(attachment)}
-                  />
-                {:else}
-                  <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
-                {/if}
-                <span class="attachment-copy">
-                  <strong>{agentDraftImageToken(index)}</strong>
-                  <small>{attachmentName(attachment)}</small>
-                </span>
-                <IconButton
-                  class="size-6 rounded-sm"
-                  label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
-                  tooltip={false}
-                  disabled={busy || attachmentSaving}
-                  onclick={() => removeAttachment(attachment)}
-                >{#snippet icon()}<XIcon size={14} strokeWidth={1.8} />{/snippet}</IconButton>
-              </div>
-            {/each}
-          </div>
-        {/if}
-        <div class="prompt-actions">
-          <small id={`draft-agent-create-help-${draft.id}`} aria-live="polite">
-            {attachmentSaving ? 'Saving image…' : 'Paste images to place them at the cursor'} · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
-          </small>
-          <Button
-            type="submit"
-            disabled={busy || !canCreate}
-            aria-busy={busy}
-            aria-describedby={`draft-agent-create-help-${draft.id}`}
-          >{busy ? 'Creating…' : 'Create agent'}</Button>
-        </div>
-      </div>
-    </div>
-
-    <Collapsible.Root bind:open={advancedOpen} class="overflow-hidden rounded-md border border-border">
+    <Collapsible.Root bind:open={modelSettingsOpen} class="overflow-hidden rounded-md border border-border">
       <Collapsible.Trigger class="flex min-h-9 w-full items-center gap-2 px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
         <SlidersHorizontalIcon class="text-muted-foreground" size={14} />
-        <span class="min-w-0 flex-1 text-sm font-medium">Advanced</span>
-        <ChevronDownIcon class={`text-muted-foreground ${advancedOpen ? 'rotate-180' : ''}`} size={14} />
+        <span class="min-w-0 flex-1 text-sm font-medium">Model settings</span>
+        <ChevronDownIcon class={`text-muted-foreground ${modelSettingsOpen ? 'rotate-180' : ''}`} size={14} />
       </Collapsible.Trigger>
       <Collapsible.Content>
-        <div class="advanced-grid">
+        <div class="model-settings-grid">
           <label class="field-label" for={`draft-agent-name-${draft.id}`}><span>Name <small>optional</small></span><Input id={`draft-agent-name-${draft.id}`} value={draft.name} placeholder={`${selectedTool?.name.toLowerCase() ?? 'agent'} worker`} disabled={busy} oninput={(event) => onChange({ name: event.currentTarget.value })} /></label>
           <label class="field-label" for={`draft-agent-args-${draft.id}`}><span>Other launch args <small>optional</small></span><Input id={`draft-agent-args-${draft.id}`} value={draft.extraArgs} placeholder="--permission-mode plan" disabled={busy} autocapitalize="off" autocorrect="off" spellcheck={false} oninput={(event) => onChange({ extraArgs: event.currentTarget.value })} /></label>
           {#if modelSupported || effortSupported}
@@ -801,6 +742,78 @@
       </Collapsible.Content>
     </Collapsible.Root>
 
+    <div
+      bind:this={promptField}
+      class="prompt-field"
+      role="group"
+      aria-label={selectedTemplate ? 'Additional instructions and image attachments' : 'Instructions and image attachments'}
+      class:attachment-drop-active={attachmentDropActive}
+      ondragover={(event) => {
+        if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+        event.preventDefault();
+        attachmentDropActive = true;
+      }}
+      ondragleave={() => { attachmentDropActive = false; }}
+      ondrop={handlePromptDrop}
+    >
+      <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
+        <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
+        <small>{selectedTemplate ? `Combined with ${selectedTemplate.name}'s instructions in one starting prompt.` : 'Tell this agent what to do.'}</small>
+      </label>
+      <div class="prompt-composer">
+        <Textarea
+          id={`draft-agent-prompt-${draft.id}`}
+          class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
+          bind:ref={promptTextarea}
+          value={draft.prompt}
+          placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
+          disabled={busy || attachmentSaving || dictationBusy}
+          oninput={(event) => onChange({ prompt: event.currentTarget.value })}
+          onpaste={handlePromptPaste}
+        />
+        {#if draft.attachments.length > 0}
+          <div class="attachment-list" role="group" aria-label="Attached images">
+            {#each draft.attachments as attachment, index (attachment)}
+              <div class="attachment-chip">
+                {#if attachmentPreview(attachment)}
+                  <img
+                    src={attachmentPreview(attachment)}
+                    alt=""
+                    onerror={() => handleAttachmentPreviewError(attachment)}
+                  />
+                {:else}
+                  <FileImageIcon class="size-7 shrink-0 p-1.5 text-muted-foreground" size={16} strokeWidth={1.8} aria-hidden="true" />
+                {/if}
+                <span class="attachment-copy">
+                  <strong>{agentDraftImageToken(index)}</strong>
+                  <small>{attachmentName(attachment)}</small>
+                </span>
+                <IconButton
+                  class="size-6 rounded-sm"
+                  label={`Remove attached image ${index + 1}: ${attachmentName(attachment)}`}
+                  tooltip={false}
+                  disabled={busy || attachmentSaving}
+                  onclick={() => removeAttachment(attachment)}
+                >{#snippet icon()}<XIcon size={14} strokeWidth={1.8} />{/snippet}</IconButton>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <div class="prompt-actions">
+          <VoiceInputButton textarea={promptTextarea} disabled={busy || attachmentSaving} onText={(prompt) => onChange({ prompt })} onBusyChange={(value) => { dictationBusy = value; }} />
+          <small id={`draft-agent-create-help-${draft.id}`} aria-live="polite">
+            {attachmentSaving ? 'Saving image…' : 'Paste images to place them at the cursor'} · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
+          </small>
+          <Button
+            type="submit"
+            disabled={busy || !canCreate}
+            aria-busy={busy}
+            aria-describedby={`draft-agent-create-help-${draft.id}`}
+          >{busy ? 'Creating…' : 'Create agent'}</Button>
+        </div>
+      </div>
+    </div>
+
     {#if !loading && enabledTools.length === 0}
       <p class="empty-note">No enabled agents. Add or enable one in Settings.</p>
     {/if}
@@ -813,7 +826,7 @@
   .feedback-handoff strong { margin-bottom: 2px; color: var(--text-soft); font-size: var(--font-size-sm); }
   .feedback-handoff span { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .agent-fields { display: grid; gap: 11px; }
-  .advanced-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .model-settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
   .field-label > span { color: var(--text-soft); }
   .field-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
@@ -863,7 +876,7 @@
   .override-options { display: grid; max-height: 260px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 1px); background: var(--border); scrollbar-width: thin; }
   .override-note { display: block; margin-top: 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
   .template-preview { border-top: 1px solid var(--border); padding: 8px 10px 9px; background: var(--card); color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
-  .advanced-grid { border-top: 1px solid var(--border); padding: 12px; }
+  .model-settings-grid { border-top: 1px solid var(--border); padding: 12px; }
   .launch-tuning { display: grid; grid-column: 1 / -1; gap: 9px; border-top: 1px solid var(--border); padding-top: 11px; }
   .launch-tuning-heading { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 12px; }
   .launch-tuning-heading > span { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
@@ -888,7 +901,7 @@
   .attachment-copy strong { color: var(--signal); font: 600 var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
   .attachment-copy small { color: var(--muted-foreground); font-size: 10px; }
   @media (max-width: 620px) {
-    .advanced-grid, .launch-tuning-fields, .roster-options, .override-options { grid-template-columns: 1fr; }
+    .model-settings-grid, .launch-tuning-fields, .roster-options, .override-options { grid-template-columns: 1fr; }
     .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }
     .instruction-label { align-items: flex-start; flex-direction: column; gap: 2px; }
     .prompt-actions { align-items: stretch; flex-direction: column; }

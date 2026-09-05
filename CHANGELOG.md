@@ -4,6 +4,12 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Keep recent agent prompts in local history, including template instructions, model settings, and
+  attachment references. Copy them or reopen them as a draft, including from a stopped agent's footer.
+- Dictate new-agent and template instructions with the same local microphone and Whisper pipeline
+  used for Recorded Feedback, without needing screen capture.
+- Move the collapsed Model settings section above agent instructions, alongside template options.
+
 ## 0.1.14 - 2026-09-03
 
 Workman 0.1.14 introduces Recorded Feedback on macOS: capture narrated, annotated screen feedback
