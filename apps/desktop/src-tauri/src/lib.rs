@@ -1375,6 +1375,7 @@ pub fn run() {
         .manage(state)
         .manage(keep_awake_state)
         .manage(recorded_feedback::FeedbackState::default())
+        .manage(native_notifications::NativeNotificationState::default())
         .menu(build_native_menu)
         .on_menu_event(|app, event| {
             if let Some(action) = native_menu_action(event.id().as_ref()) {
@@ -1409,6 +1410,7 @@ pub fn run() {
             native_notifications::native_notification_request_permission,
             native_notifications::native_notification_show,
             native_notifications::native_notification_dismiss,
+            native_notifications::native_notification_set_badge,
             recorded_feedback::feedback_capability,
             recorded_feedback::dictation_preflight,
             recorded_feedback::dictation_install_model,

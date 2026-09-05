@@ -227,10 +227,24 @@ export async function deliverNativeSystemNotification(
 
 export async function syncDockUnreadBadge(unreadCount: number): Promise<void> {
   try {
-    await getCurrentWindow().setBadgeCount(unreadCount > 0 ? unreadCount : undefined);
+    await invoke('native_notification_set_badge', { count: Math.max(0, unreadCount) });
   } catch {
-    // Badge support varies by desktop environment; the in-app count remains authoritative.
+    // Keep older desktop shells working. Linux launchers may not implement either badge API.
+    try { await getCurrentWindow().setBadgeCount(unreadCount > 0 ? unreadCount : undefined); }
+    catch { /* The in-app count remains authoritative. */ }
   }
+}
+
+/** WebView2/Linux can freeze hidden pages; an active Web Lock keeps delivery work alive. */
+export function keepNotificationDeliveryActive(): () => void {
+  if (typeof navigator === 'undefined' || !navigator.locks) return () => {};
+  const controller = new AbortController();
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  void navigator.locks.request('workman-notification-delivery', {
+    mode: 'shared', signal: controller.signal
+  }, () => held).catch(() => undefined);
+  return () => { release(); controller.abort(); };
 }
 
 export function listenForNativeNotificationActions(

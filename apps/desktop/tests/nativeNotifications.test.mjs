@@ -5,7 +5,7 @@ import { get } from 'svelte/store';
 import { isAgentNotificationViewed, isTopLevelAgentNotification } from '../src/lib/notificationAttention.ts';
 import {
   deliverNativeNotification, dismissNativeNotifications, nativeNotificationPreferences,
-  nativeNotificationRuntime, setTopLevelNotificationsOnly, syncDockUnreadBadge
+  nativeNotificationRuntime, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
 } from '../src/lib/nativeNotifications.ts';
 
 const allowed = { state: 'granted', platform: 'macos', detail: null };
@@ -59,8 +59,8 @@ test('background completion gets a banner and Dock count clears independently of
   nativeNotificationPreferences.update(value => ({ ...value, enabled: false }));
   await syncDockUnreadBadge(2);
   await syncDockUnreadBadge(0);
-  const badges = calls.filter(({ command }) => command === 'plugin:window|set_badge_count');
-  assert.deepEqual(badges.map(({ args }) => args.value), [2, undefined]);
+  const badges = calls.filter(({ command }) => command === 'native_notification_set_badge');
+  assert.deepEqual(badges.map(({ args }) => args.count), [2, 0]);
   assert.equal(await deliverNativeNotification(notification(102), [root]), false);
 });
 
@@ -144,4 +144,42 @@ test('failed macOS removal retries on the next read sync and never re-delivers t
   await dismissNativeNotifications([111]);
   await dismissNativeNotifications([111]);
   assert.equal(attempts, 2);
+});
+
+test('older desktop builds fall back to the existing badge command', async () => {
+  handle = command => {
+    if (command === 'native_notification_set_badge') throw new Error('unknown command');
+  };
+  await syncDockUnreadBadge(3);
+  await syncDockUnreadBadge(0);
+  assert.deepEqual(calls.filter(({ command }) => command === 'plugin:window|set_badge_count').map(({ args }) => args.value), [3, undefined]);
+});
+
+test('background notification activity releases its Web Lock when the app unmounts', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let signal;
+  let held;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: {
+    request: (_name, options, callback) => {
+      assert.equal(options.mode, 'shared');
+      signal = options.signal;
+      held = callback();
+      return held;
+    }
+  } } });
+  try {
+    const stop = keepNotificationDeliveryActive();
+    assert.equal(signal.aborted, false);
+    let released = false;
+    void held.then(() => { released = true; });
+    await Promise.resolve();
+    assert.equal(released, false);
+    stop();
+    await held;
+    assert.equal(released, true);
+    assert.equal(signal.aborted, true);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'navigator', previous);
+    else delete globalThis.navigator;
+  }
 });

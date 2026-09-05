@@ -4,6 +4,9 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Extend native agent notifications to Windows and Linux: open the matching agent on click, clear
+  read alerts, and show a numeric Windows taskbar overlay. Linux integration follows desktop capabilities.
+
 - Keep agent completions unread while Workman is unfocused or minimized, and clear the matching
   macOS Notification Center entries after reading them. Add a default-on top-level agent banner filter.
 

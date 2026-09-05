@@ -215,6 +215,7 @@
   import {
     deliverNativeNotification,
     dismissNativeNotifications,
+    keepNotificationDeliveryActive,
     listenForNativeNotificationActions,
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
@@ -866,6 +867,7 @@
     treeRailCollapsed = treePreference.collapsed;
 
     let active = true;
+    const stopNotificationDelivery = keepNotificationDeliveryActive();
     let visibilityRequest = 0;
     const applyDocumentVisibility = (visible: boolean): void => {
       if (documentVisible === visible) return;
@@ -1092,6 +1094,7 @@
       stopNativeMenu();
       stopFeedbackEvents();
       stopNativeNotifications();
+      stopNotificationDelivery();
       client.close();
     };
   });

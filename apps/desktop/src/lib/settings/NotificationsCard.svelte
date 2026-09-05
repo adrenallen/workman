@@ -161,7 +161,8 @@
   <Separator />
 
   <footer class="bg-muted/40 px-4 py-3 text-xs leading-5 text-muted-foreground">
-    Notification-center rows and the Dock unread badge remain active even when OS banners are off or denied.
-    Click a banner to open its agent. On macOS, viewing that agent also clears its notifications from Notification Center.
+    In-app notifications and app icon badges remain active when OS banners are off or denied.
+    Click a notification to open its agent; viewing the agent clears matching OS alerts.
+    Linux history, click actions, and launcher badges depend on your desktop environment.
   </footer>
 </section>
