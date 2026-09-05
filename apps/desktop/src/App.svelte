@@ -2747,10 +2747,11 @@
     try {
       await trackFeedbackDelivery(
         () => deliverAgentSteps(processId, steps),
-        (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, delivery.id, error),
+        (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, delivery.id, error, $recordedFeedbackPreferences.autoArchiveAfterSend),
         onSent
       );
     } finally {
+      await refreshFeedback(feedback.project_id);
       if (selection?.kind === 'feedback' && selection.id === feedback.id) await loadFeedback(feedback.id, false);
     }
   }
@@ -2855,7 +2856,6 @@
       if (legacyDaemon && feedbackId !== null) {
         const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
         await deliverFeedbackToAgent(feedback, result.process_id);
-        if (selectedProject?.id === projectId) await refreshFeedback(projectId);
         return;
       }
 
@@ -2873,9 +2873,6 @@
       } else {
         await deliverAgentSteps(result.process_id, steps);
       }
-      if (feedbackId !== null && selectedProject?.id === projectId) {
-        await refreshFeedback(projectId);
-      }
     } catch (cause) {
       throw new Error(`The agent started, but automatic delivery reported a problem: ${messageForCause(cause)}`);
     }
@@ -2884,7 +2881,8 @@
   async function sendSelectedFeedbackToScratchpad(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback') return;
     const projectId = selectedProject.id;
-    const result = await client.recordedFeedbackToScratchpad(projectId, selection.id);
+    const result = await client.recordedFeedbackToScratchpad(projectId, selection.id, undefined, $recordedFeedbackPreferences.autoArchiveAfterSend);
+    await refreshFeedback(projectId);
     await refreshCoordination(projectId, false);
     await selectTreeItem(projectTreeSelection(
       'scratchpad', result.scratchpad.id, projectId, result.scratchpad.name

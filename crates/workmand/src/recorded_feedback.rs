@@ -71,6 +71,8 @@ struct FinishDeliveryParams {
     feedback_id: RecordedFeedbackId,
     delivery_id: i64,
     error: Option<String>,
+    #[serde(default)]
+    auto_archive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +161,8 @@ struct ToScratchpadParams {
     project_id: ProjectId,
     feedback_id: RecordedFeedbackId,
     name: Option<String>,
+    #[serde(default)]
+    auto_archive: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -299,7 +303,8 @@ fn discard_append(params: Value, registry: &ProcessRegistry) -> ControlResult {
 
 fn finish_delivery(params: Value, registry: &ProcessRegistry) -> ControlResult {
     let params: FinishDeliveryParams = params_as(params)?;
-    RecordedFeedbackService::new(registry.store())
+    let service = RecordedFeedbackService::new(registry.store());
+    let delivery = service
         .finish_delivery(
             params.project_id,
             params.feedback_id,
@@ -307,8 +312,18 @@ fn finish_delivery(params: Value, registry: &ProcessRegistry) -> ControlResult {
             params.error.as_deref(),
             now_millis(),
         )
-        .map(json_value)
-        .map_err(feedback_error)
+        .map_err(feedback_error)?;
+    if params.auto_archive {
+        service
+            .archive_sent_delivery(
+                params.project_id,
+                params.feedback_id,
+                delivery.id,
+                now_millis(),
+            )
+            .map_err(feedback_error)?;
+    }
+    Ok(json_value(delivery))
 }
 
 fn renew_lease(params: Value, registry: &ProcessRegistry) -> ControlResult {
@@ -645,6 +660,16 @@ fn to_scratchpad(params: Value, registry: &ProcessRegistry, data_dir: &Path) -> 
             },
         )
         .map_err(feedback_error)?;
+    if params.auto_archive {
+        RecordedFeedbackService::new(registry.store())
+            .archive_sent_delivery(
+                params.project_id,
+                params.feedback_id,
+                delivery.id,
+                now_millis(),
+            )
+            .map_err(feedback_error)?;
+    }
     Ok(json!({ "scratchpad": scratchpad, "delivery": delivery }))
 }
 
@@ -1237,6 +1262,101 @@ mod tests {
     #[test]
     fn duration_is_compact() {
         assert_eq!(format_duration(65_900), "1:05");
+    }
+
+    #[test]
+    fn auto_archive_rpc_option_applies_only_after_a_successful_send() {
+        let temp = tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 3,
+                path: "/tmp/feedback-archive-test".into(),
+                name: "Feedback".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::new(store).unwrap();
+        for auto_archive in [false, true] {
+            for target in ["agent", "scratchpad", "clipboard", "failed_agent"] {
+                let service = RecordedFeedbackService::new(registry.store());
+                let created = service
+                    .create(3, "Archive after send", "desktop", i64::MAX, 1)
+                    .unwrap();
+                service
+                    .begin_transcription(3, created.id, 100, None, 2)
+                    .unwrap();
+                service
+                    .complete(
+                        3,
+                        created.id,
+                        vec![],
+                        vec![RecordedFeedbackBlock::Text {
+                            text: "Feedback".into(),
+                            start_ms: 0,
+                            end_ms: 100,
+                        }],
+                        3,
+                    )
+                    .unwrap();
+                if target == "scratchpad" {
+                    to_scratchpad(
+                        json!({
+                            "project_id": 3, "feedback_id": created.id, "auto_archive": auto_archive
+                        }),
+                        &registry,
+                        temp.path(),
+                    )
+                    .unwrap();
+                } else {
+                    let receipt = service
+                        .record_delivery(
+                            3,
+                            created.id,
+                            NewRecordedFeedbackDelivery {
+                                target_kind: if target == "clipboard" {
+                                    "clipboard"
+                                } else {
+                                    "agent"
+                                }
+                                .into(),
+                                target_id: None,
+                                target_name: None,
+                                status: "pending".into(),
+                                packet_path: None,
+                                error_message: None,
+                                now_ms: 4,
+                            },
+                        )
+                        .unwrap();
+                    assert!(!service.get(3, created.id).unwrap().unwrap().archived);
+                    dispatch("recorded_feedback.finish_delivery", json!({
+                        "project_id": 3, "feedback_id": created.id, "delivery_id": receipt.id,
+                        "auto_archive": auto_archive,
+                        "error": if target == "failed_agent" { Some("Agent exited") } else { None },
+                    }), &mut registry, temp.path()).unwrap().unwrap();
+                }
+                let saved = RecordedFeedbackService::new(registry.store())
+                    .get(3, created.id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    saved.archived,
+                    auto_archive && matches!(target, "agent" | "scratchpad")
+                );
+            }
+        }
+        assert!(
+            !serde_json::from_value::<FinishDeliveryParams>(json!({
+                "project_id": 3, "feedback_id": 1, "delivery_id": 1
+            }))
+            .unwrap()
+            .auto_archive,
+            "older clients retain their behavior"
+        );
     }
 
     #[test]

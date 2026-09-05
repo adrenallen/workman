@@ -37,7 +37,6 @@
   import type { AgentTool } from './agentTools';
   import type { ScratchpadSummary, TodoSummary } from './coordination';
   import {
-    feedbackDuration,
     feedbackStatusLabel,
     recordedFeedbackForView,
     type RecordedFeedbackSummary
@@ -1136,7 +1135,7 @@
                     state={item.status === 'recording' || item.status === 'transcribing' ? 'working' : item.status === 'failed' ? 'crashed' : 'idle'}
                     label={feedbackStatusLabel(item.status)}
                   />
-                  <span class="row-copy"><strong>{item.title}</strong><small>{feedbackStatusLabel(item.status)} · {feedbackDuration(item.duration_ms)} · {item.snapshot_count} snap{item.snapshot_count === 1 ? '' : 's'}</small></span>
+                  <span class="row-copy"><strong>{item.title}</strong></span>
                 </button>
               {:else}
                 <p class="empty-row">{query ? 'No matching feedback' : 'No recorded feedback'}</p>

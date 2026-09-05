@@ -5,9 +5,11 @@
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
   import { Button } from '$lib/components/ui/button';
   import { Textarea } from '$lib/components/ui/textarea';
+  import { Switch } from '$lib/components/ui/switch';
   import {
     recordedFeedbackPreferences,
-    setRecordedFeedbackAgentPrompt
+    setRecordedFeedbackAgentPrompt,
+    setRecordedFeedbackAutoArchive
   } from '../recordedFeedbackAvailability';
   import {
     defaultRecordedFeedbackAgentPrompt,
@@ -43,10 +45,18 @@
   <header>
     <div>
       <h2 id="feedback-settings-title">Recorded Feedback</h2>
-      <p>Control the context wrapped around feedback sent to agents.</p>
+      <p>Choose how feedback is sent and organized afterward.</p>
     </div>
     <span class="saved"><StatusIndicator tone="success" label="Feedback preferences saved locally" />Saved locally</span>
   </header>
+
+  <div class="archive-preference">
+    <label for="feedback-auto-archive">
+      <strong>Automatically archive after sending</strong>
+      <small>Move feedback to Archived after a successful send to an agent or scratchpad. Copying keeps it active.</small>
+    </label>
+    <Switch id="feedback-auto-archive" checked={$recordedFeedbackPreferences.autoArchiveAfterSend} onCheckedChange={setRecordedFeedbackAutoArchive} />
+  </div>
 
   <div class="editor">
     <div class="field-heading">
@@ -76,6 +86,10 @@
 </section>
 
 <style>
+  .archive-preference { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-top: 1px solid var(--border); padding: 16px 12px; }
+  .archive-preference label { display: grid; gap: 5px; }
+  .archive-preference strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 600; }
+  .archive-preference small { max-width: 620px; color: var(--muted-foreground); font-size: var(--font-size-sm); line-height: 1.5; }
   .feedback-card { overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
   header { display: flex; min-height: 68px; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 11px 12px 10px; }
   h2 { margin: 0; color: var(--text); font-size: 16px; line-height: 1.15; }
