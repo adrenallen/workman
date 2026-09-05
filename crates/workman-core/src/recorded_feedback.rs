@@ -761,6 +761,29 @@ impl<'store> RecordedFeedbackService<'store> {
             .map_err(Into::into)
     }
 
+    /// Archive only the unchanged document revision that was confirmed sent. A pending/failed
+    /// delivery, clipboard copy, or newer edit must never remove feedback from the active list.
+    pub fn archive_sent_delivery(
+        &self,
+        project_id: ProjectId,
+        feedback_id: RecordedFeedbackId,
+        delivery_id: i64,
+        now_ms: i64,
+    ) -> RecordedFeedbackResult<bool> {
+        self.require(project_id, feedback_id)?;
+        Ok(self.store.connection().execute(
+            "UPDATE recorded_feedback SET archived = 1, revision = revision + 1, updated_at = ?1
+             WHERE id = ?2 AND project_id = ?3 AND archived = 0 AND status = 'ready'
+               AND EXISTS (
+                 SELECT 1 FROM recorded_feedback_deliveries AS delivery
+                 WHERE delivery.id = ?4 AND delivery.feedback_id = recorded_feedback.id
+                   AND delivery.feedback_revision = recorded_feedback.revision
+                   AND delivery.status = 'sent' AND delivery.target_kind IN ('agent', 'scratchpad')
+               )",
+            params![now_ms, feedback_id, project_id, delivery_id],
+        )? > 0)
+    }
+
     pub fn finish_delivery(
         &self,
         project_id: ProjectId,
@@ -1013,6 +1036,109 @@ mod tests {
                 3_100,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn auto_archive_requires_a_confirmed_send_and_is_idempotent() {
+        let store = store_with_project();
+        let service = RecordedFeedbackService::new(&store);
+        for target in ["agent", "scratchpad", "clipboard"] {
+            for status in ["pending", "failed", "queued", "unverified", "sent"] {
+                let feedback = ready_document(&service);
+                let receipt = service
+                    .record_delivery(
+                        1,
+                        feedback.id,
+                        NewRecordedFeedbackDelivery {
+                            target_kind: target.into(),
+                            target_id: Some(42),
+                            target_name: None,
+                            status: status.into(),
+                            packet_path: None,
+                            error_message: None,
+                            now_ms: 4_000,
+                        },
+                    )
+                    .unwrap();
+                let expected = target != "clipboard" && status == "sent";
+                assert_eq!(
+                    service
+                        .archive_sent_delivery(1, feedback.id, receipt.id, 4_100)
+                        .unwrap(),
+                    expected
+                );
+                let saved = service.require(1, feedback.id).unwrap();
+                assert_eq!(saved.archived, expected);
+                assert_eq!(saved.revision, feedback.revision + i64::from(expected));
+                assert!(
+                    !service
+                        .archive_sent_delivery(1, feedback.id, receipt.id, 4_200)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_archive_preserves_new_edits_and_scopes_receipts_to_the_document() {
+        let store = store_with_project();
+        let service = RecordedFeedbackService::new(&store);
+        let feedback = ready_document(&service);
+        let other = ready_document(&service);
+        let receipt = service
+            .record_delivery(
+                1,
+                feedback.id,
+                NewRecordedFeedbackDelivery {
+                    target_kind: "agent".into(),
+                    target_id: Some(42),
+                    target_name: None,
+                    status: "pending".into(),
+                    packet_path: None,
+                    error_message: None,
+                    now_ms: 4_000,
+                },
+            )
+            .unwrap();
+        assert!(
+            !service
+                .archive_sent_delivery(1, feedback.id, receipt.id, 4_001)
+                .unwrap()
+        );
+        service
+            .update_document(
+                1,
+                feedback.id,
+                RecordedFeedbackDocumentUpdate {
+                    expected_revision: feedback.revision,
+                    title: "New unsent edits".into(),
+                    blocks: feedback.blocks.clone(),
+                    snapshot_captions: vec![],
+                    now_ms: 4_100,
+                },
+            )
+            .unwrap();
+        service
+            .finish_delivery(1, feedback.id, receipt.id, None, 4_200)
+            .unwrap();
+        assert!(
+            !service
+                .archive_sent_delivery(1, feedback.id, receipt.id, 4_300)
+                .unwrap()
+        );
+        assert!(
+            !service
+                .archive_sent_delivery(1, other.id, receipt.id, 4_300)
+                .unwrap()
+        );
+        assert!(
+            service
+                .archive_sent_delivery(2, feedback.id, receipt.id, 4_300)
+                .is_err()
+        );
+        let saved = service.require(1, feedback.id).unwrap();
+        assert!(!saved.archived);
+        assert_eq!(saved.title, "New unsent edits");
     }
 
     #[test]

@@ -64,6 +64,7 @@
     visible = true,
     busy = false,
     onStart,
+    onRecoverPrompt,
     onError,
     onContextMenu,
     onAppShortcut
@@ -74,6 +75,7 @@
     visible?: boolean;
     busy?: boolean;
     onStart?: (process: ProcessView) => void;
+    onRecoverPrompt?: () => void;
     onError: (message: string) => void;
     onContextMenu?: (request: ContextMenuRequest) => void;
     onAppShortcut?: (event: KeyboardEvent) => boolean;
@@ -1073,6 +1075,12 @@
     </div>
   {/if}
   {#if processDead}
+    {#if onRecoverPrompt}
+      <div class="prompt-recovery" role="note">
+        <span>Need to retry? Your starting instructions are saved.</span>
+        <button type="button" disabled={busy} onclick={onRecoverPrompt}>Use saved prompt</button>
+      </div>
+    {/if}
     {@const ProcessIcon = process.kind === 'agent' ? BotIcon : SquareTerminalIcon}
     {@const stoppedAt = exitedAtLabel()}
     <button
@@ -1108,6 +1116,9 @@
 </section>
 
 <style>
+  .prompt-recovery { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 12px; background: var(--card); border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .prompt-recovery button { border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 9px; color: var(--foreground); background: var(--background); cursor: pointer; }
+  .prompt-recovery button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
   .terminal-frame {
     position: relative;
     display: grid;

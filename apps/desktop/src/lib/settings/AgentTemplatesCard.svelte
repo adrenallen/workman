@@ -7,6 +7,7 @@
   import XIcon from '@lucide/svelte/icons/x';
 
   import AgentBrandMark from '../AgentBrandMark.svelte';
+  import VoiceInputButton from '../VoiceInputButton.svelte';
   import {
     AGENT_EFFORT_LEVELS,
     agentModelSuggestions,
@@ -57,6 +58,9 @@
   let templateSnapshot = $state<AgentTemplatesSnapshot>(templateStore.current());
   let draft = $state<Draft | null>(null);
   let saving = $state(false);
+  let dictationBusy = $state(false);
+  let editorSession = $state(0);
+  let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   let busyId = $state<number | null>(null);
   let removeRequest = $state<AgentTemplate | null>(null);
   let draftTool = $derived(
@@ -88,10 +92,12 @@
       onError('Add or enable an agent before creating an agent template');
       return;
     }
+    editorSession += 1;
     draft = { name: '', agentToolId: tool.id, model: '', effort: '', extraArgs: '', prompt: '' };
   }
 
   function beginEdit(template: AgentTemplate): void {
+    editorSession += 1;
     const tool = toolFor(template);
     const launch = splitAgentLaunchOptions(template.extra_args, tool?.tool_type);
     draft = {
@@ -106,7 +112,7 @@
   }
 
   async function save(): Promise<void> {
-    if (!draft || saving || !draft.name.trim()) return;
+    if (!draft || saving || dictationBusy || !draft.name.trim()) return;
     let extraArgs: string[];
     try {
       const parsed = splitAgentLaunchOptions(parseExtraArgs(draft.extraArgs), draftTool?.tool_type);
@@ -290,7 +296,7 @@
         <section class="grid gap-3 rounded-md border border-border bg-background/55 p-3" aria-labelledby="template-launch-tuning">
           <div class="flex flex-wrap items-baseline justify-between gap-2">
             <strong id="template-launch-tuning" class="text-sm font-medium">Default model &amp; effort</strong>
-            <small class="text-xs text-muted-foreground">Shown as inherited values in New Agent · Advanced</small>
+            <small class="text-xs text-muted-foreground">Shown as inherited values in New Agent · Model settings</small>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
             {#if agentSupportsModel(draftTool.tool_type)}
@@ -333,12 +339,15 @@
         <span class="text-xs font-normal text-muted-foreground">Quotes group one literal argument. These run before any per-launch overrides.</span>
       </label>
       <label class="grid gap-1.5 text-sm font-medium" for="template-prompt">Template prompt <span class="font-normal text-muted-foreground">(optional)</span>
-        <Textarea id="template-prompt" bind:value={draft.prompt} rows={6} placeholder="Persistent instructions for agents launched with this template" disabled={saving} />
+        <Textarea id="template-prompt" bind:ref={promptTextarea} bind:value={draft.prompt} rows={6} placeholder="Persistent instructions for agents launched with this template" disabled={saving || dictationBusy} />
         <span class="text-xs font-normal text-muted-foreground">Combined with any New Agent instructions and sent as one starting prompt.</span>
       </label>
       <footer class="flex justify-end gap-2">
+        {#key editorSession}
+          <VoiceInputButton textarea={promptTextarea} disabled={saving} onText={(text) => { if (draft) draft.prompt = text; }} onBusyChange={(value) => { dictationBusy = value; }} />
+        {/key}
         <Button type="button" variant="ghost" disabled={saving} onclick={() => (draft = null)}>Cancel</Button>
-        <Button type="submit" disabled={saving || !draft.name.trim() || !draft.agentToolId}>{saving ? 'Saving…' : 'Save template'}</Button>
+        <Button type="submit" disabled={saving || dictationBusy || !draft.name.trim() || !draft.agentToolId}>{saving ? 'Saving…' : 'Save template'}</Button>
       </footer>
     </form>
   {/if}

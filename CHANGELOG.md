@@ -4,6 +4,28 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Clarify the saved Computer notifications setting: turn it off for in-app only alerts, including
+  hiding Dock/taskbar badges while retaining Workman's unread notifications. Add an Open system
+  settings shortcut when notification permission is blocked.
+
+- Extend native agent notifications to Windows and Linux: open the matching agent on click, clear
+  read alerts, and show a numeric Windows taskbar overlay. Linux integration follows desktop capabilities.
+
+- Keep agent completions unread while Workman is unfocused or minimized, and clear the matching
+  macOS Notification Center entries after reading them. Add a default-on top-level agent banner filter.
+
+- Keep recent agent prompts in local history, including template instructions, model settings, and
+  attachment references. Copy them or reopen them as a draft, including from a stopped agent's footer.
+- Dictate new-agent and template instructions with the same local microphone and Whisper pipeline
+  used for Recorded Feedback, without needing screen capture. Keep temporary recording directories
+  private and accessible so macOS voice input can create its audio file.
+- Move the collapsed Model settings section above agent instructions, alongside template options.
+- Enlarge feedback delivery actions, join a compact agent picker to Send, and align destination
+  buttons in a wrapping row. Keep unavailable agents visible with status icons and simplify
+  feedback sidebar entries to a single title line.
+- Automatically archive feedback after a confirmed send to an agent or scratchpad, with an opt-out
+  in Feedback settings. Failed sends, copies, and newer unsent edits stay active.
+
 ## 0.1.14 - 2026-09-03
 
 Workman 0.1.14 introduces Recorded Feedback on macOS: capture narrated, annotated screen feedback

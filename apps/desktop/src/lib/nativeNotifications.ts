@@ -3,7 +3,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { get, writable } from 'svelte/store';
 
-import type { Notification } from './daemon';
+import type { Notification, ProcessView } from './daemon';
+import { isTopLevelAgentNotification } from './notificationAttention.ts';
 
 export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
 
@@ -12,6 +13,7 @@ const preferencesKey = 'workman.native-notifications.v1';
 export interface NativeNotificationPreferences {
   enabled: boolean;
   needsInput: boolean;
+  topLevelOnly: boolean;
 }
 
 export type NativeNotificationPermissionState =
@@ -40,7 +42,8 @@ interface NativeNotificationAction {
 
 const fallbackPreferences: NativeNotificationPreferences = {
   enabled: true,
-  needsInput: true
+  needsInput: true,
+  topLevelOnly: true
 };
 
 const checkingPermission: NativeNotificationPermission = {
@@ -60,6 +63,15 @@ export const nativeNotificationRuntime = writable<NativeNotificationRuntime>({
 });
 
 let permissionRequest: Promise<NativeNotificationPermission> | null = null;
+let nativeCommandQueue: Promise<unknown> = Promise.resolve();
+const readNotificationIds = new Set<number>();
+const dismissedNotificationIds = new Set<number>();
+
+function enqueueNativeCommand<T>(action: () => Promise<T>): Promise<T> {
+  const next = nativeCommandQueue.catch(() => undefined).then(action);
+  nativeCommandQueue = next;
+  return next;
+}
 
 export function setNativeNotificationsEnabled(enabled: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), enabled });
@@ -67,6 +79,10 @@ export function setNativeNotificationsEnabled(enabled: boolean): void {
 
 export function setNeedsInputNotificationsEnabled(needsInput: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), needsInput });
+}
+
+export function setTopLevelNotificationsOnly(topLevelOnly: boolean): void {
+  savePreferences({ ...get(nativeNotificationPreferences), topLevelOnly });
 }
 
 export async function refreshNativeNotificationPermission(): Promise<NativeNotificationPermission> {
@@ -109,10 +125,26 @@ export async function requestNativeNotificationPermission(): Promise<NativeNotif
   return permissionRequest;
 }
 
-export async function deliverNativeNotification(notification: Notification): Promise<boolean> {
+export async function openNativeNotificationSettings(): Promise<void> {
+  try {
+    await invoke('native_notification_open_settings');
+    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+  } catch (cause) {
+    nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
+    throw cause;
+  }
+}
+
+export async function deliverNativeNotification(
+  notification: Notification,
+  processes: ProcessView[] = [],
+  isUnread: () => boolean = () => notification.read_at === null
+): Promise<boolean> {
   const preferences = get(nativeNotificationPreferences);
   if (!preferences.enabled) return false;
   if (notification.type === 'needs_input' && !preferences.needsInput) return false;
+  if (preferences.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
+  if (!isUnread() || readNotificationIds.has(notification.id)) return false;
   try {
     if (await getCurrentWindow().isFocused()) return false;
   } catch (cause) {
@@ -124,6 +156,7 @@ export async function deliverNativeNotification(notification: Notification): Pro
   if (permission.state === 'checking') {
     permission = await refreshNativeNotificationPermission();
   }
+  if (!get(nativeNotificationPreferences).enabled) return false;
   if (permission.state === 'not_determined') {
     try {
       permission = await requestNativeNotificationPermission();
@@ -134,16 +167,39 @@ export async function deliverNativeNotification(notification: Notification): Pro
   if (permission.state !== 'granted') return false;
 
   try {
-    await invoke('native_notification_show', {
-      notificationId: notification.id,
-      title: notificationTitle(notification),
-      body: notification.body
+    return await enqueueNativeCommand(async () => {
+      // Permission sheets and earlier deliveries can take time. Recheck before displaying so a
+      // banner cannot arrive after the user has returned to Workman or read the matching agent.
+      const current = get(nativeNotificationPreferences);
+      if (!current.enabled || (notification.type === 'needs_input' && !current.needsInput)) return false;
+      if (current.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
+      if (await getCurrentWindow().isFocused()) return false;
+      if (!isUnread() || readNotificationIds.has(notification.id)) return false;
+      await invoke('native_notification_show', {
+        notificationId: notification.id,
+        title: notificationTitle(notification),
+        body: notification.body
+      });
+      nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+      return true;
     });
-    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
-    return true;
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
     return false;
+  }
+}
+
+/** Call only after a confirmed read; failed optimistic updates must retain OS notifications. */
+export async function dismissNativeNotifications(notificationIds: number[]): Promise<void> {
+  const ids = [...new Set(notificationIds)].filter((id) => id > 0 && !dismissedNotificationIds.has(id));
+  if (ids.length === 0) return;
+  for (const id of ids) readNotificationIds.add(id);
+  try {
+    await enqueueNativeCommand(() => invoke('native_notification_dismiss', { notificationIds: ids }));
+    for (const id of ids) dismissedNotificationIds.add(id);
+  } catch (cause) {
+    // The authoritative read list retries removal on the next refresh.
+    nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
   }
 }
 
@@ -157,6 +213,7 @@ export async function deliverNativeSystemNotification(
   if (permission.state === 'checking') {
     permission = await refreshNativeNotificationPermission();
   }
+  if (!get(nativeNotificationPreferences).enabled) return false;
   if (permission.state === 'not_determined') {
     try {
       permission = await requestNativeNotificationPermission();
@@ -167,13 +224,17 @@ export async function deliverNativeSystemNotification(
   if (permission.state !== 'granted') return false;
 
   try {
-    await invoke('native_notification_show', {
-      notificationId: 0,
-      title,
-      body
+    return await enqueueNativeCommand(async () => {
+      // The user may switch to in-app only while permission or another delivery is pending.
+      if (!get(nativeNotificationPreferences).enabled) return false;
+      await invoke('native_notification_show', {
+        notificationId: 0,
+        title,
+        body
+      });
+      nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+      return true;
     });
-    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
-    return true;
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
     return false;
@@ -181,11 +242,29 @@ export async function deliverNativeSystemNotification(
 }
 
 export async function syncDockUnreadBadge(unreadCount: number): Promise<void> {
-  try {
-    await getCurrentWindow().setBadgeCount(unreadCount > 0 ? unreadCount : undefined);
-  } catch {
-    // Badge support varies by desktop environment; the in-app count remains authoritative.
-  }
+  await enqueueNativeCommand(async () => {
+    const count = get(nativeNotificationPreferences).enabled ? Math.max(0, unreadCount) : 0;
+    try {
+      await invoke('native_notification_set_badge', { count });
+    } catch {
+      // Keep older desktop shells working. Linux launchers may not implement either badge API.
+      const fallbackCount = get(nativeNotificationPreferences).enabled ? count : 0;
+      try { await getCurrentWindow().setBadgeCount(fallbackCount > 0 ? fallbackCount : undefined); }
+      catch { /* The in-app count remains authoritative. */ }
+    }
+  });
+}
+
+/** WebView2/Linux can freeze hidden pages; an active Web Lock keeps delivery work alive. */
+export function keepNotificationDeliveryActive(): () => void {
+  if (typeof navigator === 'undefined' || !navigator.locks) return () => {};
+  const controller = new AbortController();
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  void navigator.locks.request('workman-notification-delivery', {
+    mode: 'shared', signal: controller.signal
+  }, () => held).catch(() => undefined);
+  return () => { release(); controller.abort(); };
 }
 
 export function listenForNativeNotificationActions(
@@ -219,7 +298,7 @@ function loadPreferences(): NativeNotificationPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(preferencesKey) ?? 'null');
     if (typeof stored?.enabled === 'boolean' && typeof stored?.needsInput === 'boolean') {
-      return stored;
+      return { ...stored, topLevelOnly: typeof stored.topLevelOnly === 'boolean' ? stored.topLevelOnly : true };
     }
   } catch {
     // Defaults keep notifications enabled when local storage is unavailable or malformed.

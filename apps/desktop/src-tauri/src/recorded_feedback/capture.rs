@@ -35,6 +35,9 @@ use uuid::Uuid;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use xcap::Monitor;
 
+mod dictation;
+pub(crate) use dictation::*;
+
 const MODEL_NAME: &str = "Whisper base.en";
 const MODEL_FILE: &str = "ggml-base.en.bin";
 const MODEL_BYTES: u64 = 147_964_211;
@@ -84,10 +87,14 @@ tauri_panel! {
 #[derive(Default)]
 pub(crate) struct FeedbackState {
     session: Mutex<Option<FeedbackSession>>,
+    dictation: Mutex<Option<dictation::DictationSession>>,
 }
 
 impl FeedbackState {
     pub(crate) fn shutdown(&self, app: &AppHandle) {
+        if let Ok(mut active) = self.dictation.lock() {
+            active.take();
+        }
         let session = self
             .session
             .lock()
@@ -310,10 +317,7 @@ pub(crate) fn feedback_preflight() -> FeedbackPreflight {
     let display_available = Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
     let screen_capture_available = screen_capture_authorized && display_available;
     let model_path = model_path();
-    let model_installed = model_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() == MODEL_BYTES)
-        && sha256_file(&model_path).is_ok_and(|sha| sha == MODEL_SHA256);
+    let model_installed = model_is_installed();
     let message = if !microphone_available {
         Some("No microphone is available. Connect or enable one, then retry.".into())
     } else if !screen_capture_authorized {
@@ -457,9 +461,23 @@ pub(crate) fn feedback_start(
     if active.is_some() {
         return Err("A feedback recording is already in progress.".into());
     }
+    let dictation = state
+        .dictation
+        .lock()
+        .map_err(|_| "dictation state is unavailable")?;
+    if dictation.is_some() {
+        return Err("Finish voice input before recording feedback.".into());
+    }
     let media_dir = validate_media_dir(feedback_id, &media_dir)?;
     let audio_path = media_dir.join("audio.wav");
-    let audio = start_audio(&app, feedback_id, project_id, &audio_path)?;
+    let audio = start_audio(
+        &app,
+        AudioErrorTarget::Feedback {
+            feedback_id,
+            project_id,
+        },
+        &audio_path,
+    )?;
     let (registered_shortcuts, unavailable_shortcuts) = register_shortcuts(&app, shortcuts);
     let display_ids = match create_feedback_panels(&app) {
         Ok(display_ids) => display_ids,
@@ -1199,10 +1217,21 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+enum AudioErrorTarget {
+    Feedback { feedback_id: i64, project_id: i64 },
+    Dictation { session_id: String },
+}
+
+fn model_is_installed() -> bool {
+    let path = model_path();
+    path.metadata()
+        .is_ok_and(|metadata| metadata.len() == MODEL_BYTES)
+        && sha256_file(&path).is_ok_and(|sha| sha == MODEL_SHA256)
+}
+
 fn start_audio(
     app: &AppHandle,
-    feedback_id: i64,
-    project_id: i64,
+    error_target: AudioErrorTarget,
     path: &Path,
 ) -> Result<StartedAudio, String> {
     let input = resolve_audio_input(None, false)?;
@@ -1221,14 +1250,13 @@ fn start_audio(
                 sample_format: WavSampleFormat::Float,
             },
         )
-        .map_err(|error| error.to_string())?,
+        .map_err(|error| format!("Could not create the recording audio file: {error}"))?,
     )));
     let samples = Arc::new(AtomicU64::new(0));
     let controls = Arc::new(AudioControls::default());
     let stream = create_audio_stream_with_config(
         app,
-        feedback_id,
-        project_id,
+        error_target,
         &input.device,
         supported,
         writer.clone(),
@@ -1277,8 +1305,10 @@ fn create_audio_stream(
         })?;
     create_audio_stream_with_config(
         app,
-        feedback_id,
-        project_id,
+        AudioErrorTarget::Feedback {
+            feedback_id,
+            project_id,
+        },
         device,
         supported,
         writer,
@@ -1289,8 +1319,7 @@ fn create_audio_stream(
 
 fn create_audio_stream_with_config(
     app: &AppHandle,
-    feedback_id: i64,
-    project_id: i64,
+    error_target: AudioErrorTarget,
     device: &cpal::Device,
     supported: cpal::SupportedStreamConfig,
     writer: SharedWriter,
@@ -1301,14 +1330,27 @@ fn create_audio_stream_with_config(
     let config: StreamConfig = supported.into();
     let error_app = app.clone();
     let error_handler = move |error| {
-        let _ = error_app.emit(
-            EVENT_ERROR,
-            json!({
-                "feedback_id": feedback_id, "project_id": project_id,
-                "code": "microphone_disconnected",
-                "message": format!("Microphone disconnected: {error}")
-            }),
-        );
+        let message = format!("Microphone disconnected: {error}");
+        match &error_target {
+            AudioErrorTarget::Feedback {
+                feedback_id,
+                project_id,
+            } => {
+                let _ = error_app.emit(
+                    EVENT_ERROR,
+                    json!({
+                        "feedback_id": feedback_id, "project_id": project_id,
+                        "code": "microphone_disconnected", "message": message
+                    }),
+                );
+            }
+            AudioErrorTarget::Dictation { session_id } => {
+                let _ = error_app.emit(
+                    "dictation://error",
+                    json!({ "session_id": session_id, "message": message }),
+                );
+            }
+        }
     };
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build_stream::<f32>(
@@ -2033,6 +2075,13 @@ fn root_mean_square(samples: &[f32]) -> f32 {
 }
 
 fn download_model(app: &AppHandle, path: &Path) -> Result<(), String> {
+    static DOWNLOAD_LOCK: Mutex<()> = Mutex::new(());
+    let _download = DOWNLOAD_LOCK
+        .lock()
+        .map_err(|_| "model download is unavailable")?;
+    if model_is_installed() {
+        return Ok(());
+    }
     if path.parent().is_some_and(|parent| !parent.exists()) {
         fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
     }
@@ -2136,7 +2185,17 @@ fn append_journal(path: &Path, value: &serde_json::Value) -> Result<(), String> 
 #[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())
+    // Directories need owner execute permission to create, read, and remove their contents.
+    // Applying the private file mode to a recording directory makes audio.wav inaccessible.
+    let mode = if fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .is_dir()
+    {
+        0o700
+    } else {
+        0o600
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| error.to_string())
 }
 
 /// Windows has no mode bits. Recordings live under the per-user data directory,

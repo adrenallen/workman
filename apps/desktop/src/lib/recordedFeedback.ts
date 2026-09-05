@@ -198,8 +198,14 @@ export function agentCanReceiveInitialTurn(process: ProcessView): boolean {
 
 export function agentFeedbackAvailability(process: ProcessView): string {
   if (process.kind !== 'agent') return 'Not an agent';
+  if (process.status === 'starting') return 'Starting';
+  if (process.status === 'crashed') return 'Crashed';
+  if (process.status === 'stopped') return 'Stopped';
+  if (process.status === 'exited' || process.agent_state.state === 'exited') return 'Exited';
   if (process.status !== 'running') return 'Not running';
-  if (!agentCanReceiveFeedback(process)) return 'Working — wait or send to a new agent';
+  if (process.agent_state.state === 'working') return 'Working';
+  if (!agentCanReceiveFeedback(process)) return 'Not ready';
+  if (process.agent_state.state === 'waiting') return 'Waiting';
   return process.agent_state.state === 'needs_input' ? 'Needs input' : 'Ready';
 }
 

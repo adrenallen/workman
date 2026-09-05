@@ -127,6 +127,13 @@
     type TodoCreationDraft
   } from './lib/creationDrafts';
   import {
+    boundAgentPromptHistory,
+    loadAgentPromptHistory,
+    saveAgentPromptHistory,
+    snapshotAgentPrompt,
+    type AgentPromptHistoryEntry
+  } from './lib/agentPromptHistory';
+  import {
     contextMenuRequest,
     describeContextMenu,
     dispatchTerminalContextAction,
@@ -207,10 +214,14 @@
   } from './lib/workspaceViewHistory';
   import {
     deliverNativeNotification,
+    dismissNativeNotifications,
+    keepNotificationDeliveryActive,
     listenForNativeNotificationActions,
+    nativeNotificationPreferences,
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
+  import { isAgentNotificationViewed } from './lib/notificationAttention';
   import {
     sidebarIdentityColorValue,
     type ProjectSettingsInput
@@ -344,6 +355,7 @@
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
   let documentVisible = $state(true);
+  let windowFocused = $state(false);
   let terminalProfileAutoImportStarted = false;
   let keepAwakeArmed = $state(false);
   let autoKeepAwakeEnabled = $state(false);
@@ -427,6 +439,7 @@
   let dialog = $state<'command' | null>(null);
   let commandDialogProcess = $state<ProcessView | null>(null);
   let creationDrafts = $state<CreationDraft[]>([]);
+  let agentPromptHistory = $state<AgentPromptHistoryEntry[]>([]);
   let activeProfileId = $state<number | null>(null);
   let creationDraftsLoaded = $state(false);
   let draftFocusRequestId = $state<number | null>(null);
@@ -593,6 +606,18 @@
       ? optimisticProcesses.find((optimistic) => optimistic.process.id === selection?.id) ?? null
       : null
   );
+  let displayedAgentId = $derived(
+    !settingsOpen && activeWorktreeOperationId === null && !selectedOptimisticProcess
+      && selectedProject !== null && selectedProcess?.kind === 'agent'
+      ? selectedProcess.id
+      : null
+  );
+  $effect(() => {
+    const process = selectedProcess;
+    if (process?.agent_state.unread && isAgentNotificationViewed(
+      process.id, windowFocused, documentVisible, displayedAgentId
+    )) void markAgentRead(process.id, process.project_id);
+  });
   let selectedDraft = $derived.by(() => {
     const currentSelection = selection;
     if (currentSelection?.kind !== 'draft') return null;
@@ -717,7 +742,9 @@
   });
 
   $effect(() => {
-    const unreadCount = notifications.filter((notification) => notification.read_at === null).length;
+    const unreadCount = $nativeNotificationPreferences.enabled
+      ? notifications.filter((notification) => notification.read_at === null).length
+      : 0;
     if (unreadCount === dockUnreadCount) return;
     dockUnreadCount = unreadCount;
     void syncDockUnreadBadge(unreadCount);
@@ -843,6 +870,7 @@
     treeRailCollapsed = treePreference.collapsed;
 
     let active = true;
+    const stopNotificationDelivery = keepNotificationDeliveryActive();
     let visibilityRequest = 0;
     const applyDocumentVisibility = (visible: boolean): void => {
       if (documentVisible === visible) return;
@@ -877,8 +905,16 @@
       else stop();
     }).catch(reportError);
     let stopWindowFocus = (): void => {};
+    let focusRequest = 0;
+    const initialFocusRequest = focusRequest;
+    void getCurrentWindow().isFocused().then((focused) => {
+      if (active && initialFocusRequest === focusRequest) windowFocused = focused;
+    }).catch(reportError);
     void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      ++focusRequest;
+      windowFocused = focused;
       updateDocumentVisibility();
+      if (focused && $nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
       // The Screen Recording sheet lives in System Settings. Refresh as soon as Workman regains
       // focus so the setup modal reflects a permission change without another button press.
       if (
@@ -964,7 +1000,7 @@
       if (active) stopNativeNotifications = stop;
       else stop();
     }).catch(reportError);
-    void refreshNativeNotificationPermission();
+    if ($nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
     const projectTimer = setInterval(() => {
       if (active && documentVisible && connection.status === 'connected' && !busy) {
         void refreshProjects();
@@ -984,7 +1020,6 @@
     const notificationTimer = setInterval(() => {
       if (
         active
-        && documentVisible
         && connection.status === 'connected'
         && connection.version_compatible
       ) {
@@ -1062,6 +1097,7 @@
       stopNativeMenu();
       stopFeedbackEvents();
       stopNativeNotifications();
+      stopNotificationDelivery();
       client.close();
     };
   });
@@ -1116,9 +1152,9 @@
       startupUpdatePort = null;
     }
     if (reconnected) {
+      if (status.version_compatible) void refreshNotifications();
       if (documentVisible) {
         void refreshProjects();
-        if (status.version_compatible) void refreshNotifications();
       }
     }
   }
@@ -1540,6 +1576,7 @@
     let succeeded = false;
     try {
       await client.markProjectRead(projectId);
+      await dismissNativeNotifications([...unreadNotificationIds]);
       succeeded = true;
     } catch (cause) {
       const restore = (process: ProcessView): ProcessView =>
@@ -1594,9 +1631,14 @@
       for (const notification of next) seenNativeNotificationIds.add(notification.id);
       nativeNotificationBaselineReady = true;
       notifications = next;
+      void dismissNativeNotifications(next.filter((notification) => notification.read_at !== null).map((notification) => notification.id));
       if (fresh.length > 0) {
         nativeDeliveryQueue = nativeDeliveryQueue.catch(() => undefined).then(async () => {
-          for (const notification of fresh) await deliverNativeNotification(notification);
+          for (const notification of fresh) {
+            await deliverNativeNotification(notification, profileProcesses, () =>
+              notifications.some((current) => current.id === notification.id && current.read_at === null)
+            );
+          }
         });
       }
     } catch (cause) {
@@ -1614,6 +1656,11 @@
     if (notification.process_id !== null) clearAgentUnreadLocally(notification.process_id);
     try {
       await client.markNotificationRead(notification.id);
+      await dismissNativeNotifications(previous.filter((candidate) =>
+        candidate.id === notification.id
+        || (notification.process_id !== null && candidate.process_id === notification.process_id)
+      ).map((candidate) => candidate.id));
+      await refreshNotifications();
     } catch (cause) {
       notifications = previous;
       reportError(cause);
@@ -1639,6 +1686,8 @@
     for (const processId of processIds) clearAgentUnreadLocally(processId);
     try {
       await client.markAllNotificationsRead();
+      await dismissNativeNotifications(previous.map((notification) => notification.id));
+      await refreshNotifications();
     } catch (cause) {
       notifications = previous;
       reportError(cause);
@@ -1702,9 +1751,12 @@
   async function markAgentRead(processId: number, projectId: number): Promise<void> {
     if (markReadPending.has(processId)) return;
     markReadPending.add(processId);
+    const notificationIds = notifications.filter((notification) => notification.process_id === processId).map((notification) => notification.id);
     clearAgentUnreadLocally(processId);
     try {
       await client.markProcessRead(processId);
+      await dismissNativeNotifications(notificationIds);
+      await refreshNotifications();
     } catch (cause) {
       reportError(cause);
       await refreshProcesses(projectId);
@@ -1737,9 +1789,9 @@
     for (const process of next) {
       if (process.kind !== 'agent' || !process.agent_state.unread) continue;
       if (markReadPending.has(process.id)) continue;
-      const alreadyViewing = selectedProject?.id === process.project_id
-        && selection?.kind === 'agent'
-        && selection.id === process.id;
+      const alreadyViewing = isAgentNotificationViewed(
+        process.id, windowFocused, documentVisible, displayedAgentId
+      );
       if (alreadyViewing) {
         void markAgentRead(process.id, process.project_id);
         continue;
@@ -2317,6 +2369,7 @@
     flushCreationDraftPersistence();
     activeProfileId = profileId;
     creationDrafts = loadCreationDrafts(profileId);
+    agentPromptHistory = loadAgentPromptHistory(profileId);
     creationDraftsLoaded = true;
   }
 
@@ -2412,11 +2465,6 @@
 
     if (next.kind === 'todo' && !todoNavigationIds.includes(next.id)) {
       todoNavigationIds = (coordination?.todos ?? []).map((todo) => todo.id);
-    }
-
-    if (next.kind === 'agent') {
-      const process = processes.find((candidate) => candidate.id === next.id);
-      if (process?.agent_state.unread) void markAgentRead(process.id, process.project_id);
     }
 
     if (next.kind === 'todo') {
@@ -2738,10 +2786,11 @@
     try {
       await trackFeedbackDelivery(
         () => deliverAgentSteps(processId, steps),
-        (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, delivery.id, error),
+        (error) => client.recordedFeedbackFinishDelivery(feedback.project_id, feedback.id, delivery.id, error, $recordedFeedbackPreferences.autoArchiveAfterSend),
         onSent
       );
     } finally {
+      await refreshFeedback(feedback.project_id);
       if (selection?.kind === 'feedback' && selection.id === feedback.id) await loadFeedback(feedback.id, false);
     }
   }
@@ -2846,7 +2895,6 @@
       if (legacyDaemon && feedbackId !== null) {
         const feedback = await client.recordedFeedbackGet(projectId, feedbackId);
         await deliverFeedbackToAgent(feedback, result.process_id);
-        if (selectedProject?.id === projectId) await refreshFeedback(projectId);
         return;
       }
 
@@ -2864,9 +2912,6 @@
       } else {
         await deliverAgentSteps(result.process_id, steps);
       }
-      if (feedbackId !== null && selectedProject?.id === projectId) {
-        await refreshFeedback(projectId);
-      }
     } catch (cause) {
       throw new Error(`The agent started, but automatic delivery reported a problem: ${messageForCause(cause)}`);
     }
@@ -2875,7 +2920,8 @@
   async function sendSelectedFeedbackToScratchpad(): Promise<void> {
     if (!selectedProject || selection?.kind !== 'feedback') return;
     const projectId = selectedProject.id;
-    const result = await client.recordedFeedbackToScratchpad(projectId, selection.id);
+    const result = await client.recordedFeedbackToScratchpad(projectId, selection.id, undefined, $recordedFeedbackPreferences.autoArchiveAfterSend);
+    await refreshFeedback(projectId);
     await refreshCoordination(projectId, false);
     await selectTreeItem(projectTreeSelection(
       'scratchpad', result.scratchpad.id, projectId, result.scratchpad.name
@@ -3483,15 +3529,47 @@
     const input = deferInitialPrompt
       ? { ...submission.input, defer_initial_prompt: true }
       : submission.input;
+    const profileId = activeProfileId;
+    const savedPrompt = snapshotAgentPrompt(
+      draft, submission.tool, submission.template, input, crypto.randomUUID()
+    );
+    replaceAgentPromptHistory([savedPrompt, ...agentPromptHistory]);
     if (spawnAgent(
       submission.tool,
       input,
       submission.template,
       () => restoreAgentCreationDraft(draft),
-      feedbackId
+      feedbackId,
+      (processId) => {
+        // A launch can finish after the user changes profiles. Never write its ID into another profile.
+        if (activeProfileId !== profileId) return;
+        replaceAgentPromptHistory(agentPromptHistory.map((entry) =>
+          entry.id === savedPrompt.id ? { ...entry, processId } : entry
+        ));
+      }
     )) {
       removeCreationDraft(draft.id);
     }
+  }
+
+  function replaceAgentPromptHistory(next: AgentPromptHistoryEntry[]): void {
+    agentPromptHistory = boundAgentPromptHistory(next);
+    if (activeProfileId !== null && !saveAgentPromptHistory(activeProfileId, agentPromptHistory)) {
+      reportError('Prompt history is available for this session, but could not be saved on this computer.');
+    }
+  }
+
+  function recoverAgentPrompt(entry: AgentPromptHistoryEntry): void {
+    if (selectedProject?.id !== entry.draft.projectId) return;
+    const draft: AgentCreationDraft = {
+      ...entry.draft,
+      id: nextCreationDraftId(creationDrafts),
+      createdAt: Date.now(),
+      attachments: [...entry.draft.attachments]
+    };
+    replaceCreationDrafts([...creationDrafts, draft]);
+    draftFocusRequestId = draft.id;
+    void selectTreeItem(projectTreeSelection('draft', draft.id, draft.projectId, creationDraftLabel(draft)));
   }
 
   function restoreAgentCreationDraft(draft: AgentCreationDraft): void {
@@ -3617,7 +3695,8 @@
     requestedInput?: SpawnAgentInput,
     template: AgentTemplate | null = null,
     onFailure?: () => void,
-    feedbackId: number | null = null
+    feedbackId: number | null = null,
+    onSpawned?: (processId: number) => void
   ): boolean {
     const currentProject = selectedProject;
     if (!currentProject) return false;
@@ -3653,7 +3732,7 @@
     feedbackBrowserOpen = false;
     processOverviewKind = null;
     selection = projectTreeSelection('agent', optimisticId, project.id, optimisticName);
-    void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId);
+    void finishAgentSpawn(project, input, optimisticId, onFailure, feedbackId, onSpawned);
     return true;
   }
 
@@ -3662,11 +3741,13 @@
     input: SpawnAgentInput,
     optimisticId: number,
     onFailure?: () => void,
-    feedbackId: number | null = null
+    feedbackId: number | null = null,
+    onSpawned?: (processId: number) => void
   ): Promise<void> {
     await tick();
     try {
       const result = await client.spawnAgent(input);
+      onSpawned?.(result.process_id);
       await refreshProcesses(project.id);
       const process = processes.find((candidate) => candidate.id === result.process_id);
       optimisticProcesses = optimisticProcesses.filter(
@@ -6526,6 +6607,9 @@
             {#if draft.kind === 'agent'}
               <NewAgentDraftPanel
                 {draft}
+                promptHistory={agentPromptHistory.filter((entry) => entry.draft.projectId === draft.projectId)}
+                onRestorePrompt={recoverAgentPrompt}
+                onClearPromptHistory={() => replaceAgentPromptHistory(agentPromptHistory.filter((entry) => entry.draft.projectId !== draft.projectId))}
                 projectName={projectDisplayName(selectedProject)}
                 tools={registeredAgentTools}
                 templates={agentTemplates}
@@ -6584,6 +6668,7 @@
             onDismiss={() => dismissOptimisticProcess(selectedOptimisticProcess!.process.id)}
           />
         {:else if selectedProcess}
+          {@const savedPrompt = agentPromptHistory.find((entry) => entry.processId === selectedProcess.id && entry.draft.projectId === selectedProcess.project_id)}
           {#key selectedProcess.id}
             <div class="terminal-view">
               <TerminalView
@@ -6594,6 +6679,7 @@
                 visible={documentVisible}
                 busy={processBusyId === selectedProcess.id}
                 onStart={(process) => void startOrReviewProcess(process)}
+                onRecoverPrompt={selectedProcess.kind === 'agent' && savedPrompt ? () => recoverAgentPrompt(savedPrompt) : undefined}
                 onError={reportError}
                 onContextMenu={showContextMenu}
                 onAppShortcut={handleAppShortcut}
