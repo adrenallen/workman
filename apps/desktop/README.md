@@ -16,7 +16,10 @@ build still has working auto-spawn behavior.
 
 ## Desktop notifications
 
-Settings → Notifications controls background banners and the default top-level agent filter.
+Settings → Notifications → Computer notifications switches between in-app only and in-app plus
+computer notifications. Turning it off stops new system alerts and hides Dock/taskbar badges without
+changing in-app unread items. The choice is saved locally and also controls non-agent system alerts.
+The same page controls the default top-level agent filter.
 Viewing an agent in the focused window clears its unread state and matching OS alerts. Unread
 state remains available in Workman when OS notifications are disabled.
 

@@ -217,6 +217,7 @@
     dismissNativeNotifications,
     keepNotificationDeliveryActive,
     listenForNativeNotificationActions,
+    nativeNotificationPreferences,
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
@@ -741,7 +742,9 @@
   });
 
   $effect(() => {
-    const unreadCount = notifications.filter((notification) => notification.read_at === null).length;
+    const unreadCount = $nativeNotificationPreferences.enabled
+      ? notifications.filter((notification) => notification.read_at === null).length
+      : 0;
     if (unreadCount === dockUnreadCount) return;
     dockUnreadCount = unreadCount;
     void syncDockUnreadBadge(unreadCount);
@@ -911,7 +914,7 @@
       ++focusRequest;
       windowFocused = focused;
       updateDocumentVisibility();
-      if (focused) void refreshNativeNotificationPermission();
+      if (focused && $nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
       // The Screen Recording sheet lives in System Settings. Refresh as soon as Workman regains
       // focus so the setup modal reflects a permission change without another button press.
       if (
@@ -997,7 +1000,7 @@
       if (active) stopNativeNotifications = stop;
       else stop();
     }).catch(reportError);
-    void refreshNativeNotificationPermission();
+    if ($nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
     const projectTimer = setInterval(() => {
       if (active && documentVisible && connection.status === 'connected' && !busy) {
         void refreshProjects();

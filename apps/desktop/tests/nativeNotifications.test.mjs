@@ -4,8 +4,8 @@ import { mockIPC, mockWindows, clearMocks } from '@tauri-apps/api/mocks';
 import { get } from 'svelte/store';
 import { isAgentNotificationViewed, isTopLevelAgentNotification } from '../src/lib/notificationAttention.ts';
 import {
-  deliverNativeNotification, dismissNativeNotifications, nativeNotificationPreferences,
-  nativeNotificationRuntime, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
+  deliverNativeNotification, deliverNativeSystemNotification, dismissNativeNotifications, nativeNotificationPreferences,
+  nativeNotificationRuntime, setNativeNotificationsEnabled, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
 } from '../src/lib/nativeNotifications.ts';
 
 const allowed = { state: 'granted', platform: 'macos', detail: null };
@@ -52,16 +52,80 @@ test('a selected agent stays unread while switched away, minimized, or behind an
   assert.equal(isAgentNotificationViewed(7, true, true, 7), true);
 });
 
-test('background completion gets a banner and Dock count clears independently of banner preference', async () => {
-  assert.equal(await deliverNativeNotification(notification(101), [root]), true);
+test('in-app only persists, suppresses computer alerts, and clears badges without reading notifications', async () => {
+  const unread = notification(101);
+  assert.equal(await deliverNativeNotification(unread, [root]), true);
   assert.equal(shown()[0].args.notificationId, 101);
   assert.equal(shown()[0].args.title, 'Agent finished');
-  nativeNotificationPreferences.update(value => ({ ...value, enabled: false }));
   await syncDockUnreadBadge(2);
-  await syncDockUnreadBadge(0);
+  let saved;
+  globalThis.localStorage.setItem = (_key, value) => { saved = JSON.parse(value); };
+  setNativeNotificationsEnabled(false);
+  assert.deepEqual(saved, { enabled: false, needsInput: true, topLevelOnly: true });
+  await syncDockUnreadBadge(2);
   const badges = calls.filter(({ command }) => command === 'native_notification_set_badge');
   assert.deepEqual(badges.map(({ args }) => args.count), [2, 0]);
   assert.equal(await deliverNativeNotification(notification(102), [root]), false);
+  assert.equal(await deliverNativeSystemNotification('Reminder', 'Take a break'), false);
+  assert.equal(shown().length, 1);
+  assert.equal(unread.read_at, null);
+  assert.equal(calls.some(({ command }) => command === 'native_notification_request_permission'), false);
+  setNativeNotificationsEnabled(true);
+  await syncDockUnreadBadge(2);
+  assert.equal(calls.at(-1).args.count, 2);
+  assert.equal(await deliverNativeNotification(notification(112), [root]), true);
+});
+
+test('switching to in-app only during permission requests cancels pending agent and system alerts', async () => {
+  const requested = deferred();
+  const permission = deferred();
+  nativeNotificationRuntime.set({ permission: { ...allowed, state: 'not_determined' }, busy: false, error: null });
+  handle = command => {
+    if (command === 'native_notification_request_permission') {
+      requested.resolve();
+      return permission.promise;
+    }
+  };
+  const system = deliverNativeSystemNotification('Reminder', 'Take a break');
+  const agent = deliverNativeNotification(notification(113), [root]);
+  await requested.promise;
+  setNativeNotificationsEnabled(false);
+  permission.resolve(allowed);
+  assert.deepEqual(await Promise.all([system, agent]), [false, false]);
+  assert.equal(shown().length, 0);
+});
+
+test('queued computer notifications recheck the mode after earlier delivery finishes', async () => {
+  const started = deferred();
+  const sending = deferred();
+  handle = command => {
+    if (command === 'native_notification_show') { started.resolve(); return sending.promise; }
+  };
+  const first = deliverNativeSystemNotification('First', 'Already sending');
+  await started.promise;
+  const queued = deliverNativeSystemNotification('Second', 'Waiting');
+  setNativeNotificationsEnabled(false);
+  sending.resolve();
+  assert.deepEqual(await Promise.all([first, queued]), [true, false]);
+  assert.equal(shown().length, 1);
+});
+
+test('in-app only prevents a permission prompt after a pending status check', async () => {
+  const checking = deferred();
+  const permission = deferred();
+  nativeNotificationRuntime.set({ permission: { ...allowed, state: 'checking' }, busy: false, error: null });
+  handle = command => {
+    if (command === 'native_notification_permission_state') {
+      checking.resolve();
+      return permission.promise;
+    }
+  };
+  const pending = deliverNativeSystemNotification('Reminder', 'Take a break');
+  await checking.promise;
+  setNativeNotificationsEnabled(false);
+  permission.resolve({ ...allowed, state: 'not_determined' });
+  assert.equal(await pending, false);
+  assert.equal(calls.some(({ command }) => command === 'native_notification_request_permission'), false);
 });
 
 test('top-level filtering leaves other notification types alone and has a persistent opt-out', async () => {
@@ -152,7 +216,9 @@ test('older desktop builds fall back to the existing badge command', async () =>
   };
   await syncDockUnreadBadge(3);
   await syncDockUnreadBadge(0);
-  assert.deepEqual(calls.filter(({ command }) => command === 'plugin:window|set_badge_count').map(({ args }) => args.value), [3, undefined]);
+  setNativeNotificationsEnabled(false);
+  await syncDockUnreadBadge(3);
+  assert.deepEqual(calls.filter(({ command }) => command === 'plugin:window|set_badge_count').map(({ args }) => args.value), [3, undefined, undefined]);
 });
 
 test('background notification activity releases its Web Lock when the app unmounts', async () => {

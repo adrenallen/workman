@@ -146,6 +146,7 @@ export async function deliverNativeNotification(
   if (permission.state === 'checking') {
     permission = await refreshNativeNotificationPermission();
   }
+  if (!get(nativeNotificationPreferences).enabled) return false;
   if (permission.state === 'not_determined') {
     try {
       permission = await requestNativeNotificationPermission();
@@ -202,6 +203,7 @@ export async function deliverNativeSystemNotification(
   if (permission.state === 'checking') {
     permission = await refreshNativeNotificationPermission();
   }
+  if (!get(nativeNotificationPreferences).enabled) return false;
   if (permission.state === 'not_determined') {
     try {
       permission = await requestNativeNotificationPermission();
@@ -212,13 +214,17 @@ export async function deliverNativeSystemNotification(
   if (permission.state !== 'granted') return false;
 
   try {
-    await invoke('native_notification_show', {
-      notificationId: 0,
-      title,
-      body
+    return await enqueueNativeCommand(async () => {
+      // The user may switch to in-app only while permission or another delivery is pending.
+      if (!get(nativeNotificationPreferences).enabled) return false;
+      await invoke('native_notification_show', {
+        notificationId: 0,
+        title,
+        body
+      });
+      nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
+      return true;
     });
-    nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
-    return true;
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
     return false;
@@ -226,13 +232,17 @@ export async function deliverNativeSystemNotification(
 }
 
 export async function syncDockUnreadBadge(unreadCount: number): Promise<void> {
-  try {
-    await invoke('native_notification_set_badge', { count: Math.max(0, unreadCount) });
-  } catch {
-    // Keep older desktop shells working. Linux launchers may not implement either badge API.
-    try { await getCurrentWindow().setBadgeCount(unreadCount > 0 ? unreadCount : undefined); }
-    catch { /* The in-app count remains authoritative. */ }
-  }
+  await enqueueNativeCommand(async () => {
+    const count = get(nativeNotificationPreferences).enabled ? Math.max(0, unreadCount) : 0;
+    try {
+      await invoke('native_notification_set_badge', { count });
+    } catch {
+      // Keep older desktop shells working. Linux launchers may not implement either badge API.
+      const fallbackCount = get(nativeNotificationPreferences).enabled ? count : 0;
+      try { await getCurrentWindow().setBadgeCount(fallbackCount > 0 ? fallbackCount : undefined); }
+      catch { /* The in-app count remains authoritative. */ }
+    }
+  });
 }
 
 /** WebView2/Linux can freeze hidden pages; an active Web Lock keeps delivery work alive. */
