@@ -222,6 +222,7 @@
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
   import { isAgentNotificationViewed } from './lib/notificationAttention';
+  import { createAgentReadDwell, isWorkmanWindowFocused } from './lib/windowAttention';
   import {
     sidebarIdentityColorValue,
     type ProjectSettingsInput
@@ -613,11 +614,24 @@
       ? selectedProcess.id
       : null
   );
+  const agentReadDwell = createAgentReadDwell((target, stillCurrent) => {
+    void isWorkmanWindowFocused().then((focused) => {
+      if (!stillCurrent()) return;
+      if (!focused) {
+        windowFocused = false;
+        agentReadDwell.reset();
+        return;
+      }
+      if (selectedProcess?.agent_state.unread && isAgentNotificationViewed(
+        target.processId, windowFocused, documentVisible, displayedAgentId
+      )) void markAgentRead(target.processId, target.projectId);
+    }).catch(reportError);
+  });
   $effect(() => {
     const process = selectedProcess;
-    if (process?.agent_state.unread && isAgentNotificationViewed(
+    agentReadDwell.update(process?.agent_state.unread && isAgentNotificationViewed(
       process.id, windowFocused, documentVisible, displayedAgentId
-    )) void markAgentRead(process.id, process.project_id);
+    ) ? { processId: process.id, projectId: process.project_id } : null);
   });
   let selectedDraft = $derived.by(() => {
     const currentSelection = selection;
@@ -907,27 +921,35 @@
     }).catch(reportError);
     let stopWindowFocus = (): void => {};
     let focusRequest = 0;
-    const initialFocusRequest = focusRequest;
-    void getCurrentWindow().isFocused().then((focused) => {
-      if (active && initialFocusRequest === focusRequest) windowFocused = focused;
-    }).catch(reportError);
-    void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-      ++focusRequest;
+    const applyWindowFocus = (focused: boolean): void => {
+      const regained = focused && !windowFocused;
       windowFocused = focused;
-      updateDocumentVisibility();
-      if (focused && $nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
-      // The Screen Recording sheet lives in System Settings. Refresh as soon as Workman regains
-      // focus so the setup modal reflects a permission change without another button press.
-      if (
-        focused
-        && feedbackPreflightOpen
-        && !feedbackPreflight?.screen_capture_available
-        && !feedbackPreflightLoading
-        && !feedbackModelInstalling
-        && !feedbackStarting
-      ) {
+      if (!focused) agentReadDwell.reset();
+      if (regained && $nativeNotificationPreferences.enabled) void refreshNativeNotificationPermission();
+      if (regained && feedbackPreflightOpen && !feedbackPreflight?.screen_capture_available
+        && !feedbackPreflightLoading && !feedbackModelInstalling && !feedbackStarting) {
         void refreshFeedbackPreflight();
       }
+    };
+    const refreshWindowFocus = async (): Promise<void> => {
+      const request = ++focusRequest;
+      try {
+        const focused = await isWorkmanWindowFocused();
+        if (active && request === focusRequest) applyWindowFocus(focused);
+      } catch (cause) {
+        if (active && request === focusRequest) applyWindowFocus(false);
+        reportError(cause);
+      }
+    };
+    const blurWindow = (): void => { ++focusRequest; applyWindowFocus(false); };
+    const focusWindow = (): void => { void refreshWindowFocus(); };
+    window.addEventListener('blur', blurWindow);
+    window.addEventListener('focus', focusWindow);
+    void refreshWindowFocus();
+    void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) void refreshWindowFocus();
+      else blurWindow();
+      updateDocumentVisibility();
     }).then((stop) => {
       if (active) stopWindowFocus = stop;
       else stop();
@@ -1019,6 +1041,8 @@
       }
     }, 2500);
     const notificationTimer = setInterval(() => {
+      // Reconcile application activation even if a platform misses a WebView/window focus event.
+      if (active) void refreshWindowFocus();
       if (
         active
         && connection.status === 'connected'
@@ -1086,6 +1110,9 @@
       flushCreationDraftPersistence();
       stopWindowResize();
       stopWindowFocus();
+      window.removeEventListener('blur', blurWindow);
+      window.removeEventListener('focus', focusWindow);
+      agentReadDwell.reset();
       document.documentElement.classList.remove('workman-document-hidden');
       clearInterval(projectTimer);
       clearInterval(coordinationTimer);
@@ -1699,7 +1726,6 @@
   }
 
   function openNotification(notification: Notification): void {
-    void markCenterNotificationRead(notification);
     pendingTodoCommentFocus = null;
     todoCommentFocusId = null;
     const process = notification.process_id === null
@@ -1710,6 +1736,11 @@
         ?? processes.find((candidate) => candidate.id === notification.process_id)
         ?? null;
     const projectId = notification.project_id ?? process?.project_id ?? null;
+    // Preserve the unread dot while opening an agent. Notifications without an unread
+    // agent (such as a crash or a removed process) still clear when explicitly opened.
+    const opensUnreadAgent = process?.kind === 'agent' && process.agent_state.unread
+      && projectId !== null;
+    if (!opensUnreadAgent) void markCenterNotificationRead(notification);
     if (notification.process_id !== null && projectId !== null) {
       appNavigation.navigate({
         type: 'item',
@@ -1793,10 +1824,8 @@
       const alreadyViewing = isAgentNotificationViewed(
         process.id, windowFocused, documentVisible, displayedAgentId
       );
-      if (alreadyViewing) {
-        void markAgentRead(process.id, process.project_id);
-        continue;
-      }
+      // Reading is handled by the focus dwell. A selected tab can still have unread output.
+      if (alreadyViewing) continue;
       if (notifiedUnreadProcessIds.has(process.id)) continue;
       notifiedUnreadProcessIds.add(process.id);
       const kind: AgentDoneNotice['kind'] = process.agent_state.needs_input
@@ -1816,7 +1845,6 @@
   }
 
   function openAgentDoneNotice(notice: AgentDoneNotice): void {
-    void markAgentRead(notice.processId, notice.projectId);
     appNavigation.navigate(
       {
         type: 'item',

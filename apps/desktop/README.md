@@ -22,8 +22,11 @@ changing in-app unread items. The choice is saved locally and also controls non-
 The same page offers three **Notification mode** choices: **All agents**, **Only top-level agents**
 (the default), or **Only when all agents are ready**. These filter completion/input banners; crash,
 timer, and task alerts still notify in every mode. Existing saved switches migrate to the selector.
-Viewing an agent in the focused window clears its unread state and matching OS alerts. Unread
-state remains available in Workman when OS notifications are disabled.
+Viewing an agent in the focused window for three continuous seconds clears its unread state and
+matching OS alerts. Its blue dot stays visible while Workman is inactive, even on the selected agent;
+switching away or selecting a different agent restarts the viewing delay. macOS application activation
+and WebView focus are checked alongside window focus. Explicit Mark read actions clear immediately.
+Unread state remains available in Workman when OS notifications are disabled.
 
 Choose **Only when all agents are ready** for a banner when every agent in a project, including children, has stopped
 working or starting. Idle agents, input prompts, timer waits, and stopped processes count as ready;
@@ -59,7 +62,12 @@ to use its system sound and disables Doom/importing: native toast audio requires
 resources, and the current Win32 build does not have that package identity. Embedding bytes in the
 executable does not supply a Windows package resource URI.
 
-When permission is blocked, **Open system settings** opens Workman's notification controls on
+Use **Send test in 5s** to try the saved sound and banner settings, with time to switch to another app.
+The test uses the native notification service and the current sound toggle. Leaving notification
+settings or turning off computer notifications cancels a pending test.
+
+When permission is blocked (including macOS allowing banners but disabling sounds),
+**Open system settings** opens Workman's notification controls on
 macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
 other desktops show manual directions. Permission refreshes when Workman regains focus.
 

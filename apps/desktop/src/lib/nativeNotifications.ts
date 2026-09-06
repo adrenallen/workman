@@ -5,6 +5,7 @@ import { get, writable } from 'svelte/store';
 
 import type { Notification, ProcessView } from './daemon';
 import { isProjectReady, isTopLevelAgentNotification } from './notificationAttention.ts';
+import { isWorkmanWindowFocused } from './windowAttention.ts';
 
 export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
 
@@ -31,6 +32,7 @@ export interface NativeNotificationPermission {
   state: NativeNotificationPermissionState;
   platform: string;
   detail: string | null;
+  sound_enabled?: boolean | null;
 }
 
 export interface NativeNotificationRuntime {
@@ -163,7 +165,7 @@ export async function deliverNativeNotification(
   if (!notificationAllowed(notification, latestProcesses())) return false;
   if (!isUnread() || readNotificationIds.has(notification.id)) return false;
   try {
-    if (await getCurrentWindow().isFocused()) return false;
+    if (await isWorkmanWindowFocused()) return false;
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));
     return false;
@@ -187,7 +189,7 @@ export async function deliverNativeNotification(
     return await enqueueNativeCommand(async () => {
       // Permission sheets and earlier deliveries can take time. Recheck before displaying so a
       // banner cannot arrive after the user has returned to Workman or read the matching agent.
-      if (await getCurrentWindow().isFocused()) return false;
+      if (await isWorkmanWindowFocused()) return false;
       const current = get(nativeNotificationPreferences);
       if (!notificationAllowed(notification, latestProcesses())) return false;
       if (!isUnread() || readNotificationIds.has(notification.id)) return false;
@@ -222,15 +224,16 @@ export async function dismissNativeNotifications(notificationIds: number[]): Pro
 
 export async function deliverNativeSystemNotification(
   title: string,
-  body: string
+  body: string,
+  shouldSend: () => boolean = () => true
 ): Promise<boolean> {
-  if (!get(nativeNotificationPreferences).enabled) return false;
+  if (!get(nativeNotificationPreferences).enabled || !shouldSend()) return false;
 
   let permission = get(nativeNotificationRuntime).permission;
   if (permission.state === 'checking') {
     permission = await refreshNativeNotificationPermission();
   }
-  if (!get(nativeNotificationPreferences).enabled) return false;
+  if (!get(nativeNotificationPreferences).enabled || !shouldSend()) return false;
   if (permission.state === 'not_determined') {
     try {
       permission = await requestNativeNotificationPermission();
@@ -243,7 +246,7 @@ export async function deliverNativeSystemNotification(
   try {
     return await enqueueNativeCommand(async () => {
       // The user may switch to in-app only while permission or another delivery is pending.
-      if (!get(nativeNotificationPreferences).enabled) return false;
+      if (!get(nativeNotificationPreferences).enabled || !shouldSend()) return false;
       await invoke('native_notification_show', {
         notificationId: 0,
         title,

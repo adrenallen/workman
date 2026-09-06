@@ -27,6 +27,7 @@ pub struct NotificationPermission {
     state: &'static str,
     platform: &'static str,
     detail: Option<String>,
+    sound_enabled: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -54,6 +55,35 @@ pub async fn native_notification_open_settings(app: AppHandle) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || settings::open(&app_id))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_window_focused(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window is unavailable")?;
+    if !window.is_focused().map_err(|error| error.to_string())?
+        || window.is_minimized().map_err(|error| error.to_string())?
+        || !window.is_visible().map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Tauri/tao queries NSWindow.isKeyWindow, which alone does not tell us whether
+        // another application is active. Read NSApplication on the AppKit main thread.
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let active = objc2::MainThreadMarker::new().is_some_and(|main| {
+                objc2_app_kit::NSApplication::sharedApplication(main).isActive()
+            });
+            let _ = send.send(active);
+        })
+        .map_err(|error| error.to_string())?;
+        return receive.await.map_err(|error| error.to_string());
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(true)
 }
 
 fn sound_store(app: &AppHandle) -> Result<sound::SoundStore, String> {
@@ -407,10 +437,23 @@ async fn permission_state(_app: &AppHandle) -> Result<NotificationPermission, St
             Some("macOS returned an unknown notification permission state.".to_owned()),
         ),
     };
+    let sound_enabled = match settings.sound_enabled {
+        NotificationSettingStatus::Enabled => Some(true),
+        NotificationSettingStatus::Disabled | NotificationSettingStatus::NotSupported => {
+            Some(false)
+        }
+        NotificationSettingStatus::Unknown => None,
+    };
+    let detail = if state == "granted" && sound_enabled == Some(false) {
+        Some("macOS allows notification banners, but notification sounds are disabled in System Settings.".into())
+    } else {
+        detail
+    };
     Ok(NotificationPermission {
         state,
         platform: "macos",
         detail,
+        sound_enabled,
     })
 }
 
@@ -431,6 +474,7 @@ async fn permission_state(app: &AppHandle) -> Result<NotificationPermission, Str
         .await;
     Ok(NotificationPermission {
         state: if capabilities.is_ok() { "granted" } else { "unavailable" },
+        sound_enabled: None,
         platform: std::env::consts::OS,
         detail: Some(match capabilities {
             Ok(capabilities) if capabilities.iter().any(|capability| capability == "actions") => "Desktop notifications are available. Banner history and app icon badges depend on your desktop environment.".into(),
@@ -457,6 +501,7 @@ async fn permission_state(app: &AppHandle) -> Result<NotificationPermission, Str
     .await
     .map_err(|error| error.to_string())??;
     Ok(NotificationPermission {
+        sound_enabled: None,
         state: if allowed { "granted" } else { "denied" },
         platform: "windows",
         detail: Some(

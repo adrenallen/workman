@@ -4,6 +4,11 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Check application activation as well as window/WebView focus before suppressing computer alerts.
+  Keep a selected agent's blue unread dot while switched away, and clear it and matching OS alerts
+  after three continuous seconds of viewing. Add a five-second notification test in Settings and
+  a system-settings shortcut when macOS allows banners but has notification sounds disabled.
+
 - Add a Notification mode selector for all agents, top-level agents, or one project-ready alert
   after every agent (including children) stops working. Wait through brief handoffs and notify once
   per work cycle. Migrate the previous overlapping switches into the selected mode.

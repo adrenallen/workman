@@ -12,6 +12,7 @@
   import {
     nativeNotificationPreferences,
     nativeNotificationRuntime,
+    deliverNativeSystemNotification,
     openNativeNotificationSettings,
     refreshNativeNotificationPermission,
     requestNativeNotificationPermission,
@@ -25,12 +26,50 @@
 
   import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound } from '../notificationSound';
 
-  onMount(() => { void refreshNotificationSound(); });
+  let testTimer: ReturnType<typeof setTimeout> | undefined;
+  let testPending = $state(false);
+  let testMessage = $state('');
+  let testGeneration = 0;
+  function cancelTest(): void {
+    ++testGeneration;
+    if (testTimer !== undefined) clearTimeout(testTimer);
+    testTimer = undefined;
+    testPending = false;
+  }
+  function scheduleTest(): void {
+    cancelTest();
+    const generation = testGeneration;
+    testPending = true;
+    testMessage = 'Switch to another app. The test will be sent in 5 seconds.';
+    testTimer = setTimeout(() => {
+      testTimer = undefined;
+      void deliverNativeSystemNotification(
+        'Workman notification test',
+        'Your notification sound and banners are ready to test.',
+        () => generation === testGeneration
+      ).then((sent) => {
+        if (generation !== testGeneration) return;
+        testPending = false;
+        testMessage = sent ? 'Test sent to your operating system.' : 'Test not sent. Check notification permission below.';
+      });
+    }, 5_000);
+  }
+  onMount(() => {
+    void refreshNotificationSound();
+    return cancelTest;
+  });
+  $effect(() => {
+    if (!$nativeNotificationPreferences.enabled) {
+      cancelTest();
+      testMessage = '';
+    }
+  });
 
   let openingSettings = $state(false);
   let showSettingsShortcut = $derived(
     $nativeNotificationPreferences.enabled && (
       ['denied', 'unavailable', 'unknown'].includes($nativeNotificationRuntime.permission.state)
+      || ($nativeNotificationPreferences.soundEnabled && $nativeNotificationRuntime.permission.sound_enabled === false)
       || $nativeNotificationRuntime.permission.platform === 'linux'
     )
   );
@@ -217,6 +256,10 @@
           <UploadIcon aria-hidden="true" />
           {$notificationSound.busy ? 'Loading…' : 'Choose sound…'}
         </Button>
+        <Button variant="outline" size="sm"
+          disabled={!$nativeNotificationPreferences.enabled || testPending || $nativeNotificationRuntime.busy || $notificationSound.busy}
+          onclick={scheduleTest}
+        >{testPending ? 'Test scheduled…' : 'Send test in 5s'}</Button>
         {#if !$notificationSound.info && !$notificationSound.busy}
           <Button variant="outline" size="sm" onclick={() => void refreshNotificationSound()}>Retry</Button>
         {/if}
@@ -224,6 +267,7 @@
       {#if $notificationSound.error}
         <p class="mt-2 text-xs leading-5 text-destructive" role="alert">{$notificationSound.error}</p>
       {/if}
+      {#if testMessage}<p class="mt-2 text-xs leading-5 text-muted-foreground" role="status">{testMessage}</p>{/if}
     </div>
   </div>
 
@@ -242,7 +286,12 @@
       {/if}
       {#if showSettingsShortcut}
         <p class="mt-1 text-xs leading-5 text-muted-foreground">
-          Enable notifications for Workman in system settings. Permission updates when you return to the app.
+          {#if $nativeNotificationRuntime.permission.state === 'granted' && $nativeNotificationRuntime.permission.sound_enabled === false}
+            Enable notification sounds for Workman in system settings.
+          {:else}
+            Enable notifications for Workman in system settings.
+          {/if}
+          Permission updates when you return to the app.
         </p>
       {/if}
     </div>

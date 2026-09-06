@@ -30,13 +30,13 @@ beforeEach(() => {
   mockWindows('main');
   mockIPC(async (command, args) => {
     calls.push({ command, args });
-    if (command === 'plugin:window|is_focused') return focused;
+    if (command === 'native_notification_window_focused') return focused;
     return handle(command, args);
   });
   nativeNotificationPreferences.set({ enabled: true, needsInput: true, mode: 'top_level', soundEnabled: true });
   nativeNotificationRuntime.set({ permission: allowed, busy: false, error: null });
 });
-afterEach(() => { clearMocks(); delete globalThis.window; delete globalThis.localStorage; });
+afterEach(() => { clearMocks(); delete globalThis.window; delete globalThis.localStorage; delete globalThis.document; });
 
 const shown = () => calls.filter(({ command }) => command === 'native_notification_show');
 const deferred = () => {
@@ -202,6 +202,29 @@ test('a selected agent stays unread while switched away, minimized, or behind an
   assert.equal(isAgentNotificationViewed(7, true, true, 7), true);
 });
 
+test('an inactive WebView delivers the selected agent banner with sound even if native key focus is stale', async () => {
+  focused = true;
+  globalThis.document = { hidden: false, hasFocus: () => false };
+  assert.equal(await deliverNativeNotification(notification(680), [root]), true);
+  assert.equal(shown()[0].args.sound, true);
+});
+
+test('a cancelled scheduled test cannot send after permission finishes', async () => {
+  const requested = deferred();
+  const permission = deferred();
+  let current = true;
+  nativeNotificationRuntime.set({ permission: { ...allowed, state: 'not_determined' }, busy: false, error: null });
+  handle = command => {
+    if (command === 'native_notification_request_permission') { requested.resolve(); return permission.promise; }
+  };
+  const pending = deliverNativeSystemNotification('Test', 'Notification sound test', () => current);
+  await requested.promise;
+  current = false;
+  permission.resolve(allowed);
+  assert.equal(await pending, false);
+  assert.equal(shown().length, 0);
+});
+
 test('in-app only persists, suppresses computer alerts, and clears badges without reading notifications', async () => {
   const unread = notification(101);
   assert.equal(await deliverNativeNotification(unread, [root]), true);
@@ -341,7 +364,7 @@ test('a read racing with native delivery removes the notification after delivery
   sending.resolve();
   await pending;
   await removal;
-  assert.deepEqual(calls.filter(({ command }) => command.startsWith('native_notification_')).map(({ command }) => command), [
+  assert.deepEqual(calls.filter(({ command }) => ['native_notification_show', 'native_notification_dismiss'].includes(command)).map(({ command }) => command), [
     'native_notification_show', 'native_notification_dismiss'
   ]);
   assert.deepEqual(calls.at(-1).args.notificationIds, [110]);
