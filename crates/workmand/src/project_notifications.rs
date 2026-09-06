@@ -56,8 +56,10 @@ impl ProjectNotifications {
         for (project_id, busy) in busy_projects {
             let activity = self.projects.entry(project_id).or_default();
             if busy {
-                // Clear on every busy observation, including the first after a daemon restart.
-                store.clear_project_ready_notifications(project_id, now)?;
+                // Clear once per work cycle, including the first observation after a restart.
+                if !activity.worked {
+                    store.clear_project_ready_notifications(project_id, now)?;
+                }
                 activity.worked = true;
                 activity.ready_since = None;
             } else if activity.worked {

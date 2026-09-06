@@ -32,6 +32,8 @@ pub struct SoundInfo {
     pub preset: SoundPreset,
     pub name: Option<String>,
     pub detail: Option<String>,
+    pub volume: u8,
+    pub volume_supported: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,6 +46,7 @@ struct Selection {
 
 pub struct SoundStore {
     settings: PathBuf,
+    volume_settings: PathBuf,
     sounds: PathBuf,
 }
 
@@ -51,6 +54,7 @@ impl SoundStore {
     pub fn new(app_data: &Path, sounds: PathBuf) -> Self {
         Self {
             settings: app_data.join("notification-sound.json"),
+            volume_settings: app_data.join("notification-volume.json"),
             sounds,
         }
     }
@@ -62,13 +66,17 @@ impl SoundStore {
                 preset: selection.preset,
                 name: Some(selection.display_name),
                 detail: None,
+                volume: self.volume(),
+                volume_supported: true,
             },
-            Ok(None) => SoundInfo { supported: true, preset: SoundPreset::System, name: None, detail: None },
+            Ok(None) => SoundInfo { supported: true, preset: SoundPreset::System, name: None, detail: None, volume: self.volume(), volume_supported: false },
             _ => SoundInfo {
                 supported: true,
                 preset: SoundPreset::System,
                 name: None,
                 detail: Some("The saved sound is unavailable. Using the system sound; choose a file again to replace it.".into()),
+                volume: self.volume(),
+                volume_supported: false,
             },
         }
     }
@@ -79,6 +87,97 @@ impl SoundStore {
             .ok()
             .flatten()
             .and_then(|selection| self.available_path(&selection))
+    }
+
+    pub fn volume(&self) -> u8 {
+        read_bounded(&self.volume_settings, 128)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<u8>(&bytes).ok())
+            .filter(|volume| *volume <= 100)
+            .unwrap_or(100)
+    }
+
+    pub fn set_volume(&self, volume: u8) -> Result<SoundInfo, String> {
+        if volume > 100 {
+            return Err("Notification volume must be between 0 and 100.".into());
+        }
+        let source = self.selected_path().ok_or("The operating system controls the default sound volume. Choose Doom or a custom WAV to adjust it in Workman.")?;
+        let previous_volume = self.volume();
+        // Prepare the exact playback copy before changing the saved preference.
+        self.render_volume(&source, volume)?;
+        let temporary = self
+            .volume_settings
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| {
+            write_new(
+                &temporary,
+                &serde_json::to_vec(&volume).map_err(|error| error.to_string())?,
+            )?;
+            fs::rename(&temporary, &self.volume_settings).map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        // Retain the previous level for an alert that was just handed to the OS. Bound the cache
+        // to two rendered copies instead of retaining a full WAV for every slider position.
+        for cached in 0..100 {
+            if cached != volume && cached != previous_volume {
+                let _ = fs::remove_file(volume_path(&source, cached));
+            }
+        }
+        Ok(self.info())
+    }
+
+    /// Previews and native notifications use the same attenuated WAV, preserving OS sound policy.
+    pub fn playback_path(&self) -> Result<Option<PathBuf>, String> {
+        self.selected_path()
+            .map(|source| self.render_volume(&source, self.volume()))
+            .transpose()
+    }
+
+    fn render_volume(&self, source: &Path, volume: u8) -> Result<PathBuf, String> {
+        if volume == 100 {
+            return Ok(source.to_owned());
+        }
+        let path = volume_path(source, volume);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                if read_bounded(&path, MAX_BYTES)
+                    .and_then(|bytes| validate_wav(&bytes))
+                    .is_ok()
+                {
+                    return Ok(path);
+                }
+                // A crash or damaged cache must not permanently replace a muted/custom alert
+                // with the system sound. The owned original remains the source of truth.
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+            }
+            Ok(_) => return Err("The saved volume preview is not a regular file.".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let bytes = read_bounded(source, MAX_BYTES)?;
+        validate_wav(&bytes)?;
+        let mut reader =
+            hound::WavReader::new(Cursor::new(bytes)).map_err(|error| error.to_string())?;
+        let mut output = Cursor::new(Vec::new());
+        let mut writer =
+            hound::WavWriter::new(&mut output, reader.spec()).map_err(|error| error.to_string())?;
+        for sample in reader.samples::<i16>() {
+            let sample = i32::from(sample.map_err(|error| error.to_string())?);
+            writer
+                .write_sample((sample * i32::from(volume) / 100) as i16)
+                .map_err(|error| error.to_string())?;
+        }
+        writer.finalize().map_err(|error| error.to_string())?;
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        write_new(&temporary, &output.into_inner())?;
+        if let Err(error) = fs::rename(&temporary, &path) {
+            let _ = fs::remove_file(temporary);
+            return Err(error.to_string());
+        }
+        Ok(path)
     }
 
     pub fn import(&self, source: &Path) -> Result<SoundInfo, String> {
@@ -199,9 +298,20 @@ impl SoundStore {
 
     fn remove_owned(&self, selection: &Selection) {
         if owned_name(&selection.file_name) {
-            let _ = fs::remove_file(self.sounds.join(&selection.file_name));
+            let source = self.sounds.join(&selection.file_name);
+            let _ = fs::remove_file(&source);
+            for volume in 0..100 {
+                let _ = fs::remove_file(volume_path(&source, volume));
+            }
         }
     }
+}
+
+fn volume_path(source: &Path, volume: u8) -> PathBuf {
+    source.with_file_name(format!(
+        "{}-volume-{volume}.wav",
+        source.file_stem().unwrap_or_default().to_string_lossy()
+    ))
 }
 
 fn owned_name(name: &str) -> bool {

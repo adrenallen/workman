@@ -4,6 +4,16 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Keep speech-model verification off the UI thread and recover abandoned dictation recordings
+  safely after a crash. Keep live notifications responsive during audio previews, repair damaged
+  volume copies, bound their cache, and reuse Linux notification connections. Refresh process
+  state before reconnect alerts and clear project-ready records once per work cycle.
+
+- Keep notification delivery active in the dev window configuration, and run the five-second
+  notification test in native code so switching apps cannot pause its countdown. Restore its
+  result when returning to Settings. Add saved volume control for Doom and custom WAVs on
+  macOS/Linux; previews and real notifications use the same volume without changing the original.
+
 - Add a speaker button beside the notification sound dropdown for immediate audio previews,
   including Doom, custom WAVs, and the system sound, without sending a notification banner.
 

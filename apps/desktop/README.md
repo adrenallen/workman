@@ -68,9 +68,18 @@ sound, or Linux theme event. Linux previews use `canberra-gtk-play`, with `papla
 for saved WAVs. Playback errors appear beside the sound controls. Preview is a deliberate action
 and works even when automatic notifications or sounds are turned off; it does not send a banner.
 
+**Volume** adjusts Doom and custom WAVs from 0–100%, relative to system volume. The saved level
+applies to previews and automatic notifications using the same attenuated PCM copy; original audio
+is never modified. Damaged rendered copies are rebuilt; the cache keeps only the current and
+previous volume copies. Previews block sound changes but do not delay automatic alerts. System default volume stays under OS control, including on Windows.
+
 Use **Send test in 5s** to try the saved sound and banner settings, with time to switch to another app.
+Permission is resolved before the countdown, which runs in native code even if the WebView is
+suspended. The result is retained natively and refreshed when you return. Both stable and dev
+window configurations disable background throttling so ordinary agent alerts also keep running.
 The test uses the native notification service and the current sound toggle. Leaving notification
-settings or turning off computer notifications cancels a pending test.
+settings or turning off computer notifications cancels a test before delivery starts. Once the
+OS submission begins, it finishes and retains its result.
 
 When permission is blocked (including macOS allowing banners but disabling sounds),
 **Open system settings** opens Workman's notification controls on
@@ -98,3 +107,10 @@ while another remains busy, sound on/off, a quick handoff restarting the two-sec
 the project-ready alert, and work resuming while OS permission is pending. Verify all three modes,
 Doom selection/reload/default reset and custom sound import on macOS/Linux, invalid/missing files, system-sound fallback
 on Windows, and sound suppression under OS notification sound settings and Focus/Do Not Disturb.
+
+## Voice input storage
+
+Voice input verifies the Whisper model on a worker before recording, keeping its large checksum
+read off the UI thread. Temporary dictation sessions hold an OS file lock through transcription;
+preflight removes abandoned marked sessions older than one minute after a crash, preserving live sessions
+and unrelated folders.

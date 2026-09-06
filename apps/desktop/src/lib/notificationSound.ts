@@ -7,6 +7,8 @@ export interface NotificationSoundInfo {
   preset: 'system' | 'doom' | 'custom';
   name: string | null;
   detail: string | null;
+  volume?: number;
+  volume_supported?: boolean;
 }
 
 export const notificationSound = writable<{
@@ -39,6 +41,12 @@ export function previewNotificationSound(): Promise<void> {
     await invoke('native_notification_preview_sound');
     return null;
   });
+}
+
+export function setNotificationSoundVolume(volume: number): Promise<void> {
+  if (!get(notificationSound).info?.volume_supported) return Promise.resolve();
+  if (!Number.isFinite(volume) || volume < 0 || volume > 100) return Promise.resolve();
+  return updateSound(() => invoke<NotificationSoundInfo>('native_notification_set_sound_volume', { volume: Math.round(volume) }));
 }
 
 export function selectNotificationSound(preset: 'system' | 'doom'): Promise<void> {

@@ -15,6 +15,7 @@ mod tests;
 #[derive(Clone, Default)]
 pub struct Backend {
     shown: Arc<Mutex<HashMap<i64, Delivered>>>,
+    connection: Arc<Mutex<Option<Connection>>>,
 }
 
 #[derive(Clone)]
@@ -25,32 +26,40 @@ struct Delivered {
     cancelled: Arc<Notify>,
 }
 
-async fn server() -> Result<(Connection, String, Vec<String>), String> {
-    let connection = Connection::session()
-        .await
-        .map_err(|error| error.to_string())?;
-    let bus = DBusProxy::new(&connection)
-        .await
-        .map_err(|error| error.to_string())?;
-    // Let D-Bus activate the desktop service if needed, then pin its unique owner. A restarted
-    // server may reuse numeric IDs; stale handles must never close another app's notification.
-    let proxy = Proxy::new(&connection, SERVICE, PATH, SERVICE)
-        .await
-        .map_err(|error| error.to_string())?;
-    let capabilities: Vec<String> = proxy
-        .call("GetCapabilities", &())
-        .await
-        .map_err(|error| error.to_string())?;
-    let owner = bus
-        .get_name_owner(BusName::try_from(SERVICE).unwrap())
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok((connection, owner.to_string(), capabilities))
-}
-
 impl Backend {
+    async fn server(&self) -> Result<(Connection, String, Vec<String>), String> {
+        let connection = {
+            let mut saved = self.connection.lock().await;
+            if saved.as_ref().is_none_or(Connection::is_closed) {
+                *saved = Some(
+                    Connection::session()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            saved.as_ref().unwrap().clone()
+        };
+        let bus = DBusProxy::new(&connection)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Let D-Bus activate the desktop service if needed, then pin its unique owner. A restarted
+        // server may reuse numeric IDs; stale handles must never close another app's notification.
+        let proxy = Proxy::new(&connection, SERVICE, PATH, SERVICE)
+            .await
+            .map_err(|error| error.to_string())?;
+        let capabilities: Vec<String> = proxy
+            .call("GetCapabilities", &())
+            .await
+            .map_err(|error| error.to_string())?;
+        let owner = bus
+            .get_name_owner(BusName::try_from(SERVICE).unwrap())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((connection, owner.to_string(), capabilities))
+    }
+
     pub async fn capabilities(&self) -> Result<Vec<String>, String> {
-        server().await.map(|(_, _, capabilities)| capabilities)
+        self.server().await.map(|(_, _, capabilities)| capabilities)
     }
 
     pub async fn show(
@@ -62,7 +71,7 @@ impl Backend {
         custom_sound: Option<&str>,
         on_open: impl Fn() + Send + 'static,
     ) -> Result<(), String> {
-        let (connection, owner, capabilities) = server().await?;
+        let (connection, owner, capabilities) = self.server().await?;
         let proxy = Proxy::new(&connection, owner.as_str(), PATH, SERVICE)
             .await
             .map_err(|error| error.to_string())?;

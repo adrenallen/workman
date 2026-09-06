@@ -756,7 +756,7 @@ export class DaemonClient
     });
   }
 
-  processes(projectId: number): Promise<ProcessView[]> {
+  processes(projectId?: number): Promise<ProcessView[]> {
     return this.request('process.list', { project_id: projectId });
   }
 

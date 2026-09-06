@@ -226,3 +226,114 @@ fn failed_settings_write_removes_new_copy_and_keeps_previous_sound() {
     fs::write(&store.settings, saved).unwrap();
     assert_eq!(store.selected_path().as_ref(), Some(&original));
 }
+
+fn samples(path: &Path) -> Vec<i16> {
+    hound::WavReader::open(path)
+        .unwrap()
+        .samples::<i16>()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn volume_scales_exact_samples_persists_and_never_changes_the_original() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    assert_eq!(store.info().volume, 100);
+    assert!(!store.info().volume_supported);
+    assert!(store.set_volume(50).is_err());
+    store.select(SoundPreset::Doom).unwrap();
+    let source = store.selected_path().unwrap();
+    let original = fs::read(&source).unwrap();
+    let full = samples(&source);
+    assert!(full.iter().any(|sample| *sample < 0));
+    assert!(full.iter().any(|sample| *sample > 0));
+    assert_eq!(store.set_volume(50).unwrap().volume, 50);
+    let half = store.playback_path().unwrap().unwrap();
+    assert_eq!(
+        samples(&half),
+        full.iter()
+            .map(|sample| (i32::from(*sample) / 2) as i16)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(store.playback_path().unwrap().unwrap(), half);
+    let reopened = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    assert_eq!(reopened.volume(), 50);
+    assert_eq!(reopened.playback_path().unwrap().unwrap(), half);
+    reopened.set_volume(0).unwrap();
+    let muted = reopened.playback_path().unwrap().unwrap();
+    assert!(samples(&muted).iter().all(|sample| *sample == 0));
+    reopened.set_volume(100).unwrap();
+    assert_eq!(reopened.playback_path().unwrap().unwrap(), source);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    reopened.set_volume(35).unwrap();
+    reopened.reset().unwrap();
+    assert!(!half.exists());
+    assert!(!muted.exists());
+    assert_eq!(reopened.volume(), 35);
+    reopened.select(SoundPreset::Doom).unwrap();
+    assert_eq!(reopened.info().volume, 35);
+    assert_ne!(
+        reopened.playback_path().unwrap().unwrap(),
+        reopened.selected_path().unwrap()
+    );
+}
+
+#[test]
+fn invalid_volume_and_failed_save_preserve_the_previous_level() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    store.select(SoundPreset::Doom).unwrap();
+    store.set_volume(40).unwrap();
+    assert!(store.set_volume(101).is_err());
+    assert_eq!(store.volume(), 40);
+    fs::remove_file(&store.volume_settings).unwrap();
+    fs::create_dir(&store.volume_settings).unwrap();
+    assert!(store.set_volume(80).is_err());
+    assert_eq!(store.volume(), 100);
+    fs::remove_dir(&store.volume_settings).unwrap();
+    for invalid in ["-1", "101", "100000", "\"quiet\"", "null"] {
+        fs::write(&store.volume_settings, invalid).unwrap();
+        assert_eq!(store.volume(), 100);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn volume_copy_cannot_overwrite_a_symlink_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    store.select(SoundPreset::Doom).unwrap();
+    let external = temp.path().join("external.wav");
+    fs::write(&external, b"untouched").unwrap();
+    let scaled = volume_path(&store.selected_path().unwrap(), 50);
+    std::os::unix::fs::symlink(&external, &scaled).unwrap();
+    assert!(store.set_volume(50).is_err());
+    assert_eq!(store.volume(), 100);
+    assert_eq!(fs::read(&external).unwrap(), b"untouched");
+    store.reset().unwrap();
+    assert!(!scaled.exists());
+    assert_eq!(fs::read(&external).unwrap(), b"untouched");
+}
+
+#[test]
+fn damaged_volume_copies_are_rebuilt_and_the_cache_is_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    store.select(SoundPreset::Doom).unwrap();
+    store.set_volume(0).unwrap();
+    let muted = store.playback_path().unwrap().unwrap();
+    fs::write(&muted, b"interrupted write").unwrap();
+    assert_eq!(store.playback_path().unwrap().unwrap(), muted);
+    assert!(samples(&muted).iter().all(|sample| *sample == 0));
+    for level in [10, 20, 30, 40, 50, 60] {
+        store.set_volume(level).unwrap();
+        assert_eq!(
+            fs::read_dir(&store.sounds).unwrap().count(),
+            3,
+            "original plus current and previous levels"
+        );
+    }
+    let original = fs::read(store.selected_path().unwrap()).unwrap();
+    assert_eq!(original, DOOM_WAV);
+}

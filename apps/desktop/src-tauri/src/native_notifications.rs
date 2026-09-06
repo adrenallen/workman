@@ -9,14 +9,17 @@ mod badge;
 mod linux;
 mod settings;
 mod sound;
+mod sound_operations;
 mod sound_preview;
+mod test_delivery;
 #[cfg(windows)]
 #[path = "native_notifications/windows.rs"]
 mod windows_backend;
 
 #[derive(Default)]
 pub struct NativeNotificationState {
-    sound_settings: std::sync::Mutex<()>,
+    sound_operations: sound_operations::SoundOperations,
+    test_delivery: std::sync::Arc<test_delivery::TestDelivery>,
     #[cfg(all(unix, not(target_os = "macos")))]
     linux: linux::Backend,
     #[cfg(windows)]
@@ -112,6 +115,8 @@ fn sound_info(app: &AppHandle) -> Result<sound::SoundInfo, String> {
             preset: sound::SoundPreset::System,
             name: None,
             detail: Some("Windows uses the system sound. Doom and custom audio aren't supported by Windows notifications in this build.".into()),
+            volume: 100,
+            volume_supported: false,
         });
     }
     let mut info = sound_store(app)?.info();
@@ -126,32 +131,54 @@ fn sound_info(app: &AppHandle) -> Result<sound::SoundInfo, String> {
 
 #[tauri::command]
 pub async fn native_notification_sound_state(app: AppHandle) -> Result<sound::SoundInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || sound_info(&app))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .read(|| sound_info(&app))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn native_notification_preview_sound(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<NativeNotificationState>();
-        // Do not queue repeated clicks or replace the saved copy while it is being played.
-        let _guard = state
-            .sound_settings
-            .try_lock()
-            .map_err(|_| "A sound operation is already in progress.".to_owned())?;
-        let path = if cfg!(windows) {
-            None
-        } else {
-            sound_store(&app)?.selected_path()
-        };
-        #[cfg(target_os = "macos")]
-        if path.is_none() {
-            return app
-                .run_on_main_thread(|| objc2_app_kit::NSBeep())
-                .map_err(|error| error.to_string());
-        }
-        sound_preview::play(path.as_deref())
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .preview(
+                || {
+                    if cfg!(windows) {
+                        Ok(None)
+                    } else {
+                        sound_store(&app)?.playback_path()
+                    }
+                },
+                |path| {
+                    #[cfg(target_os = "macos")]
+                    if path.is_none() {
+                        return app
+                            .run_on_main_thread(|| objc2_app_kit::NSBeep())
+                            .map_err(|error| error.to_string());
+                    }
+                    sound_preview::play(path.as_deref())
+                },
+            )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn update_notification_sound(
+    app: AppHandle,
+    update: impl FnOnce(&sound::SoundStore) -> Result<sound::SoundInfo, String> + Send + 'static,
+) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .update(|| {
+                update(&sound_store(&app)?)?;
+                sound_info(&app)
+            })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -162,23 +189,38 @@ pub async fn native_notification_select_sound(
     app: AppHandle,
     preset: sound::SoundPreset,
 ) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) && preset != sound::SoundPreset::System {
+        return Err(
+            "Doom and custom notification sounds are not supported on Windows in this build."
+                .into(),
+        );
+    }
+    update_notification_sound(app, move |store| store.select(preset)).await
+}
+
+#[tauri::command]
+pub async fn native_notification_set_sound_volume(
+    app: AppHandle,
+    volume: u8,
+) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) {
+        return Err("Windows controls the system notification sound volume.".into());
+    }
+    update_notification_sound(app, move |store| store.set_volume(volume)).await
+}
+
+#[cfg(unix)]
+async fn notification_sound_path(app: AppHandle) -> Option<std::path::PathBuf> {
+    // File validation/rendering and lock acquisition must not block the native async runtime.
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<NativeNotificationState>();
-        let _guard = state
-            .sound_settings
-            .lock()
-            .map_err(|error| error.to_string())?;
-        if cfg!(windows) && preset != sound::SoundPreset::System {
-            return Err(
-                "Doom and custom notification sounds are not supported on Windows in this build."
-                    .into(),
-            );
-        }
-        sound_store(&app)?.select(preset)?;
-        sound_info(&app)
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .read(|| sound_store(&app)?.playback_path())
     })
     .await
-    .map_err(|error| error.to_string())?
+    .ok()?
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
@@ -186,35 +228,15 @@ pub async fn native_notification_import_sound(
     app: AppHandle,
     path: String,
 ) -> Result<sound::SoundInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<NativeNotificationState>();
-        let _guard = state
-            .sound_settings
-            .lock()
-            .map_err(|error| error.to_string())?;
-        if cfg!(windows) {
-            return Err("Uploaded notification sounds are not supported on Windows.".into());
-        }
-        sound_store(&app)?.import(std::path::Path::new(&path))?;
-        sound_info(&app)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    if cfg!(windows) {
+        return Err("Uploaded notification sounds are not supported on Windows.".into());
+    }
+    update_notification_sound(app, move |store| store.import(std::path::Path::new(&path))).await
 }
 
 #[tauri::command]
 pub async fn native_notification_reset_sound(app: AppHandle) -> Result<sound::SoundInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<NativeNotificationState>();
-        let _guard = state
-            .sound_settings
-            .lock()
-            .map_err(|error| error.to_string())?;
-        sound_store(&app)?.reset()?;
-        sound_info(&app)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    update_notification_sound(app, sound::SoundStore::reset).await
 }
 
 #[tauri::command]
@@ -229,6 +251,54 @@ pub async fn native_notification_show(
     let body = checked_copy("body", body, 1_024)?;
 
     show_notification(app, notification_id, title, body, sound).await
+}
+
+#[tauri::command]
+pub fn native_notification_schedule_test(
+    app: AppHandle,
+    test_id: String,
+    sound: bool,
+) -> Result<test_delivery::Status, String> {
+    uuid::Uuid::parse_str(&test_id).map_err(|_| "Invalid notification test ID")?;
+    let state = app.state::<NativeNotificationState>().test_delivery.clone();
+    let delivery_app = app.clone();
+    Ok(state.schedule(
+        test_id,
+        std::time::Duration::from_secs(5),
+        async move {
+            let permission = permission_state(&delivery_app).await?;
+            if permission.state != "granted" {
+                return Err(permission.detail.unwrap_or_else(|| {
+                    "Allow notifications in system settings before sending a test.".into()
+                }));
+            }
+            show_notification(
+                delivery_app,
+                0,
+                "Workman notification test".into(),
+                "Your notification sound and banners are ready to test.".into(),
+                Some(sound),
+            )
+            .await
+        },
+        move |status| {
+            let _ = app.emit("notification://test", status);
+        },
+    ))
+}
+
+#[tauri::command]
+pub fn native_notification_cancel_test(app: AppHandle, test_id: String) -> test_delivery::Status {
+    app.state::<NativeNotificationState>()
+        .test_delivery
+        .cancel(&test_id)
+}
+
+#[tauri::command]
+pub fn native_notification_test_state(app: AppHandle) -> test_delivery::Status {
+    app.state::<NativeNotificationState>()
+        .test_delivery
+        .status()
 }
 
 #[tauri::command]
@@ -295,10 +365,7 @@ async fn show_notification(
         .title(title)
         .message(body);
     if sound == Some(true) {
-        notification = match sound_store(&app)
-            .ok()
-            .and_then(|store| store.selected_path())
-        {
+        notification = match notification_sound_path(app.clone()).await {
             Some(path) => {
                 notification.sound(path.file_name().unwrap_or_default().to_string_lossy())
             }
@@ -340,9 +407,8 @@ async fn show_notification(
     sound: Option<bool>,
 ) -> Result<(), String> {
     let backend = app.state::<NativeNotificationState>().linux.clone();
-    let custom_sound = sound_store(&app)
-        .ok()
-        .and_then(|store| store.selected_path())
+    let custom_sound = notification_sound_path(app.clone())
+        .await
         .map(|path| path.to_string_lossy().into_owned());
     backend
         .show(

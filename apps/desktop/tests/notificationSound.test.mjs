@@ -138,3 +138,26 @@ test('preview failures remain visible and retryable without losing the selected 
   await previewNotificationSound();
   assert.deepEqual(get(notificationSound), { info: custom, busy: false, error: null });
 });
+
+test('volume writes share the sound operation guard and preserve saved state on errors', async () => {
+  const { setNotificationSoundVolume } = await import('../src/lib/notificationSound.ts');
+  await setNotificationSoundVolume(50);
+  assert.equal(calls.length, 0);
+  const adjustable = { ...doom, volume: 100, volume_supported: true };
+  notificationSound.set({ info: adjustable, busy: false, error: null });
+  for (const invalid of [-1, 101, NaN, Infinity]) await setNotificationSoundVolume(invalid);
+  assert.equal(calls.length, 0);
+  let finish;
+  handle = () => new Promise(resolve => { finish = resolve; });
+  const saving = setNotificationSoundVolume(49.8);
+  await previewNotificationSound();
+  await setNotificationSoundVolume(70);
+  assert.deepEqual(calls, [{ command: 'native_notification_set_sound_volume', args: { volume: 50 } }]);
+  finish({ ...adjustable, volume: 50 });
+  await saving;
+  assert.equal(get(notificationSound).info.volume, 50);
+  handle = () => { throw new Error('Could not save volume'); };
+  await setNotificationSoundVolume(20);
+  assert.equal(get(notificationSound).info.volume, 50);
+  assert.match(get(notificationSound).error, /Could not save volume/);
+});

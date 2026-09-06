@@ -125,6 +125,26 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
     let calls = Arc::new(StdMutex::new(Calls::default()));
     let service = desktop(calls.clone()).await;
     let backend = Backend::default();
+    backend.capabilities().await.unwrap();
+    let connection_name = backend
+        .connection
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .unique_name()
+        .cloned();
+    backend.capabilities().await.unwrap();
+    assert_eq!(
+        backend
+            .connection
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .unique_name(),
+        connection_name.as_ref()
+    );
     assert!(
         backend
             .capabilities()

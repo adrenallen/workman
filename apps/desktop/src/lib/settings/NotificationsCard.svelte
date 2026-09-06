@@ -14,7 +14,6 @@
   import {
     nativeNotificationPreferences,
     nativeNotificationRuntime,
-    deliverNativeSystemNotification,
     openNativeNotificationSettings,
     refreshNativeNotificationPermission,
     requestNativeNotificationPermission,
@@ -26,12 +25,18 @@
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
 
-  import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound, previewNotificationSound } from '../notificationSound';
+  import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound, previewNotificationSound, setNotificationSoundVolume } from '../notificationSound';
 
-  let testTimer: ReturnType<typeof setTimeout> | undefined;
+  import { createNotificationTest } from '../notificationTest';
+
+  let volume = $state(100);
+  $effect(() => { volume = $notificationSound.info?.volume ?? 100; });
   let testPending = $state(false);
   let testMessage = $state('');
-  let testGeneration = 0;
+  const notificationTest = createNotificationTest((pending, message) => {
+    testPending = pending;
+    testMessage = message;
+  });
   let previewing = $state(false);
   async function previewSound(): Promise<void> {
     if (previewing) return;
@@ -39,40 +44,11 @@
     try { await previewNotificationSound(); }
     finally { previewing = false; }
   }
-  function cancelTest(): void {
-    ++testGeneration;
-    if (testTimer !== undefined) clearTimeout(testTimer);
-    testTimer = undefined;
-    testPending = false;
-  }
-  function scheduleTest(): void {
-    cancelTest();
-    const generation = testGeneration;
-    testPending = true;
-    testMessage = 'Switch to another app. The test will be sent in 5 seconds.';
-    testTimer = setTimeout(() => {
-      testTimer = undefined;
-      void deliverNativeSystemNotification(
-        'Workman notification test',
-        'Your notification sound and banners are ready to test.',
-        () => generation === testGeneration
-      ).then((sent) => {
-        if (generation !== testGeneration) return;
-        testPending = false;
-        testMessage = sent ? 'Test sent to your operating system.' : 'Test not sent. Check notification permission below.';
-      });
-    }, 5_000);
-  }
   onMount(() => {
     void refreshNotificationSound();
-    return cancelTest;
+    return notificationTest.watch();
   });
-  $effect(() => {
-    if (!$nativeNotificationPreferences.enabled) {
-      cancelTest();
-      testMessage = '';
-    }
-  });
+
 
   let openingSettings = $state(false);
   let showSettingsShortcut = $derived(
@@ -259,6 +235,31 @@
           {#snippet icon()}<Volume2Icon class={previewing ? 'size-4 animate-pulse' : 'size-4'} aria-hidden="true" />{/snippet}
         </IconButton>
       </div>
+      <div class="mt-3">
+        <div class="flex items-center justify-between gap-3 text-sm">
+          <label for="notification-sound-volume" class="font-medium">Volume</label>
+          <output for="notification-sound-volume" class="font-mono text-xs tabular-nums text-muted-foreground">
+            {$notificationSound.info?.volume_supported ? `${volume}%` : 'System volume'}
+          </output>
+        </div>
+        <input id="notification-sound-volume" type="range" min="0" max="100" step="1"
+          class="mt-1 h-8 w-full cursor-pointer accent-primary disabled:cursor-not-allowed disabled:opacity-40"
+          bind:value={volume}
+          disabled={!$notificationSound.info?.volume_supported || $notificationSound.busy}
+          aria-describedby="notification-volume-description"
+          onchange={async () => {
+            await setNotificationSoundVolume(volume);
+            volume = $notificationSound.info?.volume ?? 100;
+          }}
+        />
+        <p id="notification-volume-description" class="text-xs leading-5 text-muted-foreground">
+          {$notificationSound.info?.volume_supported
+            ? 'Applies to previews and notifications. Your system volume still applies.'
+            : $notificationSound.info?.supported
+              ? 'Your operating system controls the default sound volume. Choose Doom or a custom sound to adjust it here.'
+              : 'Your operating system controls the notification sound volume.'}
+        </p>
+      </div>
       <p id="notification-sound-description" class="mt-2 text-xs leading-5 text-muted-foreground">
         {#if $notificationSound.info?.supported}
           Doom is the bundled item pickup sound. You can also choose your own WAV under 30 seconds (16-bit PCM, mono or stereo, 8–48 kHz, up to 6 MB).
@@ -280,7 +281,7 @@
         </Button>
         <Button variant="outline" size="sm"
           disabled={!$nativeNotificationPreferences.enabled || testPending || $nativeNotificationRuntime.busy || $notificationSound.busy}
-          onclick={scheduleTest}
+          onclick={() => void notificationTest.schedule()}
         >{testPending ? 'Test scheduled…' : 'Send test in 5s'}</Button>
         {#if !$notificationSound.info && !$notificationSound.busy}
           <Button variant="outline" size="sm" onclick={() => void refreshNotificationSound()}>Retry</Button>

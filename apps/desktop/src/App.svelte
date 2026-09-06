@@ -355,6 +355,7 @@
   let projectFolders = $state<ProjectFolder[]>([]);
   let processes = $state<ProcessView[]>([]);
   let profileProcesses = $state<ProcessView[]>([]);
+  let profileProcessesCurrent = false;
   let documentVisible = $state(true);
   let windowFocused = $state(false);
   let terminalProfileAutoImportStarted = false;
@@ -957,6 +958,7 @@
     const stopStatuses = client.onProcessStatuses((next) => {
       if (!active) return;
       profileProcesses = next;
+      profileProcessesCurrent = true;
       cacheProcessStatuses(next);
       if (selectedProject) {
         applyProcesses(next.filter((process) => process.project_id === selectedProject?.id));
@@ -1133,6 +1135,7 @@
   function applyConnectionStatus(status: ConnectionStatus): void {
     const previous = connection;
     const reconnected = connection.status !== 'connected' && status.status === 'connected';
+    if (status.status !== 'connected') profileProcessesCurrent = false;
     connection = status;
     if (
       previous.status !== status.status
@@ -1647,6 +1650,16 @@
     if (connection.status !== 'connected' || !connection.version_compatible) return;
     const request = ++notificationRequest;
     try {
+      // On reconnect, notification records can arrive before the first process-status event.
+      // Refresh that snapshot first so a stale/empty list cannot permanently discard ready alerts.
+      if (!profileProcessesCurrent) {
+        const currentProcesses = await client.processes();
+        if (request !== notificationRequest) return;
+        if (!profileProcessesCurrent) {
+          profileProcesses = currentProcesses;
+          profileProcessesCurrent = true;
+        }
+      }
       const next = await client.notifications();
       if (request !== notificationRequest) return;
       const fresh = nativeNotificationBaselineReady
@@ -2397,6 +2410,8 @@
     if (creationDraftsLoaded && activeProfileId === profileId) return;
     flushCreationDraftPersistence();
     activeProfileId = profileId;
+    profileProcessesCurrent = false;
+    ++notificationRequest;
     creationDrafts = loadCreationDrafts(profileId);
     agentPromptHistory = loadAgentPromptHistory(profileId);
     creationDraftsLoaded = true;
