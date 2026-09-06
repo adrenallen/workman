@@ -4,6 +4,10 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Add optional project-ready banners and a system notification sound when every agent, including
+  children, has stopped working. Wait through brief handoffs, notify once per work cycle, and offer
+  a setting to replace individual completion/input banners with the single project-ready alert.
+
 - Scroll long scratchpad, todo, agent, and feedback indexes within the available space. Show
   newest scratchpads, todos, and agents first by default; feedback stays ordered by latest update.
   Include every todo and active or archived scratchpad in the desktop, removing the 200-item cutoff.

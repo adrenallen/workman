@@ -23,6 +23,24 @@ The same page controls the default top-level agent filter.
 Viewing an agent in the focused window clears its unread state and matching OS alerts. Unread
 state remains available in Workman when OS notifications are disabled.
 
+Enable **Project ready** for a banner when every agent in a project, including children, has stopped
+working or starting. Idle agents, input prompts, timer waits, and stopped processes count as ready;
+commands and terminals do not delay the alert. The project must have been busy in this daemon
+session and remain ready for two seconds, which avoids startup alerts and brief handoff gaps.
+Readiness records appear in Workman's notification center and open the project when clicked.
+Resuming work retires the previous ready alert.
+
+**Wait until the project is ready** enables project-ready banners and suppresses individual agent
+completion/input banners. It does not replay those banners when the project finishes. Individual
+activity remains in Workman, and crash, timer, and task alerts retain their existing behavior.
+Turning Project ready off restores individual banners. Both new banner options default off.
+
+**Project-ready sound** defaults on for enabled project-ready banners and can be switched off
+separately. It uses the native system sound on macOS and Windows, and standard sound hints on Linux;
+desktop sound support, volume, and Focus/Do Not Disturb determine whether it is audible. In-app-only
+mode produces no computer banner or sound. Computer notifications retain live status updates while
+the window is minimized, independently of Keep Awake.
+
 When permission is blocked, **Open system settings** opens Workman's notification controls on
 macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
 other desktops show manual directions. Permission refreshes when Workman regains focus.
@@ -43,3 +61,6 @@ dbus-run-session -- cargo test -p workman-desktop desktop_delivery_and_clear -- 
 Packaged-app smoke tests should cover a completion while switched away/minimized, clicking its
 notification, and reading one agent while a different agent remains unread. Windows and macOS OS
 policies (including Do Not Disturb/Focus) can suppress the banner while retaining it in history.
+Also check two working agents finishing separately (including a child), one project becoming ready
+while another remains busy, sound on/off, a quick handoff restarting the two-second pause, clicking
+the project-ready alert, and work resuming while OS permission is pending.

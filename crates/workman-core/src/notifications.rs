@@ -12,6 +12,7 @@ pub type NotificationId = i64;
 pub enum NotificationType {
     AgentDone,
     NeedsInput,
+    ProjectReady,
     ProcessCrashed,
     TimerFired,
     TodoAssignedToYou,
@@ -23,6 +24,7 @@ impl NotificationType {
         match self {
             Self::AgentDone => "agent_done",
             Self::NeedsInput => "needs_input",
+            Self::ProjectReady => "project_ready",
             Self::ProcessCrashed => "process_crashed",
             Self::TimerFired => "timer_fired",
             Self::TodoAssignedToYou => "todo_assigned_to_you",
@@ -33,6 +35,7 @@ impl NotificationType {
     fn parse(value: &str) -> Self {
         match value {
             "needs_input" => Self::NeedsInput,
+            "project_ready" => Self::ProjectReady,
             "process_crashed" => Self::ProcessCrashed,
             "timer_fired" => Self::TimerFired,
             "todo_assigned_to_you" => Self::TodoAssignedToYou,
@@ -63,6 +66,36 @@ pub struct ProjectMarkReadResult {
 }
 
 impl Store {
+    pub fn create_project_ready_notification(
+        &self,
+        project_id: ProjectId,
+        created_at: i64,
+    ) -> StoreResult<()> {
+        self.connection().execute(
+            "INSERT INTO notifications (type, project_id, body, created_at)
+             SELECT 'project_ready', id,
+                    substr(COALESCE(NULLIF(trim(display_name), ''), name), 1, 160)
+                    || ' is ready for you. All agents are idle, waiting, or stopped.', ?2
+             FROM projects WHERE id = ?1",
+            params![project_id, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// An earlier ready alert becomes stale as soon as this project starts working again.
+    pub fn clear_project_ready_notifications(
+        &self,
+        project_id: ProjectId,
+        read_at: i64,
+    ) -> StoreResult<()> {
+        self.connection().execute(
+            "UPDATE notifications SET read_at = ?2
+             WHERE project_id = ?1 AND type = 'project_ready' AND read_at IS NULL",
+            params![project_id, read_at],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn create_agent_done_notification(
         &self,
         process_id: ProcessId,

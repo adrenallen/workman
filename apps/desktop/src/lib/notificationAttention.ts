@@ -1,6 +1,16 @@
 import type { Notification, ProcessView } from './daemon';
 import { validParentId } from './agentLineage.ts';
 
+export function isProjectReady(projectId: number | null, processes: ProcessView[]): boolean {
+  const agents = processes.filter((process) => process.kind === 'agent' && process.project_id === projectId);
+  return agents.length > 0 && agents.every((process) =>
+    process.status !== 'starting' && (
+      process.status !== 'running'
+      || (!process.agent_state.working && process.agent_state.state !== 'working')
+    )
+  );
+}
+
 /** A selected tab is only read when its terminal is actually in the foreground. */
 export function isAgentNotificationViewed(
   processId: number,

@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { get, writable } from 'svelte/store';
 
 import type { Notification, ProcessView } from './daemon';
-import { isTopLevelAgentNotification } from './notificationAttention.ts';
+import { isProjectReady, isTopLevelAgentNotification } from './notificationAttention.ts';
 
 export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
 
@@ -14,6 +14,9 @@ export interface NativeNotificationPreferences {
   enabled: boolean;
   needsInput: boolean;
   topLevelOnly: boolean;
+  projectReady: boolean;
+  projectReadySound: boolean;
+  waitForProject: boolean;
 }
 
 export type NativeNotificationPermissionState =
@@ -43,7 +46,10 @@ interface NativeNotificationAction {
 const fallbackPreferences: NativeNotificationPreferences = {
   enabled: true,
   needsInput: true,
-  topLevelOnly: true
+  topLevelOnly: true,
+  projectReady: false,
+  projectReadySound: true,
+  waitForProject: false
 };
 
 const checkingPermission: NativeNotificationPermission = {
@@ -83,6 +89,31 @@ export function setNeedsInputNotificationsEnabled(needsInput: boolean): void {
 
 export function setTopLevelNotificationsOnly(topLevelOnly: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), topLevelOnly });
+}
+
+export function setProjectReadyNotificationsEnabled(projectReady: boolean): void {
+  const current = get(nativeNotificationPreferences);
+  savePreferences({ ...current, projectReady, waitForProject: projectReady && current.waitForProject });
+}
+
+export function setProjectReadySoundEnabled(projectReadySound: boolean): void {
+  savePreferences({ ...get(nativeNotificationPreferences), projectReadySound });
+}
+
+export function setWaitForProjectNotifications(waitForProject: boolean): void {
+  const current = get(nativeNotificationPreferences);
+  savePreferences({ ...current, waitForProject, projectReady: waitForProject || current.projectReady });
+}
+
+function notificationAllowed(notification: Notification, processes: ProcessView[]): boolean {
+  const preferences = get(nativeNotificationPreferences);
+  if (!preferences.enabled) return false;
+  if (notification.type === 'project_ready') {
+    return preferences.projectReady && isProjectReady(notification.project_id, processes);
+  }
+  if (preferences.waitForProject && (notification.type === 'agent_done' || notification.type === 'needs_input')) return false;
+  if (notification.type === 'needs_input' && !preferences.needsInput) return false;
+  return !preferences.topLevelOnly || isTopLevelAgentNotification(notification, processes);
 }
 
 export async function refreshNativeNotificationPermission(): Promise<NativeNotificationPermission> {
@@ -137,13 +168,11 @@ export async function openNativeNotificationSettings(): Promise<void> {
 
 export async function deliverNativeNotification(
   notification: Notification,
-  processes: ProcessView[] = [],
+  processes: ProcessView[] | (() => ProcessView[]) = [],
   isUnread: () => boolean = () => notification.read_at === null
 ): Promise<boolean> {
-  const preferences = get(nativeNotificationPreferences);
-  if (!preferences.enabled) return false;
-  if (notification.type === 'needs_input' && !preferences.needsInput) return false;
-  if (preferences.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
+  const latestProcesses = () => typeof processes === 'function' ? processes() : processes;
+  if (!notificationAllowed(notification, latestProcesses())) return false;
   if (!isUnread() || readNotificationIds.has(notification.id)) return false;
   try {
     if (await getCurrentWindow().isFocused()) return false;
@@ -170,15 +199,15 @@ export async function deliverNativeNotification(
     return await enqueueNativeCommand(async () => {
       // Permission sheets and earlier deliveries can take time. Recheck before displaying so a
       // banner cannot arrive after the user has returned to Workman or read the matching agent.
-      const current = get(nativeNotificationPreferences);
-      if (!current.enabled || (notification.type === 'needs_input' && !current.needsInput)) return false;
-      if (current.topLevelOnly && !isTopLevelAgentNotification(notification, processes)) return false;
       if (await getCurrentWindow().isFocused()) return false;
+      const current = get(nativeNotificationPreferences);
+      if (!notificationAllowed(notification, latestProcesses())) return false;
       if (!isUnread() || readNotificationIds.has(notification.id)) return false;
       await invoke('native_notification_show', {
         notificationId: notification.id,
         title: notificationTitle(notification),
-        body: notification.body
+        body: notification.body,
+        ...(notification.type === 'project_ready' ? { sound: current.projectReadySound } : {})
       });
       nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
       return true;
@@ -281,6 +310,8 @@ function notificationTitle(notification: Notification): string {
       return 'Agent finished';
     case 'needs_input':
       return 'Agent needs input';
+    case 'project_ready':
+      return 'Project ready';
     case 'process_crashed':
       return 'Process crashed';
     case 'timer_fired':
@@ -298,7 +329,14 @@ function loadPreferences(): NativeNotificationPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(preferencesKey) ?? 'null');
     if (typeof stored?.enabled === 'boolean' && typeof stored?.needsInput === 'boolean') {
-      return { ...stored, topLevelOnly: typeof stored.topLevelOnly === 'boolean' ? stored.topLevelOnly : true };
+      return {
+        enabled: stored.enabled,
+        needsInput: stored.needsInput,
+        topLevelOnly: typeof stored.topLevelOnly === 'boolean' ? stored.topLevelOnly : true,
+        projectReady: stored.projectReady === true || stored.waitForProject === true,
+        projectReadySound: stored.projectReadySound !== false,
+        waitForProject: stored.waitForProject === true
+      };
     }
   } catch {
     // Defaults keep notifications enabled when local storage is unavailable or malformed.

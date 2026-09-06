@@ -468,7 +468,8 @@
     const request = shouldSubscribeProcessStatuses(
       documentVisible,
       keepAwakeArmed,
-      autoKeepAwakeEnabled
+      autoKeepAwakeEnabled,
+      $nativeNotificationPreferences.enabled
     )
       ? client.subscribeProcessStatuses()
       : client.unsubscribeProcessStatuses();
@@ -1635,7 +1636,7 @@
       if (fresh.length > 0) {
         nativeDeliveryQueue = nativeDeliveryQueue.catch(() => undefined).then(async () => {
           for (const notification of fresh) {
-            await deliverNativeNotification(notification, profileProcesses, () =>
+            await deliverNativeNotification(notification, () => profileProcesses, () =>
               notifications.some((current) => current.id === notification.id && current.read_at === null)
             );
           }

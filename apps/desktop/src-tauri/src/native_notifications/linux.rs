@@ -58,6 +58,7 @@ impl Backend {
         notification_id: i64,
         title: &str,
         body: &str,
+        sound: Option<bool>,
         on_open: impl Fn() + Send + 'static,
     ) -> Result<(), String> {
         let (connection, owner, capabilities) = server().await?;
@@ -73,10 +74,16 @@ impl Backend {
             .receive_signal("NotificationClosed")
             .await
             .map_err(|error| error.to_string())?;
-        let hints = HashMap::from([
+        let mut hints = HashMap::from([
             ("desktop-entry", Value::from("workman-desktop")),
             ("transient", Value::from(false)),
         ]);
+        if let Some(sound) = sound {
+            hints.insert("suppress-sound", Value::from(!sound));
+            if sound {
+                hints.insert("sound-name", Value::from("message-new-instant"));
+            }
+        }
         let body = if capabilities
             .iter()
             .any(|capability| capability == "body-markup")

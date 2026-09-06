@@ -5,7 +5,8 @@ import { get } from 'svelte/store';
 import { isAgentNotificationViewed, isTopLevelAgentNotification } from '../src/lib/notificationAttention.ts';
 import {
   deliverNativeNotification, deliverNativeSystemNotification, dismissNativeNotifications, nativeNotificationPreferences,
-  nativeNotificationRuntime, openNativeNotificationSettings, setNativeNotificationsEnabled, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive
+  nativeNotificationRuntime, openNativeNotificationSettings, setNativeNotificationsEnabled, setTopLevelNotificationsOnly, syncDockUnreadBadge, keepNotificationDeliveryActive,
+  setProjectReadyNotificationsEnabled, setProjectReadySoundEnabled, setWaitForProjectNotifications
 } from '../src/lib/nativeNotifications.ts';
 
 const allowed = { state: 'granted', platform: 'macos', detail: null };
@@ -32,7 +33,7 @@ beforeEach(() => {
     if (command === 'plugin:window|is_focused') return focused;
     return handle(command, args);
   });
-  nativeNotificationPreferences.set({ enabled: true, needsInput: true, topLevelOnly: true });
+  nativeNotificationPreferences.set({ enabled: true, needsInput: true, topLevelOnly: true, projectReady: false, projectReadySound: true, waitForProject: false });
   nativeNotificationRuntime.set({ permission: allowed, busy: false, error: null });
 });
 afterEach(() => { clearMocks(); delete globalThis.window; delete globalThis.localStorage; });
@@ -43,6 +44,96 @@ const deferred = () => {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 };
+
+const projectReady = id => ({ ...notification(id, 'project_ready'), process_id: null, body: 'Project 1 is ready for you.' });
+const idleAgent = (id = 7, project_id = 1) => ({
+  ...root, id, project_id, status: 'running', agent_state: {state:'idle', working:false}
+});
+const workingAgent = (id = 7, project_id = 1) => ({
+  ...idleAgent(id, project_id), agent_state: {state:'working', working:true}
+});
+
+test('project-ready banners are opt-in and request a configurable system sound', async () => {
+  assert.equal(await deliverNativeNotification(projectReady(301), [idleAgent()]), false);
+  setProjectReadyNotificationsEnabled(true);
+  assert.equal(await deliverNativeNotification(projectReady(302), [idleAgent()]), true);
+  assert.deepEqual(shown()[0].args, {notificationId:302, title:'Project ready', body:'Project 1 is ready for you.', sound:true});
+  setProjectReadySoundEnabled(false);
+  assert.equal(await deliverNativeNotification(projectReady(303), [idleAgent()]), true);
+  assert.equal(shown()[1].args.sound, false);
+  setNativeNotificationsEnabled(false);
+  assert.equal(await deliverNativeNotification(projectReady(304), [idleAgent()]), false);
+  assert.equal(shown().length, 2);
+});
+
+test('waiting for the project replaces individual completion/input banners and persists the choice', async () => {
+  let saved;
+  globalThis.localStorage.setItem = (_key, value) => { saved = JSON.parse(value); };
+  setWaitForProjectNotifications(true);
+  assert.equal(saved.waitForProject, true);
+  assert.equal(saved.projectReady, true);
+  assert.equal(await deliverNativeNotification(notification(305), [idleAgent()]), false);
+  assert.equal(await deliverNativeNotification(notification(306, 'needs_input'), [idleAgent()]), false);
+  assert.equal(await deliverNativeNotification(projectReady(307), [workingAgent()]), false);
+  assert.equal(await deliverNativeNotification(projectReady(308), [idleAgent()]), true);
+  assert.equal(await deliverNativeNotification(notification(309, 'timer_fired'), [workingAgent()]), true);
+  assert.deepEqual(shown().map(({args}) => args.notificationId), [308, 309]);
+  setProjectReadyNotificationsEnabled(false);
+  assert.equal(saved.waitForProject, false, 'disabling project alerts must not leave all completion alerts muted');
+  assert.equal(await deliverNativeNotification(notification(310), [idleAgent()]), true);
+});
+
+test('project readiness includes children and starting agents, but excludes other projects and stopped work', async () => {
+  setWaitForProjectNotifications(true);
+  const parent = {...idleAgent(), agent_state:{state:'waiting',working:false}};
+  const child = {...workingAgent(8), spawned_by_process_id:7};
+  assert.equal(await deliverNativeNotification(projectReady(311), [parent, child]), false);
+  assert.equal(await deliverNativeNotification(projectReady(312), [parent, {...child, status:'starting', agent_state:{state:'idle',working:false}}]), false);
+  assert.equal(await deliverNativeNotification(projectReady(313), [parent, {...child,status:'stopped'}, workingAgent(9, 2)]), true);
+  assert.equal(await deliverNativeNotification(projectReady(314), []), false, 'deleted projects must not alert');
+});
+
+test('resuming project work while permission is pending prevents a stale ding', async () => {
+  setWaitForProjectNotifications(true);
+  const requested = deferred();
+  const permission = deferred();
+  nativeNotificationRuntime.set({permission:{...allowed,state:'not_determined'},busy:false,error:null});
+  handle = command => {
+    if (command === 'native_notification_request_permission') { requested.resolve(); return permission.promise; }
+  };
+  let processes = [idleAgent()];
+  const pending = deliverNativeNotification(projectReady(315), () => processes);
+  await requested.promise;
+  processes = [workingAgent()];
+  permission.resolve(allowed);
+  assert.equal(await pending, false);
+  assert.equal(shown().length, 0);
+});
+
+test('queued agent delivery honors switching to project-only notifications', async () => {
+  const requested = deferred();
+  const permission = deferred();
+  nativeNotificationRuntime.set({permission:{...allowed,state:'not_determined'},busy:false,error:null});
+  handle = command => {
+    if (command === 'native_notification_request_permission') { requested.resolve(); return permission.promise; }
+  };
+  const pending = deliverNativeNotification(notification(316), [idleAgent()]);
+  await requested.promise;
+  setWaitForProjectNotifications(true);
+  permission.resolve(allowed);
+  assert.equal(await pending, false);
+  assert.equal(shown().length, 0);
+});
+
+test('reading a project-ready notification clears its OS entry and prevents a repeat sound', async () => {
+  setWaitForProjectNotifications(true);
+  const ready = projectReady(317);
+  assert.equal(await deliverNativeNotification(ready, [idleAgent()]), true);
+  await dismissNativeNotifications([317]);
+  assert.equal(await deliverNativeNotification(ready, [idleAgent()]), false);
+  assert.equal(shown().length, 1);
+  assert.deepEqual(calls.at(-1).args.notificationIds, [317]);
+});
 
 test('opening system settings keeps permission denied until the OS reports a change', async () => {
   const denied = { ...allowed, state: 'denied' };
@@ -82,7 +173,7 @@ test('in-app only persists, suppresses computer alerts, and clears badges withou
   let saved;
   globalThis.localStorage.setItem = (_key, value) => { saved = JSON.parse(value); };
   setNativeNotificationsEnabled(false);
-  assert.deepEqual(saved, { enabled: false, needsInput: true, topLevelOnly: true });
+  assert.deepEqual(saved, { enabled: false, needsInput: true, topLevelOnly: true, projectReady: false, projectReadySound: true, waitForProject: false });
   await syncDockUnreadBadge(2);
   const badges = calls.filter(({ command }) => command === 'native_notification_set_badge');
   assert.deepEqual(badges.map(({ args }) => args.count), [2, 0]);

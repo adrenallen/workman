@@ -89,6 +89,7 @@ export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'e
 export type NotificationType =
   | 'agent_done'
   | 'needs_input'
+  | 'project_ready'
   | 'process_crashed'
   | 'timer_fired'
   | 'todo_assigned_to_you'

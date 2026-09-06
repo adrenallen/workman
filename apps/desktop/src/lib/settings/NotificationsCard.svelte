@@ -16,6 +16,9 @@
     setNativeNotificationsEnabled,
     setNeedsInputNotificationsEnabled,
     setTopLevelNotificationsOnly,
+    setProjectReadyNotificationsEnabled,
+    setProjectReadySoundEnabled,
+    setWaitForProjectNotifications,
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
 
@@ -106,10 +109,73 @@
   <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
     <div class="flex min-w-0 flex-1 items-center gap-3">
       <Switch
+        id="project-ready-notifications"
+        size="sm"
+        checked={$nativeNotificationPreferences.projectReady}
+        disabled={!$nativeNotificationPreferences.enabled}
+        onCheckedChange={(checked) => setProjectReadyNotificationsEnabled(checked === true)}
+      />
+      <label for="project-ready-notifications" class="min-w-0">
+        <span class="block text-sm font-medium">Project ready</span>
+        <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Send one banner after every agent in a project, including child agents, is idle, waiting for input or a timer, or stopped. A short pause avoids alerts during handoffs.</span>
+      </label>
+    </div>
+    <span class="font-mono text-xs text-muted-foreground">
+      {$nativeNotificationPreferences.projectReady ? 'On' : 'Off'}
+    </span>
+  </div>
+
+  <Separator />
+
+  <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
+      <Switch
+        id="wait-for-project-notifications"
+        size="sm"
+        checked={$nativeNotificationPreferences.waitForProject}
+        disabled={!$nativeNotificationPreferences.enabled}
+        onCheckedChange={(checked) => setWaitForProjectNotifications(checked === true)}
+      />
+      <label for="wait-for-project-notifications" class="min-w-0">
+        <span class="block text-sm font-medium">Wait until the project is ready</span>
+        <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Replace individual completion and input banners with one project-ready alert. Individual activity stays in Workman. Turning this on also enables Project ready.</span>
+      </label>
+    </div>
+    <span class="font-mono text-xs text-muted-foreground">
+      {$nativeNotificationPreferences.waitForProject ? 'On' : 'Off'}
+    </span>
+  </div>
+
+  <Separator />
+
+  <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
+      <Switch
+        id="project-ready-sound"
+        size="sm"
+        checked={$nativeNotificationPreferences.projectReadySound}
+        disabled={!$nativeNotificationPreferences.enabled || !$nativeNotificationPreferences.projectReady}
+        onCheckedChange={(checked) => setProjectReadySoundEnabled(checked === true)}
+      />
+      <label for="project-ready-sound" class="min-w-0">
+        <span class="block text-sm font-medium">Project-ready sound</span>
+        <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Play the system notification sound with the project-ready banner. Your system volume and Do Not Disturb settings still apply.</span>
+      </label>
+    </div>
+    <span class="font-mono text-xs text-muted-foreground">
+      {$nativeNotificationPreferences.projectReadySound ? 'On' : 'Off'}
+    </span>
+  </div>
+
+  <Separator />
+
+  <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3">
+    <div class="flex min-w-0 flex-1 items-center gap-3">
+      <Switch
         id="needs-input-notifications-enabled"
         size="sm"
         checked={$nativeNotificationPreferences.needsInput}
-        disabled={!$nativeNotificationPreferences.enabled}
+        disabled={!$nativeNotificationPreferences.enabled || $nativeNotificationPreferences.waitForProject}
         onCheckedChange={(checked) => setNeedsInputNotificationsEnabled(checked === true)}
       />
       <label for="needs-input-notifications-enabled" class="min-w-0">
@@ -130,7 +196,7 @@
         id="top-level-notifications-only"
         size="sm"
         checked={$nativeNotificationPreferences.topLevelOnly}
-        disabled={!$nativeNotificationPreferences.enabled}
+        disabled={!$nativeNotificationPreferences.enabled || $nativeNotificationPreferences.waitForProject}
         onCheckedChange={(checked) => setTopLevelNotificationsOnly(checked === true)}
       />
       <label for="top-level-notifications-only" class="min-w-0">
@@ -198,7 +264,7 @@
 
   <footer class="bg-muted/40 px-4 py-3 text-xs leading-5 text-muted-foreground">
     In-app notifications stay available in either mode. Your choice is saved on this computer.
-    Click a notification to open its agent; viewing the agent clears matching system alerts.
+    Click a notification to open its agent or project; reading it clears matching system alerts.
     Linux history, click actions, and launcher badges depend on your desktop environment.
   </footer>
 </section>

@@ -215,9 +215,10 @@ export function shouldHoldAutoKeepAwake(
 export function shouldSubscribeProcessStatuses(
   documentVisible: boolean,
   keepAwakeArmed: boolean,
-  autoKeepAwakeEnabled = false
+  autoKeepAwakeEnabled = false,
+  computerNotificationsEnabled = false
 ): boolean {
-  return documentVisible || keepAwakeArmed || autoKeepAwakeEnabled;
+  return documentVisible || keepAwakeArmed || autoKeepAwakeEnabled || computerNotificationsEnabled;
 }
 
 export function armKeepAwake(

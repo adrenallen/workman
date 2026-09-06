@@ -60,11 +60,12 @@ pub async fn native_notification_show(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
     let title = checked_copy("title", title, 160)?;
     let body = checked_copy("body", body, 1_024)?;
 
-    show_notification(app, notification_id, title, body).await
+    show_notification(app, notification_id, title, body, sound).await
 }
 
 #[tauri::command]
@@ -125,10 +126,14 @@ async fn show_notification(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
     let mut notification = mac_usernotifications::Notification::new()
         .title(title)
         .message(body);
+    if sound == Some(true) {
+        notification = notification.default_sound();
+    }
     if notification_id > 0 {
         // The durable notification ID lets reading an agent clear the matching Notification
         // Center entry, including notifications delivered before the desktop was restarted.
@@ -161,10 +166,11 @@ async fn show_notification(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
     let backend = app.state::<NativeNotificationState>().linux.clone();
     backend
-        .show(notification_id, &title, &body, move || {
+        .show(notification_id, &title, &body, sound, move || {
             activate_notification(&app, notification_id)
         })
         .await
@@ -176,6 +182,7 @@ async fn show_notification(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
     let backend = app.state::<NativeNotificationState>().windows.clone();
     let app_id = app.config().identifier.clone();
@@ -187,7 +194,7 @@ async fn show_notification(
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         backend.prepare(&app_id, &name, &executable)?;
-        backend.show(&app_id, notification_id, &title, &body, move || {
+        backend.show(&app_id, notification_id, &title, &body, sound, move || {
             activate_notification(&app, notification_id)
         })
     })

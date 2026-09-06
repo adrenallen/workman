@@ -151,11 +151,17 @@ impl Backend {
         id: i64,
         title: &str,
         body: &str,
+        sound: Option<bool>,
         on_open: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
         let _apartment = Apartment::new().map_err(|error| error.to_string())?;
         let document = XmlDocument::new().map_err(|error| error.to_string())?;
-        document.LoadXml(&HSTRING::from("<toast><visual><binding template=\"ToastGeneric\"><text/><text/></binding></visual></toast>")).map_err(|error| error.to_string())?;
+        let audio = match sound {
+            Some(true) => "<audio src=\"ms-winsoundevent:Notification.Default\"/>",
+            Some(false) => "<audio silent=\"true\"/>",
+            None => "",
+        };
+        document.LoadXml(&HSTRING::from(format!("<toast><visual><binding template=\"ToastGeneric\"><text/><text/></binding></visual>{audio}</toast>"))).map_err(|error| error.to_string())?;
         let texts = document
             .GetElementsByTagName(&HSTRING::from("text"))
             .map_err(|error| error.to_string())?;

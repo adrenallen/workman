@@ -185,10 +185,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "feedback_append_history",
         include_str!("../migrations/0034_feedback_append_history.sql"),
     ),
+    (
+        35,
+        "project_ready_notifications",
+        include_str!("../migrations/0035_project_ready_notifications.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 34;
+pub const LATEST_SCHEMA_VERSION: i64 = 35;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -2641,6 +2646,53 @@ fn query_strings(connection: &Connection, sql: &str, id: i64) -> StoreResult<Vec
         .query_map([id], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(strings)
+}
+
+#[cfg(test)]
+#[test]
+fn project_ready_migration_preserves_notification_ids_and_read_history() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 34) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO projects (id, path, name) VALUES (1, '/tmp/ready-migration', 'Ready');
+         INSERT INTO notifications (id, type, project_id, body, created_at, read_at)
+         VALUES (7, 'agent_done', 1, 'Finished', 100, NULL),
+                (8, 'mentioned_in_comment', 1, 'Mention', 200, 300);",
+        )
+        .unwrap();
+    let store = Store::from_connection(connection).unwrap();
+    store.create_project_ready_notification(1, 400).unwrap();
+    let rows = store.list_notifications(None, 100).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].id, 9);
+    assert_eq!(rows[0].kind, crate::NotificationType::ProjectReady);
+    assert_eq!(rows[1].id, 8);
+    assert_eq!(rows[1].kind, crate::NotificationType::MentionedInComment);
+    assert_eq!(rows[1].read_at, Some(300));
+    assert_eq!(rows[2].id, 7);
+    assert_eq!(rows[2].body, "Finished");
+    assert_eq!(rows[2].read_at, None);
+    let violations: i64 = store
+        .connection()
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
 }
 
 #[cfg(test)]

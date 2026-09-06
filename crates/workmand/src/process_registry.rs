@@ -47,6 +47,7 @@ use crate::config::{
 };
 use crate::mcp::agent_spawning::WORKMAN_EPHEMERAL_AGENT_HOME_ENV;
 use crate::process_tree::TrackedProcessTree;
+use crate::project_notifications::ProjectNotifications;
 use crate::status_invalidation::StatusInvalidationHub;
 use crate::user_config::user_config_path;
 use crate::user_environment::{ResolvedUserEnvironment, UserEnvironmentResolver};
@@ -483,6 +484,7 @@ pub struct ProcessEvent {
 pub struct ProcessRegistry {
     store: Store,
     status_invalidations: StatusInvalidationHub,
+    project_notifications: ProjectNotifications,
     running: HashMap<ProcessId, PtyProcess>,
     input_router: ProcessInputRouter,
     /// Last geometry measured by a desktop terminal surface, including while stopped.
@@ -615,6 +617,7 @@ impl ProcessRegistry {
         let mut registry = Self {
             store,
             status_invalidations: StatusInvalidationHub::default(),
+            project_notifications: ProjectNotifications::default(),
             running: HashMap::new(),
             input_router: ProcessInputRouter::default(),
             pty_sizes: HashMap::new(),
@@ -764,9 +767,11 @@ impl ProcessRegistry {
             .list(project_id)?
             .into_iter()
             .map(|process| self.status_view(process))
-            .collect();
+            .collect::<RegistryResult<Vec<_>>>()?;
+        self.project_notifications
+            .observe(&self.store, project_id, &statuses, now_millis())?;
         self.arm_attention_deadline();
-        statuses
+        Ok(statuses)
     }
 
     /// Attach attention state to an already-loaded process record.
@@ -2249,6 +2254,7 @@ impl ProcessRegistry {
             .outputs
             .values()
             .filter_map(|output| output.attention.next_transition_at(now))
+            .chain(self.project_notifications.next_deadline())
             .min()
         {
             self.status_invalidations.arm_deadline(at);

@@ -11,6 +11,7 @@ use zbus::{connection::Builder, object_server::SignalEmitter, zvariant::OwnedVal
 #[derive(Default)]
 struct Calls {
     notifications: Vec<(u32, String, String)>,
+    sounds: Vec<(Option<bool>, Option<String>)>,
     closed: Vec<u32>,
     fail_close: bool,
     plain_text_only: bool,
@@ -51,6 +52,15 @@ impl Desktop {
             assert_eq!(actions, ["default", "Open Workman"]);
         }
         assert!(hints.contains_key("desktop-entry"));
+        self.calls.lock().unwrap().sounds.push((
+            hints
+                .get("suppress-sound")
+                .and_then(|value| bool::try_from(value).ok()),
+            hints
+                .get("sound-name")
+                .and_then(|value| <&str>::try_from(value).ok())
+                .map(str::to_owned),
+        ));
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         self.calls
             .lock()
@@ -120,17 +130,23 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
             .any(|capability| capability == "actions")
     );
     backend
-        .show(11, "Agent finished", "A & B <C>", || {})
+        .show(11, "Agent finished", "A & B <C>", None, || {})
         .await
         .unwrap();
     let (opened, clicked) = tokio::sync::oneshot::channel();
     let opened = StdMutex::new(Some(opened));
     backend
-        .show(12, "Agent needs input", "Second agent", move || {
-            if let Some(opened) = opened.lock().unwrap().take() {
-                let _ = opened.send(());
-            }
-        })
+        .show(
+            12,
+            "Agent needs input",
+            "Second agent",
+            Some(true),
+            move || {
+                if let Some(opened) = opened.lock().unwrap().take() {
+                    let _ = opened.send(());
+                }
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -150,9 +166,17 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
         .unwrap();
 
     backend
-        .show(13, "Retry removal", "Third agent", || {})
+        .show(13, "Retry removal", "Third agent", Some(false), || {})
         .await
         .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().sounds,
+        [
+            (None, None),
+            (Some(false), Some("message-new-instant".into())),
+            (Some(true), None),
+        ]
+    );
     calls.lock().unwrap().fail_close = true;
     assert!(backend.dismiss(&[13]).await.is_err());
     assert!(backend.shown.lock().await.contains_key(&13));
@@ -171,14 +195,14 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
     );
 
     backend
-        .show(14, "Old desktop", "Older unread", || {})
+        .show(14, "Old desktop", "Older unread", None, || {})
         .await
         .unwrap();
     service.release_name(SERVICE).await.unwrap();
     let new_calls = Arc::new(StdMutex::new(Calls::default()));
     let _replacement = desktop(new_calls.clone()).await;
     backend
-        .show(15, "New desktop", "Newer unread", || {})
+        .show(15, "New desktop", "Newer unread", None, || {})
         .await
         .unwrap();
     backend.dismiss(&[14]).await.unwrap();
@@ -192,7 +216,7 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
 
     new_calls.lock().unwrap().plain_text_only = true;
     backend
-        .show(16, "Minimal desktop", "A & B <C>", || {})
+        .show(16, "Minimal desktop", "A & B <C>", None, || {})
         .await
         .unwrap();
     assert_eq!(new_calls.lock().unwrap().notifications[1].2, "A & B <C>");

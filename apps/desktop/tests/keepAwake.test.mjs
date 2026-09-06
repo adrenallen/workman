@@ -508,6 +508,11 @@ test('armed keep awake retains process statuses while the document is hidden', (
   assert.equal(shouldSubscribeProcessStatuses(false, false), false);
 });
 
+test('computer notifications retain hidden status updates without requiring keep awake', () => {
+  assert.equal(shouldSubscribeProcessStatuses(false, false, false, true), true);
+  assert.equal(shouldSubscribeProcessStatuses(false, false, false, false), false);
+});
+
 test('control exposes resilient, truthful keep-awake status and copy', async () => {
   const [app, control, navigation, palette, shortcuts, native, config] = await Promise.all(
     Object.values(files).map((file) => readFile(file, 'utf8'))
