@@ -38,7 +38,7 @@
   let assignment = $state<AssignmentFilter>('all');
   let tag = $state('all');
   let priority = $state<PriorityFilter>('all');
-  let sort = $state<SortMode>('state');
+  let sort = $state<SortMode>('newest');
 
   const priorityRank: Record<TodoPriority, number> = { high: 0, medium: 1, low: 2 };
   const stateRank = { blocked: 0, claimed: 1, open: 2, completed: 3 } as const;
@@ -107,7 +107,7 @@
     assignment = 'all';
     tag = 'all';
     priority = 'all';
-    sort = 'state';
+    sort = 'newest';
   }
 
   function statusCopy(todo: TodoSummary): string {
@@ -152,7 +152,7 @@
       <label><span>Dependency</span><select bind:value={blocked} aria-label="Filter blocked todos"><option value="all">Any</option><option value="blocked">Blocked</option><option value="unblocked">Not blocked</option></select></label>
       <label><span>Tag</span><select bind:value={tag} aria-label="Filter todos by tag"><option value="all">Any tag</option>{#each tags as item}<option value={item}>{item}</option>{/each}</select></label>
       <label><span>Priority</span><select bind:value={priority} aria-label="Filter todos by priority"><option value="all">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
-      <label><span>Sort</span><select bind:value={sort} aria-label="Sort todos"><option value="state">Claim state</option><option value="priority">Priority</option><option value="newest">Newest ID</option><option value="title">Title</option></select></label>
+      <label><span>Sort</span><select bind:value={sort} aria-label="Sort todos"><option value="newest">Newest first</option><option value="state">Claim state</option><option value="priority">Priority</option><option value="title">Title</option></select></label>
     </div>
   {/snippet}
 
@@ -257,5 +257,11 @@
     .filter-panel { grid-template-columns: minmax(190px, 2fr) repeat(3, minmax(100px, 1fr)); }
     .todo-row { grid-template-columns: 3px 15px 42px minmax(150px, 1fr) 92px 58px; }
     .signals { display: none; }
+  }
+
+  @container (max-width: 620px) {
+    .filter-panel { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .search-field { grid-column: span 2; }
+    .todo-row { grid-template-columns: 3px 15px 32px minmax(0, 1fr) 76px 50px; gap: 6px; }
   }
 </style>

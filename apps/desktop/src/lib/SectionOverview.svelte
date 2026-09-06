@@ -68,6 +68,7 @@
     width: 100%;
     height: 100%;
     min-width: 0;
+    min-height: 0;
     grid-template-rows: auto auto auto minmax(0, 1fr);
     background: var(--background);
     color: var(--foreground);
@@ -111,7 +112,7 @@
   .overview-controls { border-bottom: 1px solid var(--border); background: var(--card); }
   .overview-summary { display: flex; min-height: 28px; align-items: center; gap: var(--space-2); border-bottom: 1px solid var(--border); padding: 0 12px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .overview-summary.split-summary { justify-content: space-between; }
-  .overview-body { min-height: 0; overflow: hidden; }
+  .overview-body { display: grid; grid-template-rows: minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; }
 
   @container (max-width: 620px) {
     .overview-heading { grid-template-columns: 34px minmax(0, 1fr); }

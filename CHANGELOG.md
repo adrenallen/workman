@@ -4,6 +4,10 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Scroll long scratchpad, todo, agent, and feedback indexes within the available space. Show
+  newest scratchpads, todos, and agents first by default; feedback stays ordered by latest update.
+  Include every todo and active or archived scratchpad in the desktop, removing the 200-item cutoff.
+
 - Clarify the saved Computer notifications setting: turn it off for in-app only alerts, including
   hiding Dock/taskbar badges while retaining Workman's unread notifications. Add an Open system
   settings shortcut when notification permission is blocked.

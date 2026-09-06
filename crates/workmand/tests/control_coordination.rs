@@ -11,7 +11,10 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
-use workman_core::{NewTodo, Project, ScratchpadService, TodoPriority, TodoService};
+use workman_core::{
+    NewTodo, Project, ScratchpadListQuery, ScratchpadService, TodoListQuery, TodoPriority,
+    TodoService,
+};
 use workmand::{DaemonConfig, DaemonServer, Discovery, SharedProcessRegistry};
 
 struct TestServer {
@@ -193,6 +196,124 @@ async fn rpc_error(socket: &mut Socket, id: &str, method: &str, params: Value) -
             return response["error"].clone();
         }
     }
+}
+
+#[tokio::test]
+async fn coordination_snapshot_includes_items_beyond_agent_api_page_limits() {
+    let server = TestServer::start().await;
+    {
+        let registry = server.registry.lock().await;
+        let store = registry.store();
+        let todos = TodoService::new(store);
+        let scratchpads = ScratchpadService::new(store);
+        for index in 0..205 {
+            todos
+                .create(
+                    1,
+                    NewTodo {
+                        title: format!("Todo {index}"),
+                        body: String::new(),
+                        priority: TodoPriority::Low,
+                        tags: vec![],
+                    },
+                    0,
+                )
+                .unwrap();
+            for archived in [false, true] {
+                let (scratchpad, _) = scratchpads
+                    .write(
+                        1,
+                        None,
+                        format!("Scratchpad {index} archived={archived}"),
+                        String::new(),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                if archived {
+                    scratchpads.archive(1, scratchpad.id, None).unwrap();
+                }
+            }
+        }
+        // The desktop snapshot must not weaken pagination for agent-facing lists.
+        let todos_page = todos
+            .list(
+                1,
+                TodoListQuery {
+                    limit: Some(1_000),
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(todos_page.todos.len(), 200);
+        assert_eq!(todos_page.total_count, 207);
+        assert_eq!(todos_page.next_offset, Some(200));
+        for archived in [false, true] {
+            let page = scratchpads
+                .list(
+                    1,
+                    ScratchpadListQuery {
+                        archived,
+                        limit: Some(1_000),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(page.scratchpads.len(), 200);
+            assert_eq!(page.total_count, 206);
+            assert_eq!(page.next_offset, Some(200));
+        }
+    }
+    let (mut socket, _) = connect_async(server.request()).await.unwrap();
+    let snapshot = rpc(
+        &mut socket,
+        "large-snapshot",
+        "coordination.snapshot",
+        json!({ "project_id": 1 }),
+    )
+    .await;
+    for (key, count_key, count) in [
+        ("todos", "todo_total_count", 207),
+        ("scratchpads", "scratchpad_total_count", 206),
+        (
+            "archived_scratchpads",
+            "archived_scratchpad_total_count",
+            206,
+        ),
+    ] {
+        let items = snapshot[key].as_array().unwrap();
+        assert_eq!(items.len(), count, "{key} must include every item");
+        assert_eq!(snapshot[count_key], count);
+        let ids = items
+            .iter()
+            .map(|item| item["id"].as_i64().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), count, "{key} must not duplicate items");
+    }
+    assert!(
+        snapshot["todos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|todo| todo["title"] == "Todo 204")
+    );
+    assert!(
+        snapshot["scratchpads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|scratchpad| scratchpad["archived"] == false)
+    );
+    assert!(
+        snapshot["archived_scratchpads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|scratchpad| scratchpad["archived"] == true)
+    );
+    socket.close(None).await.unwrap();
+    server.stop().await;
 }
 
 #[tokio::test]

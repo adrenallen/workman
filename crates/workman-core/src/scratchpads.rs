@@ -986,6 +986,52 @@ impl<'store> ScratchpadService<'store> {
         project_id: ProjectId,
         query: ScratchpadListQuery,
     ) -> ScratchpadServiceResult<ScratchpadPage> {
+        let limit = query
+            .limit
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+        let requested_offset = query.offset;
+        let matches = self.matching_scratchpads(project_id, query)?;
+        let total_count = matches.len();
+        let offset = requested_offset.min(total_count);
+        let scratchpads = matches
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let end = offset + scratchpads.len();
+        let has_more = end < total_count;
+        Ok(ScratchpadPage {
+            scratchpads,
+            total_count,
+            offset,
+            limit,
+            has_more,
+            next_offset: has_more.then_some(end),
+        })
+    }
+
+    /// All active or archived summaries for the desktop's coordination snapshot.
+    /// Agent-facing lists retain their bounded pages through `list`.
+    pub fn snapshot(
+        &self,
+        project_id: ProjectId,
+        archived: bool,
+    ) -> ScratchpadServiceResult<Vec<ScratchpadSummary>> {
+        self.matching_scratchpads(
+            project_id,
+            ScratchpadListQuery {
+                archived,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn matching_scratchpads(
+        &self,
+        project_id: ProjectId,
+        query: ScratchpadListQuery,
+    ) -> ScratchpadServiceResult<Vec<ScratchpadSummary>> {
         self.require_project(project_id)?;
         let tags = normalize_tags(query.tags)?;
         let needle = query
@@ -1055,27 +1101,7 @@ impl<'store> ScratchpadService<'store> {
                 match_snippet,
             });
         }
-        let total_count = matches.len();
-        let limit = query
-            .limit
-            .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE);
-        let offset = query.offset.min(total_count);
-        let scratchpads = matches
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
-        let end = offset + scratchpads.len();
-        let has_more = end < total_count;
-        Ok(ScratchpadPage {
-            scratchpads,
-            total_count,
-            offset,
-            limit,
-            has_more,
-            next_offset: has_more.then_some(end),
-        })
+        Ok(matches)
     }
 
     /// Replace the manual order of active scratchpads while preserving archived-row slots.
