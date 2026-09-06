@@ -4,6 +4,7 @@ export interface RecoveryAwareUpdate {
     available: boolean;
     current: string;
     latest: string;
+    install_blocked?: string | null;
   };
 }
 
@@ -17,12 +18,38 @@ export interface UpdateActionCopy {
   bannerDescription: string;
 }
 
+/**
+ * A newer release without a package for this platform. Nothing can be installed from it, not
+ * even a CLI repair: the daemon always installs the latest release, and its package is missing.
+ */
+export function updateInstallBlocked(update: RecoveryAwareUpdate): string | null {
+  return update.check.available ? update.check.install_blocked ?? null : null;
+}
+
 export function updateActionAvailable(update: RecoveryAwareUpdate): boolean {
+  if (updateInstallBlocked(update) !== null) return false;
   return update.check.available || update.cli_recovery_required;
 }
 
 export function updateActionCopy(update: RecoveryAwareUpdate): UpdateActionCopy {
   const { check, cli_recovery_required: recovery } = update;
+  const blocked = updateInstallBlocked(update);
+  if (blocked !== null) {
+    // The newer release is real, but this platform has nothing to install, so no button is
+    // offered; the copy explains and points at the download page instead.
+    const repairNote = recovery
+      ? ' The wrk and workmand launchers are also missing; installing that release restores them.'
+      : '';
+    return {
+      buttonLabel: 'Download release',
+      busyLabel: 'Download release',
+      dialogTitle: `Download Workman ${check.latest}`,
+      dialogDescription: blocked + repairNote,
+      confirmLabel: 'Download release',
+      bannerTitle: `Workman ${check.latest} is available to download`,
+      bannerDescription: blocked + repairNote
+    };
+  }
   if (recovery && check.available) {
     return {
       buttonLabel: 'Repair CLI and update',

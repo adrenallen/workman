@@ -4,6 +4,7 @@ import type {
   UpdateStage,
   UpdateStatus
 } from './settings';
+import { updateActionAvailable, updateInstallBlocked } from './updateRecovery.ts';
 
 export type UpdateCompletionAction = 'relaunch' | 'restart-daemon-only' | 'manual-restart';
 export type UpdateRestartAction = 'app' | 'daemon' | null;
@@ -27,6 +28,9 @@ export interface UpdateEnvironment {
   appBundle: string | null;
 }
 
+/** The one action an available release offers, shared by the banner and the About card. */
+export type UpdateBannerAction = 'install' | 'download' | null;
+
 export interface UpdateBannerState {
   visible: boolean;
   mode: 'available' | 'running' | 'restarting' | 'needs-restart' | 'failed';
@@ -38,6 +42,8 @@ export interface UpdateBannerState {
   restart: boolean;
   restartLabel: string | null;
   dismiss: boolean;
+  action: UpdateBannerAction;
+  releaseUrl: string | null;
 }
 
 export const idleUpdateFlow: UpdateFlow = { kind: 'idle' };
@@ -129,7 +135,9 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
       retry: false,
       restart: false,
       restartLabel: null,
-      dismiss: false
+      dismiss: false,
+      action: null,
+      releaseUrl: null
     };
   }
   if (flow.kind === 'restarting') {
@@ -145,7 +153,9 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
       retry: false,
       restart: false,
       restartLabel: null,
-      dismiss: false
+      dismiss: false,
+      action: null,
+      releaseUrl: null
     };
   }
   if (flow.kind === 'needs-restart') {
@@ -159,7 +169,9 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
       retry: false,
       restart: flow.restartAction !== null,
       restartLabel: flow.restartAction === 'daemon' ? 'Restart daemon' : flow.restartAction === 'app' ? 'Restart now' : null,
-      dismiss: true
+      dismiss: true,
+      action: null,
+      releaseUrl: null
     };
   }
   if (flow.kind === 'failed') return failedBanner(flow.stage, flow.message);
@@ -167,23 +179,33 @@ export function updateBannerState(update: UpdateStatus | null, flow: UpdateFlow)
   const check = update?.check;
   const recovery = update?.cli_recovery_required === true;
   const available = check?.available === true;
+  const blocked = update ? updateInstallBlocked(update) : null;
+  const action: UpdateBannerAction = update && updateActionAvailable(update)
+    ? 'install'
+    : blocked !== null ? 'download' : null;
   return {
     visible: available || recovery,
     mode: 'available',
-    title: recovery
-      ? available
-        ? `Workman ${check?.latest} is available and the CLI needs repair`
-        : 'Workman command-line tools need repair'
-      : `Workman ${check?.latest} is available`,
-    description: recovery
-      ? 'The verified release can restore wrk and workmand before Workman restarts.'
-      : 'The release is downloaded, SHA256 verified, installed, then Workman restarts automatically.',
+    title: blocked !== null
+      ? `Workman ${check?.latest} is available to download`
+      : recovery
+        ? available
+          ? `Workman ${check?.latest} is available and the CLI needs repair`
+          : 'Workman command-line tools need repair'
+        : `Workman ${check?.latest} is available`,
+    description: blocked !== null
+      ? blocked
+      : recovery
+        ? 'The verified release can restore wrk and workmand before Workman restarts.'
+        : 'The release is downloaded, SHA256 verified, installed, then Workman restarts automatically.',
     percent: null,
     indeterminate: false,
     retry: false,
     restart: false,
     restartLabel: null,
-    dismiss: false
+    dismiss: false,
+    action,
+    releaseUrl: check?.url ?? null
   };
 }
 
@@ -208,7 +230,9 @@ function failedBanner(stage: UpdateStage, message: string): UpdateBannerState {
     retry: true,
     restart: false,
     restartLabel: null,
-    dismiss: true
+    dismiss: true,
+    action: null,
+    releaseUrl: null
   };
 }
 

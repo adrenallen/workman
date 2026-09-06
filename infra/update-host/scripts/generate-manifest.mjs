@@ -30,6 +30,7 @@ function releaseTarget(name) {
     ["workman-linux-arm64.AppImage", "linux-arm64-appimage"],
     ["workman-linux-x86_64.deb", "linux-x86_64-deb"],
     ["workman-linux-arm64.deb", "linux-arm64-deb"],
+    ["workman-windows-x86_64.zip", "windows-x86_64"],
     ["SHA256SUMS", "checksums"],
   ]);
   return targets.get(name) ?? `artifact-${name}`;

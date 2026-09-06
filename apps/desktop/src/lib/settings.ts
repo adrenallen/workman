@@ -68,6 +68,8 @@ export interface UpdateCheckInfo {
   notes: string;
   available: boolean;
   checked_at: number;
+  /** A newer release exists but has no package for this platform; the updater cannot install it. */
+  install_blocked?: string | null;
 }
 
 export interface UpdateStatus {
@@ -198,7 +200,8 @@ export function setUpdateChannel(
 
 export function applyUpdate(
   client: DaemonClient,
-  onProgress: (progress: UpdateProgress) => void
+  onProgress: (progress: UpdateProgress) => void,
+  desktopSurface: string | null = null
 ): Promise<UpdateInstallReport> {
-  return client.applyUpdate(onProgress);
+  return client.applyUpdate(onProgress, desktopSurface);
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { updateActionAvailable, updateActionCopy } from '../src/lib/updateRecovery.ts';
+import { updateActionAvailable, updateActionCopy, updateInstallBlocked } from '../src/lib/updateRecovery.ts';
 
 function status({ available, recovery }) {
   return {
@@ -47,4 +47,32 @@ test('a healthy current install shows no recovery action or recovery copy', () =
   assert.doesNotMatch(copy.dialogTitle, /repair/i);
   assert.doesNotMatch(copy.dialogDescription, /missing|repair/i);
   assert.match(copy.dialogDescription, /restart the app and daemon automatically/);
+});
+
+test('a release without a package for this platform is download-only, not an installable update', () => {
+  const blocked = {
+    ...status({ available: true, recovery: false }),
+    check: {
+      available: true,
+      current: '0.1.6',
+      latest: '0.2.0',
+      install_blocked: 'Workman 0.2.0 has no Windows x86_64 package yet. Download it from https://example.com/v0.2.0 once one is published.'
+    }
+  };
+  assert.equal(updateInstallBlocked(blocked), blocked.check.install_blocked);
+  assert.equal(updateActionAvailable(blocked), false);
+  const copy = updateActionCopy(blocked);
+  assert.equal(copy.bannerTitle, 'Workman 0.2.0 is available to download');
+  assert.equal(copy.bannerDescription, blocked.check.install_blocked);
+
+  // A CLI repair would install the same missing package, so it is not offered either.
+  const repairable = { ...blocked, cli_recovery_required: true };
+  assert.equal(updateActionAvailable(repairable), false);
+  assert.equal(updateActionCopy(repairable).bannerTitle, 'Workman 0.2.0 is available to download');
+  assert.match(updateActionCopy(repairable).bannerDescription, /launchers are also missing/);
+
+  // The note only matters while the release is actually newer.
+  const current = { ...blocked, check: { ...blocked.check, available: false, latest: '0.1.6' } };
+  assert.equal(updateInstallBlocked(current), null);
+  assert.equal(updateActionAvailable(current), false);
 });

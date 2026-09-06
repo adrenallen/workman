@@ -164,3 +164,49 @@ test('banner distinguishes automatic restart from manual completion', () => {
   assert.equal(manual.restart, true);
   assert.equal(manual.dismiss, true);
 });
+
+test('banner presents a platform without a package as download-only without a retry', () => {
+  const banner = updateBannerState({
+    automatic_checks: true,
+    channel: 'stable',
+    last_checked_at: 1,
+    cli_recovery_required: false,
+    check: {
+      channel: 'stable',
+      prerelease: false,
+      current: '0.1.14',
+      latest: '0.2.0',
+      url: 'https://example.com/v0.2.0',
+      notes: '',
+      available: true,
+      checked_at: 1,
+      install_blocked: 'Workman 0.2.0 has no Windows x86_64 package yet.'
+    }
+  }, { kind: 'idle' });
+  assert.equal(banner.visible, true);
+  assert.equal(banner.mode, 'available');
+  assert.equal(banner.title, 'Workman 0.2.0 is available to download');
+  assert.equal(banner.description, 'Workman 0.2.0 has no Windows x86_64 package yet.');
+  assert.equal(banner.retry, false);
+  assert.equal(banner.action, 'download');
+  assert.equal(banner.releaseUrl, 'https://example.com/v0.2.0');
+
+  const installable = updateBannerState({
+    automatic_checks: true,
+    channel: 'stable',
+    last_checked_at: 1,
+    cli_recovery_required: false,
+    check: {
+      channel: 'stable',
+      prerelease: false,
+      current: '0.1.14',
+      latest: '0.2.0',
+      url: 'https://example.com/v0.2.0',
+      notes: '',
+      available: true,
+      checked_at: 1
+    }
+  }, { kind: 'idle' });
+  assert.equal(installable.action, 'install');
+  assert.equal(installable.title, 'Workman 0.2.0 is available');
+});

@@ -45,6 +45,7 @@ cd "$REPO_ROOT"
 source "$REPO_ROOT/scripts/release-public-repository.sh"
 TAG="v$VERSION"
 OUTPUT_DIR="${WORKMAN_RELEASE_OUTPUT_DIR:-$REPO_ROOT/release/$TAG}"
+WINDOWS_ARTIFACT=workman-windows-x86_64.zip
 WORK_DIR="$OUTPUT_DIR/.work"
 LOG_DIR="$OUTPUT_DIR/logs"
 TIMINGS_FILE="$OUTPUT_DIR/build-timings.tsv"
@@ -505,6 +506,46 @@ verify_app_surface_update_hop() {
   record_stage app-surface-update "$started"
 }
 
+# The Windows archive is built on a Windows machine by scripts/release-windows.ps1 at the same
+# tagged commit and copied into the release directory before this script runs. It is optional
+# because Apple silicon cannot build it, but a release without it cannot update Windows installs.
+include_windows_artifact() {
+  local archive="$OUTPUT_DIR/$WINDOWS_ARTIFACT"
+  if [[ ! -f "$archive" ]]; then
+    warn "$WINDOWS_ARTIFACT is absent; Windows installs will report this release as download-only"
+    return 1
+  fi
+  local sidecar="$archive.sha256" expected actual
+  [[ -f "$sidecar" ]] || {
+    echo "$WINDOWS_ARTIFACT is present but its .sha256 sidecar from release-windows.ps1 is missing" >&2
+    exit 1
+  }
+  expected="$(awk 'NR == 1 { print tolower($1) }' "$sidecar")"
+  actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+  [[ "$expected" == "$actual" ]] || {
+    echo "$WINDOWS_ARTIFACT does not match its .sha256 sidecar" >&2
+    exit 1
+  }
+  unzip -Z1 "$archive" | grep -qx 'bin/wrk.exe' || {
+    echo "$WINDOWS_ARTIFACT is missing bin/wrk.exe" >&2
+    exit 1
+  }
+  unzip -Z1 "$archive" | grep -qx 'bin/workmand.exe' || {
+    echo "$WINDOWS_ARTIFACT is missing bin/workmand.exe" >&2
+    exit 1
+  }
+  unzip -Z1 "$archive" | grep -qx 'bin/workman-desktop.exe' || {
+    echo "$WINDOWS_ARTIFACT is missing bin/workman-desktop.exe" >&2
+    exit 1
+  }
+  unzip -Z1 "$archive" | grep -qx 'install.ps1' || {
+    echo "$WINDOWS_ARTIFACT is missing install.ps1" >&2
+    exit 1
+  }
+  printf '    including %s\n' "$WINDOWS_ARTIFACT"
+  return 0
+}
+
 write_release_metadata() {
   local started=$SECONDS
   log "Checksums and release notes"
@@ -519,6 +560,11 @@ write_release_metadata() {
   )
   local artifact
   for artifact in "${artifacts[@]}"; do test -f "$OUTPUT_DIR/$artifact"; done
+  local windows_included=false
+  if include_windows_artifact; then
+    artifacts+=("$WINDOWS_ARTIFACT")
+    windows_included=true
+  fi
 
   (
     cd "$OUTPUT_DIR"
@@ -539,8 +585,16 @@ write_release_metadata() {
     printf -- '- **macOS Apple silicon:** `workman-macos-arm64.zip` — app, CLI, daemon, installer, and getting-started guide.\n'
     printf -- '- **Linux x86_64 (portable, experimental):** `workman-linux-x86_64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
     printf -- '- **Linux arm64 (portable, experimental):** `workman-linux-arm64.tar.gz` — AppImage, static CLI/daemon, installer, and guide.\n'
-    printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n\n'
-    printf 'Each platform archive contains `GETTING-STARTED.md`; read it first. After extracting, install the CLI and daemon with `./install.sh`.\n\n'
+    printf -- '- **Linux Debian package (experimental):** choose the matching standalone `.deb` instead of the portable archive.\n'
+    if [[ "$windows_included" == true ]]; then
+      printf -- '- **Windows x86_64 (experimental):** `%s` — desktop app, CLI, daemon, and `install.ps1`.\n' "$WINDOWS_ARTIFACT"
+    fi
+    printf '\n'
+    printf 'Each macOS and Linux archive contains `GETTING-STARTED.md`; read it first. After extracting, install the CLI and daemon with `./install.sh`.\n'
+    if [[ "$windows_included" == true ]]; then
+      printf 'The Windows archive ships `install.ps1` and `THIRD_PARTY_NOTICES.md`: extract it, then run `powershell -ExecutionPolicy Bypass -File install.ps1`.\n'
+    fi
+    printf '\n'
     printf '> **macOS trust:** Workman.app, `wrk`, and `workmand` are Developer ID signed and notarized. Browser-downloaded builds should open normally. Versions 0.1.4 and earlier were unsigned and may still require the legacy Gatekeeper workaround in their bundled guide.\n\n'
     printf '## Changes\n\n'
     cat "$WORK_DIR/changelog-section.md"

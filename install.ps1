@@ -1,16 +1,19 @@
 <#
 .SYNOPSIS
-Builds Workman in release mode and installs the daemon, CLI, and desktop app for
-the current user. The Windows counterpart of install.sh.
+Installs Workman's daemon, CLI, and desktop app for the current user. The
+Windows counterpart of install.sh.
 
 .DESCRIPTION
-Builds the Svelte frontend and the three release binaries, then installs
-wrk.exe, workmand.exe, and workman-desktop.exe under
-%LOCALAPPDATA%\Programs\Workman\bin. The directory is added to the user PATH
-unless -NoPath is given. Re-run after pulling updates. Running daemons are never
-stopped: a binary that is currently running is renamed aside and the updater
-removes the retired copy once its process exits. A `workman.exe` convenience
-copy of wrk.exe is installed unless WORKMAN_INSTALL_ALIAS=0.
+From a source checkout, builds the Svelte frontend and the three release
+binaries. From an extracted release archive (workman-windows-x86_64.zip, which
+ships bin\wrk.exe, bin\workmand.exe, and bin\workman-desktop.exe beside this
+script), installs those prebuilt binaries without any toolchain. Either way the
+binaries land under %LOCALAPPDATA%\Programs\Workman\bin. The directory is
+added to the user PATH unless -NoPath is given. Re-run after pulling updates or
+extracting a newer archive. Running daemons are never stopped: a binary that is
+currently running is renamed aside and the updater removes the retired copy once
+its process exits. A `workman.exe` convenience copy of wrk.exe is installed
+unless WORKMAN_INSTALL_ALIAS=0.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File install.ps1
@@ -24,7 +27,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+# A release archive carries the finished binaries in bin\ and no Cargo workspace;
+# a source checkout is the other way round. Never build inside an archive.
+$prebuiltDir = Join-Path $repo 'bin'
+$prebuilt = (-not (Test-Path (Join-Path $repo 'Cargo.toml'))) -and
+    (@('wrk.exe', 'workmand.exe', 'workman-desktop.exe') | ForEach-Object { Test-Path (Join-Path $prebuiltDir $_) }) -notcontains $false
+if ($prebuilt) {
+    Write-Host "==> Installing the prebuilt Workman release from $prebuiltDir"
+}
+
+if (-not $prebuilt -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     # A shell opened before rustup finished installing has the old PATH.
     $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
     if (Test-Path (Join-Path $cargoBin 'cargo.exe')) {
@@ -39,7 +51,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 # generated during the build. That needs cmake (the Visual Studio Build Tools ship
 # one) and libclang from LLVM. Resolve both here so the build does not fail deep
 # inside a dependency with an opaque message.
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+if (-not $prebuilt -and -not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     $bundledCMake = Get-ChildItem -Path @(
         (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'),
         (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')
@@ -52,7 +64,7 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     }
 }
 
-if (-not $env:LIBCLANG_PATH) {
+if (-not $prebuilt -and -not $env:LIBCLANG_PATH) {
     $libclangDir = Join-Path $env:ProgramFiles 'LLVM\bin'
     if (Test-Path (Join-Path $libclangDir 'libclang.dll')) {
         $env:LIBCLANG_PATH = $libclangDir
@@ -62,7 +74,7 @@ if (-not $env:LIBCLANG_PATH) {
     }
 }
 
-if (-not $SkipFrontend) {
+if (-not $prebuilt -and -not $SkipFrontend) {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         throw 'npm was not found on PATH. Install Node.js (https://nodejs.org), or pass -SkipFrontend if apps/desktop/dist is already built.'
     }
@@ -77,24 +89,27 @@ if (-not $SkipFrontend) {
     finally { Pop-Location }
 }
 
-Write-Host '==> Building release binaries'
-Push-Location $repo
-try {
-    cargo build --release -p workman-cli -p workmand
-    if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
-    # The desktop app must embed the frontend. Without tauri/custom-protocol a
-    # release still builds, but it opens a blank development WebView — the same
-    # contract scripts/tauri-dist-runner.sh enforces for packaged builds.
-    cargo build --release -p workman-desktop --features tauri/custom-protocol
-    if ($LASTEXITCODE -ne 0) { throw 'desktop build failed' }
+if (-not $prebuilt) {
+    Write-Host '==> Building release binaries'
+    Push-Location $repo
+    try {
+        cargo build --release -p workman-cli -p workmand
+        if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+        # The desktop app must embed the frontend. Without tauri/custom-protocol a
+        # release still builds, but it opens a blank development WebView — the same
+        # contract scripts/tauri-dist-runner.sh enforces for packaged builds.
+        cargo build --release -p workman-desktop --features tauri/custom-protocol
+        if ($LASTEXITCODE -ne 0) { throw 'desktop build failed' }
+    }
+    finally { Pop-Location }
 }
-finally { Pop-Location }
+$sourceDir = if ($prebuilt) { $prebuiltDir } else { Join-Path $repo 'target\release' }
 
 $binDir = Join-Path $env:LOCALAPPDATA 'Programs\Workman\bin'
 New-Item -ItemType Directory -Force $binDir | Out-Null
 
 function Install-Binary([string]$name) {
-    $source = Join-Path $repo "target\release\$name"
+    $source = Join-Path $sourceDir $name
     $target = Join-Path $binDir $name
     try {
         Copy-Item $source $target -Force

@@ -17,8 +17,8 @@ use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use workman_core::{
-    ApplicationInstallTarget, ReleaseTarget, UpdateChannel, UpdateClient, UpdateError,
-    UpdateInstallTarget, UpdateStage,
+    ApplicationInstallTarget, LinuxDesktopInstallTarget, ReleaseTarget, UpdateChannel,
+    UpdateClient, UpdateError, UpdateInstallTarget, UpdateStage,
 };
 
 const TEST_UPDATE_KEY: &str = "fixture-update-key";
@@ -38,6 +38,124 @@ fn archive() -> Vec<u8> {
         archive.append(&header, body).unwrap();
     }
     archive.into_inner().unwrap().finish().unwrap()
+}
+
+/// The Linux platform bundle: static tools under bin/ beside the desktop AppImage.
+fn linux_bundle_archive() -> Vec<u8> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for (name, body) in [
+        (
+            "bin/wrk",
+            b"#!/bin/sh\nprintf 'workman 9.0.0\\n'\n".as_slice(),
+        ),
+        (
+            "bin/workmand",
+            b"#!/bin/sh\nprintf 'workmand 9.0.0\\n'\n".as_slice(),
+        ),
+        ("Workman.AppImage", b"new appimage".as_slice()),
+        ("install.sh", b"#!/bin/sh\n".as_slice()),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, body).unwrap();
+    }
+    archive.into_inner().unwrap().finish().unwrap()
+}
+
+/// A Linux bundle whose desktop file is missing: the tools are complete, the AppImage is not.
+fn linux_tools_only_archive() -> Vec<u8> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for (name, body) in [
+        ("bin/wrk", b"tools-only wrk".as_slice()),
+        ("bin/workmand", b"tools-only workmand".as_slice()),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, body).unwrap();
+    }
+    archive.into_inner().unwrap().finish().unwrap()
+}
+
+/// An installed 0.1.13 CLI pair in the versioned layout with launchers pointing at it, plus the
+/// AppImage the desktop was launched from. Returns the launcher directory.
+fn seed_linux_desktop_install(root: &Path, appimage: &Path) -> PathBuf {
+    use std::os::unix::fs::symlink;
+
+    let home = root.join("home");
+    let launchers = home.join(".local/bin");
+    let old_bin = home.join(".local/share/workman/dist/0.1.13/bin");
+    fs::create_dir_all(&launchers).unwrap();
+    fs::create_dir_all(&old_bin).unwrap();
+    fs::write(old_bin.join("wrk"), "old wrk").unwrap();
+    fs::write(old_bin.join("workmand"), "old workmand").unwrap();
+    symlink(old_bin.join("wrk"), launchers.join("wrk")).unwrap();
+    symlink(old_bin.join("workmand"), launchers.join("workmand")).unwrap();
+    fs::create_dir_all(appimage.parent().unwrap()).unwrap();
+    fs::write(appimage, "old appimage").unwrap();
+    fs::create_dir_all(root.join("mount/usr/bin")).unwrap();
+    fs::write(root.join("mount/usr/bin/workman-desktop"), "old desktop").unwrap();
+    launchers
+}
+
+/// Everything a failed desktop update must leave alone: the launched AppImage, the launchers,
+/// the version directory that was never committed, and no temporary files anywhere.
+fn assert_linux_desktop_install_untouched(root: &Path, appimage: &Path, launchers: &Path) {
+    let old_bin = root.join("home/.local/share/workman/dist/0.1.13/bin");
+    assert_eq!(fs::read(appimage).unwrap(), b"old appimage");
+    assert_eq!(
+        fs::read_link(launchers.join("wrk")).unwrap(),
+        old_bin.join("wrk")
+    );
+    assert_eq!(
+        fs::read_link(launchers.join("workmand")).unwrap(),
+        old_bin.join("workmand")
+    );
+    assert_eq!(fs::read(launchers.join("wrk")).unwrap(), b"old wrk");
+    let versioned_root = root.join("home/.local/share/workman/dist");
+    let leftovers: Vec<_> = fs::read_dir(&versioned_root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "0.1.13")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "versioned root changed: {leftovers:?}"
+    );
+    for directory in [appimage.parent().unwrap(), launchers] {
+        let stray: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "{} has leftovers: {stray:?}",
+            directory.display()
+        );
+    }
+}
+
+fn linux_desktop_target(root: &Path, appimage: Option<PathBuf>) -> LinuxDesktopInstallTarget {
+    let home = root.join("home");
+    let launchers = home.join(".local/bin");
+    LinuxDesktopInstallTarget::new(
+        root.join("mount/usr/bin/workman-desktop"),
+        appimage,
+        &home,
+        vec![launchers.clone()],
+        vec![launchers],
+        home.join(".local/share/workman/dist"),
+    )
 }
 
 fn unified_zip_archive() -> Vec<u8> {
@@ -1280,4 +1398,359 @@ async fn rejected_artifact_key_is_an_honest_install_failure() {
         fs::read_to_string(install.path().join("workmand")).unwrap(),
         "old workmand"
     );
+}
+
+#[tokio::test]
+async fn appimage_desktop_gets_tools_launchers_and_a_replaced_appimage() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let appimage = root.path().join("Applications/Workman.AppImage");
+    fs::create_dir_all(appimage.parent().unwrap()).unwrap();
+    fs::write(&appimage, "old appimage").unwrap();
+    fs::create_dir_all(root.path().join("mount/usr/bin")).unwrap();
+    fs::write(
+        root.path().join("mount/usr/bin/workman-desktop"),
+        "old desktop",
+    )
+    .unwrap();
+    let target = linux_desktop_target(root.path(), Some(appimage.clone()));
+
+    let archive = linux_bundle_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.14").await.unwrap();
+    assert!(check.available);
+    assert_eq!(check.install_blocked, None);
+    let report = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target.clone()))
+        .await
+        .unwrap();
+
+    let new_bin = target.versioned_root.join("9.0.0/bin");
+    assert_eq!(
+        report.install_dir,
+        target.versioned_root.join("9.0.0").display().to_string()
+    );
+    assert_eq!(fs::read(&appimage).unwrap(), b"new appimage");
+    assert_eq!(
+        fs::metadata(&appimage).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+    assert_eq!(
+        fs::canonicalize(target.home_dir.join(".local/bin/wrk")).unwrap(),
+        fs::canonicalize(new_bin.join("wrk")).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(target.home_dir.join(".local/bin/workmand")).unwrap(),
+        fs::canonicalize(new_bin.join("workmand")).unwrap()
+    );
+    assert!(
+        target
+            .versioned_root
+            .join("9.0.0/Workman.AppImage")
+            .is_file()
+    );
+    assert_eq!(
+        report.installed_app_bundle.as_deref(),
+        Some(appimage.to_str().unwrap())
+    );
+    assert!(report.restart_plan.daemon && report.restart_plan.app);
+    let stray_beside_app: Vec<_> = fs::read_dir(appimage.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(
+        stray_beside_app.is_empty(),
+        "AppImage swap left temporaries: {stray_beside_app:?}"
+    );
+    assert!(
+        report
+            .updated_files
+            .contains(&appimage.display().to_string())
+    );
+    assert!(
+        report
+            .desktop_instruction
+            .unwrap()
+            .contains("Updated the Workman AppImage")
+    );
+    assert_eq!(
+        fs::read(root.path().join("mount/usr/bin/workman-desktop")).unwrap(),
+        b"old desktop"
+    );
+    let stray: Vec<_> = fs::read_dir(target.home_dir.join(".local/bin"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "launcher swap left backups behind: {stray:?}"
+    );
+}
+
+#[tokio::test]
+async fn packaged_desktop_updates_the_tools_and_says_the_app_was_not_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("mount/usr/bin")).unwrap();
+    fs::write(
+        root.path().join("mount/usr/bin/workman-desktop"),
+        "packaged desktop",
+    )
+    .unwrap();
+    let target = linux_desktop_target(root.path(), None);
+
+    let archive = linux_bundle_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.14").await.unwrap();
+    let report = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(report.installed_app_bundle, None);
+    assert!(report.restart_plan.daemon && !report.restart_plan.app);
+    let instruction = report.desktop_instruction.unwrap();
+    assert!(instruction.contains("installed by a package and was not replaced"));
+    assert!(instruction.contains(&format!("{}/release", fixture.base)));
+    assert_eq!(
+        fs::read(root.path().join("mount/usr/bin/workman-desktop")).unwrap(),
+        b"packaged desktop"
+    );
+    assert!(target.versioned_root.join("9.0.0/bin/wrk").is_file());
+}
+
+#[tokio::test]
+async fn a_release_without_a_platform_package_is_blocked_not_offered() {
+    let archive = archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start_named(
+        archive,
+        checksum,
+        "workman-other-platform.tar.gz",
+        "workman-other-platform.tar.gz",
+        1,
+    );
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.14").await.unwrap();
+    assert!(check.available);
+    assert_eq!(check.binary_asset, None);
+    let blocked = check.install_blocked.clone().unwrap();
+    assert!(
+        blocked.contains("Workman 9.0.0 has no test package yet"),
+        "{blocked}"
+    );
+    assert!(
+        blocked.contains(&format!("{}/release", fixture.base)),
+        "{blocked}"
+    );
+
+    let install_dir = seed_install();
+    let error = client
+        .install(&check, install_dir.path())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, UpdateError::MissingAsset(asset) if asset == "workman-fixture.tar.gz for test"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(install_dir.path().join("wrk")).unwrap(),
+        b"old wrk"
+    );
+}
+
+#[tokio::test]
+async fn a_bundle_without_the_appimage_changes_nothing_on_an_appimage_desktop() {
+    let root = tempfile::tempdir().unwrap();
+    let appimage = root.path().join("Applications/Workman.AppImage");
+    let launchers = seed_linux_desktop_install(root.path(), &appimage);
+    let target = linux_desktop_target(root.path(), Some(appimage.clone()));
+
+    let archive = linux_tools_only_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.13").await.unwrap();
+    let error = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, UpdateError::InvalidRelease(message) if message.contains("does not contain Workman.AppImage")),
+        "{error}"
+    );
+    assert_linux_desktop_install_untouched(root.path(), &appimage, &launchers);
+}
+
+#[tokio::test]
+async fn an_unwritable_appimage_location_changes_nothing_on_an_appimage_desktop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let applications = root.path().join("Applications");
+    let appimage = applications.join("Workman.AppImage");
+    let launchers = seed_linux_desktop_install(root.path(), &appimage);
+    let target = linux_desktop_target(root.path(), Some(appimage.clone()));
+
+    fs::set_permissions(&applications, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(applications.join(".probe"), "").is_ok() {
+        // Running as root: the directory cannot be made read-only, so there is nothing to test.
+        fs::remove_file(applications.join(".probe")).unwrap();
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let archive = linux_bundle_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.13").await.unwrap();
+    let result = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target))
+        .await;
+    fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, UpdateError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+        "{error}"
+    );
+    assert_linux_desktop_install_untouched(root.path(), &appimage, &launchers);
+}
+
+#[tokio::test]
+async fn an_unwritable_launcher_directory_changes_nothing_on_an_appimage_desktop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let appimage = root.path().join("Applications/Workman.AppImage");
+    let launchers = seed_linux_desktop_install(root.path(), &appimage);
+    let target = linux_desktop_target(root.path(), Some(appimage.clone()));
+
+    fs::set_permissions(&launchers, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(launchers.join(".probe"), "").is_ok() {
+        fs::remove_file(launchers.join(".probe")).unwrap();
+        fs::set_permissions(&launchers, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let archive = linux_bundle_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.13").await.unwrap();
+    let result = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target))
+        .await;
+    fs::set_permissions(&launchers, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, UpdateError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+        "{error}"
+    );
+    assert_linux_desktop_install_untouched(root.path(), &appimage, &launchers);
+}
+
+/// A launcher that cannot be replaced mid-commit. macOS lets the owner make a file immutable
+/// without privileges, so the swap of the launchers in `~/.local/bin` succeeds and the later
+/// launcher fails; everything already swapped, including the AppImage and a pre-existing
+/// version directory, must come back. Other hosts skip: Linux needs root for the same flag.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_launcher_that_cannot_be_replaced_rolls_back_the_tools_and_the_appimage() {
+    let root = tempfile::tempdir().unwrap();
+    let appimage = root.path().join("Applications/Workman.AppImage");
+    let launchers = seed_linux_desktop_install(root.path(), &appimage);
+    let old_bin = root
+        .path()
+        .join("home/.local/share/workman/dist/0.1.13/bin");
+    // Sorts after home/.local/bin, so the canonical pair is swapped before this one fails.
+    let other = root.path().join("other-launchers");
+    fs::create_dir_all(&other).unwrap();
+    std::os::unix::fs::symlink(old_bin.join("wrk"), other.join("wrk")).unwrap();
+    // -h flags the link itself; without it the flag lands on the old binary it points at.
+    let locked = Command::new("chflags")
+        .args(["-h", "uchg"])
+        .arg(other.join("wrk"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !locked {
+        return;
+    }
+    // A previous attempt left a directory for the incoming version; it must survive a failure.
+    let historical = root.path().join("home/.local/share/workman/dist/9.0.0/bin");
+    fs::create_dir_all(&historical).unwrap();
+    fs::write(historical.join("wrk"), "historical wrk").unwrap();
+    fs::write(historical.join("workmand"), "historical workmand").unwrap();
+
+    let mut target = linux_desktop_target(root.path(), Some(appimage.clone()));
+    target.search_path.push(other.clone());
+
+    let archive = linux_bundle_archive();
+    let checksum = format!("{:x}", Sha256::digest(&archive));
+    let fixture = Fixture::start(archive, checksum);
+    let client = fixture_client(&fixture.base);
+    let check = client.check("0.1.13").await.unwrap();
+    let result = client
+        .install_target(&check, &UpdateInstallTarget::LinuxDesktop(target))
+        .await;
+    Command::new("chflags")
+        .args(["-h", "nouchg"])
+        .arg(other.join("wrk"))
+        .status()
+        .unwrap();
+
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, UpdateError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+        "{error}"
+    );
+    assert_eq!(fs::read(&appimage).unwrap(), b"old appimage");
+    for (directory, name) in [
+        (&launchers, "wrk"),
+        (&launchers, "workmand"),
+        (&other, "wrk"),
+    ] {
+        assert_eq!(
+            fs::read_link(directory.join(name)).unwrap(),
+            old_bin.join(name),
+            "{name} in {} was not restored",
+            directory.display()
+        );
+    }
+    assert_eq!(fs::read(historical.join("wrk")).unwrap(), b"historical wrk");
+    let versioned_root = root.path().join("home/.local/share/workman/dist");
+    let mut versions: Vec<_> = fs::read_dir(&versioned_root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    versions.sort();
+    assert_eq!(versions, ["0.1.13", "9.0.0"]);
+    for directory in [
+        appimage.parent().unwrap(),
+        launchers.as_path(),
+        other.as_path(),
+    ] {
+        let stray: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "{} has leftovers: {stray:?}",
+            directory.display()
+        );
+    }
 }

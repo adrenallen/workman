@@ -1086,10 +1086,16 @@ export class DaemonClient
     return () => this.processListeners.delete(listener);
   }
 
+  /**
+   * `desktopSurface` names the file this desktop was launched from (an AppImage on Linux) so a
+   * daemon started by the command-line tools can refresh that desktop too.
+   */
   async applyUpdate(
-    onProgress: (progress: UpdateProgress) => void
+    onProgress: (progress: UpdateProgress) => void,
+    desktopSurface: string | null = null
   ): Promise<UpdateInstallReport> {
     const operationId = `desktop-update-${Date.now()}-${++this.sequence}`;
+    const surface = desktopSurface ? { desktop_surface: desktopSurface } : {};
     const subscription = await this.requestOptional<{ subscribed: boolean }>(
       'daemon.update_progress_subscribe',
       { request_id: operationId },
@@ -1098,14 +1104,14 @@ export class DaemonClient
     if (!subscription.subscribed) {
       // A legacy daemon has no progress subscription or restart-plan metadata. Its response is
       // still accepted and normalized by the update-flow compatibility layer.
-      return this.request('daemon.update_apply');
+      return this.request('daemon.update_apply', surface);
     }
 
     this.updateProgressListeners.set(operationId, onProgress);
     try {
       return await this.request(
         'daemon.update_apply',
-        { request_id: operationId },
+        { request_id: operationId, ...surface },
         operationId
       );
     } finally {

@@ -92,3 +92,26 @@ test("rejects obsolete pre-Workman release aliases", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("maps the Windows archive to the target the updater asks for", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workman-manifest-test-"));
+  try {
+    const windows = Buffer.from("windows artifact");
+    await writeFile(join(directory, "workman-windows-x86_64.zip"), windows);
+    await writeFile(join(directory, "SHA256SUMS"), `${sha256(windows)}  workman-windows-x86_64.zip\n`);
+    const manifest = await generateManifest({
+      version: "1.2.3",
+      artifactsDir: directory,
+      publishedAt: "2026-08-06T12:34:56Z",
+      notesUrl: "https://github.com/adrenallen/workman/releases/tag/v1.2.3",
+    });
+    assert.equal(manifest.assets[0].name, "workman-windows-x86_64.zip");
+    assert.equal(manifest.assets[0].target, "windows-x86_64");
+    assert.equal(
+      manifest.assets[0].url,
+      "https://workman.userdefined.io/versions/1.2.3/workman-windows-x86_64.zip",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

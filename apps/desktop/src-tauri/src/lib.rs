@@ -670,9 +670,9 @@ fn desktop_relaunch_capability() -> DesktopRelaunchCapability {
         .is_some_and(relaunch_supported_from_executable);
     let app_bundle = executable
         .as_deref()
-        .and_then(application_bundle_from_executable)
-        .and_then(|bundle| bundle.canonicalize().ok())
-        .map(|bundle| bundle.to_string_lossy().into_owned());
+        .and_then(relaunch_surface_from_executable)
+        .and_then(|surface| surface.canonicalize().ok())
+        .map(|surface| surface.to_string_lossy().into_owned());
     let supported = supported && app_bundle.is_some();
     DesktopRelaunchCapability {
         supported,
@@ -728,11 +728,64 @@ fn relaunch_supported_from_executable(executable: &Path) -> bool {
             && bundle.join("Contents/Info.plist").is_file()
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // Tauri relaunches the AppImage named by $APPIMAGE, which the updater replaces in
+        // place. A package-managed binary under /usr is never replaced, so it never relaunches.
+        let _ = executable;
+        appimage_from_environment().is_some()
+    }
+
+    #[cfg(windows)]
+    {
+        // The updater swaps workman-desktop.exe beside wrk.exe/workmand.exe; the process keeps
+        // running from the retired image and reopens the new file at this same path.
+        executable.is_file()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = executable;
         false
     }
+}
+
+/// The file the updater replaces and Tauri reopens: the macOS bundle, the Linux AppImage, or
+/// the Windows executable itself.
+fn relaunch_surface_from_executable(executable: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        application_bundle_from_executable(executable)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = executable;
+        appimage_from_environment()
+    }
+    #[cfg(windows)]
+    {
+        Some(executable.to_path_buf())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = executable;
+        None
+    }
+}
+
+/// The file the AppImage runtime launched, under the same rule the updater applies: an absolute,
+/// executable regular file, whatever it was renamed to.
+#[cfg(target_os = "linux")]
+fn appimage_from_environment() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    env::var_os(workman_core::APPIMAGE_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .filter(|path| {
+            std::fs::metadata(path).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
 }
 
 fn application_bundle_from_executable(executable: &Path) -> Option<PathBuf> {
@@ -755,7 +808,7 @@ fn verify_relaunch_bundle(expected_bundle: &Path) -> Result<(), String> {
             "the running executable is not a relaunchable Workman application bundle".into(),
         );
     }
-    let running_bundle = application_bundle_from_executable(&executable)
+    let running_bundle = relaunch_surface_from_executable(&executable)
         .ok_or_else(|| "could not locate the running Workman application bundle".to_owned())?
         .canonicalize()
         .map_err(|error| format!("could not resolve the running Workman bundle: {error}"))?;

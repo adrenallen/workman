@@ -49,4 +49,7 @@ wrk update --check
 ```
 
 Install an available command-line update with `wrk update`. Replace the AppImage from the new
-platform bundle when the command reports that a desktop update is available.
+platform bundle when the command reports that a desktop update is available. Updating from the
+desktop app's Settings does both: it installs the new `wrk` and `workmand` and replaces the
+AppImage you launched, then restarts. A desktop installed from the `.deb` package keeps its
+command-line update and asks you to install the new package yourself.

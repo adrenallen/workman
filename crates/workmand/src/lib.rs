@@ -1024,23 +1024,14 @@ async fn handle_session_control(
             .get("force")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let key =
-            match params.get("key") {
-                Some(value) => match value.as_str() {
-                    Some(key) => Some(key),
-                    None => {
-                        return Some(json!({
-                        "id": id, "ok": false,
-                        "error": { "code": "invalid_params", "message": "key must be a string" }
-                    }).to_string());
-                    }
-                },
-                None => None,
-            };
-        let result = match key {
-            Some(key) => settings.updates().check_with_key(force, Some(key)).await,
-            None => settings.updates().check(force).await,
+        let key = match optional_string_param(&params, "key") {
+            Ok(key) => key,
+            Err(reply) => return Some(reply(id)),
         };
+        let result = settings
+            .updates()
+            .check_with_key(force, key.as_deref())
+            .await;
         return Some(match result {
             Ok(result) => json!({ "id": id, "ok": true, "result": result }).to_string(),
             Err(error) => update_error_reply(id, error),
@@ -1120,19 +1111,25 @@ async fn handle_session_control(
     }
     if method == "daemon.update_apply" {
         let params = request.get("params").cloned().unwrap_or_default();
-        let key =
-            match params.get("key") {
-                Some(value) => match value.as_str() {
-                    Some(key) => Some(key),
-                    None => {
-                        return Some(json!({
-                        "id": id, "ok": false,
-                        "error": { "code": "invalid_params", "message": "key must be a string" }
-                    }).to_string());
-                    }
-                },
-                None => None,
-            };
+        let key = match optional_string_param(&params, "key") {
+            Ok(key) => key,
+            Err(reply) => return Some(reply(id)),
+        };
+        // The desktop names the file it was launched from so a daemon that was started by the
+        // command-line tools can still refresh that desktop; only an absolute path is accepted.
+        let desktop_surface = match optional_string_param(&params, "desktop_surface") {
+            Ok(surface) => surface.map(PathBuf::from),
+            Err(reply) => return Some(reply(id)),
+        };
+        if desktop_surface
+            .as_ref()
+            .is_some_and(|surface| !surface.is_absolute())
+        {
+            return Some(json!({
+                "id": id, "ok": false,
+                "error": { "code": "invalid_params", "message": "desktop_surface must be an absolute path" }
+            }).to_string());
+        }
         let request_id = match params.get("request_id") {
             Some(value) => match value.as_str() {
                 Some(value) if !value.is_empty() && value.len() <= 128 => Some(value.to_owned()),
@@ -1152,22 +1149,10 @@ async fn handle_session_control(
             },
             None => None,
         };
-        let result = match (key, request_id) {
-            (Some(key), Some(request_id)) => {
-                settings
-                    .updates()
-                    .install_with_key_for(Some(key), Some(request_id))
-                    .await
-            }
-            (None, Some(request_id)) => {
-                settings
-                    .updates()
-                    .install_with_key_for(None, Some(request_id))
-                    .await
-            }
-            (Some(key), None) => settings.updates().install_with_key(Some(key)).await,
-            (None, None) => settings.updates().install().await,
-        };
+        let result = settings
+            .updates()
+            .install_with_key_for(key.as_deref(), request_id, desktop_surface)
+            .await;
         return Some(match result {
             Ok(result) => {
                 // Installation no longer races a fixed reply-then-shutdown timer. The report's
@@ -1398,6 +1383,26 @@ fn status_event_if_changed(
     }
     *previous = Some(event.clone());
     Some(event)
+}
+
+/// Read an optional string parameter. JSON `null` counts as absent: older `wrk` builds send
+/// `"key": null` when no update key is configured, and a rejected request there broke every
+/// `wrk update` that reached a running daemon.
+fn optional_string_param(
+    params: &serde_json::Value,
+    name: &'static str,
+) -> Result<Option<String>, impl FnOnce(serde_json::Value) -> String + use<>> {
+    match params.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(move |id: serde_json::Value| {
+            json!({
+                "id": id, "ok": false,
+                "error": { "code": "invalid_params", "message": format!("{name} must be a string") }
+            })
+            .to_string()
+        }),
+    }
 }
 
 fn update_error_reply(id: serde_json::Value, error: workman_core::UpdateError) -> String {
@@ -1958,6 +1963,41 @@ mod tests {
             })
             .to_string()
         ));
+    }
+
+    #[test]
+    fn optional_update_params_treat_json_null_as_absent_and_reject_other_types() {
+        assert_eq!(
+            optional_string_param(&json!({ "force": true }), "key")
+                .ok()
+                .flatten(),
+            None
+        );
+        // Older `wrk` builds send `"key": null` whenever no update key is configured.
+        assert_eq!(
+            optional_string_param(&json!({ "key": null }), "key")
+                .ok()
+                .flatten(),
+            None
+        );
+        assert_eq!(
+            optional_string_param(&json!({ "key": "friends" }), "key")
+                .ok()
+                .flatten(),
+            Some("friends".to_owned())
+        );
+        let Err(reply) = optional_string_param(&json!({ "desktop_surface": 7 }), "desktop_surface")
+        else {
+            panic!("numbers are rejected");
+        };
+        let reply = reply(json!(4));
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["ok"], json!(false));
+        assert_eq!(reply["error"]["code"], json!("invalid_params"));
+        assert_eq!(
+            reply["error"]["message"],
+            json!("desktop_surface must be a string")
+        );
     }
 
     #[test]

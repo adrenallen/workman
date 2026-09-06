@@ -51,3 +51,16 @@ in the team's approved secret store.
 The `/download` page shows the legacy Gatekeeper workaround only for versions 0.1.4 and earlier.
 Do not deploy that Worker change ahead of the first signed release; Garrett owns the v0.1.5
 release and deployment decision.
+
+## Windows archive
+
+`scripts/release.sh` runs on Apple silicon and cannot build Windows binaries. Before running it,
+build `workman-windows-x86_64.zip` on a Windows machine at the same tagged commit with
+`powershell -ExecutionPolicy Bypass -File scripts/release-windows.ps1`, then copy the archive and
+its `.sha256` sidecar into `release/vX.Y.Z/`. The release script requires the sidecar, verifies it and the
+`bin/wrk.exe`, `bin/workmand.exe`, `bin/workman-desktop.exe`, and `install.ps1` entries, adds the
+archive to `SHA256SUMS`, GitHub, R2, and the `/download` page, and lists it in the release notes.
+
+When the archive is absent the release still publishes, with a warning. Windows installs then see
+the new version as download-only in Settings and the CLI reports that no Windows package exists;
+they cannot self-update until a release ships the archive.

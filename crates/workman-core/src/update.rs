@@ -183,6 +183,10 @@ pub struct UpdateCheck {
     pub notes: String,
     pub available: bool,
     pub checked_at: i64,
+    /// Set when a newer release exists but ships no package for this platform. The updater
+    /// cannot install it; the message says where to get it instead.
+    #[serde(default)]
+    pub install_blocked: Option<String>,
     pub binary_asset: Option<ReleaseAsset>,
     pub desktop_asset: Option<ReleaseAsset>,
     pub checksums_asset: Option<ReleaseAsset>,
@@ -257,6 +261,7 @@ impl UpdateCheck {
             notes: String::new(),
             available: false,
             checked_at: 0,
+            install_blocked: None,
             binary_asset: None,
             desktop_asset: None,
             checksums_asset: None,
@@ -442,6 +447,14 @@ impl UpdateClient {
             })
             .collect::<UpdateResult<Vec<_>>>()?;
         let asset = |name: &str| assets.iter().find(|asset| asset.name == name).cloned();
+        let available = selected_version > current_version;
+        let binary_asset = asset(&self.target.binary_asset_name);
+        let install_blocked = (available && binary_asset.is_none()).then(|| {
+            format!(
+                "Workman {selected_version} has no {} package yet. Download it from {notes_url} once one is published.",
+                self.target.platform_label
+            )
+        });
         Ok(UpdateCheck {
             channel: self.channel,
             prerelease: self.channel == UpdateChannel::Latest && selected_version != stable_version,
@@ -449,9 +462,10 @@ impl UpdateClient {
             latest: selected_version.to_string(),
             url: notes_url,
             notes: String::new(),
-            available: selected_version > current_version,
+            available,
             checked_at: unix_timestamp(),
-            binary_asset: asset(&self.target.binary_asset_name),
+            install_blocked,
+            binary_asset,
             desktop_asset: asset(&self.target.desktop_asset_name),
             checksums_asset: asset("SHA256SUMS"),
         })
@@ -483,37 +497,12 @@ impl UpdateClient {
                 check.current
             )));
         }
-        let binary_asset = check
-            .binary_asset
-            .as_ref()
-            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
         let install_dir = crate::canonical_path(install_dir.as_ref())?;
         let (wrk_target, workmand_target) = installed_binary_targets(&install_dir)?;
         let desktop_candidate = install_dir.join(executable_name("workman-desktop"));
         remove_retired_binaries(&[&wrk_target, &workmand_target, &desktop_candidate]);
 
-        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset, on_progress).await?;
-        on_progress(UpdateProgress::stage(
-            UpdateStage::Verifying,
-            format!("Verifying {}", binary_asset.name),
-        ));
-        if archive.len() as u64 != binary_asset.size {
-            return Err(UpdateError::InvalidRelease(format!(
-                "{} size mismatch: expected {} bytes, got {}",
-                binary_asset.name,
-                binary_asset.size,
-                archive.len()
-            )));
-        }
-        let actual = sha256_hex(&archive);
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return Err(UpdateError::ChecksumMismatch {
-                asset: binary_asset.name.clone(),
-                expected,
-                actual,
-            });
-        }
+        let (binary_asset, archive) = self.fetch_verified_archive(check, on_progress).await?;
 
         let staging = unique_staging_dir(&install_dir)?;
         on_progress(UpdateProgress::stage(
@@ -531,12 +520,16 @@ impl UpdateClient {
             let quarantine_cleared = clear_macos_quarantine(&staging);
             atomic_replace(&wrk_source, &wrk_target)?;
             atomic_replace(&workmand_source, &workmand_target)?;
+            let alias_target = refresh_flat_alias(&wrk_source, &install_dir)?;
             let desktop_target = replace_staged_desktop(&staging, &install_dir)?;
 
             let mut updated_files = vec![
                 wrk_target.to_string_lossy().into_owned(),
                 workmand_target.to_string_lossy().into_owned(),
             ];
+            if let Some(alias) = &alias_target {
+                updated_files.push(alias.to_string_lossy().into_owned());
+            }
             if let Some(desktop) = &desktop_target {
                 updated_files.push(desktop.to_string_lossy().into_owned());
             }
@@ -563,11 +556,15 @@ impl UpdateClient {
                         )
                     }
                 }),
-                installed_app_bundle: None,
+                installed_app_bundle: desktop_target
+                    .as_ref()
+                    .map(|desktop| desktop.to_string_lossy().into_owned()),
                 quarantine_cleared,
                 restart_plan: UpdateRestartPlan {
                     daemon: true,
-                    app: false,
+                    // The flat Windows layout swaps workman-desktop.exe in place; the running
+                    // app keeps its retired image until it relaunches.
+                    app: desktop_target.is_some(),
                 },
             })
         })();
@@ -606,6 +603,10 @@ impl UpdateClient {
                 self.install_application(check, application, on_progress)
                     .await
             }
+            UpdateInstallTarget::LinuxDesktop(desktop) => {
+                self.install_linux_desktop(check, desktop, on_progress)
+                    .await
+            }
         }
     }
 
@@ -623,113 +624,162 @@ impl UpdateClient {
         }
         let current_binary_dir = target.current_binary_dir.canonicalize()?;
         installed_binary_targets(&current_binary_dir)?;
-        let binary_asset = check
-            .binary_asset
-            .as_ref()
-            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
-        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset, on_progress).await?;
-        on_progress(UpdateProgress::stage(
-            UpdateStage::Verifying,
-            format!("Verifying {}", binary_asset.name),
-        ));
-        if archive.len() as u64 != binary_asset.size {
-            return Err(UpdateError::InvalidRelease(format!(
-                "{} size mismatch: expected {} bytes, got {}",
-                binary_asset.name,
-                binary_asset.size,
-                archive.len()
-            )));
-        }
-        let actual = sha256_hex(&archive);
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return Err(UpdateError::ChecksumMismatch {
-                asset: binary_asset.name.clone(),
-                expected,
-                actual,
-            });
-        }
+        let (binary_asset, archive) = self.fetch_verified_archive(check, on_progress).await?;
 
         let inventory = discover_versioned_binary_inventory(target);
-        fs::create_dir_all(&target.versioned_root)?;
-        let staging = unique_staging_dir(&target.versioned_root)?;
         on_progress(UpdateProgress::stage(
             UpdateStage::Installing,
             "Installing command-line tools and daemon",
         ));
-        let result = (|| -> UpdateResult<UpdateInstallReport> {
-            extract_release_archive(&archive, &binary_asset.name, &staging)?;
-            let wrk_source = staged_binary(&staging, "wrk")?;
-            let workmand_source = staged_binary(&staging, "workmand")?;
-            ensure_staged_binary(&wrk_source, &staging)?;
-            ensure_staged_binary(&workmand_source, &staging)?;
-            set_executable(&wrk_source)?;
-            set_executable(&workmand_source)?;
-            let quarantine_cleared = clear_macos_quarantine(&staging);
-
-            let version = parse_version(&check.latest)?.to_string();
-            let install_dir = target.versioned_root.join(version);
-            commit_staging_directory(&staging, &install_dir)?;
-            let wrk_target = install_dir.join("bin").join(executable_name("wrk"));
-            let workmand_target = install_dir.join("bin").join(executable_name("workmand"));
-            ensure_existing_binary(&wrk_target)?;
-            ensure_existing_binary(&workmand_target)?;
-
-            let mut launchers = inventory.launchers;
-            let canonical_launcher_dir = target.home_dir.join(".local/bin");
-            for (name, binary) in [
-                ("wrk", InstalledProgram::Wrk),
-                ("workmand", InstalledProgram::Workmand),
-            ] {
-                let path = canonical_launcher_dir.join(executable_name(name));
-                if !launchers.iter().any(|launcher| launcher.path == path) {
-                    launchers.push(DiscoveredLauncher { path, binary });
+        let staged = stage_versioned_tools(&archive, &binary_asset.name, &target.versioned_root)?;
+        let install_dir = version_install_dir(&target.versioned_root, &check.latest)?;
+        let (wrk_target, workmand_target) = version_binary_targets(&install_dir);
+        let launchers = PreparedLaunchers::prepare(
+            inventory.launchers,
+            &target.home_dir,
+            &wrk_target,
+            &workmand_target,
+        )?;
+        let tools = commit_versioned_release(staged, &install_dir, launchers, None)?;
+        Ok(UpdateInstallReport {
+            current: check.current.clone(),
+            latest: check.latest.clone(),
+            install_dir: tools.install_dir.to_string_lossy().into_owned(),
+            updated_files: tools.updated_file_names(),
+            desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
+                if asset.name == binary_asset.name {
+                    format!(
+                        "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
+                        tools.wrk_target.display(), tools.workmand_target.display(), asset.name, asset.url
+                    )
+                } else {
+                    format!(
+                        "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
+                        tools.wrk_target.display(), tools.workmand_target.display(), asset.name, asset.url
+                    )
                 }
-            }
-            launchers.sort_by(|left, right| left.path.cmp(&right.path));
+            }),
+            installed_app_bundle: None,
+            quarantine_cleared: tools.quarantine_cleared,
+            restart_plan: UpdateRestartPlan {
+                daemon: true,
+                app: false,
+            },
+        })
+    }
 
-            let mut updated_files = vec![wrk_target.clone(), workmand_target.clone()];
-            for launcher in launchers {
-                let destination = match launcher.binary {
-                    InstalledProgram::Wrk => &wrk_target,
-                    InstalledProgram::Workmand => &workmand_target,
-                };
-                if ensure_launcher(&launcher.path, destination)? {
-                    updated_files.push(launcher.path);
+    /// Update a Linux desktop launched from an AppImage or a distribution package.
+    ///
+    /// Those bundles carry only `workman-desktop`, which then serves as the embedded daemon, so
+    /// there is no wrk/workmand pair beside it to replace. The command-line tools and daemon are
+    /// installed into the durable versioned layout with repointed launchers, and a writable
+    /// AppImage is swapped in place so the relaunched app is the new release. A package-managed
+    /// binary under /usr cannot be replaced without privileges and gets an honest instruction.
+    async fn install_linux_desktop(
+        &self,
+        check: &UpdateCheck,
+        target: &LinuxDesktopInstallTarget,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
+    ) -> UpdateResult<UpdateInstallReport> {
+        if !check.available {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} is already current",
+                check.current
+            )));
+        }
+        if let Some(appimage) = &target.appimage
+            && !appimage.is_file()
+        {
+            return Err(UpdateError::InvalidRelease(format!(
+                "the AppImage that launched Workman is missing at {}",
+                appimage.display()
+            )));
+        }
+        let (binary_asset, archive) = self.fetch_verified_archive(check, on_progress).await?;
+
+        let inventory = discover_install_inventory(
+            &target.home_dir,
+            &target.search_path,
+            &target.known_launcher_dirs,
+        );
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Installing,
+            if target.appimage.is_some() {
+                "Installing command-line tools, daemon, and desktop app"
+            } else {
+                "Installing command-line tools and daemon"
+            },
+        ));
+        // Everything that can fail is validated and prepared before anything the user relies on
+        // changes: the archive must carry the tools and, for an AppImage install, the desktop
+        // file; every launcher link and the replacement AppImage are written beside their
+        // destinations first, which proves those directories are writable. The commit then runs
+        // in a reversible order (version directory, AppImage, launchers) with the previous
+        // state retained until the end, so a failure anywhere puts the old tools and the old
+        // app back.
+        let staged = stage_versioned_tools(&archive, &binary_asset.name, &target.versioned_root)?;
+        let install_dir = version_install_dir(&target.versioned_root, &check.latest)?;
+        let (wrk_target, workmand_target) = version_binary_targets(&install_dir);
+        let launchers = PreparedLaunchers::prepare(
+            inventory.launchers,
+            &target.home_dir,
+            &wrk_target,
+            &workmand_target,
+        )?;
+        let prepared_appimage = match &target.appimage {
+            Some(appimage) => {
+                let staged_appimage = staged.path("Workman.AppImage");
+                if !staged_appimage.is_file() {
+                    return Err(UpdateError::InvalidRelease(format!(
+                        "{} does not contain Workman.AppImage",
+                        binary_asset.name
+                    )));
                 }
+                Some(PreparedReplacement::new(&staged_appimage, appimage)?)
             }
-
-            Ok(UpdateInstallReport {
-                current: check.current.clone(),
-                latest: check.latest.clone(),
-                install_dir: install_dir.to_string_lossy().into_owned(),
-                updated_files: updated_files
-                    .into_iter()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect(),
-                desktop_instruction: check.desktop_asset.as_ref().map(|asset| {
-                    if asset.name == binary_asset.name {
-                        format!(
-                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, open the platform bundle {} from {}, and replace the installed app.",
-                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
-                        )
-                    } else {
-                        format!(
-                            "Updated wrk at {} and workmand at {}. The desktop app bundle was not replaced: close Workman, download {} from {}, and replace the installed app.",
-                            wrk_target.display(), workmand_target.display(), asset.name, asset.url
-                        )
-                    }
-                }),
-                installed_app_bundle: None,
-                quarantine_cleared,
-                restart_plan: UpdateRestartPlan {
-                    daemon: true,
-                    app: false,
-                },
-            })
-        })();
-        let _ = fs::remove_dir_all(&staging);
-        result
+            None => None,
+        };
+        let tools = commit_versioned_release(staged, &install_dir, launchers, prepared_appimage)?;
+        let mut updated_files = tools.updated_file_names();
+        let (installed_app_bundle, desktop_instruction) = match &target.appimage {
+            Some(appimage) => {
+                updated_files.push(appimage.to_string_lossy().into_owned());
+                (
+                    Some(appimage.to_string_lossy().into_owned()),
+                    format!(
+                        "Updated the Workman AppImage at {} to {}. The running app must restart to use the replaced file. Updated wrk at {} and workmand at {}.",
+                        appimage.display(),
+                        check.latest,
+                        tools.wrk_target.display(),
+                        tools.workmand_target.display()
+                    ),
+                )
+            }
+            None => (
+                None,
+                format!(
+                    "Updated wrk at {} and workmand at {}. The desktop app at {} was installed by a package and was not replaced: install the {} package from {}, then reopen Workman.",
+                    tools.wrk_target.display(),
+                    tools.workmand_target.display(),
+                    target.executable.display(),
+                    check.latest,
+                    check.url
+                ),
+            ),
+        };
+        Ok(UpdateInstallReport {
+            current: check.current.clone(),
+            latest: check.latest.clone(),
+            install_dir: tools.install_dir.to_string_lossy().into_owned(),
+            updated_files,
+            desktop_instruction: Some(desktop_instruction),
+            restart_plan: UpdateRestartPlan {
+                daemon: true,
+                app: installed_app_bundle.is_some(),
+            },
+            installed_app_bundle,
+            quarantine_cleared: tools.quarantine_cleared,
+        })
     }
 
     async fn install_application(
@@ -749,32 +799,7 @@ impl UpdateClient {
                 check.current
             )));
         }
-        let binary_asset = check
-            .binary_asset
-            .as_ref()
-            .ok_or_else(|| UpdateError::MissingAsset(self.target.binary_asset_name.clone()))?;
-        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
-        let archive = self.download(binary_asset, on_progress).await?;
-        on_progress(UpdateProgress::stage(
-            UpdateStage::Verifying,
-            format!("Verifying {}", binary_asset.name),
-        ));
-        if archive.len() as u64 != binary_asset.size {
-            return Err(UpdateError::InvalidRelease(format!(
-                "{} size mismatch: expected {} bytes, got {}",
-                binary_asset.name,
-                binary_asset.size,
-                archive.len()
-            )));
-        }
-        let actual = sha256_hex(&archive);
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return Err(UpdateError::ChecksumMismatch {
-                asset: binary_asset.name.clone(),
-                expected,
-                actual,
-            });
-        }
+        let (binary_asset, archive) = self.fetch_verified_archive(check, on_progress).await?;
 
         fs::create_dir_all(&target.versioned_root)?;
         let staging = unique_staging_dir(&target.versioned_root)?;
@@ -920,6 +945,44 @@ impl UpdateClient {
         result
     }
 
+    /// Download this platform's archive and verify the manifest size and SHA256 before any byte
+    /// is extracted or installed.
+    async fn fetch_verified_archive(
+        &self,
+        check: &UpdateCheck,
+        on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
+    ) -> UpdateResult<(ReleaseAsset, Vec<u8>)> {
+        let binary_asset = check.binary_asset.as_ref().ok_or_else(|| {
+            UpdateError::MissingAsset(format!(
+                "{} for {}",
+                self.target.binary_asset_name, self.target.platform_label
+            ))
+        })?;
+        let expected = validate_sha256(&binary_asset.sha256, &binary_asset.name)?;
+        let archive = self.download(binary_asset, on_progress).await?;
+        on_progress(UpdateProgress::stage(
+            UpdateStage::Verifying,
+            format!("Verifying {}", binary_asset.name),
+        ));
+        if archive.len() as u64 != binary_asset.size {
+            return Err(UpdateError::InvalidRelease(format!(
+                "{} size mismatch: expected {} bytes, got {}",
+                binary_asset.name,
+                binary_asset.size,
+                archive.len()
+            )));
+        }
+        let actual = sha256_hex(&archive);
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(UpdateError::ChecksumMismatch {
+                asset: binary_asset.name.clone(),
+                expected,
+                actual,
+            });
+        }
+        Ok((binary_asset.clone(), archive))
+    }
+
     async fn download(
         &self,
         asset: &ReleaseAsset,
@@ -1016,16 +1079,26 @@ pub enum UpdateInstallTarget {
     BinaryDirectory(PathBuf),
     VersionedBinary(VersionedBinaryInstallTarget),
     Application(ApplicationInstallTarget),
+    LinuxDesktop(LinuxDesktopInstallTarget),
 }
+
+/// Environment variable the AppImage runtime sets to the path of the running AppImage file.
+pub const APPIMAGE_ENV: &str = "APPIMAGE";
 
 impl UpdateInstallTarget {
     pub fn binary_directory(path: impl Into<PathBuf>) -> Self {
         Self::BinaryDirectory(path.into())
     }
 
-    /// Resolve the update destination from a process executable. Paths inside a macOS app bundle
-    /// use app-surface discovery; ordinary installed CLI/daemon executables hop to the durable
-    /// versioned layout and repoint their launchers.
+    /// Resolve the update destination from a process executable.
+    ///
+    /// - Paths inside a macOS app bundle use app-surface discovery.
+    /// - A Windows directory holding the wrk/workmand pair (the installer's flat layout) is
+    ///   updated in place, retiring running images, so PATH and shortcuts keep working.
+    /// - A `workman-desktop` executable with no wrk/workmand pair beside it is a Linux AppImage
+    ///   or package bundle running as the embedded daemon.
+    /// - Ordinary installed CLI/daemon executables hop to the durable versioned layout and
+    ///   repoint their launchers.
     pub fn discover(executable: impl AsRef<Path>) -> UpdateResult<Self> {
         let executable = executable.as_ref().canonicalize()?;
         if let Some(app_bundle) = application_bundle_from_executable(&executable) {
@@ -1036,9 +1109,49 @@ impl UpdateInstallTarget {
         let current_binary_dir = executable.parent().map(Path::to_path_buf).ok_or_else(|| {
             UpdateError::InvalidRelease("executable has no parent directory".to_owned())
         })?;
+        let has_tool_pair = installed_binary_targets(&current_binary_dir).is_ok();
+        if cfg!(windows) && has_tool_pair {
+            return Ok(Self::BinaryDirectory(current_binary_dir));
+        }
+        if !has_tool_pair && is_desktop_executable(&executable) {
+            let appimage = env::var_os("WORKMAN_UPDATE_APPIMAGE")
+                .or_else(|| env::var_os(APPIMAGE_ENV))
+                .map(PathBuf::from)
+                .and_then(|path| appimage_surface(&path));
+            return Ok(Self::LinuxDesktop(
+                LinuxDesktopInstallTarget::from_environment(executable, appimage)?,
+            ));
+        }
         Ok(Self::VersionedBinary(
             VersionedBinaryInstallTarget::from_environment(current_binary_dir)?,
         ))
+    }
+
+    /// Let a desktop client tell the daemon which desktop surface it runs from.
+    ///
+    /// A daemon started by the command-line tools cannot see the AppImage the user launched,
+    /// so the versioned CLI hop would leave the desktop on the old release. With the AppImage
+    /// path the same install also swaps that file. Anything that is not an existing, absolute
+    /// `.AppImage` file is ignored; bundles and Windows executables have their own targets.
+    pub fn with_desktop_surface(self, surface: Option<&Path>) -> Self {
+        let Some(appimage) = surface.and_then(appimage_surface) else {
+            return self;
+        };
+        match self {
+            Self::VersionedBinary(target) => Self::LinuxDesktop(LinuxDesktopInstallTarget {
+                executable: target.current_binary_dir.join("workman-desktop"),
+                appimage: Some(appimage),
+                home_dir: target.home_dir,
+                search_path: target.search_path,
+                known_launcher_dirs: target.known_launcher_dirs,
+                versioned_root: target.versioned_root,
+            }),
+            Self::LinuxDesktop(mut target) => {
+                target.appimage = Some(appimage);
+                Self::LinuxDesktop(target)
+            }
+            other => other,
+        }
     }
 
     /// Report whether a Dock-launched app is the only usable Workman surface because no complete
@@ -1126,6 +1239,87 @@ impl ApplicationInstallTarget {
             environment.known_launcher_dirs,
             environment.versioned_root,
         ))
+    }
+}
+
+/// A Linux desktop launched from an AppImage or a distribution package, serving as the embedded
+/// daemon. `appimage` is the launching file when it can be replaced in place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinuxDesktopInstallTarget {
+    pub executable: PathBuf,
+    pub appimage: Option<PathBuf>,
+    pub home_dir: PathBuf,
+    pub search_path: Vec<PathBuf>,
+    pub known_launcher_dirs: Vec<PathBuf>,
+    pub versioned_root: PathBuf,
+}
+
+impl LinuxDesktopInstallTarget {
+    pub fn new(
+        executable: impl Into<PathBuf>,
+        appimage: Option<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        search_path: Vec<PathBuf>,
+        known_launcher_dirs: Vec<PathBuf>,
+        versioned_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            executable: executable.into(),
+            appimage,
+            home_dir: home_dir.into(),
+            search_path,
+            known_launcher_dirs,
+            versioned_root: versioned_root.into(),
+        }
+    }
+
+    fn from_environment(executable: PathBuf, appimage: Option<PathBuf>) -> UpdateResult<Self> {
+        let environment = UpdateInstallEnvironment::from_environment()?;
+        Ok(Self::new(
+            executable,
+            appimage,
+            environment.home_dir,
+            environment.search_path,
+            environment.known_launcher_dirs,
+            environment.versioned_root,
+        ))
+    }
+}
+
+/// Only Linux bundles run the desktop as the daemon. A bare `workman-desktop` elsewhere (a
+/// development build outside its bundle) keeps the tool-pair rules. Unit tests exercise the
+/// rule on every host.
+fn is_desktop_executable(executable: &Path) -> bool {
+    cfg!(any(target_os = "linux", test))
+        && executable
+            .file_stem()
+            .is_some_and(|stem| stem == "workman-desktop")
+}
+
+/// The AppImage the runtime reports through `$APPIMAGE`, canonicalized so the desktop's relaunch
+/// check and the install report name the same path. Users rename AppImages freely, so the file
+/// is trusted by being an absolute, executable regular file rather than by its extension.
+fn appimage_surface(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.canonicalize()
+        .ok()
+        .filter(|path| is_executable_file(path))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
     }
 }
 
@@ -1418,7 +1612,376 @@ fn app_bundle_identifier(bundle: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("{} has no CFBundleIdentifier", plist_path.display()))
 }
 
+/// Result of installing the command-line tools and daemon into the versioned layout.
+struct VersionedToolsInstall {
+    install_dir: PathBuf,
+    wrk_target: PathBuf,
+    workmand_target: PathBuf,
+    updated_files: Vec<PathBuf>,
+    quarantine_cleared: bool,
+}
+
+impl VersionedToolsInstall {
+    fn updated_file_names(&self) -> Vec<String> {
+        self.updated_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+}
+
+/// A verified release extracted into a staging directory beside the versioned layout. The
+/// staging directory is removed when this is dropped without being committed.
+struct StagedTools {
+    staging: PathBuf,
+    quarantine_cleared: bool,
+}
+
+impl StagedTools {
+    fn path(&self, name: &str) -> PathBuf {
+        self.staging.join(name)
+    }
+
+    /// Move the staged bundle to `install_dir`. A previous directory of the same version is
+    /// retained beside it until [`CommittedTools::finish`]. Nothing the user runs changes yet.
+    fn commit(self, install_dir: &Path) -> UpdateResult<CommittedTools> {
+        let previous = commit_staging_directory_retaining(&self.staging, install_dir)?;
+        let (wrk_target, workmand_target) = version_binary_targets(install_dir);
+        let committed = CommittedTools {
+            install_dir: install_dir.to_path_buf(),
+            wrk_target,
+            workmand_target,
+            quarantine_cleared: self.quarantine_cleared,
+            previous,
+            done: false,
+        };
+        if let Err(error) = ensure_existing_binary(&committed.wrk_target)
+            .and_then(|()| ensure_existing_binary(&committed.workmand_target))
+        {
+            committed.roll_back();
+            return Err(error);
+        }
+        Ok(committed)
+    }
+}
+
+impl Drop for StagedTools {
+    fn drop(&mut self) {
+        // After a commit the staging path no longer exists and this is a no-op.
+        let _ = fs::remove_dir_all(&self.staging);
+    }
+}
+
+fn version_install_dir(versioned_root: &Path, version: &str) -> UpdateResult<PathBuf> {
+    Ok(versioned_root.join(parse_version(version)?.to_string()))
+}
+
+fn version_binary_targets(install_dir: &Path) -> (PathBuf, PathBuf) {
+    (
+        install_dir.join("bin").join(executable_name("wrk")),
+        install_dir.join("bin").join(executable_name("workmand")),
+    )
+}
+
+/// A release committed to its version directory. Until [`finish`](Self::finish) runs,
+/// [`roll_back`](Self::roll_back) restores the retained earlier directory of the same version
+/// or removes the new one; dropping it unfinished rolls back as well.
+struct CommittedTools {
+    install_dir: PathBuf,
+    wrk_target: PathBuf,
+    workmand_target: PathBuf,
+    quarantine_cleared: bool,
+    previous: Option<PathBuf>,
+    done: bool,
+}
+
+impl CommittedTools {
+    fn roll_back(mut self) {
+        self.undo();
+    }
+
+    fn undo(&mut self) {
+        self.done = true;
+        let _ = fs::remove_dir_all(&self.install_dir);
+        if let Some(previous) = self.previous.take() {
+            let _ = fs::rename(&previous, &self.install_dir);
+        }
+    }
+
+    fn finish(mut self) -> Self {
+        self.done = true;
+        if let Some(previous) = self.previous.take() {
+            let _ = remove_path(&previous);
+        }
+        self
+    }
+}
+
+impl Drop for CommittedTools {
+    fn drop(&mut self) {
+        if !self.done {
+            self.undo();
+        }
+    }
+}
+
+/// Launchers to repoint. Each replacement link is written beside its path up front, which proves
+/// the directory is writable before anything commits. Committed launchers keep their previous
+/// link as a backup until [`finish`](Self::finish); [`roll_back`](Self::roll_back) restores every
+/// committed one, and dropping the set unfinished does the same.
+struct PreparedLaunchers {
+    entries: Vec<PreparedLauncher>,
+    done: bool,
+}
+
+struct PreparedLauncher {
+    path: PathBuf,
+    target: PathBuf,
+    temporary: Option<PathBuf>,
+    backup: Option<PathBuf>,
+    committed: bool,
+}
+
+impl PreparedLaunchers {
+    fn prepare(
+        mut launchers: Vec<DiscoveredLauncher>,
+        home_dir: &Path,
+        wrk_target: &Path,
+        workmand_target: &Path,
+    ) -> UpdateResult<Self> {
+        let canonical_launcher_dir = home_dir.join(".local/bin");
+        for (name, binary) in [
+            ("wrk", InstalledProgram::Wrk),
+            ("workmand", InstalledProgram::Workmand),
+        ] {
+            let path = canonical_launcher_dir.join(executable_name(name));
+            if !launchers.iter().any(|launcher| launcher.path == path) {
+                launchers.push(DiscoveredLauncher { path, binary });
+            }
+        }
+        launchers.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let mut prepared = Self {
+            entries: Vec::new(),
+            done: false,
+        };
+        for launcher in launchers {
+            let target = match launcher.binary {
+                InstalledProgram::Wrk => wrk_target,
+                InstalledProgram::Workmand => workmand_target,
+            }
+            .to_path_buf();
+            // A launcher that already names this exact target (a retry after an interrupted
+            // update) needs nothing.
+            if fs::read_link(&launcher.path).is_ok_and(|current| current == target) {
+                continue;
+            }
+            let parent = launcher.path.parent().ok_or_else(|| {
+                UpdateError::InvalidRelease(format!("{} has no parent", launcher.path.display()))
+            })?;
+            fs::create_dir_all(parent)?;
+            let mut entry = PreparedLauncher {
+                path: launcher.path,
+                target,
+                temporary: None,
+                backup: None,
+                committed: false,
+            };
+            // Symlinks can point at a binary that does not exist yet; a Windows launcher is a
+            // copy of that binary and can only be made once the release is committed.
+            if cfg!(unix) {
+                let temporary = next_update_path(&entry.path, "link")?;
+                prepared.entries.push(PreparedLauncher {
+                    temporary: Some(temporary.clone()),
+                    ..entry
+                });
+                create_launcher(&temporary, &prepared.entries.last().unwrap().target)?;
+            } else {
+                entry.temporary = None;
+                prepared.entries.push(entry);
+            }
+        }
+        Ok(prepared)
+    }
+
+    /// Swap every prepared link into place, keeping each previous link as a backup. Returns the
+    /// launcher paths that changed. On error the entry that failed is left untouched and the
+    /// caller rolls back the ones already swapped.
+    fn commit(&mut self) -> UpdateResult<Vec<PathBuf>> {
+        let mut updated = Vec::new();
+        for entry in &mut self.entries {
+            let temporary = match entry.temporary.take() {
+                Some(temporary) => temporary,
+                None => {
+                    let temporary = next_update_path(&entry.path, "link")?;
+                    create_launcher(&temporary, &entry.target)?;
+                    temporary
+                }
+            };
+            if fs::symlink_metadata(&entry.path).is_ok() {
+                let backup = next_update_path(&entry.path, "backup")?;
+                if let Err(error) = fs::rename(&entry.path, &backup) {
+                    entry.temporary = Some(temporary);
+                    return Err(error.into());
+                }
+                entry.backup = Some(backup);
+            }
+            if let Err(error) = fs::rename(&temporary, &entry.path) {
+                if let Some(backup) = entry.backup.take() {
+                    let _ = fs::rename(&backup, &entry.path);
+                }
+                entry.temporary = Some(temporary);
+                return Err(error.into());
+            }
+            entry.committed = true;
+            if let Some(parent) = entry.path.parent() {
+                let _ = sync_directory(parent);
+            }
+            updated.push(entry.path.clone());
+        }
+        Ok(updated)
+    }
+
+    fn roll_back(&mut self) {
+        self.done = true;
+        for entry in self.entries.iter_mut().rev() {
+            if entry.committed {
+                match entry.backup.take() {
+                    Some(backup) => {
+                        let _ = fs::rename(&backup, &entry.path);
+                    }
+                    None => {
+                        let _ = fs::remove_file(&entry.path);
+                    }
+                }
+                entry.committed = false;
+            }
+            if let Some(temporary) = entry.temporary.take() {
+                let _ = fs::remove_file(&temporary);
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.done = true;
+        for entry in &mut self.entries {
+            if let Some(backup) = entry.backup.take() {
+                let _ = remove_path(&backup);
+            }
+            if let Some(temporary) = entry.temporary.take() {
+                let _ = fs::remove_file(&temporary);
+            }
+        }
+    }
+}
+
+impl Drop for PreparedLaunchers {
+    fn drop(&mut self) {
+        if !self.done {
+            self.roll_back();
+        }
+    }
+}
+
+/// Commit a staged release in the order that keeps every failure reversible: the version
+/// directory (previous one retained), then the desktop file (previous one retained), then the
+/// launchers (previous links retained). Any error rolls back in reverse; success discards the
+/// retained state.
+fn commit_versioned_release(
+    staged: StagedTools,
+    install_dir: &Path,
+    mut launchers: PreparedLaunchers,
+    appimage: Option<PreparedReplacement>,
+) -> UpdateResult<VersionedToolsInstall> {
+    let committed = staged.commit(install_dir)?;
+    let swapped = match appimage {
+        Some(prepared) => match prepared.commit_retaining() {
+            Ok(swapped) => Some(swapped),
+            Err(error) => {
+                committed.roll_back();
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    let updated_launchers = match launchers.commit() {
+        Ok(updated) => updated,
+        Err(error) => {
+            launchers.roll_back();
+            if let Some(swapped) = swapped {
+                swapped.roll_back();
+            }
+            committed.roll_back();
+            return Err(error);
+        }
+    };
+    launchers.finish();
+    if let Some(swapped) = swapped {
+        swapped.finish();
+    }
+    let committed = committed.finish();
+    let mut updated_files = vec![
+        committed.wrk_target.clone(),
+        committed.workmand_target.clone(),
+    ];
+    updated_files.extend(updated_launchers);
+    Ok(VersionedToolsInstall {
+        install_dir: committed.install_dir.clone(),
+        wrk_target: committed.wrk_target.clone(),
+        workmand_target: committed.workmand_target.clone(),
+        updated_files,
+        quarantine_cleared: committed.quarantine_cleared,
+    })
+}
+
+/// Extract a verified release beside the versioned layout and check that it carries the
+/// command-line tools and daemon. Nothing outside the staging directory changes.
+fn stage_versioned_tools(
+    archive: &[u8],
+    asset_name: &str,
+    versioned_root: &Path,
+) -> UpdateResult<StagedTools> {
+    fs::create_dir_all(versioned_root)?;
+    let mut staged = StagedTools {
+        staging: unique_staging_dir(versioned_root)?,
+        quarantine_cleared: false,
+    };
+    extract_release_archive(archive, asset_name, &staged.staging)?;
+    let wrk_source = staged_binary(&staged.staging, "wrk")?;
+    let workmand_source = staged_binary(&staged.staging, "workmand")?;
+    ensure_staged_binary(&wrk_source, &staged.staging)?;
+    ensure_staged_binary(&workmand_source, &staged.staging)?;
+    set_executable(&wrk_source)?;
+    set_executable(&workmand_source)?;
+    staged.quarantine_cleared = clear_macos_quarantine(&staged.staging);
+    Ok(staged)
+}
+
+/// The Windows installer copies `wrk.exe` to `workman.exe` beside it. Refresh that copy so the
+/// alias does not keep running the retired release; Unix aliases are symlinks and follow wrk.
+fn refresh_flat_alias(wrk_source: &Path, install_dir: &Path) -> UpdateResult<Option<PathBuf>> {
+    let alias = install_dir.join(executable_name("workman"));
+    let is_regular_file = fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.is_file());
+    if !is_regular_file {
+        return Ok(None);
+    }
+    atomic_replace(wrk_source, &alias)?;
+    Ok(Some(alias))
+}
+
 fn commit_staging_directory(staging: &Path, destination: &Path) -> UpdateResult<()> {
+    if let Some(previous) = commit_staging_directory_retaining(staging, destination)? {
+        remove_path(&previous)?;
+    }
+    Ok(())
+}
+
+/// Move `staging` to `destination`, returning the path a previous `destination` was parked at.
+/// The caller removes it once the whole install succeeded, or renames it back on failure.
+fn commit_staging_directory_retaining(
+    staging: &Path,
+    destination: &Path,
+) -> UpdateResult<Option<PathBuf>> {
     let parent = destination.parent().ok_or_else(|| {
         UpdateError::InvalidRelease(format!("{} has no parent", destination.display()))
     })?;
@@ -1434,11 +1997,8 @@ fn commit_staging_directory(staging: &Path, destination: &Path) -> UpdateResult<
         }
         return Err(error.into());
     }
-    if had_destination {
-        remove_path(&backup)?;
-    }
     sync_directory(parent)?;
-    Ok(())
+    Ok(had_destination.then_some(backup))
 }
 
 fn refresh_application_bundle(
@@ -1540,7 +2100,11 @@ fn ensure_launcher(path: &Path, target: &Path) -> UpdateResult<bool> {
         .ok_or_else(|| UpdateError::InvalidRelease(format!("{} has no parent", path.display())))?;
     fs::create_dir_all(parent)?;
     if fs::symlink_metadata(path).is_ok() {
-        replace_launcher(path, target)?;
+        if let Some(backup) = replace_launcher(path, target)? {
+            // The new launcher is in place; the parked previous one would otherwise pile up
+            // beside it after every update.
+            let _ = remove_path(&backup);
+        }
         return Ok(true);
     }
 
@@ -1755,29 +2319,118 @@ fn extract_zip(bytes: &[u8], destination: &Path) -> UpdateResult<()> {
 }
 
 fn atomic_replace(source: &Path, target: &Path) -> UpdateResult<()> {
-    let parent = target.parent().ok_or_else(|| {
-        UpdateError::InvalidRelease(format!("{} has no parent", target.display()))
-    })?;
-    let name = target.file_name().ok_or_else(|| {
-        UpdateError::InvalidRelease(format!("{} has no file name", target.display()))
-    })?;
-    let temporary = parent.join(format!(
-        ".{}.workman-update-new-{}",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&temporary);
-    let mut input = File::open(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    set_executable(&temporary)?;
-    replace_file(&temporary, target)?;
-    sync_directory(parent)?;
-    Ok(())
+    PreparedReplacement::new(source, target)?.commit()
+}
+
+/// A replacement file written and synced beside its target, ready to be renamed over it.
+/// Preparing it proves the destination directory is writable before any other step commits;
+/// dropping it without committing removes the temporary file.
+struct PreparedReplacement {
+    temporary: PathBuf,
+    target: PathBuf,
+    committed: bool,
+}
+
+impl PreparedReplacement {
+    fn new(source: &Path, target: &Path) -> UpdateResult<Self> {
+        let parent = target.parent().ok_or_else(|| {
+            UpdateError::InvalidRelease(format!("{} has no parent", target.display()))
+        })?;
+        let name = target.file_name().ok_or_else(|| {
+            UpdateError::InvalidRelease(format!("{} has no file name", target.display()))
+        })?;
+        let temporary = parent.join(format!(
+            ".{}.workman-update-new-{}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&temporary);
+        let prepared = Self {
+            temporary,
+            target: target.to_path_buf(),
+            committed: false,
+        };
+        let mut input = File::open(source)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&prepared.temporary)?;
+        io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        set_executable(&prepared.temporary)?;
+        Ok(prepared)
+    }
+
+    fn commit(mut self) -> UpdateResult<()> {
+        let parent = self.target.parent().ok_or_else(|| {
+            UpdateError::InvalidRelease(format!("{} has no parent", self.target.display()))
+        })?;
+        replace_file(&self.temporary, &self.target)?;
+        self.committed = true;
+        sync_directory(parent)?;
+        Ok(())
+    }
+
+    /// Swap the replacement in while parking the previous file beside it, so a later failure
+    /// can put it back. Used where the previous file stays usable after a rename (Unix).
+    fn commit_retaining(mut self) -> UpdateResult<CommittedReplacement> {
+        let parent = self.target.parent().ok_or_else(|| {
+            UpdateError::InvalidRelease(format!("{} has no parent", self.target.display()))
+        })?;
+        let backup = next_update_path(&self.target, "old")?;
+        fs::rename(&self.target, &backup)?;
+        if let Err(error) = fs::rename(&self.temporary, &self.target) {
+            let _ = fs::rename(&backup, &self.target);
+            return Err(error.into());
+        }
+        self.committed = true;
+        sync_directory(parent)?;
+        Ok(CommittedReplacement {
+            target: self.target.clone(),
+            backup,
+            done: false,
+        })
+    }
+}
+
+impl Drop for PreparedReplacement {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+/// A file swapped into place whose previous version is parked beside it until
+/// [`finish`](Self::finish); [`roll_back`](Self::roll_back) or an unfinished drop restores it.
+struct CommittedReplacement {
+    target: PathBuf,
+    backup: PathBuf,
+    done: bool,
+}
+
+impl CommittedReplacement {
+    fn roll_back(mut self) {
+        self.undo();
+    }
+
+    fn undo(&mut self) {
+        self.done = true;
+        let _ = fs::rename(&self.backup, &self.target);
+    }
+
+    fn finish(mut self) {
+        self.done = true;
+        let _ = fs::remove_file(&self.backup);
+    }
+}
+
+impl Drop for CommittedReplacement {
+    fn drop(&mut self) {
+        if !self.done {
+            self.undo();
+        }
+    }
 }
 
 /// Move `source` over `target`, replacing any existing file.
@@ -2045,6 +2698,117 @@ mod tests {
         );
         assert!(validate_sha256(&"z".repeat(64), "asset").is_err());
         assert!(validate_sha256("abc", "asset").is_err());
+    }
+
+    #[test]
+    fn a_lone_desktop_executable_is_a_linux_desktop_target_and_a_tool_pair_is_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_bin = temp.path().join("mount/usr/bin");
+        fs::create_dir_all(&bundle_bin).unwrap();
+        let desktop = bundle_bin.join(executable_name("workman-desktop"));
+        fs::write(&desktop, "desktop").unwrap();
+        match UpdateInstallTarget::discover(&desktop).unwrap() {
+            UpdateInstallTarget::LinuxDesktop(target) => {
+                assert_eq!(target.executable, desktop.canonicalize().unwrap());
+                assert_eq!(target.appimage, None);
+            }
+            other => panic!("expected a Linux desktop target, got {other:?}"),
+        }
+
+        let tools = temp.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(tools.join(executable_name("wrk")), "wrk").unwrap();
+        fs::write(tools.join(executable_name("workmand")), "workmand").unwrap();
+        let expected_dir = tools.canonicalize().unwrap();
+        match UpdateInstallTarget::discover(tools.join(executable_name("workmand"))).unwrap() {
+            UpdateInstallTarget::VersionedBinary(target) if !cfg!(windows) => {
+                assert_eq!(target.current_binary_dir, expected_dir);
+            }
+            UpdateInstallTarget::BinaryDirectory(directory) if cfg!(windows) => {
+                assert_eq!(directory, expected_dir);
+            }
+            other => panic!("unexpected target for an installed tool pair: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_desktop_surface_only_redirects_versioned_installs_to_an_existing_appimage() {
+        let temp = tempfile::tempdir().unwrap();
+        let appimage = temp.path().join("Workman.AppImage");
+        fs::write(&appimage, "appimage").unwrap();
+        set_executable(&appimage).unwrap();
+        let versioned = UpdateInstallTarget::VersionedBinary(VersionedBinaryInstallTarget::new(
+            temp.path().join("dist/0.1.13/bin"),
+            temp.path().join("home"),
+            vec![],
+            vec![],
+            temp.path().join("dist"),
+        ));
+        match versioned.clone().with_desktop_surface(Some(&appimage)) {
+            UpdateInstallTarget::LinuxDesktop(target) => {
+                assert_eq!(target.appimage, Some(appimage.canonicalize().unwrap()));
+                assert_eq!(target.versioned_root, temp.path().join("dist"));
+            }
+            other => panic!("expected a Linux desktop target, got {other:?}"),
+        }
+        assert_eq!(
+            versioned
+                .clone()
+                .with_desktop_surface(Some(&temp.path().join("missing.AppImage"))),
+            versioned
+        );
+        // A renamed AppImage is still executable; a data file beside it is not a surface.
+        let renamed = temp.path().join("workman");
+        fs::write(&renamed, "renamed appimage").unwrap();
+        set_executable(&renamed).unwrap();
+        assert!(matches!(
+            versioned.clone().with_desktop_surface(Some(&renamed)),
+            UpdateInstallTarget::LinuxDesktop(target)
+                if target.appimage == Some(renamed.canonicalize().unwrap())
+        ));
+        #[cfg(unix)]
+        {
+            let data_file = temp.path().join("notes.txt");
+            fs::write(&data_file, "notes").unwrap();
+            assert_eq!(
+                versioned.clone().with_desktop_surface(Some(&data_file)),
+                versioned
+            );
+        }
+        let directory = UpdateInstallTarget::binary_directory(temp.path());
+        assert_eq!(
+            directory.clone().with_desktop_surface(Some(&appimage)),
+            directory
+        );
+    }
+
+    #[test]
+    fn flat_alias_refresh_touches_only_a_regular_alias_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("new-wrk");
+        fs::write(&source, "new wrk").unwrap();
+        assert_eq!(refresh_flat_alias(&source, temp.path()).unwrap(), None);
+
+        let alias = temp.path().join(executable_name("workman"));
+        fs::write(&alias, "old wrk").unwrap();
+        assert_eq!(
+            refresh_flat_alias(&source, temp.path()).unwrap().as_deref(),
+            Some(alias.as_path())
+        );
+        assert_eq!(fs::read(&alias).unwrap(), b"new wrk");
+
+        #[cfg(unix)]
+        {
+            fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(temp.path().join("wrk"), &alias).unwrap();
+            assert_eq!(refresh_flat_alias(&source, temp.path()).unwrap(), None);
+            assert!(
+                fs::symlink_metadata(&alias)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
     }
 
     #[test]

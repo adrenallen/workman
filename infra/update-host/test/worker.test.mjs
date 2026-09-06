@@ -142,6 +142,37 @@ test("renders the public stable download page entirely from its channel manifest
   assert.equal(await head.text(), "");
 });
 
+test("lists the Windows archive only when a release carries one", async () => {
+  const without = await (await worker.fetch(request("/download"), env)).text();
+  assert.doesNotMatch(without, /Windows/);
+  assert.doesNotMatch(without, /install\.ps1/);
+
+  const windowsRelease = {
+    ...release,
+    assets: [...release.assets, releaseAsset("workman-windows-x86_64.zip", "windows-x86_64", 45 * 1024 * 1024)],
+  };
+  const windowsEnv = {
+    ...env,
+    RELEASES: {
+      ...env.RELEASES,
+      async get(key, options = {}) {
+        if (key === "channels/stable.json") {
+          const body = new TextEncoder().encode(JSON.stringify(windowsRelease));
+          return object(rangedBody(body, options.range), "application/json; charset=utf-8", body.byteLength);
+        }
+        return env.RELEASES.get(key, options);
+      },
+    },
+  };
+  const html = await (await worker.fetch(request("/download"), windowsEnv)).text();
+  assert.match(html, /<h2 id="windows-x86-64">x86_64<\/h2>/);
+  assert.match(html, /href="\/versions\/1\.2\.3\/workman-windows-x86_64\.zip"/);
+  assert.match(html, /Download for Windows/);
+  assert.match(html, /45 MB/);
+  assert.match(html, /install\.ps1/);
+  assert.match(html, /%LOCALAPPDATA%/);
+});
+
 test("keeps the download page public when legacy credentials or query values are present", async () => {
   for (const [path, headers] of [
     ["/download", {}],

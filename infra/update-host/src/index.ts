@@ -54,6 +54,13 @@ const DOWNLOAD_GROUPS = [
       { target: "linux-arm64", label: "Portable archive", format: "TAR.GZ" },
     ],
   },
+  {
+    id: "windows-x86-64",
+    platform: "Windows",
+    architecture: "x86_64",
+    description: "Desktop app, wrk, and workmand with install.ps1",
+    assets: [{ target: "windows-x86_64", label: "Download for Windows", format: "ZIP" }],
+  },
 ] as const;
 
 function json(data: unknown, status = 200, cacheControl = "no-store"): Response {
@@ -241,6 +248,7 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
       ?? release.assets.find((asset) => asset.target === "linux-arm64-deb");
     const linuxArchive = release.assets.find((asset) => asset.target === "linux-x86_64")
       ?? release.assets.find((asset) => asset.target === "linux-arm64");
+    const windowsArchive = release.assets.find((asset) => asset.target === "windows-x86_64");
     const published = formattedDate(release.published_at);
     const groups = DOWNLOAD_GROUPS.map((group) => renderDownloadGroup(release, group)).join("");
     const checksumLink = checksums === undefined
@@ -250,6 +258,13 @@ async function serveDownload(request: Request, env: WorkerEnv): Promise<Response
     const appImageName = escapeHtml(linuxAppImage?.name ?? "the AppImage");
     const debName = escapeHtml(linuxDeb?.name ?? "the .deb package");
     const archiveName = escapeHtml(linuxArchive?.name ?? "the tar.gz archive");
+    const windowsName = escapeHtml(windowsArchive?.name ?? "workman-windows-x86_64.zip");
+    const windowsInstall = windowsArchive === undefined
+      ? ""
+      : `<section>
+            <h3>Windows</h3>
+            <p>Extract <code>${windowsName}</code>, then run <code>powershell -ExecutionPolicy Bypass -File install.ps1</code> from the extracted folder. It installs <code>wrk.exe</code>, <code>workmand.exe</code>, and the desktop app under <code>%LOCALAPPDATA%\\Programs\\Workman\\bin</code> and adds a Start Menu entry.</p>
+          </section>`;
     const version = escapeHtml(release.version);
     const publishedAt = escapeHtml(release.published_at);
     const macFirstLaunch = hasNotarizedMacBundle(release.version)
@@ -361,6 +376,7 @@ ${noindexMeta(env)}  <title>Download Workman ${version}</title>
             <h3>Linux</h3>
             <p>For <code>${appImageName}</code>, run <code>chmod +x &lt;file&gt;</code>. Install <code>${debName}</code> with <code>sudo apt install ./&lt;file&gt;</code>, or unpack <code>${archiveName}</code> with <code>tar -xzf &lt;file&gt;</code>.</p>
           </section>
+          ${windowsInstall}
         </div>
       </section>
     </main>

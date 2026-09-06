@@ -19,7 +19,7 @@
   import MarkdownView from '../MarkdownView.svelte';
   import type { ConnectionStatus } from '../daemon';
   import type { DaemonSettingsInfo, UpdateChannel } from '../settings';
-  import { updateActionAvailable, updateActionCopy } from '../updateRecovery';
+  import { updateActionAvailable, updateActionCopy, updateInstallBlocked } from '../updateRecovery';
   import { updateBannerState, type UpdateFlow } from '../updateFlow';
   import workmanLogo from '../../../../../assets/branding/workman-logo-wide.png';
 
@@ -61,6 +61,7 @@
   let recoveryRequired = $derived(update.cli_recovery_required);
   let actionAvailable = $derived(updateActionAvailable(update));
   let actionCopy = $derived(updateActionCopy(update));
+  let installBlocked = $derived(updateInstallBlocked(update));
   let hasChecked = $derived(update.last_checked_at !== null && check.checked_at > 0);
   let connected = $derived(connection.status === 'connected');
   let currentReleaseUrl = $derived(`${releasesUrl}/tag/v${encodeURIComponent(check.current)}`);
@@ -202,6 +203,12 @@
             {#if flowActive}
               <strong class="text-sm">{flowBanner.title}</strong>
               <p class="mt-1 text-xs leading-5 text-muted-foreground">{flowBanner.description}</p>
+            {:else if installBlocked !== null}
+              <div class="flex flex-wrap items-center gap-2">
+                <strong class="text-sm">Workman {check.latest} is available to download</strong>
+                {#if check.prerelease}<Badge variant="secondary">Prerelease</Badge>{/if}
+              </div>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">{actionCopy.bannerDescription}</p>
             {:else if recoveryRequired}
               <div class="flex flex-wrap items-center gap-2">
                 <strong class="text-sm">
@@ -266,6 +273,12 @@
               <RefreshCwIcon class={updateBusy === 'check' ? 'animate-spin' : undefined} aria-hidden="true" />
               {updateBusy === 'check' ? 'Checking…' : 'Check for updates'}
             </Button>
+            {#if installBlocked !== null}
+              <Button size="sm" variant="outline" href={check.url} target="_blank" rel="noreferrer">
+                <ExternalLinkIcon aria-hidden="true" />
+                Download release
+              </Button>
+            {/if}
             {#if actionAvailable}
               <Button
                 size="sm"

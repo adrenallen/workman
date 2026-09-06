@@ -2582,7 +2582,7 @@ async fn self_update(
         client
             .rpc::<UpdateStatus>(
                 "daemon.update_check",
-                json!({ "force": true, "key": update_key.as_deref() }),
+                update_rpc_params(json!({ "force": true }), update_key.as_deref()),
             )
             .await?
             .check
@@ -2610,7 +2610,10 @@ async fn self_update(
             "workman: warning: updating restarts workmand and stops all running project processes"
         );
         client
-            .rpc("daemon.update_apply", json!({ "key": &update_key }))
+            .rpc(
+                "daemon.update_apply",
+                update_rpc_params(json!({}), update_key.as_deref()),
+            )
             .await?
     } else {
         let install_target = match env::var_os("WORKMAN_UPDATE_INSTALL_DIR") {
@@ -2634,6 +2637,14 @@ async fn self_update(
         );
     }
     Ok(())
+}
+
+/// Older daemons reject `"key": null`, so the key is only sent when one is configured.
+fn update_rpc_params(mut params: serde_json::Value, key: Option<&str>) -> serde_json::Value {
+    if let Some(key) = key {
+        params["key"] = json!(key);
+    }
+    params
 }
 
 fn print_update_report(report: &UpdateInstallReport) {
@@ -3063,6 +3074,18 @@ mod tests {
         assert_eq!(
             shell_command(&["printf hi | sed s/hi/ok/".into()]),
             "printf hi | sed s/hi/ok/"
+        );
+    }
+
+    #[test]
+    fn update_requests_omit_the_key_unless_one_is_configured() {
+        assert_eq!(
+            update_rpc_params(json!({ "force": true }), None),
+            json!({ "force": true })
+        );
+        assert_eq!(
+            update_rpc_params(json!({}), Some("friends-key")),
+            json!({ "key": "friends-key" })
         );
     }
 

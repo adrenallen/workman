@@ -5868,7 +5868,7 @@
         if (canPresentUpdateProgress(updateFlow, updateInstallActive)) {
           presentUpdateProgress(progress);
         }
-      });
+      }, nativeRelaunchAppBundle);
       installedUpdateReport = report;
       presentUpdateProgress(
         updateProgress('restarting', `Installed Workman ${report.latest} — restarting…`)
@@ -6149,9 +6149,13 @@
         <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void restartOutdatedDaemon()}>
           {versionRestarting ? 'Restarting daemon…' : 'Restart daemon'}
         </Button>
-      {:else if updateBanner.mode === 'available'}
+      {:else if updateBanner.mode === 'available' && updateBanner.action === 'install'}
         <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" disabled={versionRestarting} onclick={() => void applyAvailableUpdate()}>
           {startupUpdateCopy?.buttonLabel}
+        </Button>
+      {:else if updateBanner.mode === 'available' && updateBanner.action === 'download' && updateBanner.releaseUrl}
+        <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" href={updateBanner.releaseUrl} target="_blank" rel="noreferrer">
+          Download release
         </Button>
       {:else if updateBanner.retry}
         <Button class="border-warning/50 text-warning hover:bg-warning/10" size="sm" variant="outline" onclick={() => void performAvailableUpdate()}>Retry</Button>

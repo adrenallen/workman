@@ -4,6 +4,17 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Repair self-update on Linux desktops and Windows. AppImage and package installs run the desktop
+  as their daemon and have no wrk/workmand pair beside it; updates now install the command-line
+  tools into the versioned layout, replace a writable AppImage in place and relaunch it, and give
+  package installs an honest instruction instead of failing. Windows installs update
+  `Programs\Workman\bin` in place and relaunch the replaced desktop. A daemon started by `wrk`
+  also refreshes the AppImage the desktop was launched from. `wrk update` no longer fails with
+  "key must be a string" against a running daemon when no update key is configured. Releases
+  without a package for the current platform are shown as download-only instead of offering an
+  update that cannot install, and the release pipeline, manifest, and download page carry the
+  Windows archive whose bundled `install.ps1` now installs prebuilt binaries.
+
 - Keep speech-model verification off the UI thread and recover abandoned dictation recordings
   safely after a crash. Keep live notifications responsive during audio previews, repair damaged
   volume copies, bound their cache, and reuse Linux notification connections. Refresh process

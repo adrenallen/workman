@@ -135,10 +135,6 @@ impl UpdateService {
         )
     }
 
-    pub(crate) async fn check(&self, force: bool) -> Result<UpdateStatus, UpdateError> {
-        self.check_with_key(force, None).await
-    }
-
     pub(crate) async fn check_with_key(
         &self,
         force: bool,
@@ -219,21 +215,13 @@ impl UpdateService {
         ))
     }
 
-    pub(crate) async fn install(&self) -> Result<UpdateInstallReport, UpdateError> {
-        self.install_with_key_for(None, None).await
-    }
-
-    pub(crate) async fn install_with_key(
-        &self,
-        key_override: Option<&str>,
-    ) -> Result<UpdateInstallReport, UpdateError> {
-        self.install_with_key_for(key_override, None).await
-    }
-
+    /// Install the latest release. `desktop_surface` is the desktop client's own launch file
+    /// (an AppImage path), which lets a CLI-started daemon refresh that desktop as well.
     pub(crate) async fn install_with_key_for(
         &self,
         key_override: Option<&str>,
         request_id: Option<String>,
+        desktop_surface: Option<PathBuf>,
     ) -> Result<UpdateInstallReport, UpdateError> {
         if !self.updates_enabled {
             return Err(UpdateError::InvalidRelease(
@@ -270,8 +258,12 @@ impl UpdateService {
             .as_ref()
             .unwrap_or_else(|| self.client(status.channel));
         let publish = |progress| self.publish_progress(request_id.as_deref(), progress);
+        let install_target = self
+            .install_target
+            .clone()
+            .with_desktop_surface(desktop_surface.as_deref());
         match client
-            .install_target_with_progress(&status.check, &self.install_target, &publish)
+            .install_target_with_progress(&status.check, &install_target, &publish)
             .await
         {
             // The daemon cannot know whether the caller will relaunch an app, restart only the
