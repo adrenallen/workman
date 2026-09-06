@@ -7,6 +7,9 @@ All notable changes to Workman are recorded here.
 - Add a Notification mode selector for all agents, top-level agents, or one project-ready alert
   after every agent (including children) stops working. Wait through brief handoffs and notify once
   per work cycle. Migrate the previous overlapping switches into the selected mode.
+- Bundle the Doom item pickup sound in the notification sound dropdown. Keep System default as
+  the initial selection and Doom as the only shipped alternative, alongside custom WAV import.
+  Embed the audio in the desktop binary and persist the choice. Windows retains its native sound.
 - Add a separate notification sound toggle for every mode and custom WAV import on macOS/Linux.
   Keep a validated local copy with a system-default reset; preserve the prior sound on import errors.
   Windows retains its system sound because native toasts cannot play uploaded files outside the app

@@ -78,8 +78,9 @@ fn sound_info(app: &AppHandle) -> Result<sound::SoundInfo, String> {
     if cfg!(windows) {
         return Ok(sound::SoundInfo {
             supported: false,
+            preset: sound::SoundPreset::System,
             name: None,
-            detail: Some("Windows uses the system sound. Uploaded sounds aren't supported by Windows notifications in this build.".into()),
+            detail: Some("Windows uses the system sound. Doom and custom audio aren't supported by Windows notifications in this build.".into()),
         });
     }
     let mut info = sound_store(app)?.info();
@@ -97,6 +98,30 @@ pub async fn native_notification_sound_state(app: AppHandle) -> Result<sound::So
     tauri::async_runtime::spawn_blocking(move || sound_info(&app))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_select_sound(
+    app: AppHandle,
+    preset: sound::SoundPreset,
+) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<NativeNotificationState>();
+        let _guard = state
+            .sound_settings
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if cfg!(windows) && preset != sound::SoundPreset::System {
+            return Err(
+                "Doom and custom notification sounds are not supported on Windows in this build."
+                    .into(),
+            );
+        }
+        sound_store(&app)?.select(preset)?;
+        sound_info(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

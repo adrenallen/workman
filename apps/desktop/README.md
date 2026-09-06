@@ -43,14 +43,21 @@ sound permissions, and Focus/Do Not Disturb still determine whether it is audibl
 play audio outside the notification service. In-app-only mode produces no computer banner or sound.
 Computer notifications retain live status updates while minimized, independently of Keep Awake.
 
+The sound dropdown starts with **System default** and **Doom**, the only bundled alternative.
+Doom uses the supplied `dsitemup.wav` pickup sound, converted without changing its timing to 16-bit
+PCM and embedded as `dsitempickup.wav` in the desktop binary. Selecting it needs no download or
+file dialog, and the choice survives restart. It uses the same native delivery path and respects
+the sound toggle and in-app-only setting.
+
 On macOS and Linux, **Choose sound…** imports a WAV file (16-bit PCM, mono or stereo, 8–48 kHz,
 less than 30 seconds, up to 6 MiB). Workman validates the actual audio and keeps its own local copy;
-cancelled or failed imports retain the previous selection. **Use system default** removes the saved
-copy. Missing files fall back to the system sound without blocking the banner. macOS stores its
-uniquely named copy in `~/Library/Sounds` for Notification Center; Linux uses Workman's app data
+cancelled or failed imports retain the previous selection. Selecting **System default** removes the
+saved copy. A selected upload appears as **Custom: filename** in the dropdown. Missing files fall
+back to the system sound without blocking the banner. macOS stores its uniquely named copy in `~/Library/Sounds` for Notification Center; Linux uses Workman's app data
 folder and the standard `sound-file` hint. Linux desktops may ignore sound hints. Windows continues
-to use its system sound and disables importing: its native toast API supports packaged sound
-resources, not uploaded files outside the application package.
+to use its system sound and disables Doom/importing: native toast audio requires Windows package
+resources, and the current Win32 build does not have that package identity. Embedding bytes in the
+executable does not supply a Windows package resource URI.
 
 When permission is blocked, **Open system settings** opens Workman's notification controls on
 macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
@@ -75,5 +82,5 @@ policies (including Do Not Disturb/Focus) can suppress the banner while retainin
 Also check two working agents finishing separately (including a child), one project becoming ready
 while another remains busy, sound on/off, a quick handoff restarting the two-second pause, clicking
 the project-ready alert, and work resuming while OS permission is pending. Verify all three modes,
-custom sound import/reload/reset on macOS and Linux, invalid/missing files, system-sound fallback
+Doom selection/reload/default reset and custom sound import on macOS/Linux, invalid/missing files, system-sound fallback
 on Windows, and sound suppression under OS notification sound settings and Focus/Do Not Disturb.

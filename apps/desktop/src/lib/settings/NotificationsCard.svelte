@@ -23,7 +23,7 @@
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
 
-  import { notificationSound, refreshNotificationSound, chooseNotificationSound, resetNotificationSound } from '../notificationSound';
+  import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound } from '../notificationSound';
 
   onMount(() => { void refreshNotificationSound(); });
 
@@ -177,12 +177,30 @@
       </label>
     </div>
     <div class="min-w-0 rounded-md border bg-muted/30 p-3">
-      <p class="truncate text-sm font-medium" title={$notificationSound.info?.name ?? undefined}>
-        {$notificationSound.info?.name ?? 'System default'}
-      </p>
-      <p class="mt-1 text-xs leading-5 text-muted-foreground">
+      <label for="notification-sound-preset" class="mb-2 block text-sm font-medium">Sound</label>
+      <select
+        id="notification-sound-preset"
+        class="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        value={$notificationSound.info?.preset ?? 'system'}
+        disabled={!$nativeNotificationPreferences.enabled || !$nativeNotificationPreferences.soundEnabled || $notificationSound.busy || !$notificationSound.info}
+        aria-describedby="notification-sound-description"
+        onchange={(event) => {
+          const preset = event.currentTarget.value;
+          // Keep the displayed value tied to the saved choice while a native write is pending
+          // or fails. A failed write must never look like a successfully selected sound.
+          event.currentTarget.value = $notificationSound.info?.preset ?? 'system';
+          if (preset === 'system' || preset === 'doom') void selectNotificationSound(preset);
+        }}
+      >
+        <option value="system">System default</option>
+        <option value="doom" disabled={!$notificationSound.info?.supported}>Doom</option>
+        {#if $notificationSound.info?.preset === 'custom'}
+          <option value="custom">Custom: {$notificationSound.info.name}</option>
+        {/if}
+      </select>
+      <p id="notification-sound-description" class="mt-2 text-xs leading-5 text-muted-foreground">
         {#if $notificationSound.info?.supported}
-          Choose a WAV file under 30 seconds (16-bit PCM, mono or stereo, 8–48 kHz, up to 6 MB).
+          Doom is the bundled item pickup sound. You can also choose your own WAV under 30 seconds (16-bit PCM, mono or stereo, 8–48 kHz, up to 6 MB).
           Workman saves a local copy.
         {:else if !$notificationSound.info}
           {$notificationSound.busy ? 'Checking sound support…' : 'Sound settings are unavailable.'}
@@ -199,12 +217,6 @@
           <UploadIcon aria-hidden="true" />
           {$notificationSound.busy ? 'Loading…' : 'Choose sound…'}
         </Button>
-        {#if $notificationSound.info?.name}
-          <Button variant="outline" size="sm"
-            disabled={!$nativeNotificationPreferences.enabled || !$nativeNotificationPreferences.soundEnabled || $notificationSound.busy}
-            onclick={() => void resetNotificationSound()}
-          >Use system default</Button>
-        {/if}
         {#if !$notificationSound.info && !$notificationSound.busy}
           <Button variant="outline" size="sm" onclick={() => void refreshNotificationSound()}>Retry</Button>
         {/if}

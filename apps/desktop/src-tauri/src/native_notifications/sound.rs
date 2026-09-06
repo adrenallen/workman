@@ -10,16 +10,33 @@ use serde::{Deserialize, Serialize};
 
 const MAX_BYTES: u64 = 6 * 1024 * 1024;
 const FILE_PREFIX: &str = "workman-notification-";
+// Embed the only shipped sound in every binary, including dev and packaged builds.
+const DOOM_WAV: &[u8] = include_bytes!("../../assets/sounds/dsitempickup.wav");
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundPreset {
+    System,
+    Doom,
+    Custom,
+}
+
+fn legacy_preset() -> SoundPreset {
+    SoundPreset::Custom
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SoundInfo {
     pub supported: bool,
+    pub preset: SoundPreset,
     pub name: Option<String>,
     pub detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Selection {
+    #[serde(default = "legacy_preset")]
+    preset: SoundPreset,
     file_name: String,
     display_name: String,
 }
@@ -41,12 +58,14 @@ impl SoundStore {
         match self.selection() {
             Ok(Some(selection)) if self.available_path(&selection).is_some() => SoundInfo {
                 supported: true,
+                preset: selection.preset,
                 name: Some(selection.display_name),
                 detail: None,
             },
-            Ok(None) => SoundInfo { supported: true, name: None, detail: None },
+            Ok(None) => SoundInfo { supported: true, preset: SoundPreset::System, name: None, detail: None },
             _ => SoundInfo {
                 supported: true,
+                preset: SoundPreset::System,
                 name: None,
                 detail: Some("The saved sound is unavailable. Using the system sound; choose a file again to replace it.".into()),
             },
@@ -79,24 +98,45 @@ impl SoundStore {
             return Err("Choose a WAV file smaller than 6 MB.".into());
         }
         let bytes = read_bounded(source, MAX_BYTES)?;
-        validate_wav(&bytes)?;
+        let display_name = source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(160)
+            .collect();
+        self.install(&bytes, display_name, SoundPreset::Custom)
+    }
+
+    pub fn select(&self, preset: SoundPreset) -> Result<SoundInfo, String> {
+        match preset {
+            SoundPreset::System => self.reset(),
+            SoundPreset::Doom => self.install(DOOM_WAV, "Doom".into(), SoundPreset::Doom),
+            SoundPreset::Custom => {
+                Err("Choose a WAV file to set a custom notification sound.".into())
+            }
+        }
+    }
+
+    fn install(
+        &self,
+        bytes: &[u8],
+        display_name: String,
+        preset: SoundPreset,
+    ) -> Result<SoundInfo, String> {
+        validate_wav(bytes)?;
         let selection = Selection {
+            preset,
             file_name: format!("{FILE_PREFIX}{}.wav", uuid::Uuid::new_v4()),
-            display_name: source
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(160)
-                .collect(),
+            display_name,
         };
         let previous = self.selection().ok().flatten();
         fs::create_dir_all(&self.sounds).map_err(|error| error.to_string())?;
         fs::create_dir_all(self.settings.parent().ok_or("Missing settings folder")?)
             .map_err(|error| error.to_string())?;
         let destination = self.sounds.join(&selection.file_name);
-        write_new(&destination, &bytes)?;
+        write_new(&destination, bytes)?;
         let temporary = self
             .settings
             .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -140,7 +180,7 @@ impl SoundStore {
         }
         let selection: Selection = serde_json::from_slice(&read_bounded(&self.settings, 4096)?)
             .map_err(|error| error.to_string())?;
-        if !owned_name(&selection.file_name) {
+        if selection.preset == SoundPreset::System || !owned_name(&selection.file_name) {
             return Err("Invalid saved sound name".into());
         }
         Ok(Some(selection))

@@ -107,6 +107,7 @@ fn unavailable_or_invalid_settings_fall_back_and_never_remove_external_files() {
         fs::write(
             &store.settings,
             serde_json::to_vec(&Selection {
+                preset: SoundPreset::Custom,
                 file_name: name.into(),
                 display_name: "Bad".into(),
             })
@@ -121,6 +122,71 @@ fn unavailable_or_invalid_settings_fall_back_and_never_remove_external_files() {
     assert!(store.selected_path().is_none());
     store.import(&source).unwrap();
     assert!(store.selected_path().is_some());
+}
+
+#[test]
+fn bundled_doom_is_valid_and_preserves_the_supplied_pickup_audio_format_and_timing() {
+    validate_wav(DOOM_WAV).unwrap();
+    let mut reader = hound::WavReader::new(Cursor::new(DOOM_WAV)).unwrap();
+    assert_eq!(reader.spec().sample_rate, 11_025);
+    assert_eq!(reader.spec().channels, 1);
+    assert_eq!(reader.spec().bits_per_sample, 16);
+    assert_eq!(reader.duration(), 2_263);
+    let samples: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+    assert!(samples.iter().all(|sample| i32::from(*sample) % 256 == 0));
+    assert!(samples.iter().any(|sample| *sample != 0));
+}
+
+#[test]
+fn selecting_doom_persists_an_embedded_copy_and_system_restores_the_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let sounds = temp.path().join("Library/Sounds");
+    let store = SoundStore::new(temp.path(), sounds.clone());
+    assert_eq!(store.info().preset, SoundPreset::System);
+    assert!(store.selected_path().is_none());
+    let info = store.select(SoundPreset::Doom).unwrap();
+    assert_eq!(info.preset, SoundPreset::Doom);
+    assert_eq!(info.name.as_deref(), Some("Doom"));
+    let copy = store.selected_path().unwrap();
+    assert_eq!(fs::read(&copy).unwrap(), DOOM_WAV);
+    let reopened = SoundStore::new(temp.path(), sounds);
+    assert_eq!(reopened.info().preset, SoundPreset::Doom);
+    assert_eq!(reopened.selected_path().as_ref(), Some(&copy));
+    assert_eq!(
+        reopened.select(SoundPreset::System).unwrap().preset,
+        SoundPreset::System
+    );
+    assert!(!copy.exists());
+    assert!(reopened.selected_path().is_none());
+}
+
+#[test]
+fn legacy_custom_sound_migrates_and_switching_presets_cleans_only_owned_copies() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SoundStore::new(temp.path(), temp.path().join("sounds"));
+    let source = temp.path().join("My sound.wav");
+    fs::write(&source, wav(1, 1)).unwrap();
+    store.import(&source).unwrap();
+    let custom = store.selected_path().unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&store.settings).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("preset");
+    fs::write(&store.settings, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(store.info().preset, SoundPreset::Custom);
+    assert_eq!(store.selected_path().as_ref(), Some(&custom));
+    store.select(SoundPreset::Doom).unwrap();
+    assert!(!custom.exists());
+    let doom = store.selected_path().unwrap();
+    assert!(
+        store.select(SoundPreset::Custom).is_err(),
+        "custom requires a selected file"
+    );
+    assert_eq!(store.selected_path().as_ref(), Some(&doom));
+    assert_eq!(store.import(&source).unwrap().preset, SoundPreset::Custom);
+    assert!(!doom.exists());
+    assert!(source.exists());
+    store.select(SoundPreset::System).unwrap();
+    assert!(source.exists());
 }
 
 #[cfg(unix)]

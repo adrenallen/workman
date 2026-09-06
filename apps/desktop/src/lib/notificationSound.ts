@@ -4,6 +4,7 @@ import { get, writable } from 'svelte/store';
 
 export interface NotificationSoundInfo {
   supported: boolean;
+  preset: 'system' | 'doom' | 'custom';
   name: string | null;
   detail: string | null;
 }
@@ -29,6 +30,11 @@ async function updateSound(action: () => Promise<NotificationSoundInfo | null>):
 
 export function refreshNotificationSound(): Promise<void> {
   return updateSound(() => invoke<NotificationSoundInfo>('native_notification_sound_state'));
+}
+
+export function selectNotificationSound(preset: 'system' | 'doom'): Promise<void> {
+  if (preset === 'doom' && !get(notificationSound).info?.supported) return Promise.resolve();
+  return updateSound(() => invoke<NotificationSoundInfo>('native_notification_select_sound', { preset }));
 }
 
 export function chooseNotificationSound(): Promise<void> {
