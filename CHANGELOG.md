@@ -4,6 +4,9 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Add a speaker button beside the notification sound dropdown for immediate audio previews,
+  including Doom, custom WAVs, and the system sound, without sending a notification banner.
+
 - Check application activation as well as window/WebView focus before suppressing computer alerts.
   Keep a selected agent's blue unread dot while switched away, and clear it and matching OS alerts
   after three continuous seconds of viewing. Add a five-second notification test in Settings and

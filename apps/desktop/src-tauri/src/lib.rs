@@ -1411,6 +1411,7 @@ pub fn run() {
             native_notifications::native_notification_request_permission,
             native_notifications::native_notification_open_settings,
             native_notifications::native_notification_sound_state,
+            native_notifications::native_notification_preview_sound,
             native_notifications::native_notification_select_sound,
             native_notifications::native_notification_import_sound,
             native_notifications::native_notification_reset_sound,

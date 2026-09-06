@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, afterEach, test } from 'node:test';
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
 import { get } from 'svelte/store';
-import { notificationSound, refreshNotificationSound, chooseNotificationSound, resetNotificationSound, selectNotificationSound } from '../src/lib/notificationSound.ts';
+import { notificationSound, refreshNotificationSound, chooseNotificationSound, resetNotificationSound, selectNotificationSound, previewNotificationSound } from '../src/lib/notificationSound.ts';
 
 const system = {supported:true,preset:'system',name:null,detail:null};
 const custom = {...system,preset:'custom',name:'My ding.wav'};
@@ -96,4 +96,45 @@ test('a failed preset selection retains the saved sound and can be retried', asy
   handle = () => doom;
   await selectNotificationSound('doom');
   assert.deepEqual(get(notificationSound), {info:doom,busy:false,error:null});
+});
+
+test('previews the saved sound without changing it, requesting permission, or sending a banner', async () => {
+  for (const info of [system, doom, custom, { ...system, supported: false }]) {
+    notificationSound.set({ info, busy: false, error: null });
+    calls = [];
+    handle = () => null;
+    await previewNotificationSound();
+    assert.deepEqual(calls, [{ command: 'native_notification_preview_sound', args: {} }]);
+    assert.deepEqual(get(notificationSound), { info, busy: false, error: null });
+  }
+});
+
+test('preview waits for loaded settings and prevents overlapping playback or selection changes', async () => {
+  notificationSound.set({ info: null, busy: false, error: null });
+  await previewNotificationSound();
+  assert.equal(calls.length, 0);
+  notificationSound.set({ info: doom, busy: false, error: null });
+  let finish;
+  handle = () => new Promise(resolve => { finish = resolve; });
+  const playing = previewNotificationSound();
+  assert.equal(get(notificationSound).busy, true);
+  await previewNotificationSound();
+  await selectNotificationSound('system');
+  await chooseNotificationSound();
+  assert.equal(calls.length, 1);
+  finish(null);
+  await playing;
+  assert.deepEqual(get(notificationSound), { info: doom, busy: false, error: null });
+});
+
+test('preview failures remain visible and retryable without losing the selected sound', async () => {
+  notificationSound.set({ info: custom, busy: false, error: null });
+  handle = () => { throw new Error('Audio player is unavailable.'); };
+  await previewNotificationSound();
+  assert.match(get(notificationSound).error, /Audio player is unavailable/);
+  assert.equal(get(notificationSound).busy, false);
+  assert.deepEqual(get(notificationSound).info, custom);
+  handle = () => null;
+  await previewNotificationSound();
+  assert.deepEqual(get(notificationSound), { info: custom, busy: false, error: null });
 });

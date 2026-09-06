@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import UploadIcon from '@lucide/svelte/icons/upload';
+  import Volume2Icon from '@lucide/svelte/icons/volume-2';
   import BellIcon from '@lucide/svelte/icons/bell';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 
   import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
+  import IconButton from '$lib/components/ds/IconButton.svelte';
   import { Button } from '$lib/components/ui/button';
   import { Separator } from '$lib/components/ui/separator';
   import { Switch } from '$lib/components/ui/switch';
@@ -24,12 +26,19 @@
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
 
-  import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound } from '../notificationSound';
+  import { notificationSound, refreshNotificationSound, chooseNotificationSound, selectNotificationSound, previewNotificationSound } from '../notificationSound';
 
   let testTimer: ReturnType<typeof setTimeout> | undefined;
   let testPending = $state(false);
   let testMessage = $state('');
   let testGeneration = 0;
+  let previewing = $state(false);
+  async function previewSound(): Promise<void> {
+    if (previewing) return;
+    previewing = true;
+    try { await previewNotificationSound(); }
+    finally { previewing = false; }
+  }
   function cancelTest(): void {
     ++testGeneration;
     if (testTimer !== undefined) clearTimeout(testTimer);
@@ -217,26 +226,39 @@
     </div>
     <div class="min-w-0 rounded-md border bg-muted/30 p-3">
       <label for="notification-sound-preset" class="mb-2 block text-sm font-medium">Sound</label>
-      <select
-        id="notification-sound-preset"
-        class="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-        value={$notificationSound.info?.preset ?? 'system'}
-        disabled={!$nativeNotificationPreferences.enabled || !$nativeNotificationPreferences.soundEnabled || $notificationSound.busy || !$notificationSound.info}
-        aria-describedby="notification-sound-description"
-        onchange={(event) => {
-          const preset = event.currentTarget.value;
-          // Keep the displayed value tied to the saved choice while a native write is pending
-          // or fails. A failed write must never look like a successfully selected sound.
-          event.currentTarget.value = $notificationSound.info?.preset ?? 'system';
-          if (preset === 'system' || preset === 'doom') void selectNotificationSound(preset);
-        }}
-      >
-        <option value="system">System default</option>
-        <option value="doom" disabled={!$notificationSound.info?.supported}>Doom</option>
-        {#if $notificationSound.info?.preset === 'custom'}
-          <option value="custom">Custom: {$notificationSound.info.name}</option>
-        {/if}
-      </select>
+      <div class="flex min-w-0 items-center gap-2">
+        <select
+          id="notification-sound-preset"
+          class="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          value={$notificationSound.info?.preset ?? 'system'}
+          disabled={!$nativeNotificationPreferences.enabled || !$nativeNotificationPreferences.soundEnabled || $notificationSound.busy || !$notificationSound.info}
+          aria-describedby="notification-sound-description"
+          onchange={(event) => {
+            const preset = event.currentTarget.value;
+            // Keep the displayed value tied to the saved choice while a native write is pending
+            // or fails. A failed write must never look like a successfully selected sound.
+            event.currentTarget.value = $notificationSound.info?.preset ?? 'system';
+            if (preset === 'system' || preset === 'doom') void selectNotificationSound(preset);
+          }}
+        >
+          <option value="system">System default</option>
+          <option value="doom" disabled={!$notificationSound.info?.supported}>Doom</option>
+          {#if $notificationSound.info?.preset === 'custom'}
+            <option value="custom">Custom: {$notificationSound.info.name}</option>
+          {/if}
+        </select>
+        <IconButton
+          label={previewing ? 'Playing notification sound' : `Preview ${$notificationSound.info?.name ?? 'system default'} notification sound`}
+          variant="outline"
+          size="icon"
+          class="size-10 shrink-0"
+          disabled={$notificationSound.busy || !$notificationSound.info}
+          aria-busy={previewing}
+          onclick={() => void previewSound()}
+        >
+          {#snippet icon()}<Volume2Icon class={previewing ? 'size-4 animate-pulse' : 'size-4'} aria-hidden="true" />{/snippet}
+        </IconButton>
+      </div>
       <p id="notification-sound-description" class="mt-2 text-xs leading-5 text-muted-foreground">
         {#if $notificationSound.info?.supported}
           Doom is the bundled item pickup sound. You can also choose your own WAV under 30 seconds (16-bit PCM, mono or stereo, 8–48 kHz, up to 6 MB).

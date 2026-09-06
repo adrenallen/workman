@@ -9,6 +9,7 @@ mod badge;
 mod linux;
 mod settings;
 mod sound;
+mod sound_preview;
 #[cfg(windows)]
 #[path = "native_notifications/windows.rs"]
 mod windows_backend;
@@ -128,6 +129,32 @@ pub async fn native_notification_sound_state(app: AppHandle) -> Result<sound::So
     tauri::async_runtime::spawn_blocking(move || sound_info(&app))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_preview_sound(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<NativeNotificationState>();
+        // Do not queue repeated clicks or replace the saved copy while it is being played.
+        let _guard = state
+            .sound_settings
+            .try_lock()
+            .map_err(|_| "A sound operation is already in progress.".to_owned())?;
+        let path = if cfg!(windows) {
+            None
+        } else {
+            sound_store(&app)?.selected_path()
+        };
+        #[cfg(target_os = "macos")]
+        if path.is_none() {
+            return app
+                .run_on_main_thread(|| objc2_app_kit::NSBeep())
+                .map_err(|error| error.to_string());
+        }
+        sound_preview::play(path.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

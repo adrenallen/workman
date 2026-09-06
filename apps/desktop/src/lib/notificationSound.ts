@@ -32,6 +32,15 @@ export function refreshNotificationSound(): Promise<void> {
   return updateSound(() => invoke<NotificationSoundInfo>('native_notification_sound_state'));
 }
 
+/** A deliberate preview is available even when automatic notifications or their sound are off. */
+export function previewNotificationSound(): Promise<void> {
+  if (!get(notificationSound).info) return Promise.resolve();
+  return updateSound(async () => {
+    await invoke('native_notification_preview_sound');
+    return null;
+  });
+}
+
 export function selectNotificationSound(preset: 'system' | 'doom'): Promise<void> {
   if (preset === 'doom' && !get(notificationSound).info?.supported) return Promise.resolve();
   return updateSound(() => invoke<NotificationSoundInfo>('native_notification_select_sound', { preset }));

@@ -1,5 +1,6 @@
-//! Imported sounds remain local and are played by the notification service, respecting its
-//! permission and Do Not Disturb policy. Windows toasts cannot use arbitrary user audio files.
+//! Imported sounds remain local. Automatic alerts use the notification service and its permission
+//! and Do Not Disturb policy; explicit previews play audio directly. Windows toasts cannot use
+//! arbitrary user audio files.
 use std::{
     fs::{self, File, OpenOptions},
     io::{Cursor, Read, Write},

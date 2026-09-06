@@ -42,8 +42,8 @@ individual banners.
 **Notification sound** defaults on and can be switched off separately in any mode. It controls
 all computer alerts. Existing Project-ready sound preferences migrate to this switch. The default is
 the native system sound on macOS/Windows and the desktop theme sound on Linux. Volume, notification
-sound permissions, and Focus/Do Not Disturb still determine whether it is audible; Workman does not
-play audio outside the notification service. In-app-only mode produces no computer banner or sound.
+sound permissions, and Focus/Do Not Disturb still determine whether it is audible. Automatic alerts
+play audio through the notification service; in-app-only mode produces no automatic computer banner or sound.
 Computer notifications retain live status updates while minimized, independently of Keep Awake.
 
 The sound dropdown starts with **System default** and **Doom**, the only bundled alternative.
@@ -61,6 +61,12 @@ folder and the standard `sound-file` hint. Linux desktops may ignore sound hints
 to use its system sound and disables Doom/importing: native toast audio requires Windows package
 resources, and the current Win32 build does not have that package identity. Embedding bytes in the
 executable does not supply a Windows package resource URI.
+
+Click the speaker beside the sound dropdown for an immediate preview. Doom and custom WAVs play
+from the saved local copy; System default previews the macOS alert sound, Windows notification
+sound, or Linux theme event. Linux previews use `canberra-gtk-play`, with `paplay`/`aplay` fallbacks
+for saved WAVs. Playback errors appear beside the sound controls. Preview is a deliberate action
+and works even when automatic notifications or sounds are turned off; it does not send a banner.
 
 Use **Send test in 5s** to try the saved sound and banner settings, with time to switch to another app.
 The test uses the native notification service and the current sound toggle. Leaving notification
