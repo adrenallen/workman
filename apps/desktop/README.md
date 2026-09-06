@@ -19,27 +19,38 @@ build still has working auto-spawn behavior.
 Settings → Notifications → Computer notifications switches between in-app only and in-app plus
 computer notifications. Turning it off stops new system alerts and hides Dock/taskbar badges without
 changing in-app unread items. The choice is saved locally and also controls non-agent system alerts.
-The same page controls the default top-level agent filter.
+The same page offers three **Notification mode** choices: **All agents**, **Only top-level agents**
+(the default), or **Only when all agents are ready**. These filter completion/input banners; crash,
+timer, and task alerts still notify in every mode. Existing saved switches migrate to the selector.
 Viewing an agent in the focused window clears its unread state and matching OS alerts. Unread
 state remains available in Workman when OS notifications are disabled.
 
-Enable **Project ready** for a banner when every agent in a project, including children, has stopped
+Choose **Only when all agents are ready** for a banner when every agent in a project, including children, has stopped
 working or starting. Idle agents, input prompts, timer waits, and stopped processes count as ready;
 commands and terminals do not delay the alert. The project must have been busy in this daemon
 session and remain ready for two seconds, which avoids startup alerts and brief handoff gaps.
 Readiness records appear in Workman's notification center and open the project when clicked.
 Resuming work retires the previous ready alert.
 
-**Wait until the project is ready** enables project-ready banners and suppresses individual agent
-completion/input banners. It does not replay those banners when the project finishes. Individual
-activity remains in Workman, and crash, timer, and task alerts retain their existing behavior.
-Turning Project ready off restores individual banners. Both new banner options default off.
+Project-ready mode suppresses individual completion/input banners instead of replaying them in a
+burst. Individual activity remains available in Workman. Switching back to either agent mode restores
+individual banners.
 
-**Project-ready sound** defaults on for enabled project-ready banners and can be switched off
-separately. It uses the native system sound on macOS and Windows, and standard sound hints on Linux;
-desktop sound support, volume, and Focus/Do Not Disturb determine whether it is audible. In-app-only
-mode produces no computer banner or sound. Computer notifications retain live status updates while
-the window is minimized, independently of Keep Awake.
+**Notification sound** defaults on and can be switched off separately in any mode. It controls
+all computer alerts. Existing Project-ready sound preferences migrate to this switch. The default is
+the native system sound on macOS/Windows and the desktop theme sound on Linux. Volume, notification
+sound permissions, and Focus/Do Not Disturb still determine whether it is audible; Workman does not
+play audio outside the notification service. In-app-only mode produces no computer banner or sound.
+Computer notifications retain live status updates while minimized, independently of Keep Awake.
+
+On macOS and Linux, **Choose sound…** imports a WAV file (16-bit PCM, mono or stereo, 8–48 kHz,
+less than 30 seconds, up to 6 MiB). Workman validates the actual audio and keeps its own local copy;
+cancelled or failed imports retain the previous selection. **Use system default** removes the saved
+copy. Missing files fall back to the system sound without blocking the banner. macOS stores its
+uniquely named copy in `~/Library/Sounds` for Notification Center; Linux uses Workman's app data
+folder and the standard `sound-file` hint. Linux desktops may ignore sound hints. Windows continues
+to use its system sound and disables importing: its native toast API supports packaged sound
+resources, not uploaded files outside the application package.
 
 When permission is blocked, **Open system settings** opens Workman's notification controls on
 macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
@@ -63,4 +74,6 @@ notification, and reading one agent while a different agent remains unread. Wind
 policies (including Do Not Disturb/Focus) can suppress the banner while retaining it in history.
 Also check two working agents finishing separately (including a child), one project becoming ready
 while another remains busy, sound on/off, a quick handoff restarting the two-second pause, clicking
-the project-ready alert, and work resuming while OS permission is pending.
+the project-ready alert, and work resuming while OS permission is pending. Verify all three modes,
+custom sound import/reload/reset on macOS and Linux, invalid/missing files, system-sound fallback
+on Windows, and sound suppression under OS notification sound settings and Focus/Do Not Disturb.

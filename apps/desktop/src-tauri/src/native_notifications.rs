@@ -8,12 +8,14 @@ mod badge;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 mod settings;
+mod sound;
 #[cfg(windows)]
 #[path = "native_notifications/windows.rs"]
 mod windows_backend;
 
 #[derive(Default)]
 pub struct NativeNotificationState {
+    sound_settings: std::sync::Mutex<()>,
     #[cfg(all(unix, not(target_os = "macos")))]
     linux: linux::Backend,
     #[cfg(windows)]
@@ -52,6 +54,85 @@ pub async fn native_notification_open_settings(app: AppHandle) -> Result<(), Str
     tauri::async_runtime::spawn_blocking(move || settings::open(&app_id))
         .await
         .map_err(|error| error.to_string())?
+}
+
+fn sound_store(app: &AppHandle) -> Result<sound::SoundStore, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    // Workman is not sandboxed on macOS. Its Library/Sounds directory is under the user's
+    // home, where UNNotificationSound resolves custom names without modifying the app bundle.
+    #[cfg(target_os = "macos")]
+    let sounds = app
+        .path()
+        .home_dir()
+        .map_err(|error| error.to_string())?
+        .join("Library/Sounds");
+    #[cfg(not(target_os = "macos"))]
+    let sounds = app_data.join("notification-sounds");
+    Ok(sound::SoundStore::new(&app_data, sounds))
+}
+
+fn sound_info(app: &AppHandle) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) {
+        return Ok(sound::SoundInfo {
+            supported: false,
+            name: None,
+            detail: Some("Windows uses the system sound. Uploaded sounds aren't supported by Windows notifications in this build.".into()),
+        });
+    }
+    let mut info = sound_store(app)?.info();
+    if cfg!(all(unix, not(target_os = "macos"))) && info.detail.is_none() {
+        info.detail = Some(
+            "Custom sound playback depends on your Linux desktop's notification sound support."
+                .into(),
+        );
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn native_notification_sound_state(app: AppHandle) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || sound_info(&app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_import_sound(
+    app: AppHandle,
+    path: String,
+) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<NativeNotificationState>();
+        let _guard = state
+            .sound_settings
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if cfg!(windows) {
+            return Err("Uploaded notification sounds are not supported on Windows.".into());
+        }
+        sound_store(&app)?.import(std::path::Path::new(&path))?;
+        sound_info(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_reset_sound(app: AppHandle) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<NativeNotificationState>();
+        let _guard = state
+            .sound_settings
+            .lock()
+            .map_err(|error| error.to_string())?;
+        sound_store(&app)?.reset()?;
+        sound_info(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -132,7 +213,15 @@ async fn show_notification(
         .title(title)
         .message(body);
     if sound == Some(true) {
-        notification = notification.default_sound();
+        notification = match sound_store(&app)
+            .ok()
+            .and_then(|store| store.selected_path())
+        {
+            Some(path) => {
+                notification.sound(path.file_name().unwrap_or_default().to_string_lossy())
+            }
+            None => notification.default_sound(),
+        };
     }
     if notification_id > 0 {
         // The durable notification ID lets reading an agent clear the matching Notification
@@ -169,10 +258,19 @@ async fn show_notification(
     sound: Option<bool>,
 ) -> Result<(), String> {
     let backend = app.state::<NativeNotificationState>().linux.clone();
+    let custom_sound = sound_store(&app)
+        .ok()
+        .and_then(|store| store.selected_path())
+        .map(|path| path.to_string_lossy().into_owned());
     backend
-        .show(notification_id, &title, &body, sound, move || {
-            activate_notification(&app, notification_id)
-        })
+        .show(
+            notification_id,
+            &title,
+            &body,
+            sound,
+            custom_sound.as_deref(),
+            move || activate_notification(&app, notification_id),
+        )
         .await
 }
 

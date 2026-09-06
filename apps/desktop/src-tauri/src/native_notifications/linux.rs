@@ -59,6 +59,7 @@ impl Backend {
         title: &str,
         body: &str,
         sound: Option<bool>,
+        custom_sound: Option<&str>,
         on_open: impl Fn() + Send + 'static,
     ) -> Result<(), String> {
         let (connection, owner, capabilities) = server().await?;
@@ -81,7 +82,13 @@ impl Backend {
         if let Some(sound) = sound {
             hints.insert("suppress-sound", Value::from(!sound));
             if sound {
-                hints.insert("sound-name", Value::from("message-new-instant"));
+                // Some desktops prefer sound-name when both hints are supplied, so send only
+                // the selected file or the theme fallback, never both.
+                if let Some(path) = custom_sound {
+                    hints.insert("sound-file", Value::from(path));
+                } else {
+                    hints.insert("sound-name", Value::from("message-new-instant"));
+                }
             }
         }
         let body = if capabilities

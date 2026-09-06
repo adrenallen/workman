@@ -11,7 +11,7 @@ use zbus::{connection::Builder, object_server::SignalEmitter, zvariant::OwnedVal
 #[derive(Default)]
 struct Calls {
     notifications: Vec<(u32, String, String)>,
-    sounds: Vec<(Option<bool>, Option<String>)>,
+    sounds: Vec<(Option<bool>, Option<String>, Option<String>)>,
     closed: Vec<u32>,
     fail_close: bool,
     plain_text_only: bool,
@@ -58,6 +58,10 @@ impl Desktop {
                 .and_then(|value| bool::try_from(value).ok()),
             hints
                 .get("sound-name")
+                .and_then(|value| <&str>::try_from(value).ok())
+                .map(str::to_owned),
+            hints
+                .get("sound-file")
                 .and_then(|value| <&str>::try_from(value).ok())
                 .map(str::to_owned),
         ));
@@ -130,7 +134,7 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
             .any(|capability| capability == "actions")
     );
     backend
-        .show(11, "Agent finished", "A & B <C>", None, || {})
+        .show(11, "Agent finished", "A & B <C>", None, None, || {})
         .await
         .unwrap();
     let (opened, clicked) = tokio::sync::oneshot::channel();
@@ -141,6 +145,7 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
             "Agent needs input",
             "Second agent",
             Some(true),
+            None,
             move || {
                 if let Some(opened) = opened.lock().unwrap().take() {
                     let _ = opened.send(());
@@ -166,15 +171,22 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
         .unwrap();
 
     backend
-        .show(13, "Retry removal", "Third agent", Some(false), || {})
+        .show(
+            13,
+            "Retry removal",
+            "Third agent",
+            Some(false),
+            Some("/tmp/should-be-silent.wav"),
+            || {},
+        )
         .await
         .unwrap();
     assert_eq!(
         calls.lock().unwrap().sounds,
         [
-            (None, None),
-            (Some(false), Some("message-new-instant".into())),
-            (Some(true), None),
+            (None, None, None),
+            (Some(false), Some("message-new-instant".into()), None),
+            (Some(true), None, None),
         ]
     );
     calls.lock().unwrap().fail_close = true;
@@ -195,14 +207,14 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
     );
 
     backend
-        .show(14, "Old desktop", "Older unread", None, || {})
+        .show(14, "Old desktop", "Older unread", None, None, || {})
         .await
         .unwrap();
     service.release_name(SERVICE).await.unwrap();
     let new_calls = Arc::new(StdMutex::new(Calls::default()));
     let _replacement = desktop(new_calls.clone()).await;
     backend
-        .show(15, "New desktop", "Newer unread", None, || {})
+        .show(15, "New desktop", "Newer unread", None, None, || {})
         .await
         .unwrap();
     backend.dismiss(&[14]).await.unwrap();
@@ -216,9 +228,25 @@ async fn desktop_delivery_and_clear_survive_errors_and_server_replacement() {
 
     new_calls.lock().unwrap().plain_text_only = true;
     backend
-        .show(16, "Minimal desktop", "A & B <C>", None, || {})
+        .show(16, "Minimal desktop", "A & B <C>", None, None, || {})
         .await
         .unwrap();
     assert_eq!(new_calls.lock().unwrap().notifications[1].2, "A & B <C>");
     backend.dismiss(&[16]).await.unwrap();
+    backend
+        .show(
+            17,
+            "Custom sound",
+            "Project ready",
+            Some(true),
+            Some("/tmp/Workman sound.wav"),
+            || {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        new_calls.lock().unwrap().sounds.last().unwrap(),
+        &(Some(false), None, Some("/tmp/Workman sound.wav".into()))
+    );
+    backend.dismiss(&[17]).await.unwrap();
 }

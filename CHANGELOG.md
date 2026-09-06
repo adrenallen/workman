@@ -4,9 +4,13 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
-- Add optional project-ready banners and a system notification sound when every agent, including
-  children, has stopped working. Wait through brief handoffs, notify once per work cycle, and offer
-  a setting to replace individual completion/input banners with the single project-ready alert.
+- Add a Notification mode selector for all agents, top-level agents, or one project-ready alert
+  after every agent (including children) stops working. Wait through brief handoffs and notify once
+  per work cycle. Migrate the previous overlapping switches into the selected mode.
+- Add a separate notification sound toggle for every mode and custom WAV import on macOS/Linux.
+  Keep a validated local copy with a system-default reset; preserve the prior sound on import errors.
+  Windows retains its system sound because native toasts cannot play uploaded files outside the app
+  package. Linux playback depends on the desktop notification service.
 
 - Scroll long scratchpad, todo, agent, and feedback indexes within the available space. Show
   newest scratchpads, todos, and agents first by default; feedback stays ordered by latest update.

@@ -10,13 +10,13 @@ export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
 
 const preferencesKey = 'workman.native-notifications.v1';
 
+export type NativeNotificationMode = 'all' | 'top_level' | 'project_ready';
+
 export interface NativeNotificationPreferences {
   enabled: boolean;
   needsInput: boolean;
-  topLevelOnly: boolean;
-  projectReady: boolean;
-  projectReadySound: boolean;
-  waitForProject: boolean;
+  mode: NativeNotificationMode;
+  soundEnabled: boolean;
 }
 
 export type NativeNotificationPermissionState =
@@ -46,10 +46,8 @@ interface NativeNotificationAction {
 const fallbackPreferences: NativeNotificationPreferences = {
   enabled: true,
   needsInput: true,
-  topLevelOnly: true,
-  projectReady: false,
-  projectReadySound: true,
-  waitForProject: false
+  mode: 'top_level',
+  soundEnabled: true
 };
 
 const checkingPermission: NativeNotificationPermission = {
@@ -87,33 +85,23 @@ export function setNeedsInputNotificationsEnabled(needsInput: boolean): void {
   savePreferences({ ...get(nativeNotificationPreferences), needsInput });
 }
 
-export function setTopLevelNotificationsOnly(topLevelOnly: boolean): void {
-  savePreferences({ ...get(nativeNotificationPreferences), topLevelOnly });
+export function setNativeNotificationMode(mode: NativeNotificationMode): void {
+  savePreferences({ ...get(nativeNotificationPreferences), mode });
 }
 
-export function setProjectReadyNotificationsEnabled(projectReady: boolean): void {
-  const current = get(nativeNotificationPreferences);
-  savePreferences({ ...current, projectReady, waitForProject: projectReady && current.waitForProject });
-}
-
-export function setProjectReadySoundEnabled(projectReadySound: boolean): void {
-  savePreferences({ ...get(nativeNotificationPreferences), projectReadySound });
-}
-
-export function setWaitForProjectNotifications(waitForProject: boolean): void {
-  const current = get(nativeNotificationPreferences);
-  savePreferences({ ...current, waitForProject, projectReady: waitForProject || current.projectReady });
+export function setNotificationSoundEnabled(soundEnabled: boolean): void {
+  savePreferences({ ...get(nativeNotificationPreferences), soundEnabled });
 }
 
 function notificationAllowed(notification: Notification, processes: ProcessView[]): boolean {
   const preferences = get(nativeNotificationPreferences);
   if (!preferences.enabled) return false;
   if (notification.type === 'project_ready') {
-    return preferences.projectReady && isProjectReady(notification.project_id, processes);
+    return preferences.mode === 'project_ready' && isProjectReady(notification.project_id, processes);
   }
-  if (preferences.waitForProject && (notification.type === 'agent_done' || notification.type === 'needs_input')) return false;
+  if (preferences.mode === 'project_ready' && (notification.type === 'agent_done' || notification.type === 'needs_input')) return false;
   if (notification.type === 'needs_input' && !preferences.needsInput) return false;
-  return !preferences.topLevelOnly || isTopLevelAgentNotification(notification, processes);
+  return preferences.mode !== 'top_level' || isTopLevelAgentNotification(notification, processes);
 }
 
 export async function refreshNativeNotificationPermission(): Promise<NativeNotificationPermission> {
@@ -207,7 +195,7 @@ export async function deliverNativeNotification(
         notificationId: notification.id,
         title: notificationTitle(notification),
         body: notification.body,
-        ...(notification.type === 'project_ready' ? { sound: current.projectReadySound } : {})
+        sound: current.soundEnabled
       });
       nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
       return true;
@@ -259,7 +247,8 @@ export async function deliverNativeSystemNotification(
       await invoke('native_notification_show', {
         notificationId: 0,
         title,
-        body
+        body,
+        sound: get(nativeNotificationPreferences).soundEnabled
       });
       nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
       return true;
@@ -325,23 +314,29 @@ function notificationTitle(notification: Notification): string {
   }
 }
 
+export function parseNativeNotificationPreferences(value: unknown): NativeNotificationPreferences {
+  if (!value || typeof value !== 'object') return { ...fallbackPreferences };
+  const stored = value as Record<string, unknown>;
+  const mode: NativeNotificationMode = stored.mode === 'all' || stored.mode === 'top_level' || stored.mode === 'project_ready'
+    ? stored.mode
+    : stored.waitForProject === true || stored.projectReady === true
+      ? 'project_ready'
+      : stored.topLevelOnly === false ? 'all' : 'top_level';
+  return {
+    enabled: typeof stored.enabled === 'boolean' ? stored.enabled : fallbackPreferences.enabled,
+    needsInput: typeof stored.needsInput === 'boolean' ? stored.needsInput : fallbackPreferences.needsInput,
+    mode,
+    soundEnabled: typeof stored.soundEnabled === 'boolean' ? stored.soundEnabled
+      : typeof stored.projectReadySound === 'boolean' ? stored.projectReadySound : fallbackPreferences.soundEnabled
+  };
+}
+
 function loadPreferences(): NativeNotificationPreferences {
   try {
-    const stored = JSON.parse(localStorage.getItem(preferencesKey) ?? 'null');
-    if (typeof stored?.enabled === 'boolean' && typeof stored?.needsInput === 'boolean') {
-      return {
-        enabled: stored.enabled,
-        needsInput: stored.needsInput,
-        topLevelOnly: typeof stored.topLevelOnly === 'boolean' ? stored.topLevelOnly : true,
-        projectReady: stored.projectReady === true || stored.waitForProject === true,
-        projectReadySound: stored.projectReadySound !== false,
-        waitForProject: stored.waitForProject === true
-      };
-    }
+    return parseNativeNotificationPreferences(JSON.parse(localStorage.getItem(preferencesKey) ?? 'null'));
   } catch {
-    // Defaults keep notifications enabled when local storage is unavailable or malformed.
+    return { ...fallbackPreferences };
   }
-  return fallbackPreferences;
 }
 
 function savePreferences(preferences: NativeNotificationPreferences): void {
