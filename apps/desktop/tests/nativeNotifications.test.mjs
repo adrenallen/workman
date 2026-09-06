@@ -177,7 +177,7 @@ test('opening system settings keeps permission denied until the OS reports a cha
   const denied = { ...allowed, state: 'denied' };
   nativeNotificationRuntime.set({ permission: denied, busy: false, error: 'Old error' });
   await openNativeNotificationSettings();
-  assert.deepEqual(calls, [{ command: 'native_notification_open_settings', args: {} }]);
+  assert.deepEqual(calls, [{ command: 'native_notification_open_settings', args: { target: 'notifications' } }]);
   assert.deepEqual(get(nativeNotificationRuntime), { permission: denied, busy: false, error: null });
   assert.equal(get(nativeNotificationPreferences).enabled, true);
 });
@@ -192,6 +192,16 @@ test('settings launch failures stay visible and can be retried without changing 
   await openNativeNotificationSettings();
   assert.equal(get(nativeNotificationRuntime).error, null);
   assert.equal(get(nativeNotificationPreferences).enabled, true);
+});
+
+test('the Focus shortcut opens only the requested settings page and preserves permission', async () => {
+  nativeNotificationRuntime.set({ permission: allowed, busy: false, error: null });
+  await openNativeNotificationSettings('focus');
+  assert.deepEqual(calls, [{ command: 'native_notification_open_settings', args: { target: 'focus' } }]);
+  assert.deepEqual(get(nativeNotificationRuntime).permission, allowed);
+  handle = () => { throw new Error('Could not open Focus settings.'); };
+  await assert.rejects(openNativeNotificationSettings('focus'), /Could not open Focus/);
+  assert.match(get(nativeNotificationRuntime).error, /Could not open Focus/);
 });
 
 test('a selected agent stays unread while switched away, minimized, or behind another view', () => {

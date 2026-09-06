@@ -34,7 +34,7 @@ test('schedules immediately in native code and restores the native result when f
   status = { ...status, phase: 'sent' };
   focus();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test sent to your operating system.' });
+  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test accepted by your operating system. If no banner or sound appeared, check the notification settings below.' });
   stop();
   assert.equal(focus, undefined);
 });
@@ -105,7 +105,7 @@ test('in-flight delivery stays pending and a stale scheduled reply cannot undo c
   await new Promise(resolve => setImmediate(resolve));
   stale.resolve({ ...status, phase: 'scheduled' });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test sent to your operating system.' });
+  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test accepted by your operating system. If no banner or sound appeared, check the notification settings below.' });
   stop();
 });
 
@@ -134,7 +134,7 @@ test('a native delivery already committed remains visible after cancellation', a
   status = { ...status, phase: 'sent' };
   focus();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test sent to your operating system.' });
+  assert.deepEqual(updates.at(-1), { pending: false, message: 'Test accepted by your operating system. If no banner or sound appeared, check the notification settings below.' });
   stop();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(updates.at(-1), { pending: false, message: '' });

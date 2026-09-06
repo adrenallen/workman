@@ -146,9 +146,11 @@ export async function requestNativeNotificationPermission(): Promise<NativeNotif
   return permissionRequest;
 }
 
-export async function openNativeNotificationSettings(): Promise<void> {
+export type NotificationSettingsTarget = 'notifications' | 'focus';
+
+export async function openNativeNotificationSettings(target: NotificationSettingsTarget = 'notifications'): Promise<void> {
   try {
-    await invoke('native_notification_open_settings');
+    await invoke('native_notification_open_settings', { target });
     nativeNotificationRuntime.update((current) => ({ ...current, error: null }));
   } catch (cause) {
     nativeNotificationRuntime.update((current) => ({ ...current, error: message(cause) }));

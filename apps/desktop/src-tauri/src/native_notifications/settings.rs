@@ -1,6 +1,27 @@
 //! Fixed destinations for notification permission recovery; no caller-supplied URLs or commands.
 use std::process::{Command, Stdio};
 
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    #[default]
+    Notifications,
+    Focus,
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_focus() -> Result<(), String> {
+    run_launcher(
+        Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.Focus-Settings.extension"),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_focus() -> Result<(), String> {
+    Err("Focus settings are only available on macOS.".into())
+}
+
 #[cfg(target_os = "macos")]
 pub fn open(app_id: &str) -> Result<(), String> {
     let mut url =

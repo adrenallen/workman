@@ -21,6 +21,7 @@
     setNeedsInputNotificationsEnabled,
     setNativeNotificationMode,
     setNotificationSoundEnabled,
+    type NotificationSettingsTarget,
     type NativeNotificationMode,
     type NativeNotificationPermissionState
   } from '../nativeNotifications';
@@ -51,18 +52,17 @@
 
 
   let openingSettings = $state(false);
-  let showSettingsShortcut = $derived(
+  let needsPermissionHelp = $derived(
     $nativeNotificationPreferences.enabled && (
       ['denied', 'unavailable', 'unknown'].includes($nativeNotificationRuntime.permission.state)
       || ($nativeNotificationPreferences.soundEnabled && $nativeNotificationRuntime.permission.sound_enabled === false)
-      || $nativeNotificationRuntime.permission.platform === 'linux'
     )
   );
 
-  async function openSettings(): Promise<void> {
+  async function openSettings(target: NotificationSettingsTarget = 'notifications'): Promise<void> {
     if (openingSettings) return;
     openingSettings = true;
-    try { await openNativeNotificationSettings(); }
+    try { await openNativeNotificationSettings(target); }
     catch { /* The notification runtime displays the launch error below. */ }
     finally { openingSettings = false; }
   }
@@ -296,7 +296,7 @@
 
   <Separator />
 
-  <div class="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+  <div class="space-y-3 px-4 py-3">
     <div>
       <strong class="block text-sm font-medium">Computer notification permission</strong>
       <p class="mt-1 text-xs leading-5 text-muted-foreground">
@@ -307,7 +307,7 @@
       {#if $nativeNotificationPreferences.enabled && $nativeNotificationRuntime.error}
         <p class="mt-1 font-mono text-xs leading-5 text-destructive">{$nativeNotificationRuntime.error}</p>
       {/if}
-      {#if showSettingsShortcut}
+      {#if needsPermissionHelp}
         <p class="mt-1 text-xs leading-5 text-muted-foreground">
           {#if $nativeNotificationRuntime.permission.state === 'granted' && $nativeNotificationRuntime.permission.sound_enabled === false}
             Enable notification sounds for Workman in system settings.
@@ -315,6 +315,18 @@
             Enable notifications for Workman in system settings.
           {/if}
           Permission updates when you return to the app.
+        </p>
+      {/if}
+      {#if $nativeNotificationPreferences.enabled}
+        <p class="mt-2 text-xs leading-5 text-muted-foreground">
+          {#if $nativeNotificationRuntime.permission.platform === 'macos'}
+            No banner or sound? In Control Center, turn off Focus, or allow Workman in that Focus.
+            macOS can also silence notifications while sharing or mirroring your screen.
+            In System Settings → Notifications, check “when mirroring or sharing the display”.
+          {:else}
+            No banner or sound? Check Do Not Disturb, notification sound permissions, and system volume in your desktop settings.
+          {/if}
+          The speaker button previews audio directly, so hearing it does not confirm that computer alerts are allowed through.
         </p>
       {/if}
     </div>
@@ -337,7 +349,7 @@
           Allow notifications
         </Button>
       {/if}
-      {#if showSettingsShortcut}
+      {#if $nativeNotificationPreferences.enabled}
         <Button
           size="sm"
           disabled={openingSettings || $nativeNotificationRuntime.busy}
@@ -346,6 +358,17 @@
           <ExternalLinkIcon aria-hidden="true" />
           {openingSettings ? 'Opening settings…' : 'Open system settings'}
         </Button>
+        {#if $nativeNotificationRuntime.permission.platform === 'macos'}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={openingSettings || $nativeNotificationRuntime.busy}
+            onclick={() => void openSettings('focus')}
+          >
+            <ExternalLinkIcon aria-hidden="true" />
+            Open Focus settings
+          </Button>
+        {/if}
       {/if}
     </div>
   </div>

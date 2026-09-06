@@ -27,7 +27,7 @@ export function createNotificationTest(onChange: (pending: boolean, message: str
     if (!pending) completed = true;
     const message = status.phase === 'delivering' ? 'Sending test to your operating system…'
       : pending ? 'Switch to another app. The test will be sent in 5 seconds.'
-      : status.phase === 'sent' ? 'Test sent to your operating system.'
+      : status.phase === 'sent' ? 'Test accepted by your operating system. If no banner or sound appeared, check the notification settings below.'
       : status.phase === 'error' ? `Test not sent. ${status.error ?? 'Check notification permission.'}` : '';
     onChange(pending, message);
   };

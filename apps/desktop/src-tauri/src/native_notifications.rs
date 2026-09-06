@@ -54,11 +54,17 @@ pub async fn native_notification_request_permission(
 }
 
 #[tauri::command]
-pub async fn native_notification_open_settings(app: AppHandle) -> Result<(), String> {
+pub async fn native_notification_open_settings(
+    app: AppHandle,
+    target: Option<settings::Target>,
+) -> Result<(), String> {
     let app_id = app.config().identifier.clone();
-    tauri::async_runtime::spawn_blocking(move || settings::open(&app_id))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || match target.unwrap_or_default() {
+        settings::Target::Notifications => settings::open(&app_id),
+        settings::Target::Focus => settings::open_focus(),
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -276,7 +282,7 @@ pub fn native_notification_schedule_test(
                 delivery_app,
                 0,
                 "Workman notification test".into(),
-                "Your notification sound and banners are ready to test.".into(),
+                "This is your five-second notification test.".into(),
                 Some(sound),
             )
             .await

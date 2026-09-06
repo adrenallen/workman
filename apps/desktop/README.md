@@ -81,8 +81,14 @@ The test uses the native notification service and the current sound toggle. Leav
 settings or turning off computer notifications cancels a test before delivery starts. Once the
 OS submission begins, it finishes and retains its result.
 
-When permission is blocked (including macOS allowing banners but disabling sounds),
-**Open system settings** opens Workman's notification controls on
+**Test accepted by your operating system** confirms submission, not a visible banner or audible sound.
+Focus/Do Not Disturb can suppress both even when Workman's notification permission is granted.
+macOS can also silence them while sharing or mirroring a display. The speaker preview plays audio
+directly, so a successful preview does not prove notification delivery. The settings card explains
+these differences and keeps recovery shortcuts available even when permission is already granted.
+
+**Open Focus settings** on macOS opens the Focus page, where you can allow Workman in a Focus.
+You can also turn Focus off in Control Center. **Open system settings** opens Workman's notification controls on
 macOS or the Notifications page on Windows. Linux shortcuts support GNOME, KDE Plasma, and Xfce;
 other desktops show manual directions. Permission refreshes when Workman regains focus.
 
@@ -107,6 +113,11 @@ while another remains busy, sound on/off, a quick handoff restarting the two-sec
 the project-ready alert, and work resuming while OS permission is pending. Verify all three modes,
 Doom selection/reload/default reset and custom sound import on macOS/Linux, invalid/missing files, system-sound fallback
 on Windows, and sound suppression under OS notification sound settings and Focus/Do Not Disturb.
+Test **Send test in 5s** while switched away with Focus off and on, and while screen sharing. Confirm
+the actual banner and audio separately from the accepted status. Screen-recording tools may themselves
+trigger macOS screen-sharing suppression; do not treat a mocked timer or OS accept callback as proof
+of presentation. OS logs for `NotificationCenter` distinguish `displaying as banner` and sound playback
+from `muted by DND suppression` or `muted by display state`; `usernoted` acceptance alone is insufficient.
 
 ## Voice input storage
 
