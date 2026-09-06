@@ -63,6 +63,7 @@
       case 'process_crashed': return 'Process crashed';
       case 'timer_fired': return 'Timer fired';
       case 'needs_input': return 'Agent needs input';
+      case 'project_ready': return 'Project ready';
       case 'todo_assigned_to_you': return 'Todo assigned to you';
       case 'mentioned_in_comment': return 'Mentioned in a comment';
       default: return 'Agent finished';

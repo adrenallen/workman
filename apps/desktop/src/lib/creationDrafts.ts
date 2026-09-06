@@ -226,7 +226,7 @@ export function cloneCreationDraft(draft: CreationDraft): CreationDraft {
   return { ...draft };
 }
 
-function parseCreationDraft(value: unknown): CreationDraft | null {
+export function parseCreationDraft(value: unknown): CreationDraft | null {
   if (
     !isRecord(value)
     || !isNegativeInteger(value.id)

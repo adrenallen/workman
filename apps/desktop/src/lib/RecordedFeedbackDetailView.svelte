@@ -11,12 +11,17 @@
   import HistoryIcon from '@lucide/svelte/icons/history';
   import MicIcon from '@lucide/svelte/icons/mic';
   import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
+  import LockKeyholeIcon from '@lucide/svelte/icons/lock-keyhole';
   import NotebookTextIcon from '@lucide/svelte/icons/notebook-text';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import { invoke } from '@tauri-apps/api/core';
 
   import { Button } from '$lib/components/ui/button';
+  import * as Select from '$lib/components/ui/select';
+  import StatusIndicator from '$lib/components/ds/StatusIndicator.svelte';
+  import { processActivity, processActivityTone } from './processActivity';
+  import { recordedFeedbackPreferences } from './recordedFeedbackAvailability';
   import type { ProcessView } from './daemon';
   import {
     agentCanReceiveFeedback,
@@ -62,6 +67,8 @@
   let agents = $derived(processes.filter((process) => process.kind === 'agent'));
   let editable = $derived(feedback?.status === 'ready' && !localBusy && !busy);
   let eligibleAgents = $derived(agents.filter(agentCanReceiveFeedback));
+  let selectedAgent = $derived(agents.find((agent) => agent.id === selectedAgentId) ?? null);
+  let canSendAgent = $derived(Boolean(selectedAgent && agentCanReceiveFeedback(selectedAgent)));
   let dirty = $derived(Boolean(feedback && (
     title !== feedback.title
     || JSON.stringify(blocks) !== JSON.stringify(feedback.blocks)
@@ -82,9 +89,9 @@
   });
 
   $effect(() => {
-    const available = eligibleAgents;
-    if (!selectedAgentId || !available.some((agent) => agent.id === selectedAgentId)) {
-      selectedAgentId = available[0]?.id ?? null;
+    // Keep an existing selection when it becomes busy, so Send cannot silently target another agent.
+    if (!selectedAgentId || !agents.some((agent) => agent.id === selectedAgentId)) {
+      selectedAgentId = eligibleAgents[0]?.id ?? null;
     }
   });
 
@@ -120,6 +127,18 @@
     if (!feedback) return;
     if (feedback.status === 'ready') await afterSave(onArchive);
     else await run(onArchive);
+  }
+
+  async function sendToAgent(): Promise<void> {
+    const target = selectedAgent;
+    if (!target || !agentCanReceiveFeedback(target)) return;
+    await afterSave(() => onSendAgent(target.id));
+  }
+
+  function agentStatusState(agent: ProcessView) {
+    if (agent.status === 'starting') return 'working';
+    if (agent.agent_state.state === 'exited' && agent.status === 'running') return 'stopped';
+    return processActivity(agent).state;
   }
 
   async function run(action: () => Promise<void>): Promise<void> {
@@ -230,26 +249,79 @@
     {#if localError}<button class="inline-error" type="button" onclick={() => (localError = null)}>{localError}<span>Dismiss</span></button>{/if}
 
     <footer>
-      <div class="manage-actions">
-        {#if feedback.append_state && feedback.status === 'failed'}<Button variant="outline" size="sm" disabled={localBusy || busy} onclick={() => void run(onDiscardAppend)}>Keep original</Button>{/if}
-        {#if feedback.status === 'ready'}<Button variant="outline" size="sm" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={13} />{/if}</Button>{/if}
-        <Button variant="ghost" size="sm" disabled={localBusy || busy || feedback.status === 'recording'} onclick={() => void archive()}>
-          {#if feedback.archived}<ArchiveRestoreIcon size={14} />Restore{:else}<ArchiveIcon size={14} />Archive{/if}
-        </Button>
-        <Button variant="ghost" size="sm" class="delete" disabled={localBusy || busy || feedback.status === 'recording'} onclick={onDelete}><Trash2Icon size={14} />Delete</Button>
-      </div>
       {#if feedback.status === 'ready'}
         <div class="send-actions">
-          <select aria-label="Agent target" bind:value={selectedAgentId} disabled={localBusy || busy || eligibleAgents.length === 0}>
-            {#if eligibleAgents.length === 0}<option value={null}>No ready agents</option>{/if}
-            {#each agents as agent}<option value={agent.id} disabled={!agentCanReceiveFeedback(agent)}>{agent.name} · {agentFeedbackAvailability(agent)}</option>{/each}
-          </select>
-          <Button size="sm" disabled={!selectedAgentId || localBusy || busy} onclick={() => void afterSave(() => onSendAgent(selectedAgentId!))}><BotIcon size={14} />Send</Button>
-          <Button variant="outline" size="sm" disabled={localBusy || busy} onclick={() => void afterSave(onSendNewAgent)}><PlusIcon size={14} />New agent</Button>
-          <Button variant="outline" size="sm" disabled={localBusy || busy} onclick={() => void afterSave(onSendScratchpad)}><NotebookTextIcon size={14} />Scratchpad</Button>
-          <Button variant="ghost" size="sm" disabled={localBusy || busy} aria-label="Copy packet prompt" title="Copy a prompt that points to the immutable local packet" onclick={() => void afterSave(onCopy)}><ClipboardIcon size={14} />Copy</Button>
+          <div class="agent-send-row" role="group" aria-label="Send feedback to an agent">
+            <Select.Root
+              type="single"
+              value={selectedAgentId?.toString() ?? ''}
+              disabled={localBusy || busy || agents.length === 0}
+              onValueChange={(value) => { selectedAgentId = value ? Number(value) : null; }}
+            >
+              <Select.Trigger
+                class="feedback-agent-trigger data-[size=default]:h-[40px] w-[220px] min-w-0 rounded-md rounded-r-none text-[1rem] focus-visible:relative focus-visible:z-10 disabled:opacity-70"
+                aria-label="Agent target"
+                aria-describedby={!canSendAgent ? 'feedback-agent-help' : undefined}
+                title={selectedAgent ? `${selectedAgent.name} · ${agentFeedbackAvailability(selectedAgent)}` : agents.length ? 'No agents ready' : 'No agents in this project'}
+              >
+                <span class="agent-choice">
+                  {#if selectedAgent}
+                    <StatusIndicator state={agentStatusState(selectedAgent)} tone={processActivityTone(agentStatusState(selectedAgent))} label={agentFeedbackAvailability(selectedAgent)} />
+                    <span class="agent-name">{selectedAgent.name}</span>
+                    {#if !canSendAgent}<LockKeyholeIcon size={15} aria-hidden="true" />{/if}
+                  {:else}
+                    <LockKeyholeIcon size={16} aria-hidden="true" />
+                    <span class="agent-name">{agents.length ? 'No agents ready' : 'No agents in this project'}</span>
+                  {/if}
+                </span>
+              </Select.Trigger>
+              <Select.Content class="w-[320px] max-w-[calc(100vw-24px)]">
+                {#each agents as agent (agent.id)}
+                  {@const ready = agentCanReceiveFeedback(agent)}
+                  <Select.Item
+                    value={agent.id.toString()}
+                    label={`${agent.name} · ${agentFeedbackAvailability(agent)}`}
+                    disabled={!ready}
+                    aria-disabled={!ready}
+                    class="min-h-[40px] text-[1rem] data-[disabled]:opacity-100 [&>span:last-child]:min-w-0 [&>span:last-child]:shrink"
+                  >
+                    <span class="agent-choice" class:unavailable={!ready}>
+                      <StatusIndicator state={agentStatusState(agent)} tone={processActivityTone(agentStatusState(agent))} label={agentFeedbackAvailability(agent)} />
+                      <span class="agent-name">{agent.name}</span>
+                      <small>{agentFeedbackAvailability(agent)}</small>
+                    </span>
+                  </Select.Item>
+                {/each}
+              </Select.Content>
+            </Select.Root>
+            <Button class="-ml-px h-[40px] shrink-0 rounded-md rounded-l-none px-4 text-[1rem] focus-visible:relative focus-visible:z-10" disabled={!canSendAgent || localBusy || busy} onclick={() => void sendToAgent()}><BotIcon size={17} />Send to agent</Button>
+          </div>
+          <div class="other-destinations">
+            <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} onclick={() => void afterSave(onSendNewAgent)}><PlusIcon size={17} />New agent</Button>
+            <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} onclick={() => void afterSave(onSendScratchpad)}><NotebookTextIcon size={17} />Send to scratchpad</Button>
+            <Button variant="outline" class="h-[40px] px-4 text-[1rem]" disabled={localBusy || busy} aria-label="Copy packet prompt" title="Copy a prompt that points to the immutable local packet" onclick={() => void afterSave(onCopy)}><ClipboardIcon size={17} />Copy prompt</Button>
+          </div>
+          {#if !canSendAgent}
+            <p id="feedback-agent-help" class="agent-help">
+              {#if agents.length === 0}Create a new agent to send this feedback.
+              {:else}Wait for an agent to be ready, or create a new one. Open the list to see each agent’s status.{/if}
+            </p>
+          {/if}
         </div>
       {/if}
+      <div class="manage-row">
+        <div class="manage-actions">
+          {#if feedback.append_state && feedback.status === 'failed'}<Button variant="outline" class="h-[40px] px-3 text-[1rem]" disabled={localBusy || busy} onclick={() => void run(onDiscardAppend)}>Keep original</Button>{/if}
+          {#if feedback.status === 'ready'}<Button variant="ghost" class="h-[40px] px-3 text-[1rem]" disabled={!dirty || localBusy || busy} onclick={() => void save()}>{dirty ? 'Save changes' : 'Saved'}{#if !dirty}<CheckIcon size={16} />{/if}</Button>{/if}
+          <Button variant="ghost" class="h-[40px] px-3 text-[1rem]" disabled={localBusy || busy || feedback.status === 'recording'} onclick={() => void archive()}>
+            {#if feedback.archived}<ArchiveRestoreIcon size={17} />Restore{:else}<ArchiveIcon size={17} />Archive{/if}
+          </Button>
+          <Button variant="ghost" class="delete h-[40px] px-3 text-[1rem]" disabled={localBusy || busy || feedback.status === 'recording'} onclick={onDelete}><Trash2Icon size={17} />Delete</Button>
+        </div>
+        {#if feedback.status === 'ready' && !feedback.archived && $recordedFeedbackPreferences.autoArchiveAfterSend}
+          <span class="archive-note"><ArchiveIcon size={14} />Archives after sending</span>
+        {/if}
+      </div>
     </footer>
     </div>
   </section>
@@ -310,14 +382,23 @@
   .recording-card { border-color: rgb(255 77 94 / 35%); }
   .failed-card { border-color: color-mix(in srgb, var(--destructive) 40%, var(--border)); }
   :global(.spin) { animation: spin 1s linear infinite; }
-  footer { position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; border-top: 1px solid var(--border); padding: 10px 14px max(10px, env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(12px); }
-  .manage-actions, .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
-  .send-actions select { max-width: 210px; height: 32px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 7px; background: var(--background); color: var(--foreground); font-size: var(--font-size-xs); }
+  footer { display: grid; gap: 10px; max-height: 50vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 14px 22px max(12px, env(safe-area-inset-bottom)); background: var(--card); }
+  .send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .agent-send-row { display: flex; width: max-content; max-width: 100%; align-items: center; }
+  .agent-choice { display: flex; align-items: center; width: 100%; min-width: 0; gap: 9px; text-align: left; }
+  .agent-name { overflow: hidden; flex: 1; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-choice small { flex: none; color: var(--muted-foreground); font-size: .875rem; }
+  .agent-choice.unavailable .agent-name { color: var(--muted-foreground); opacity: .65; }
+  .agent-help { flex-basis: 100%; margin: 0; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
+  .other-destinations { display: flex; flex-wrap: wrap; gap: 8px; }
+  .manage-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  .manage-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .archive-note { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   :global(.delete) { color: var(--destructive); }
   .inline-error { display: flex; justify-content: space-between; margin: 0 22px 12px; border: 1px solid color-mix(in srgb, var(--destructive) 45%, var(--border)); border-radius: 5px; padding: 8px 10px; background: color-mix(in srgb, var(--destructive) 7%, var(--surface)); color: var(--destructive); text-align: left; }
   .inline-error span { font-weight: 700; }
   .loading { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 8px; color: var(--muted-foreground); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 800px) { footer { align-items: stretch; } .send-actions { width: 100%; } .send-actions select { max-width: none; flex: 1; } }
+  @media (max-width: 540px) { footer { padding-inline: 14px; } }
   @media (prefers-reduced-motion: reduce) { :global(.spin) { animation: none; } }
 </style>

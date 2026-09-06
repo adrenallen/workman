@@ -4,6 +4,61 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Keep speech-model verification off the UI thread and recover abandoned dictation recordings
+  safely after a crash. Keep live notifications responsive during audio previews, repair damaged
+  volume copies, bound their cache, and reuse Linux notification connections. Refresh process
+  state before reconnect alerts and clear project-ready records once per work cycle.
+
+- Keep notification delivery active in the dev window configuration, and run the five-second
+  notification test in native code so switching apps cannot pause its countdown. Restore its
+  result when returning to Settings. Add saved volume control for Doom and custom WAVs on
+  macOS/Linux; previews and real notifications use the same volume without changing the original.
+
+- Add a speaker button beside the notification sound dropdown for immediate audio previews,
+  including Doom, custom WAVs, and the system sound, without sending a notification banner.
+
+- Check application activation as well as window/WebView focus before suppressing computer alerts.
+  Keep a selected agent's blue unread dot while switched away, and clear it and matching OS alerts
+  after three continuous seconds of viewing. Add a five-second notification test in Settings and
+  a system-settings shortcut when macOS allows banners but has notification sounds disabled.
+
+- Add a Notification mode selector for all agents, top-level agents, or one project-ready alert
+  after every agent (including children) stops working. Wait through brief handoffs and notify once
+  per work cycle. Migrate the previous overlapping switches into the selected mode.
+- Bundle the Doom item pickup sound in the notification sound dropdown. Keep System default as
+  the initial selection and Doom as the only shipped alternative, alongside custom WAV import.
+  Embed the audio in the desktop binary and persist the choice. Windows retains its native sound.
+- Add a separate notification sound toggle for every mode and custom WAV import on macOS/Linux.
+  Keep a validated local copy with a system-default reset; preserve the prior sound on import errors.
+  Windows retains its system sound because native toasts cannot play uploaded files outside the app
+  package. Linux playback depends on the desktop notification service.
+
+- Scroll long scratchpad, todo, agent, and feedback indexes within the available space. Show
+  newest scratchpads, todos, and agents first by default; feedback stays ordered by latest update.
+  Include every todo and active or archived scratchpad in the desktop, removing the 200-item cutoff.
+
+- Clarify the saved Computer notifications setting: turn it off for in-app only alerts, including
+  hiding Dock/taskbar badges while retaining Workman's unread notifications. Add an Open system
+  settings shortcut when notification permission is blocked.
+
+- Extend native agent notifications to Windows and Linux: open the matching agent on click, clear
+  read alerts, and show a numeric Windows taskbar overlay. Linux integration follows desktop capabilities.
+
+- Keep agent completions unread while Workman is unfocused or minimized, and clear the matching
+  macOS Notification Center entries after reading them. Add a default-on top-level agent banner filter.
+
+- Keep recent agent prompts in local history, including template instructions, model settings, and
+  attachment references. Copy them or reopen them as a draft, including from a stopped agent's footer.
+- Dictate new-agent and template instructions with the same local microphone and Whisper pipeline
+  used for Recorded Feedback, without needing screen capture. Keep temporary recording directories
+  private and accessible so macOS voice input can create its audio file.
+- Move the collapsed Model settings section above agent instructions, alongside template options.
+- Enlarge feedback delivery actions, join a compact agent picker to Send, and align destination
+  buttons in a wrapping row. Keep unavailable agents visible with status icons and simplify
+  feedback sidebar entries to a single title line.
+- Automatically archive feedback after a confirmed send to an agent or scratchpad, with an opt-out
+  in Feedback settings. Failed sends, copies, and newer unsent edits stay active.
+
 ## 0.1.14 - 2026-09-03
 
 Workman 0.1.14 introduces Recorded Feedback on macOS: capture narrated, annotated screen feedback

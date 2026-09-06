@@ -6,9 +6,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use workman_core::{
     NewScratchpadComment, NewTodo, ProjectId, ScratchpadCommentId, ScratchpadId,
-    ScratchpadListQuery, ScratchpadReadMode, ScratchpadService, ScratchpadServiceError, Store,
-    TodoId, TodoListQuery, TodoPriority, TodoService, TodoServiceError, TodoSort, TodoStatus,
-    UpdateTodo,
+    ScratchpadReadMode, ScratchpadService, ScratchpadServiceError, Store, TodoId, TodoPriority,
+    TodoService, TodoServiceError, TodoStatus, UpdateTodo,
 };
 
 pub(crate) type ControlResult = Result<Value, (&'static str, String)>;
@@ -230,44 +229,23 @@ pub(crate) fn dispatch(method: &str, params: Value, store: &Store) -> Option<Con
 fn snapshot(params: Value, store: &Store) -> ControlResult {
     let params: ProjectParams = params_as(params)?;
     let todos = TodoService::new(store)
-        .list(
-            params.project_id,
-            TodoListQuery {
-                sort: TodoSort::Status,
-                limit: Some(200),
-                ..TodoListQuery::default()
-            },
-            now_millis(),
-        )
+        .snapshot(params.project_id, now_millis())
         .map_err(todo_error)?;
     let scratchpads = ScratchpadService::new(store)
-        .list(
-            params.project_id,
-            ScratchpadListQuery {
-                limit: Some(200),
-                ..ScratchpadListQuery::default()
-            },
-        )
+        .snapshot(params.project_id, false)
         .map_err(scratchpad_error)?;
     let archived_scratchpads = ScratchpadService::new(store)
-        .list(
-            params.project_id,
-            ScratchpadListQuery {
-                archived: true,
-                limit: Some(200),
-                ..ScratchpadListQuery::default()
-            },
-        )
+        .snapshot(params.project_id, true)
         .map_err(scratchpad_error)?;
 
     Ok(json!({
         "project_id": params.project_id,
-        "todos": todos.todos,
-        "todo_total_count": todos.total_count,
-        "scratchpads": scratchpads.scratchpads,
-        "scratchpad_total_count": scratchpads.total_count,
-        "archived_scratchpads": archived_scratchpads.scratchpads,
-        "archived_scratchpad_total_count": archived_scratchpads.total_count,
+        "todos": todos,
+        "todo_total_count": todos.len(),
+        "scratchpads": scratchpads,
+        "scratchpad_total_count": scratchpads.len(),
+        "archived_scratchpads": archived_scratchpads,
+        "archived_scratchpad_total_count": archived_scratchpads.len(),
     }))
 }
 

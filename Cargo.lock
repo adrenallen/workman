@@ -5993,6 +5993,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -7446,6 +7447,7 @@ dependencies = [
  "imageproc",
  "mac-usernotifications",
  "notify-rust",
+ "objc2",
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
@@ -7466,8 +7468,10 @@ dependencies = [
  "url",
  "uuid",
  "whisper-rs",
+ "windows 0.61.3",
  "workmand",
  "xcap",
+ "zbus",
 ]
 
 [[package]]
@@ -7700,6 +7704,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

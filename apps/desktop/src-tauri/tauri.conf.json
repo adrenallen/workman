@@ -21,7 +21,8 @@
         "minHeight": 520,
         "resizable": true,
         "center": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "backgroundThrottling": "disabled"
       }
     ],
     "security": {

@@ -46,7 +46,7 @@
       !needle || `${scratchpad.id} ${scratchpad.name} ${scratchpad.tags.join(' ')}`
         .toLowerCase()
         .includes(needle)
-    );
+    ).sort((left, right) => right.id - left.id);
   });
 
   function beginRename(scratchpad: ScratchpadSummary): void {

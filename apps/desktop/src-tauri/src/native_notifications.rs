@@ -3,11 +3,35 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const ACTION_EVENT: &str = "notification://action";
 
+#[cfg(any(windows, test))]
+mod badge;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+mod settings;
+mod sound;
+mod sound_operations;
+mod sound_preview;
+mod test_delivery;
+#[cfg(windows)]
+#[path = "native_notifications/windows.rs"]
+mod windows_backend;
+
+#[derive(Default)]
+pub struct NativeNotificationState {
+    sound_operations: sound_operations::SoundOperations,
+    test_delivery: std::sync::Arc<test_delivery::TestDelivery>,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux: linux::Backend,
+    #[cfg(windows)]
+    windows: windows_backend::Backend,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct NotificationPermission {
     state: &'static str,
     platform: &'static str,
     detail: Option<String>,
+    sound_enabled: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -16,13 +40,209 @@ struct NotificationAction {
 }
 
 #[tauri::command]
-pub async fn native_notification_permission_state() -> Result<NotificationPermission, String> {
-    permission_state().await
+pub async fn native_notification_permission_state(
+    app: AppHandle,
+) -> Result<NotificationPermission, String> {
+    permission_state(&app).await
 }
 
 #[tauri::command]
-pub async fn native_notification_request_permission() -> Result<NotificationPermission, String> {
-    request_permission().await
+pub async fn native_notification_request_permission(
+    app: AppHandle,
+) -> Result<NotificationPermission, String> {
+    request_permission(&app).await
+}
+
+#[tauri::command]
+pub async fn native_notification_open_settings(
+    app: AppHandle,
+    target: Option<settings::Target>,
+) -> Result<(), String> {
+    let app_id = app.config().identifier.clone();
+    tauri::async_runtime::spawn_blocking(move || match target.unwrap_or_default() {
+        settings::Target::Notifications => settings::open(&app_id),
+        settings::Target::Focus => settings::open_focus(),
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_window_focused(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window is unavailable")?;
+    if !window.is_focused().map_err(|error| error.to_string())?
+        || window.is_minimized().map_err(|error| error.to_string())?
+        || !window.is_visible().map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Tauri/tao queries NSWindow.isKeyWindow, which alone does not tell us whether
+        // another application is active. Read NSApplication on the AppKit main thread.
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let active = objc2::MainThreadMarker::new().is_some_and(|main| {
+                objc2_app_kit::NSApplication::sharedApplication(main).isActive()
+            });
+            let _ = send.send(active);
+        })
+        .map_err(|error| error.to_string())?;
+        return receive.await.map_err(|error| error.to_string());
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(true)
+}
+
+fn sound_store(app: &AppHandle) -> Result<sound::SoundStore, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    // Workman is not sandboxed on macOS. Its Library/Sounds directory is under the user's
+    // home, where UNNotificationSound resolves custom names without modifying the app bundle.
+    #[cfg(target_os = "macos")]
+    let sounds = app
+        .path()
+        .home_dir()
+        .map_err(|error| error.to_string())?
+        .join("Library/Sounds");
+    #[cfg(not(target_os = "macos"))]
+    let sounds = app_data.join("notification-sounds");
+    Ok(sound::SoundStore::new(&app_data, sounds))
+}
+
+fn sound_info(app: &AppHandle) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) {
+        return Ok(sound::SoundInfo {
+            supported: false,
+            preset: sound::SoundPreset::System,
+            name: None,
+            detail: Some("Windows uses the system sound. Doom and custom audio aren't supported by Windows notifications in this build.".into()),
+            volume: 100,
+            volume_supported: false,
+        });
+    }
+    let mut info = sound_store(app)?.info();
+    if cfg!(all(unix, not(target_os = "macos"))) && info.detail.is_none() {
+        info.detail = Some(
+            "Custom sound playback depends on your Linux desktop's notification sound support."
+                .into(),
+        );
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn native_notification_sound_state(app: AppHandle) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .read(|| sound_info(&app))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_preview_sound(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .preview(
+                || {
+                    if cfg!(windows) {
+                        Ok(None)
+                    } else {
+                        sound_store(&app)?.playback_path()
+                    }
+                },
+                |path| {
+                    #[cfg(target_os = "macos")]
+                    if path.is_none() {
+                        return app
+                            .run_on_main_thread(|| objc2_app_kit::NSBeep())
+                            .map_err(|error| error.to_string());
+                    }
+                    sound_preview::play(path.as_deref())
+                },
+            )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn update_notification_sound(
+    app: AppHandle,
+    update: impl FnOnce(&sound::SoundStore) -> Result<sound::SoundInfo, String> + Send + 'static,
+) -> Result<sound::SoundInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .update(|| {
+                update(&sound_store(&app)?)?;
+                sound_info(&app)
+            })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_notification_select_sound(
+    app: AppHandle,
+    preset: sound::SoundPreset,
+) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) && preset != sound::SoundPreset::System {
+        return Err(
+            "Doom and custom notification sounds are not supported on Windows in this build."
+                .into(),
+        );
+    }
+    update_notification_sound(app, move |store| store.select(preset)).await
+}
+
+#[tauri::command]
+pub async fn native_notification_set_sound_volume(
+    app: AppHandle,
+    volume: u8,
+) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) {
+        return Err("Windows controls the system notification sound volume.".into());
+    }
+    update_notification_sound(app, move |store| store.set_volume(volume)).await
+}
+
+#[cfg(unix)]
+async fn notification_sound_path(app: AppHandle) -> Option<std::path::PathBuf> {
+    // File validation/rendering and lock acquisition must not block the native async runtime.
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<NativeNotificationState>()
+            .sound_operations
+            .read(|| sound_store(&app)?.playback_path())
+    })
+    .await
+    .ok()?
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
+pub async fn native_notification_import_sound(
+    app: AppHandle,
+    path: String,
+) -> Result<sound::SoundInfo, String> {
+    if cfg!(windows) {
+        return Err("Uploaded notification sounds are not supported on Windows.".into());
+    }
+    update_notification_sound(app, move |store| store.import(std::path::Path::new(&path))).await
+}
+
+#[tauri::command]
+pub async fn native_notification_reset_sound(app: AppHandle) -> Result<sound::SoundInfo, String> {
+    update_notification_sound(app, sound::SoundStore::reset).await
 }
 
 #[tauri::command]
@@ -31,11 +251,112 @@ pub async fn native_notification_show(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
     let title = checked_copy("title", title, 160)?;
     let body = checked_copy("body", body, 1_024)?;
 
-    show_notification(app, notification_id, title, body).await
+    show_notification(app, notification_id, title, body, sound).await
+}
+
+#[tauri::command]
+pub fn native_notification_schedule_test(
+    app: AppHandle,
+    test_id: String,
+    sound: bool,
+) -> Result<test_delivery::Status, String> {
+    uuid::Uuid::parse_str(&test_id).map_err(|_| "Invalid notification test ID")?;
+    let state = app.state::<NativeNotificationState>().test_delivery.clone();
+    let delivery_app = app.clone();
+    Ok(state.schedule(
+        test_id,
+        std::time::Duration::from_secs(5),
+        async move {
+            let permission = permission_state(&delivery_app).await?;
+            if permission.state != "granted" {
+                return Err(permission.detail.unwrap_or_else(|| {
+                    "Allow notifications in system settings before sending a test.".into()
+                }));
+            }
+            show_notification(
+                delivery_app,
+                0,
+                "Workman notification test".into(),
+                "This is your five-second notification test.".into(),
+                Some(sound),
+            )
+            .await
+        },
+        move |status| {
+            let _ = app.emit("notification://test", status);
+        },
+    ))
+}
+
+#[tauri::command]
+pub fn native_notification_cancel_test(app: AppHandle, test_id: String) -> test_delivery::Status {
+    app.state::<NativeNotificationState>()
+        .test_delivery
+        .cancel(&test_id)
+}
+
+#[tauri::command]
+pub fn native_notification_test_state(app: AppHandle) -> test_delivery::Status {
+    app.state::<NativeNotificationState>()
+        .test_delivery
+        .status()
+}
+
+#[tauri::command]
+pub async fn native_notification_dismiss(
+    _app: AppHandle,
+    notification_ids: Vec<i64>,
+) -> Result<(), String> {
+    if notification_ids.len() > 1_000 || notification_ids.iter().any(|id| *id <= 0) {
+        return Err("invalid notification IDs".into());
+    }
+    #[cfg(target_os = "macos")]
+    for id in notification_ids {
+        let identifier = notification_identifier(id);
+        mac_usernotifications::cancel_pending(&identifier).await;
+        mac_usernotifications::close_delivered(&identifier).await;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    _app.state::<NativeNotificationState>()
+        .linux
+        .dismiss(&notification_ids)
+        .await?;
+    #[cfg(windows)]
+    {
+        let backend = _app.state::<NativeNotificationState>().windows.clone();
+        let app_id = _app.config().identifier.clone();
+        tauri::async_runtime::spawn_blocking(move || backend.dismiss(&app_id, &notification_ids))
+            .await
+            .map_err(|error| error.to_string())??;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn native_notification_set_badge(app: AppHandle, count: u32) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window is unavailable")?;
+    #[cfg(windows)]
+    return window
+        .set_overlay_icon(
+            (count > 0).then(|| tauri::image::Image::new_owned(badge::pixels(count), 32, 32)),
+        )
+        .map_err(|error| error.to_string());
+    #[cfg(not(windows))]
+    window
+        .set_badge_count((count > 0).then_some(i64::from(count)))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn notification_identifier(id: i64) -> String {
+    format!("workman.notification.{id}")
 }
 
 #[cfg(target_os = "macos")]
@@ -44,10 +365,25 @@ async fn show_notification(
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
-    let handle = mac_usernotifications::Notification::new()
+    let mut notification = mac_usernotifications::Notification::new()
         .title(title)
-        .message(body)
+        .message(body);
+    if sound == Some(true) {
+        notification = match notification_sound_path(app.clone()).await {
+            Some(path) => {
+                notification.sound(path.file_name().unwrap_or_default().to_string_lossy())
+            }
+            None => notification.default_sound(),
+        };
+    }
+    if notification_id > 0 {
+        // The durable notification ID lets reading an agent clear the matching Notification
+        // Center entry, including notifications delivered before the desktop was restarted.
+        notification = notification.id(&notification_identifier(notification_id));
+    }
+    let handle = notification
         .send()
         .await
         .map_err(|error| format!("could not show the OS notification: {error}"))?;
@@ -68,42 +404,54 @@ async fn show_notification(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 async fn show_notification(
     app: AppHandle,
     notification_id: i64,
     title: String,
     body: String,
+    sound: Option<bool>,
 ) -> Result<(), String> {
-    let handle = tauri::async_runtime::spawn_blocking(move || {
-        let mut notification = notify_rust::Notification::new();
-        notification.summary(&title).body(&body).auto_icon();
+    let backend = app.state::<NativeNotificationState>().linux.clone();
+    let custom_sound = notification_sound_path(app.clone())
+        .await
+        .map(|path| path.to_string_lossy().into_owned());
+    backend
+        .show(
+            notification_id,
+            &title,
+            &body,
+            sound,
+            custom_sound.as_deref(),
+            move || activate_notification(&app, notification_id),
+        )
+        .await
+}
 
-        // Freedesktop notification servers require an explicit default action
-        // before clicking the banner can be observed. Windows exposes the
-        // banner's default activation without rendering an extra button.
-        #[cfg(unix)]
-        notification.action("default", "Open Workman");
-
-        notification
-            .show()
-            .map_err(|error| format!("could not show the OS notification: {error}"))
+#[cfg(windows)]
+async fn show_notification(
+    app: AppHandle,
+    notification_id: i64,
+    title: String,
+    body: String,
+    sound: Option<bool>,
+) -> Result<(), String> {
+    let backend = app.state::<NativeNotificationState>().windows.clone();
+    let app_id = app.config().identifier.clone();
+    let name = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| "Workman".into());
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        backend.prepare(&app_id, &name, &executable)?;
+        backend.show(&app_id, notification_id, &title, &body, sound, move || {
+            activate_notification(&app, notification_id)
+        })
     })
     .await
-    .map_err(|error| format!("notification task failed: {error}"))??;
-
-    // tauri-plugin-notification deliberately treats desktop notifications as
-    // fire-and-forget. Retaining the same backend handle is the narrow seam that
-    // lets Workman identify a banner click and route to the matching row.
-    tauri::async_runtime::spawn_blocking(move || {
-        handle.wait_for_action(|action| {
-            if action == "default" {
-                activate_notification(&app, notification_id);
-            }
-        });
-    });
-
-    Ok(())
+    .map_err(|error| error.to_string())?
 }
 
 fn activate_notification(app: &AppHandle, notification_id: i64) {
@@ -127,7 +475,7 @@ fn checked_copy(label: &str, value: String, max_chars: usize) -> Result<String, 
 }
 
 #[cfg(target_os = "macos")]
-async fn permission_state() -> Result<NotificationPermission, String> {
+async fn permission_state(_app: &AppHandle) -> Result<NotificationPermission, String> {
     use mac_usernotifications::{
         AuthorizationStatus, NotificationSettingStatus, get_notification_settings,
     };
@@ -188,35 +536,87 @@ async fn permission_state() -> Result<NotificationPermission, String> {
             Some("macOS returned an unknown notification permission state.".to_owned()),
         ),
     };
+    let sound_enabled = match settings.sound_enabled {
+        NotificationSettingStatus::Enabled => Some(true),
+        NotificationSettingStatus::Disabled | NotificationSettingStatus::NotSupported => {
+            Some(false)
+        }
+        NotificationSettingStatus::Unknown => None,
+    };
+    let detail = if state == "granted" && sound_enabled == Some(false) {
+        Some("macOS allows notification banners, but notification sounds are disabled in System Settings.".into())
+    } else {
+        detail
+    };
     Ok(NotificationPermission {
         state,
         platform: "macos",
         detail,
+        sound_enabled,
     })
 }
 
 #[cfg(target_os = "macos")]
-async fn request_permission() -> Result<NotificationPermission, String> {
+async fn request_permission(app: &AppHandle) -> Result<NotificationPermission, String> {
     mac_usernotifications::request_auth()
         .await
         .map_err(|error| format!("could not request macOS notification permission: {error}"))?;
-    permission_state().await
+    permission_state(app).await
 }
 
-#[cfg(not(target_os = "macos"))]
-async fn permission_state() -> Result<NotificationPermission, String> {
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn permission_state(app: &AppHandle) -> Result<NotificationPermission, String> {
+    let capabilities = app
+        .state::<NativeNotificationState>()
+        .linux
+        .capabilities()
+        .await;
     Ok(NotificationPermission {
-        state: "granted",
+        state: if capabilities.is_ok() { "granted" } else { "unavailable" },
+        sound_enabled: None,
         platform: std::env::consts::OS,
+        detail: Some(match capabilities {
+            Ok(capabilities) if capabilities.iter().any(|capability| capability == "actions") => "Desktop notifications are available. Banner history and app icon badges depend on your desktop environment.".into(),
+            Ok(_) => "This desktop can show notifications but does not support clicking them to open Workman.".into(),
+            Err(error) => format!("No desktop notification service is available: {error}"),
+        }),
+    })
+}
+
+#[cfg(windows)]
+async fn permission_state(app: &AppHandle) -> Result<NotificationPermission, String> {
+    let backend = app.state::<NativeNotificationState>().windows.clone();
+    let app_id = app.config().identifier.clone();
+    let name = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| "Workman".into());
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let allowed = tauri::async_runtime::spawn_blocking(move || {
+        backend.prepare(&app_id, &name, &executable)?;
+        backend.permission(&app_id)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(NotificationPermission {
+        sound_enabled: None,
+        state: if allowed { "granted" } else { "denied" },
+        platform: "windows",
         detail: Some(
-            "Notifications are available through the desktop notification service.".into(),
+            if allowed {
+                "Windows notifications are allowed. Do Not Disturb may deliver them quietly."
+            } else {
+                "Notifications are disabled in Windows Settings or by your organization's policy."
+            }
+            .into(),
         ),
     })
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn request_permission() -> Result<NotificationPermission, String> {
-    permission_state().await
+async fn request_permission(app: &AppHandle) -> Result<NotificationPermission, String> {
+    permission_state(app).await
 }
 
 #[cfg(test)]

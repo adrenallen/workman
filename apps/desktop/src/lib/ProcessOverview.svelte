@@ -76,7 +76,10 @@
   } as const;
 
   let section = $derived(copy[kind]);
-  let matchingProcesses = $derived(processes.filter((process) => process.kind === kind));
+  let matchingProcesses = $derived.by(() => {
+    const matches = processes.filter((process) => process.kind === kind);
+    return kind === 'agent' ? matches.sort((left, right) => right.id - left.id) : matches;
+  });
   let workingCount = $derived(
     matchingProcesses
       .filter((process) => processActivity(process, $liveStats.processes[process.id]).state === 'working')

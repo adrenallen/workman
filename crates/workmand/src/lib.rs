@@ -49,6 +49,7 @@ mod process_registry;
 pub mod process_stats;
 mod process_tree;
 mod profiles;
+mod project_notifications;
 mod project_titles;
 pub mod readiness;
 mod recorded_feedback;

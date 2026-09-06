@@ -448,6 +448,56 @@ impl<'store> TodoService<'store> {
         query: TodoListQuery,
         now_ms: i64,
     ) -> TodoServiceResult<TodoPage> {
+        let limit = query
+            .limit
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+        let requested_offset = query.offset;
+        let todos = self.matching_todos(project_id, query, now_ms)?;
+        let total_count = todos.len();
+        let offset = requested_offset.min(total_count);
+        let end = offset.saturating_add(limit).min(total_count);
+        let has_more = end < total_count;
+        let todos = todos
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(TodoSummary::from)
+            .collect();
+        Ok(TodoPage {
+            todos,
+            total_count,
+            offset,
+            limit,
+            has_more,
+            next_offset: has_more.then_some(end),
+        })
+    }
+
+    /// All project summaries for the desktop's complete coordination snapshot.
+    /// Agent-facing lists retain their bounded pages through `list`.
+    pub fn snapshot(
+        &self,
+        project_id: ProjectId,
+        now_ms: i64,
+    ) -> TodoServiceResult<Vec<TodoSummary>> {
+        let todos = self.matching_todos(
+            project_id,
+            TodoListQuery {
+                sort: TodoSort::Status,
+                ..Default::default()
+            },
+            now_ms,
+        )?;
+        Ok(todos.into_iter().map(TodoSummary::from).collect())
+    }
+
+    fn matching_todos(
+        &self,
+        project_id: ProjectId,
+        query: TodoListQuery,
+        now_ms: i64,
+    ) -> TodoServiceResult<Vec<TodoView>> {
         self.require_project(project_id)?;
         let tags = normalize_tags(query.tags)?;
         let needle = query
@@ -492,28 +542,7 @@ impl<'store> TodoService<'store> {
             todos.push(todo);
         }
         sort_todos(&mut todos, query.sort);
-
-        let total_count = todos.len();
-        let limit = query
-            .limit
-            .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE);
-        let offset = query.offset.min(total_count);
-        let end = offset.saturating_add(limit).min(total_count);
-        let has_more = end < total_count;
-        let todos = todos[offset..end]
-            .iter()
-            .cloned()
-            .map(TodoSummary::from)
-            .collect();
-        Ok(TodoPage {
-            todos,
-            total_count,
-            offset,
-            limit,
-            has_more,
-            next_offset: has_more.then_some(end),
-        })
+        Ok(todos)
     }
 
     /// Replace the manual order of open todos while preserving completed-row slots.

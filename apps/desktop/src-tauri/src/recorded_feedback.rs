@@ -130,6 +130,17 @@ mod unsupported {
     unsupported_command!(feedback_capture_snapshot(display_index: Option<usize>, region: Option<serde_json::Value>) -> serde_json::Value);
     unsupported_command!(feedback_abort(feedback_id: i64, app: AppHandle) -> bool);
     unsupported_command!(feedback_finish(app: AppHandle) -> serde_json::Value);
+    #[tauri::command]
+    pub(crate) fn dictation_preflight() -> serde_json::Value {
+        serde_json::json!({
+            "supported": false, "microphone_available": false,
+            "model_installed": false, "model_size_bytes": 0
+        })
+    }
+    unsupported_command!(dictation_install_model(app: AppHandle) -> serde_json::Value);
+    unsupported_command!(dictation_start(session_id: String, app: AppHandle) -> ());
+    unsupported_command!(dictation_finish(session_id: String) -> String);
+    unsupported_command!(dictation_cancel(session_id: String) -> ());
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]

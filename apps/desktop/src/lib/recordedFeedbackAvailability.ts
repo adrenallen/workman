@@ -17,11 +17,13 @@ export interface RecordedFeedbackCapabilityState extends RecordedFeedbackCapabil
 export interface RecordedFeedbackPreferences {
   showInSidebar: boolean;
   agentPrompt: string;
+  autoArchiveAfterSend: boolean;
 }
 
 const maxAgentPromptLength = 32_000;
 const defaultPreferences: RecordedFeedbackPreferences = {
   showInSidebar: true,
+  autoArchiveAfterSend: true,
   agentPrompt: defaultRecordedFeedbackAgentPrompt
 };
 
@@ -49,6 +51,10 @@ let capabilityRequest: Promise<RecordedFeedbackCapabilityState> | null = null;
 
 export function setRecordedFeedbackSidebarVisible(showInSidebar: boolean): void {
   updateRecordedFeedbackPreferences({ showInSidebar });
+}
+
+export function setRecordedFeedbackAutoArchive(autoArchiveAfterSend: boolean): void {
+  updateRecordedFeedbackPreferences({ autoArchiveAfterSend });
 }
 
 export function setRecordedFeedbackAgentPrompt(agentPrompt: string): void {
@@ -99,16 +105,20 @@ export function platformDisplayName(platform: string): string {
 function loadRecordedFeedbackPreferences(): RecordedFeedbackPreferences {
   try {
     const stored = JSON.parse(localStorage.getItem(recordedFeedbackPreferencesStorageKey) ?? 'null');
-    if (typeof stored?.showInSidebar === 'boolean') {
-      return {
-        showInSidebar: stored.showInSidebar,
-        agentPrompt: typeof stored.agentPrompt === 'string' && stored.agentPrompt.length <= maxAgentPromptLength
-          ? stored.agentPrompt
-          : defaultRecordedFeedbackAgentPrompt
-      };
-    }
+    return parseRecordedFeedbackPreferences(stored);
   } catch {
     // Defaults keep the section visible when storage is unavailable or malformed.
   }
   return defaultPreferences;
+}
+
+export function parseRecordedFeedbackPreferences(value: unknown): RecordedFeedbackPreferences {
+  const stored = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    showInSidebar: typeof stored.showInSidebar === 'boolean' ? stored.showInSidebar : true,
+    autoArchiveAfterSend: typeof stored.autoArchiveAfterSend === 'boolean' ? stored.autoArchiveAfterSend : true,
+    agentPrompt: typeof stored.agentPrompt === 'string' && stored.agentPrompt.length <= maxAgentPromptLength
+      ? stored.agentPrompt
+      : defaultRecordedFeedbackAgentPrompt
+  };
 }

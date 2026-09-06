@@ -73,7 +73,7 @@ export function agentLineageRows(agents: ProcessView[], query: string): AgentLin
   return rows;
 }
 
-function validParentId(agent: ProcessView, byId: Map<number, ProcessView>): number | null {
+export function validParentId(agent: ProcessView, byId: Map<number, ProcessView>): number | null {
   const parentId = agent.spawned_by_process_id;
   if (parentId === null || parentId === agent.id || !byId.has(parentId)) return null;
 

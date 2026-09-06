@@ -105,7 +105,7 @@ test('the additional-instructions surface owns Create and remains optional', asy
   const instructionSurface = sourceBetween(
     source,
     'bind:this={promptField}',
-    '<Collapsible.Root bind:open={advancedOpen}',
+    '{#if !loading && enabledTools.length === 0}',
     'additional instructions surface'
   );
   assert.match(instructionSurface, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);

@@ -89,6 +89,7 @@ export type AttentionState = 'working' | 'needs_input' | 'waiting' | 'idle' | 'e
 export type NotificationType =
   | 'agent_done'
   | 'needs_input'
+  | 'project_ready'
   | 'process_crashed'
   | 'timer_fired'
   | 'todo_assigned_to_you'
@@ -646,9 +647,9 @@ export class DaemonClient
     return this.request('recorded_feedback.discard_append', { project_id: projectId, feedback_id: feedbackId });
   }
 
-  recordedFeedbackFinishDelivery(projectId: number, feedbackId: number, deliveryId: number, error: string | null): Promise<RecordedFeedbackDelivery> {
+  recordedFeedbackFinishDelivery(projectId: number, feedbackId: number, deliveryId: number, error: string | null, autoArchive = false): Promise<RecordedFeedbackDelivery> {
     return this.request('recorded_feedback.finish_delivery', {
-      project_id: projectId, feedback_id: feedbackId, delivery_id: deliveryId, error
+      project_id: projectId, feedback_id: feedbackId, delivery_id: deliveryId, error, auto_archive: autoArchive
     });
   }
 
@@ -744,16 +745,18 @@ export class DaemonClient
   recordedFeedbackToScratchpad(
     projectId: number,
     feedbackId: number,
-    name?: string
+    name?: string,
+    autoArchive = false
   ): Promise<{ scratchpad: Scratchpad; delivery: RecordedFeedbackDelivery }> {
     return this.request('recorded_feedback.to_scratchpad', {
       project_id: projectId,
       feedback_id: feedbackId,
-      name
+      name,
+      auto_archive: autoArchive
     });
   }
 
-  processes(projectId: number): Promise<ProcessView[]> {
+  processes(projectId?: number): Promise<ProcessView[]> {
     return this.request('process.list', { project_id: projectId });
   }
 
