@@ -166,9 +166,10 @@
   });
 
   $effect(() => {
-    if (mode !== 'create' || !defaultRef || baseRefTouched || appliedDefaultRef) return;
+    const initialRef = defaultRef ?? refOptions.find(option => option.source === 'current')?.name;
+    if (mode !== 'create' || !initialRef || baseRefTouched || appliedDefaultRef) return;
     appliedDefaultRef = true;
-    baseRef = defaultRef;
+    baseRef = initialRef;
     queueMicrotask(() => scheduleRefValidation(0));
   });
 
@@ -203,7 +204,8 @@
         score: filter ? fuzzySubsequenceScore(filter, option.name) : 0
       }))
       .filter((entry): entry is { option: WorktreeRefOption; index: number; score: number } => entry.score !== null)
-      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .sort((left, right) => Number(right.option.name === trimmed) - Number(left.option.name === trimmed)
+        || right.score - left.score || left.index - right.index)
       .map((entry) => entry.option);
   }
 

@@ -753,7 +753,13 @@ pub async fn origin_branches_for_project(
     let branches = options.iter().map(|option| option.name.clone()).collect();
 
     let mut ref_options = vec![WorktreeRefOption {
-        name: "HEAD".into(),
+        name: snapshot
+            .worktrees
+            .iter()
+            .find(|entry| same_path(&entry.path, &snapshot.root_path))
+            .map(|entry| entry.branch.clone().unwrap_or_else(|| entry.head.clone()))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "HEAD".into()),
         source: "current",
     }];
     if let Some(default_ref) = default_ref.as_ref() {

@@ -90,6 +90,7 @@ export type NotificationType =
   | 'agent_done'
   | 'needs_input'
   | 'project_ready'
+  | 'process_idle'
   | 'process_crashed'
   | 'timer_fired'
   | 'todo_assigned_to_you'
@@ -202,6 +203,7 @@ export function isUnsupportedControlMethod(cause: unknown): boolean {
 }
 
 export interface ProcessView {
+  notify_on_idle?: boolean;
   id: number;
   project_id: number;
   kind: ProcessKind;

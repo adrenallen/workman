@@ -64,6 +64,7 @@
     process,
     connected,
     visible = true,
+    allowAutoFocus = true,
     busy = false,
     onStart,
     onRecoverPrompt,
@@ -75,6 +76,7 @@
     process: ProcessView;
     connected: boolean;
     visible?: boolean;
+    allowAutoFocus?: boolean;
     busy?: boolean;
     onStart?: (process: ProcessView) => void;
     onRecoverPrompt?: () => void;
@@ -558,7 +560,7 @@
       gapDetected: false
     };
     replayState = state;
-    if (processStatus === 'running') instance.focus();
+    if (processStatus === 'running' && allowAutoFocus) instance.focus();
     if (!resumingConnection && processStatus === 'running') {
       replayPreviewAllowed = true;
       void loadLiveOutputPreview(state);
@@ -675,7 +677,7 @@
     if (!instance || !onContextMenu) return;
     const request = contextMenuRequest(event, {
       kind: 'terminal',
-      process: { id: process.id, kind: process.kind, name: process.name },
+      process: { id: process.id, kind: process.kind, name: process.name, notify_on_idle: process.notify_on_idle },
       hasSelection: instance.hasSelection(),
       link: hoveredLinkUri,
       pasteEnabled: process.status === 'running'
@@ -904,7 +906,7 @@
       if (state.gapDetected) {
         showTransientReplayWarning('Some live styled output was skipped; showing the available tail.');
       }
-      if (!state.focusRequested) return;
+      if (!state.focusRequested || !allowAutoFocus) return;
       if (alreadyFocused && state.focusReporting) {
         // Replay enabled mode 1004 after the DOM focus event, so xterm has no new event to report.
         queueInput(encoder.encode('\x1b[I'), true);

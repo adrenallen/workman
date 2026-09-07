@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { processLabel } from './processLabel';
   import BotIcon from '@lucide/svelte/icons/bot';
   import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
   import CoffeeIcon from '@lucide/svelte/icons/coffee';
@@ -222,7 +223,7 @@
       });
 
       for (const process of snapshot?.processes ?? []) {
-        const label = process.kind === 'terminal' ? workingDirLabel(process.working_dir) : process.name;
+        const label = processLabel(process);
         const selection = projectTreeSelection(process.kind, process.id, project.id, label);
         const processTarget: AppNavigationTarget = { type: 'item', selection };
         next.push({
@@ -339,11 +340,6 @@
 
   function projectLabel(project: Project): string {
     return projectDisplayName(project);
-  }
-
-  function workingDirLabel(path: string): string {
-    const parts = path.split('/').filter(Boolean);
-    return parts[0] === 'Users' && parts.length > 2 ? `~/${parts.slice(2).join('/')}` : path;
   }
 
   function kindLabel(kind: PaletteKind): string {

@@ -40,8 +40,8 @@ test('detected origin default is applied until the user edits the ref', async ()
   const dialog = await readFile(dialogUrl, 'utf8');
   const app = await readFile(appUrl, 'utf8');
 
-  assert.match(dialog, /!defaultRef \|\| baseRefTouched \|\| appliedDefaultRef/);
-  assert.match(dialog, /baseRef = defaultRef/);
+  assert.match(dialog, /!initialRef \|\| baseRefTouched \|\| appliedDefaultRef/);
+  assert.match(dialog, /baseRef = initialRef/);
   assert.match(app, /worktreeDefaultRef = response\.default_ref \?\? null/);
   assert.match(app, /if \(mode === 'create'\) void loadOriginBranches\(\)/);
 });

@@ -66,7 +66,7 @@ export type ContextMenuTarget =
   | { kind: 'process'; process: ProcessView; selection: ProjectTreeSelection }
   | {
       kind: 'terminal';
-      process: Pick<ProcessView, 'id' | 'kind' | 'name'>;
+      process: Pick<ProcessView, 'id' | 'kind' | 'name' | 'notify_on_idle'>;
       hasSelection: boolean;
       link: string | null;
       pasteEnabled: boolean;
@@ -198,6 +198,7 @@ export function describeContextMenu(
         title: target.todo.title,
         subtitle: `TODO · ${target.todo.id}`,
         items: [
+          { id: 'rename', label: 'Rename' },
           {
             id: target.todo.completed ? 'reopen-todo' : 'complete-todo',
             label: target.todo.completed ? 'Reopen todo' : 'Complete todo'
@@ -222,6 +223,7 @@ export function describeContextMenu(
         title: target.feedback.title,
         subtitle: `FEEDBACK · ${target.feedback.id}`,
         items: [
+          { id: 'rename', label: 'Rename' },
           {
             id: 'archive-feedback',
             label: target.feedback.archived ? 'Restore feedback' : 'Archive feedback'
@@ -260,7 +262,7 @@ export function describeContextMenu(
 function terminalItems(
   target: Extract<ContextMenuTarget, { kind: 'terminal' }>
 ): ContextMenuItem[] {
-  return terminalContextMenuItems(target);
+  return [...terminalContextMenuItems(target), idleNotificationItem(target.process)];
 }
 
 function projectItems(
@@ -390,6 +392,15 @@ function projectItems(
   ];
 }
 
+function idleNotificationItem(process: Pick<ProcessView, 'notify_on_idle'>): ContextMenuItem {
+  return {
+    id: process.notify_on_idle ? 'cancel-idle-notification' : 'notify-on-idle',
+    label: process.notify_on_idle ? 'Cancel idle notification' : 'Notify when idle',
+    detail: process.notify_on_idle ? 'An alert is armed for this process' : 'One alert when this process next finishes or returns to idle',
+    separatorBefore: true
+  };
+}
+
 function processItems(process: ProcessView): ContextMenuEntry[] {
   const running = process.status === 'running' || process.status === 'starting';
   const items: ContextMenuEntry[] = [];
@@ -418,6 +429,8 @@ function processItems(process: ProcessView): ContextMenuEntry[] {
     });
   }
 
+  items.push(idleNotificationItem(process));
+
   if (process.kind === 'agent') {
     items.push({
       id: 'send-prompt',
@@ -442,9 +455,7 @@ function processItems(process: ProcessView): ContextMenuEntry[] {
   if (process.kind === 'agent' && process.spawned_by_process_id !== null) {
     moreItems.push({ id: 'view-parent', label: 'View parent' });
   }
-  if (process.kind !== 'command') {
-    moreItems.push({ id: 'rename', label: 'Rename' });
-  }
+  moreItems.push({ id: 'rename', label: 'Rename' });
   if (process.kind === 'command' && process.source === 'yml') {
     moreItems.push({ id: 'reveal-config', label: 'Reveal in workman.yml' });
   }

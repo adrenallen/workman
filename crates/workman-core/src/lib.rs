@@ -7,6 +7,7 @@ pub mod locks;
 pub mod notifications;
 mod output_spill;
 mod paths;
+mod process_idle_notifications;
 pub mod project_folders;
 pub mod recorded_feedback;
 /// Revision-guarded project scratchpads.

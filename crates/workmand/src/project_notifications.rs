@@ -112,6 +112,7 @@ mod tests {
         agent_state.working = state == AttentionState::Working;
         agent_state.exited = state == AttentionState::Exited;
         ProcessStatusView {
+            notify_on_idle: false,
             process: Process {
                 id,
                 project_id,
@@ -211,9 +212,11 @@ mod tests {
         let store = store();
         let idle = agent(1, 1, AttentionState::Idle);
         let mut tracker = ProjectNotifications::default();
-        tracker.observe(&store, None, &[idle.clone()], 0).unwrap();
         tracker
-            .observe(&store, None, &[idle.clone()], 9_000)
+            .observe(&store, None, std::slice::from_ref(&idle), 0)
+            .unwrap();
+        tracker
+            .observe(&store, None, std::slice::from_ref(&idle), 9_000)
             .unwrap();
         assert!(store.list_notifications(None, 100).unwrap().is_empty());
         tracker
@@ -226,15 +229,15 @@ mod tests {
             .unwrap();
         tracker.observe(&store, None, &[], 11_000).unwrap();
         tracker
-            .observe(&store, None, &[idle.clone()], 20_000)
+            .observe(&store, None, std::slice::from_ref(&idle), 20_000)
             .unwrap();
         tracker
-            .observe(&store, None, &[idle.clone()], 30_000)
+            .observe(&store, None, std::slice::from_ref(&idle), 30_000)
             .unwrap();
         assert!(store.list_notifications(None, 100).unwrap().is_empty());
         let mut restarted = ProjectNotifications::default();
         restarted
-            .observe(&store, None, &[idle.clone()], 40_000)
+            .observe(&store, None, std::slice::from_ref(&idle), 40_000)
             .unwrap();
         restarted.observe(&store, None, &[idle], 50_000).unwrap();
         assert!(store.list_notifications(None, 100).unwrap().is_empty());
@@ -293,10 +296,10 @@ mod tests {
             .unwrap();
         let idle = agent(1, 1, AttentionState::Idle);
         tracker
-            .observe(&store, Some(1), &[idle.clone()], 10)
+            .observe(&store, Some(1), std::slice::from_ref(&idle), 10)
             .unwrap();
         tracker
-            .observe(&store, Some(2), &[second.clone()], 1_000)
+            .observe(&store, Some(2), std::slice::from_ref(&second), 1_000)
             .unwrap();
         assert_eq!(tracker.next_deadline(), Some(2_010));
         tracker

@@ -300,6 +300,7 @@ export function listenForNativeNotificationActions(
 
 function notificationTitle(notification: Notification): string {
   switch (notification.type) {
+      case 'process_idle': return 'Process ready';
     case 'agent_done':
       return 'Agent finished';
     case 'needs_input':

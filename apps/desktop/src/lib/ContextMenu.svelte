@@ -1,4 +1,6 @@
 <script lang="ts">
+  import BellIcon from '@lucide/svelte/icons/bell';
+  import BellOffIcon from '@lucide/svelte/icons/bell-off';
   import ArchiveIcon from '@lucide/svelte/icons/archive';
   import BotIcon from '@lucide/svelte/icons/bot';
   import CheckIcon from '@lucide/svelte/icons/check';
@@ -69,6 +71,8 @@
   }
 
   const ICONS: Record<ContextActionIcon, Component> = {
+    bell: BellIcon,
+    'bell-off': BellOffIcon,
     archive: ArchiveIcon,
     bot: BotIcon,
     check: CheckIcon,

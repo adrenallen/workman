@@ -432,3 +432,13 @@ test('background notification activity releases its Web Lock when the app unmoun
     else delete globalThis.navigator;
   }
 });
+
+test('manually armed idle alerts override automatic agent scope but respect OS and sound switches', async () => {
+  for (const [id, mode] of ['all', 'top_level', 'project_ready'].entries()) {
+    nativeNotificationPreferences.set({ enabled: true, mode, needsInput: false, soundEnabled: false });
+    assert.equal(await deliverNativeNotification(notification(800 + id, 'process_idle'), family), true);
+    assert.equal(shown().at(-1).args.sound, false);
+  }
+  nativeNotificationPreferences.set({ enabled: false, mode: 'all', needsInput: true, soundEnabled: true });
+  assert.equal(await deliverNativeNotification(notification(804, 'process_idle'), family), false);
+});

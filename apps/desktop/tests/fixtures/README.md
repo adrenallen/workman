@@ -31,3 +31,9 @@ For process-resume focus coverage, start Vite on port 1433 and run
 `process-resume-focus.js` in a fresh browser session. It checks terminal input,
 sidebar and overview rows, running/starting processes, editors, dialogs, menus,
 and removed processes against the real focus resolver, without starting processes.
+
+For command review and branch selection, start Vite on port 1438 and open
+`/tests/fixtures/command-review.html`, then run `command-review-interactions.js`.
+This checks dark/light/narrow trust review, Escape dismissal, and typing `origin/dev`
+then Enter and Create without silently changing the starting ref. Screenshots are
+written to `/tmp/workman-trust-*.png`; data is in memory and no daemon is contacted.

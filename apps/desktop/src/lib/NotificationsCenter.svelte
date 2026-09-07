@@ -60,6 +60,7 @@
 
   function notificationTypeLabel(notification: Notification): string {
     switch (notification.type) {
+      case 'process_idle': return 'Process ready';
       case 'process_crashed': return 'Process crashed';
       case 'timer_fired': return 'Timer fired';
       case 'needs_input': return 'Agent needs input';

@@ -748,7 +748,7 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
         branches
             .ref_options
             .iter()
-            .any(|option| option.name == "HEAD" && option.source == "current")
+            .any(|option| option.name == "main" && option.source == "current")
     );
     assert!(
         branches
@@ -787,6 +787,17 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
     // or remote-tracking ref exists. Validation fetches the exact ref so the
     // preview and the eventual worktree use the current remote commit.
     git(&fixture.main, &["checkout", "--detach", "origin/main"])?;
+    let detached = worktrees::origin_branches_for_project(&fixture.registry, 1).await?;
+    let current_ref = detached
+        .ref_options
+        .iter()
+        .find(|option| option.source == "current")
+        .unwrap();
+    assert_eq!(
+        current_ref.name,
+        git(&fixture.main, &["rev-parse", "HEAD"])?.trim()
+    );
+
     git(&fixture.main, &["branch", "-D", "main"])?;
     std::fs::write(fixture.main.join("remote-main.txt"), "new remote main\n")?;
     git(&fixture.main, &["add", "remote-main.txt"])?;

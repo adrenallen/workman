@@ -462,6 +462,8 @@ pub struct ProcessStatusView {
     #[serde(flatten)]
     pub process: Process,
     pub agent_state: AgentState,
+    #[serde(default)]
+    pub notify_on_idle: bool,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
     /// Conversation ID passively discovered from the agent CLI's own session store.
@@ -689,7 +691,7 @@ impl ProcessRegistry {
         process.exit_signal = None;
         process.exited_at = None;
         if process.source == ProcessSource::Yml {
-            process.trust_hash = None;
+            process.trust_hash = self.remembered_trust_hash(&process)?;
         }
         self.store.put_process(&process)?;
         self.status_invalidations.invalidate();
@@ -709,14 +711,30 @@ impl ProcessRegistry {
         process.sort_order = current.sort_order;
         let current_hash = trust_hash_for_process(&current);
         let updated_hash = trust_hash_for_process(&process);
-        let trust_still_applies = current.source == ProcessSource::Yml
+        let trust_still_applies = current.project_id == process.project_id
+            && current.source == ProcessSource::Yml
             && process.source == ProcessSource::Yml
             && current.trust_hash.as_deref() == Some(current_hash.as_str())
             && current_hash == updated_hash;
-        process.trust_hash = trust_still_applies.then_some(current_hash);
+        process.trust_hash = if trust_still_applies {
+            Some(current_hash)
+        } else {
+            self.remembered_trust_hash(&process)?
+        };
         self.store.put_process(&process)?;
         self.status_invalidations.invalidate();
         Ok(process)
+    }
+
+    fn remembered_trust_hash(&self, process: &Process) -> RegistryResult<Option<String>> {
+        if process.source != ProcessSource::Yml {
+            return Ok(None);
+        }
+        let hash = trust_hash_for_process(process);
+        Ok(self
+            .store
+            .has_command_approval(process.project_id, &hash)?
+            .then_some(hash))
     }
 
     pub fn get(&mut self, process_id: ProcessId) -> RegistryResult<Process> {
@@ -782,6 +800,13 @@ impl ProcessRegistry {
             .get(&process.id)
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        let idle_watch = self.store.process_idle_watch_enabled(process.id)?;
+        let idle_alert_fired = idle_watch
+            && self.store.observe_process_idle_watch(
+                process.id,
+                self.process_ready_for_idle_alert(&process, &agent_state),
+                now_millis(),
+            )?;
         if process.kind == ProcessKind::Agent {
             let waiting_on = self.waiting_reasons(process.id)?;
             let watched = self.process_is_watched(process.id)?;
@@ -790,7 +815,7 @@ impl ProcessRegistry {
             let notification = self.store.observe_agent_attention_with_activity(
                 process.id,
                 agent_state.state,
-                watched,
+                watched || idle_watch,
                 agent_state.last_input_at.is_some(),
                 last_agent_activity_at,
                 now_millis(),
@@ -811,6 +836,7 @@ impl ProcessRegistry {
             .store
             .claimed_todos_for_process(process.id, now_millis())?;
         Ok(ProcessStatusView {
+            notify_on_idle: idle_watch && !idle_alert_fired,
             process,
             agent_state,
             events,
@@ -820,6 +846,56 @@ impl ProcessRegistry {
             agent_launch_mode: agent_session.map(|session| session.launch_mode),
             claimed_todos,
         })
+    }
+
+    pub fn set_notify_on_idle(
+        &mut self,
+        process_id: ProcessId,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        let process = self.get(process_id)?;
+        let attention = self.agent_attention_snapshot(process_id)?;
+        let busy = self.process_ready_for_idle_alert(&process, &attention) == Some(false);
+        self.store
+            .set_process_idle_watch(process_id, enabled, busy, now_millis())?;
+        self.status_invalidations.invalidate();
+        self.arm_attention_deadline();
+        self.status_view(process)
+    }
+
+    fn process_ready_for_idle_alert(
+        &self,
+        process: &Process,
+        attention: &AgentState,
+    ) -> Option<bool> {
+        if !matches!(
+            process.status,
+            ProcessStatus::Running | ProcessStatus::Starting
+        ) {
+            return Some(true);
+        }
+        if process.kind == ProcessKind::Command || process.status == ProcessStatus::Starting {
+            return Some(false); // A quiet command is still running until it exits.
+        }
+        if process.kind == ProcessKind::Agent {
+            return Some(attention.state != AttentionState::Working);
+        }
+        #[cfg(unix)]
+        {
+            let foreground = self.foreground_process_group(process.id)?;
+            Some(process.pid == Some(foreground))
+        }
+        #[cfg(windows)]
+        {
+            // ConPTY has no foreground process groups. Conservatively wait for shell
+            // descendants to exit, including background jobs; silence is never evidence.
+            let pid = process.pid?;
+            Some(crate::process_stats::inspect_process_tree(pid).is_empty())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
     }
 
     fn waiting_reasons(&self, process_id: ProcessId) -> RegistryResult<Vec<AgentWaitingReason>> {
@@ -1166,6 +1242,9 @@ impl ProcessRegistry {
             active: Arc::new(RwLock::new(true)),
         });
         self.running.insert(process_id, hosted);
+        // Capture even a command that exits before the next status poll.
+        self.store
+            .observe_process_idle_watch(process_id, Some(false), now_millis())?;
         if process.kind == ProcessKind::Agent {
             let started_at = now_millis();
             self.store.observe_agent_attention_with_activity(
@@ -1220,6 +1299,8 @@ impl ProcessRegistry {
         if expected_hash != actual {
             return Err(RegistryError::TrustHashMismatch(process_id));
         }
+        self.store
+            .remember_command_approval(process.project_id, &actual)?;
         process.trust_hash = Some(actual);
         self.store.put_process(&process)?;
         self.status_invalidations.invalidate();
@@ -2255,6 +2336,12 @@ impl ProcessRegistry {
             .values()
             .filter_map(|output| output.attention.next_transition_at(now))
             .chain(self.project_notifications.next_deadline())
+            .chain(
+                self.store
+                    .has_process_idle_watches()
+                    .unwrap_or(false)
+                    .then_some(now + 1_000),
+            )
             .min()
         {
             self.status_invalidations.arm_deadline(at);
@@ -2904,6 +2991,170 @@ mod tests {
             spawned_by_process_id: None,
             sort_order: 0,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn idle_alert_waits_for_a_silent_terminal_job_and_only_fires_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "Idle fixture".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry =
+            ProcessRegistry::with_stop_grace(store, Duration::from_millis(50)).unwrap();
+        let mut process = output_test_process(temp.path().to_str().unwrap());
+        process.command = Some("exec /bin/sh -i".into());
+        registry.create(process).unwrap();
+        let shell = registry.start(31).unwrap();
+        registry.send_input(31, b"sleep 7\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while registry.foreground_process_group(31) == shell.pid {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            registry
+                .set_notify_on_idle(31, true)
+                .unwrap()
+                .notify_on_idle
+        );
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(6) {
+            assert!(registry.get_status(31).unwrap().notify_on_idle);
+            assert!(
+                registry
+                    .store()
+                    .list_notifications(None, 100)
+                    .unwrap()
+                    .is_empty(),
+                "quiet output is not job completion"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.get_status(31).unwrap().notify_on_idle {
+            assert!(
+                Instant::now() < deadline,
+                "foreground job never produced an idle alert"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(registry.get(31).unwrap().status, ProcessStatus::Running);
+        assert_eq!(
+            registry
+                .store()
+                .list_notifications(None, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        registry.get_status(31).unwrap();
+        assert_eq!(
+            registry
+                .store()
+                .list_notifications(None, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        registry.stop(31).unwrap();
+    }
+
+    #[test]
+    fn idle_alert_armed_before_a_fast_command_starts_is_not_lost() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "Fast command".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut process = output_test_process(temp.path().to_str().unwrap());
+        process.kind = ProcessKind::Command;
+        process.command = Some("true".into());
+        registry.create(process).unwrap();
+        registry.set_notify_on_idle(31, true).unwrap();
+        registry.start(31).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while registry.get_status(31).unwrap().notify_on_idle {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            registry
+                .store()
+                .list_notifications(None, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_agent_alert_suppresses_duplicate_automatic_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into_owned(),
+                name: "Idle fixture".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut process = output_test_process(temp.path().to_str().unwrap());
+        process.kind = ProcessKind::Agent;
+        registry.create(process).unwrap();
+        registry
+            .store()
+            .observe_agent_attention(31, AttentionState::Working, false, true, 0)
+            .unwrap();
+        registry
+            .store()
+            .set_process_idle_watch(31, true, true, 0)
+            .unwrap();
+        registry.get_status(31).unwrap();
+        assert!(
+            registry
+                .store()
+                .list_notifications(None, 100)
+                .unwrap()
+                .is_empty()
+        );
+        registry
+            .store()
+            .connection()
+            .execute("UPDATE process_idle_watches SET ready_since = 0", [])
+            .unwrap();
+        let status = registry.get_status(31).unwrap();
+        assert!(!status.notify_on_idle);
+        assert!(status.agent_state.unread);
+        let notifications = registry.store().list_notifications(None, 100).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].kind,
+            workman_core::NotificationType::ProcessIdle
+        );
     }
 
     #[test]

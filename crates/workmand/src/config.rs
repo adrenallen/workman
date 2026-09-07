@@ -507,6 +507,61 @@ pub fn update_command(
     Ok(registry.trust_yml_process_without_auto_start(updated.id, &expected_hash)?)
 }
 
+/// Rename a YAML entry without approving it or changing the running invocation.
+pub fn rename_command(
+    registry: &mut ProcessRegistry,
+    process_id: ProcessId,
+    name: String,
+) -> Result<Process, ConfigError> {
+    let current = registry.get(process_id)?;
+    if current.source != ProcessSource::Yml {
+        return Ok(registry.rename(process_id, name)?);
+    }
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(ConfigError::InvalidProcessName);
+    }
+    if name == current.name {
+        return Ok(current);
+    }
+    if registry
+        .list(Some(current.project_id))?
+        .iter()
+        .any(|process| process.name == name)
+    {
+        return Err(ConfigError::ProcessNameConflict(name));
+    }
+    let project = registry
+        .store()
+        .get_project(current.project_id)
+        .map_err(RegistryError::from)?
+        .ok_or(ConfigError::ProjectNotFound(current.project_id))?;
+    let root = canonical_directory("<project>", Path::new(&project.path))?;
+    let path = root.join(WORKMAN_CONFIG_FILE);
+    let source_path = project_config_path(&root).unwrap_or_else(|| path.clone());
+    let yaml = fs::read_to_string(&source_path).map_err(|source| ConfigError::ReadConfig {
+        path: source_path,
+        source,
+    })?;
+    let mut config = parse_workman_yml(&yaml)?;
+    if config.processes.contains_key(&name) {
+        return Err(ConfigError::ProcessNameConflict(name));
+    }
+    let definition = config
+        .processes
+        .remove(&current.name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(current.name.clone()))?;
+    config.processes.insert(name.clone(), definition);
+    let mut desired = prepare_processes(current.project_id, &root, config.processes.clone())?
+        .into_iter()
+        .find(|process| process.name == name)
+        .ok_or_else(|| ConfigError::WrittenProcessMissing(name))?;
+    fs::write(&path, serde_yaml::to_string(&config)?)
+        .map_err(|source| ConfigError::WriteConfig { path, source })?;
+    desired.id = current.id;
+    Ok(registry.update(desired)?)
+}
+
 /// Stop one command if necessary, remove its stored definition, and delete its registry row.
 pub fn delete_command(
     registry: &mut ProcessRegistry,
@@ -1288,6 +1343,125 @@ mod tests {
             fixture.registry.trust_yml_process(pending.id, &hash),
             Err(RegistryError::TrustHashMismatch(_))
         ));
+    }
+
+    #[test]
+    fn approved_project_commands_are_remembered_after_edits_and_recreation() {
+        let mut fixture = Fixture::new();
+        let original = "processes:\n  Server:\n    command: printf original\n";
+        sync_workman_yml(&mut fixture.registry, 1, original).unwrap();
+        let pending = fixture.process("Server");
+        let hash = trust_hash_for_process(&pending);
+        fixture
+            .registry
+            .trust_yml_process(pending.id, &hash)
+            .unwrap();
+
+        sync_workman_yml(
+            &mut fixture.registry,
+            1,
+            "processes:\n  Server:\n    command: printf changed\n",
+        )
+        .unwrap();
+        let changed = fixture.process("Server");
+        assert!(changed.trust_hash.is_none());
+        assert!(
+            !fixture
+                .registry
+                .store()
+                .has_command_approval(1, &trust_hash_for_process(&changed))
+                .unwrap()
+        );
+        let reverted = sync_workman_yml(&mut fixture.registry, 1, original).unwrap();
+        assert!(reverted.awaiting_trust.is_empty());
+        assert_eq!(fixture.process("Server").trust_hash, Some(hash.clone()));
+
+        sync_workman_yml(&mut fixture.registry, 1, "processes: {}\n").unwrap();
+        let recreated = sync_workman_yml(
+            &mut fixture.registry,
+            1,
+            "processes:\n  Renamed server:\n    command: printf original\n",
+        )
+        .unwrap();
+        assert!(recreated.awaiting_trust.is_empty());
+        assert_eq!(fixture.process("Renamed server").trust_hash, Some(hash));
+    }
+
+    #[test]
+    fn remembered_command_approval_never_crosses_projects_or_trust_fields() {
+        let mut fixture = Fixture::new();
+        sync_workman_yml(
+            &mut fixture.registry,
+            1,
+            "processes:\n  Server:\n    command: true\n",
+        )
+        .unwrap();
+        let pending = fixture.process("Server");
+        fixture
+            .registry
+            .trust_yml_process(pending.id, &trust_hash_for_process(&pending))
+            .unwrap();
+        for fields in [
+            "env: { MODE: production }",
+            "working_dir: frontend",
+            "auto_start: true",
+            "auto_restart: true",
+            "restart_when_changed: ['*.rs']",
+        ] {
+            let report = sync_workman_yml(
+                &mut fixture.registry,
+                1,
+                &format!("processes:\n  Server:\n    command: true\n    {fields}\n"),
+            )
+            .unwrap();
+            assert_eq!(report.awaiting_trust.len(), 1, "{fields}");
+        }
+        fixture
+            .registry
+            .store()
+            .put_project(&Project {
+                id: 2,
+                path: fixture.outside.path().to_string_lossy().into_owned(),
+                name: "Other".into(),
+                display_name: None,
+                icon: None,
+                selected: false,
+                sort_order: 1,
+            })
+            .unwrap();
+        let mut other = pending.clone();
+        other.id = 0;
+        other.project_id = 2;
+        other.name = "Other server".into();
+        let other = fixture.registry.create(other).unwrap();
+        assert!(
+            other.trust_hash.is_none(),
+            "even identical fields require this project's approval"
+        );
+        let mut moved = pending;
+        moved.project_id = 2;
+        assert!(fixture.registry.update(moved).unwrap().trust_hash.is_none());
+    }
+
+    #[test]
+    fn command_rename_survives_yaml_sync_without_approving_pending_commands() {
+        let mut fixture = Fixture::new();
+        let yaml = "processes:\n  Original:\n    command: true\n";
+        fs::write(fixture.root.path().join(WORKMAN_CONFIG_FILE), yaml).unwrap();
+        sync_workman_yml(&mut fixture.registry, 1, yaml).unwrap();
+        let pending = fixture.process("Original");
+        let renamed = rename_command(&mut fixture.registry, pending.id, "Renamed".into()).unwrap();
+        assert_eq!(renamed.id, pending.id);
+        assert!(renamed.trust_hash.is_none());
+        let yaml = fs::read_to_string(fixture.root.path().join(WORKMAN_CONFIG_FILE)).unwrap();
+        sync_workman_yml(&mut fixture.registry, 1, &yaml).unwrap();
+        assert_eq!(fixture.process("Renamed").id, pending.id);
+        fixture
+            .registry
+            .trust_yml_process(pending.id, &trust_hash_for_process(&renamed))
+            .unwrap();
+        let again = rename_command(&mut fixture.registry, pending.id, "Build".into()).unwrap();
+        assert!(again.trust_hash.is_some());
     }
 
     #[test]

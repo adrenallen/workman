@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { processLabel } from './processLabel';
   import BotIcon from '@lucide/svelte/icons/bot';
   import PlayIcon from '@lucide/svelte/icons/play';
   import PlusIcon from '@lucide/svelte/icons/plus';
@@ -169,7 +170,7 @@
         <button
           type="button"
           class="process-primary"
-          title={`Open ${process.name}`}
+          title={`Open ${processLabel(process)}`}
           onclick={() => onSelect(process)}
         >
           {#if process.kind === 'agent'}
@@ -179,7 +180,7 @@
           {/if}
           <span class="process-ref">#{process.id}</span>
           <span class="process-copy">
-            <strong>{process.name}</strong>
+            <strong>{processLabel(process)}</strong>
             <small>{secondaryCopy(process)}</small>
           </span>
           <span

@@ -41,6 +41,12 @@ struct ProcessIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProcessIdleNotificationParams {
+    process_id: ProcessId,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TimerProjectParams {
     project_id: ProjectId,
 }
@@ -1654,11 +1660,17 @@ async fn dispatch(
             let params: ProcessIdParams = params_as(params)?;
             registry.close(params.process_id).map(json_value)
         }
+        "process.notify_on_idle" => {
+            let params: ProcessIdleNotificationParams = params_as(params)?;
+            registry
+                .set_notify_on_idle(params.process_id, params.enabled)
+                .map(json_value)
+        }
         "process.rename" => {
             let params: RenameParams = params_as(params)?;
-            registry
-                .rename(params.process_id, params.name)
+            return crate::config::rename_command(&mut registry, params.process_id, params.name)
                 .map(json_value)
+                .map_err(config_error);
         }
         "process.select" => {
             let params: ProcessIdParams = params_as(params)?;

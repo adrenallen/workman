@@ -66,6 +66,7 @@
     type ProjectTreeMultiSelection
   } from './projectTreeMultiSelect';
   import { processActivity, processActivityTone } from './processActivity';
+  import { processLabel, workingDirLabel } from './processLabel';
   import { todoClaimLabel, todoClaimState } from './todoPresentation';
   import { projectDisplayName } from './worktrees';
   import {
@@ -118,6 +119,7 @@
     renameTarget: ContextMenuTarget | null;
     onContextMenu: (request: ContextMenuRequest) => void;
     onMiddleClick: (target: ContextMenuTarget) => void;
+    onRename: (target: ContextMenuTarget) => void;
     onRenameSubmit: (name: string) => void;
     onRenameCancel: () => void;
   }
@@ -161,6 +163,7 @@
     renameTarget,
     onContextMenu,
     onMiddleClick,
+    onRename,
     onRenameSubmit,
     onRenameCancel
   }: Props = $props();
@@ -484,14 +487,12 @@
     onMiddleClick(target);
   }
 
-  function processLabel(process: ProcessView): string {
-    return process.kind === 'terminal' ? workingDirLabel(process.working_dir) : process.name;
-  }
-
-  function workingDirLabel(path: string): string {
-    const parts = path.split('/').filter(Boolean);
-    if (parts[0] === 'Users' && parts.length > 2) return `~/${parts.slice(2).join('/')}`;
-    return path;
+  function renameEntry(event: MouseEvent, target: ContextMenuTarget): void {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (bulkBusy || reordering || processBusyId !== null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onRename(target);
   }
 
   function isRunning(process: ProcessView): boolean {
@@ -885,6 +886,9 @@
             {/if}
             {#if group === 'todos'}
               {#each visibleTodos as todo (todo.id)}
+                {#if renameTarget?.kind === 'todo' && renameTarget.todo.id === todo.id}
+                  <InlineTreeRename value={todo.title} label="Todo title" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
                 <button
                   type="button"
                   class="tree-row todo-row"
@@ -894,6 +898,7 @@
                   data-tree-row
                   data-context-kind="todo"
                   data-context-id={todo.id}
+                  ondblclick={(event) => renameEntry(event, todoTarget(todo))}
                   use:reorderItem={todoReorderOptions(todo)}
                   onclick={(event) => selectGroupItem(event, 'todos', todo.id, visibleTodos.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('todo', todo.id, project.id, todo.title)))}
                   onmousedown={preventMiddleMouseDefault}
@@ -915,6 +920,7 @@
                     </span>
                   {/if}
                 </button>
+                {/if}
               {/each}
               {#each visibleTodoDrafts as draft (draft.id)}
                 <CreationDraftTreeRow {draft} {selection} {onSelect} {onContextMenu} />
@@ -958,6 +964,7 @@
                       data-tree-row
                       data-context-kind="agent"
                       data-context-id={process.id}
+                      ondblclick={(event) => renameEntry(event, processTarget(process))}
                       use:reorderItem={reorderOptions(process)}
                       onclick={(event) => selectGroupItem(event, 'agents', process.id, visibleAgentRows.map((candidate) => candidate.process.id), () => selectProcess(process))}
                       onmousedown={preventMiddleMouseDefault}
@@ -1034,6 +1041,7 @@
                       data-tree-row
                       data-context-kind="terminal"
                       data-context-id={process.id}
+                      ondblclick={(event) => renameEntry(event, processTarget(process))}
                       use:reorderItem={reorderOptions(process)}
                       onclick={(event) => selectGroupItem(event, 'terminals', process.id, visibleTerminals.map((candidate) => candidate.id), () => selectProcess(process))}
                       onmousedown={preventMiddleMouseDefault}
@@ -1042,7 +1050,7 @@
                       onkeydown={(event) => openKeyboardMenu(event, processTarget(process))}
                     >
                       <StatusIndicator tone={processStatusTone(process, stats)} label={processStatusLabel(process, stats)} />
-                      <span class="row-copy"><strong>{workingDirLabel(process.working_dir)}</strong></span>
+                      <span class="row-copy"><strong>{processLabel(process)}</strong></span>
                       {#if stats}<span class="row-badges">{#if stats.descendant_count > 0}<CountBadge prefix="+" value={stats.descendant_count} title={`${stats.descendant_count} subprocesses`} />{/if}<MemoryBadge bytes={stats.memory_bytes} /></span>{/if}
                     </button>
                     {#if !isRunning(process)}
@@ -1082,6 +1090,7 @@
                       data-tree-row
                       data-context-kind="command"
                       data-context-id={process.id}
+                      ondblclick={(event) => renameEntry(event, processTarget(process))}
                       use:reorderItem={reorderOptions(process)}
                       onclick={() => selectProcess(process)}
                       oncontextmenu={(event) => openPointerMenu(event, processTarget(process))}
@@ -1119,9 +1128,13 @@
               {/if}
             {:else if group === 'feedback'}
               {#each visibleFeedback as item (item.id)}
+                {#if renameTarget?.kind === 'feedback' && renameTarget.feedback.id === item.id}
+                  <InlineTreeRename value={item.title} label="Feedback title" onSubmit={onRenameSubmit} onCancel={onRenameCancel} />
+                {:else}
                 <button
                   type="button"
                   class="tree-row feedback-row"
+                  ondblclick={(event) => renameEntry(event, feedbackTarget(item))}
                   class:selected={selection?.key === `feedback:${item.id}`}
                   data-tree-row
                   onclick={() => onSelect(projectTreeSelection('feedback', item.id, project.id, item.title))}
@@ -1137,6 +1150,7 @@
                   />
                   <span class="row-copy"><strong>{item.title}</strong></span>
                 </button>
+                {/if}
               {:else}
                 <p class="empty-row">{query ? 'No matching feedback' : 'No recorded feedback'}</p>
               {/each}
@@ -1156,6 +1170,7 @@
                     data-tree-row
                     data-context-kind="scratchpad"
                     data-context-id={scratchpad.id}
+                    ondblclick={(event) => renameEntry(event, scratchpadTarget(scratchpad))}
                     use:reorderItem={scratchpadReorderOptions(scratchpad)}
                     onclick={(event) => selectGroupItem(event, 'scratchpads', scratchpad.id, visibleScratchpads.map((candidate) => candidate.id), () => onSelect(projectTreeSelection('scratchpad', scratchpad.id, project.id, scratchpad.name)))}
                     onmousedown={preventMiddleMouseDefault}

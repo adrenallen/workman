@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { TrustFieldChange, TrustReview } from './daemon';
+  import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
+  import XIcon from '@lucide/svelte/icons/x';
+  import IconButton from '$lib/components/ds/IconButton.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import type { TrustFields, TrustReview } from './daemon';
 
   interface Props {
     review: TrustReview;
@@ -9,346 +14,80 @@
   }
 
   let { review, busy, onApprove, onClose }: Props = $props();
-
+  let cancelButton: HTMLButtonElement | null = $state(null);
+  const labels: Record<keyof TrustFields, string> = {
+    command: 'Command', working_dir: 'Working directory', env: 'Environment',
+    auto_start: 'Start automatically', auto_restart: 'Restart automatically',
+    restart_when_changed: 'Restart when files change'
+  };
   function formatValue(value: unknown): string {
-    if (typeof value === 'string') return value || '—';
+    if (typeof value === 'boolean') return value ? 'On' : 'Off';
+    if (typeof value === 'string') return value || 'None';
+    if (value === null || (typeof value === 'object' && Object.keys(value).length === 0)) return 'None';
     return JSON.stringify(value, null, 2);
-  }
-
-  function changeLabel(change: TrustFieldChange): string {
-    return change.previous === null ? 'New' : 'Changed';
-  }
-
-  function closeOnEscape(event: KeyboardEvent): void {
-    if (event.key === 'Escape' && !busy) onClose();
   }
 </script>
 
-<svelte:window onkeydown={closeOnEscape} />
-
-<div
-  class="backdrop"
-  role="presentation"
-  onclick={(event) => {
-    if (event.target === event.currentTarget && !busy) onClose();
-  }}
->
-  <div
-    class="review"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="trust-title"
-    aria-describedby="trust-description"
+<Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+  <Dialog.Content
+    class="w-[min(680px,calc(100vw-32px))] max-w-none sm:max-w-none grid-rows-[auto_minmax(0,1fr)_auto] gap-0 rounded-lg border border-border bg-popover p-0"
+    showCloseButton={false}
+    onOpenAutoFocus={(event) => { event.preventDefault(); requestAnimationFrame(() => cancelButton?.focus()); }}
+    onEscapeKeydown={(event) => { if (busy) event.preventDefault(); }}
+    onInteractOutside={(event) => { if (busy) event.preventDefault(); }}
   >
-    <header>
-      <div class="interlock" aria-hidden="true"><span></span><i></i></div>
-      <div>
-        <span class="eyebrow">Command interlock</span>
-        <h2 id="trust-title">Review {review.process_name}</h2>
+    <Dialog.Header class="flex-row items-start justify-between gap-3 border-b border-border px-4 py-3 text-left">
+      <div class="min-w-0">
+        <Dialog.Title class="flex items-center gap-2 text-base"><ShieldCheckIcon size={17} />Trust this command?</Dialog.Title>
+        <Dialog.Description class="mt-2 text-sm">
+          Review the command from this project's workman.yml before running it.
+          Approval is remembered for this project when the command, directory, environment, and launch settings match.
+        </Dialog.Description>
       </div>
-      <button class="close" type="button" aria-label="Close trust review" disabled={busy} onclick={onClose}>×</button>
-    </header>
+      <IconButton label="Close trust review" disabled={busy} onclick={onClose}>
+        {#snippet icon()}<XIcon size={14} />{/snippet}
+      </IconButton>
+    </Dialog.Header>
 
-    <p id="trust-description" class="description">
-      This repository is asking Workman to execute a command on your machine. Approval applies only
-      to the exact fields below; another change locks it again.
-    </p>
-
-    <div class="change-summary">
-      <strong>{review.changes.length.toString().padStart(2, '0')}</strong>
-      <span>{review.changes.some((change) => change.previous !== null) ? 'fields changed since approval' : 'fields require first review'}</span>
-    </div>
-
-    <div class="changes">
-      {#each review.changes as change (change.field)}
-        <article>
+    <div class="review-body">
+      <h3>{review.process_name}</h3>
+      {#each Object.entries(labels) as [field, label] (field)}
+        {@const value = review.fields[field as keyof TrustFields]}
+        {@const change = review.changes.find(change => change.field === field)}
+        <section aria-label={label}>
           <div class="field-heading">
-            <strong>{change.field.replaceAll('_', ' ')}</strong>
-            <span class:changed={change.previous !== null}>{changeLabel(change)}</span>
+            <strong>{label}</strong>
+            {#if change && change.previous !== null}<span>Changed</span>{/if}
           </div>
-          {#if change.previous !== null}
-            <div class="value previous">
-              <small>Previous</small>
-              <pre>{formatValue(change.previous)}</pre>
-            </div>
+          {#if change && change.previous !== null}
+            <div class="value previous"><span>Previous</span><pre>{formatValue(change.previous)}</pre></div>
           {/if}
-          <div class="value current">
-            <small>{change.previous === null ? 'Requested' : 'Now'}</small>
-            <pre>{formatValue(change.current)}</pre>
+          <div class="value">
+            {#if change && change.previous !== null}<span>Requested</span>{/if}
+            <pre>{formatValue(value)}</pre>
           </div>
-        </article>
+        </section>
       {/each}
     </div>
 
-    <footer>
-      <code title={review.expected_hash}>{review.expected_hash.slice(0, 19)}…</code>
-      <div>
-        <button class="cancel" type="button" disabled={busy} onclick={onClose}>Keep blocked</button>
-        <button class="approve" type="button" disabled={busy} onclick={onApprove}>
-          {busy ? 'Approving…' : 'Trust & allow'}
-        </button>
-      </div>
-    </footer>
-  </div>
-</div>
+    <Dialog.Footer class="mx-0 mb-0 flex-row justify-end gap-2 bg-popover border-t border-border px-4 py-3">
+      <Button bind:ref={cancelButton} variant="outline" disabled={busy} onclick={onClose}>Cancel</Button>
+      <Button disabled={busy} onclick={onApprove}>{busy ? 'Approving…' : 'Trust and run'}</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .backdrop {
-    position: fixed;
-    z-index: 30;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: 24px;
-    background: rgb(3 10 15 / 78%);
-    backdrop-filter: blur(7px);
-  }
-
-  .review {
-    display: grid;
-    width: min(720px, 100%);
-    min-height: 0;
-    max-height: min(780px, calc(100dvh - 48px));
-    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-    overflow: hidden;
-    border: 1px solid #7e633c;
-    border-radius: 5px;
-    background: #0d1b24;
-    box-shadow: 0 28px 90px rgb(0 0 0 / 48%), inset 0 1px rgb(228 174 91 / 8%);
-  }
-
-  header {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 14px;
-    padding: 20px 22px 17px;
-    border-bottom: 1px solid #473b2d;
-    background: linear-gradient(105deg, rgb(228 174 91 / 9%), transparent 66%);
-  }
-
-  .interlock {
-    position: relative;
-    display: grid;
-    width: 36px;
-    height: 36px;
-    place-items: center;
-    border: 1px solid #8a6b3c;
-    transform: rotate(45deg);
-  }
-
-  .interlock span {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #e4ae5b;
-    box-shadow: 0 0 0 5px rgb(228 174 91 / 10%);
-  }
-
-  .interlock i {
-    position: absolute;
-    right: 4px;
-    bottom: 4px;
-    width: 5px;
-    height: 5px;
-    background: #765c38;
-  }
-
-  .eyebrow,
-  .field-heading span,
-  .value small,
-  footer button,
-  footer code,
-  .change-summary span {
-    font-family: 'JetBrains Mono Variable', monospace;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .eyebrow {
-    color: #e4ae5b;
-    font-size: var(--font-size-xs);
-  }
-
-  h2 {
-    margin: 5px 0 0;
-    color: #edf2f3;
-    font-size: 22px;
-    font-weight: 510;
-    letter-spacing: -0.025em;
-  }
-
-  .close {
-    width: 32px;
-    height: 32px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: #78909b;
-    font-size: 22px;
-    cursor: pointer;
-  }
-
-  .close:hover:not(:disabled) {
-    border-color: #4a5e68;
-    color: #d4dfe3;
-  }
-
-  .description {
-    margin: 0;
-    padding: 17px 22px;
-    color: #8da1aa;
-    font-size: 12px;
-    line-height: 1.6;
-  }
-
-  .change-summary {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    padding: 0 22px 12px;
-  }
-
-  .change-summary strong {
-    color: #e4ae5b;
-    font-size: 23px;
-    font-weight: 430;
-  }
-
-  .change-summary span {
-    color: #6f858e;
-    font-size: var(--font-size-xs);
-  }
-
-  .changes {
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 0 22px 5px;
-    scrollbar-color: #3f4d4e transparent;
-    scrollbar-width: thin;
-  }
-
-  article {
-    margin-bottom: 9px;
-    border: 1px solid #293e48;
-    border-left: 2px solid #8a6b3c;
-    background: #0a171f;
-  }
-
-  .field-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-bottom: 1px solid #263943;
-  }
-
-  .field-heading strong {
-    color: #b8c7cd;
-    font-size: var(--font-size-sm);
-    font-weight: 600;
-    text-transform: capitalize;
-  }
-
-  .field-heading span {
-    color: #e4ae5b;
-    font-size: var(--font-size-xs);
-  }
-
-  .field-heading span.changed {
-    color: #ef9a75;
-  }
-
-  .value {
-    display: grid;
-    grid-template-columns: 68px minmax(0, 1fr);
-    gap: 8px;
-    padding: 8px 10px;
-  }
-
-  .value + .value {
-    border-top: 1px solid #20343e;
-  }
-
-  .value small {
-    padding-top: 2px;
-    color: #607984;
-    font-size: var(--font-size-xs);
-  }
-
-  .value pre {
-    min-width: 0;
-    margin: 0;
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
-    color: #b8c7cd;
-    font-family: 'JetBrains Mono Variable', monospace;
-    font-size: var(--font-size-sm);
-    line-height: 1.5;
-  }
-
-  .value.previous pre {
-    color: #8b7c78;
-    text-decoration-color: rgb(239 125 117 / 55%);
-    text-decoration-line: line-through;
-  }
-
-  .value.current pre {
-    color: #d4dfd9;
-  }
-
-  footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 15px;
-    padding: 15px 22px 18px;
-    border-top: 1px solid #293d46;
-    background: #0b1921;
-  }
-
-  footer code {
-    overflow: hidden;
-    color: #566f79;
-    font-size: var(--font-size-xs);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  footer div {
-    display: flex;
-    gap: 7px;
-  }
-
-  footer button {
-    border-radius: 2px;
-    padding: 9px 12px;
-    font-size: var(--font-size-xs);
-    font-weight: 650;
-    cursor: pointer;
-  }
-
-  .cancel {
-    border: 1px solid #354b56;
-    background: transparent;
-    color: #899da6;
-  }
-
-  .approve {
-    border: 1px solid #e4ae5b;
-    background: #e4ae5b;
-    color: #1c1811;
-  }
-
-  button:disabled {
-    cursor: not-allowed;
-    opacity: 0.48;
-  }
-
-  @media (max-width: 620px) {
-    .backdrop { padding: 10px; }
-    .value { grid-template-columns: 1fr; }
-    footer { align-items: stretch; flex-direction: column; }
-    footer div { justify-content: flex-end; }
-  }
+  .review-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; }
+  h3 { margin: 0 0 12px; overflow-wrap: anywhere; color: var(--foreground); font-size: var(--font-size-base); font-weight: 600; }
+  section { overflow: hidden; margin-bottom: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--background); }
+  section:last-child { margin-bottom: 0; }
+  .field-heading { display: flex; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--card); }
+  .field-heading strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 550; }
+  .field-heading span, .value > span { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .value { padding: 10px 12px; }
+  .value > span { display: block; margin-bottom: 5px; }
+  .value + .value { border-top: 1px solid var(--border); }
+  pre { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--foreground); font: 400 var(--font-size-sm)/1.6 'JetBrains Mono Variable', monospace; }
+  .previous pre { color: var(--muted-foreground); }
 </style>

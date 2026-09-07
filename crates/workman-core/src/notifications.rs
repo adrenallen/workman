@@ -13,6 +13,7 @@ pub enum NotificationType {
     AgentDone,
     NeedsInput,
     ProjectReady,
+    ProcessIdle,
     ProcessCrashed,
     TimerFired,
     TodoAssignedToYou,
@@ -25,6 +26,7 @@ impl NotificationType {
             Self::AgentDone => "agent_done",
             Self::NeedsInput => "needs_input",
             Self::ProjectReady => "project_ready",
+            Self::ProcessIdle => "process_idle",
             Self::ProcessCrashed => "process_crashed",
             Self::TimerFired => "timer_fired",
             Self::TodoAssignedToYou => "todo_assigned_to_you",
@@ -36,6 +38,7 @@ impl NotificationType {
         match value {
             "needs_input" => Self::NeedsInput,
             "project_ready" => Self::ProjectReady,
+            "process_idle" => Self::ProcessIdle,
             "process_crashed" => Self::ProcessCrashed,
             "timer_fired" => Self::TimerFired,
             "todo_assigned_to_you" => Self::TodoAssignedToYou,

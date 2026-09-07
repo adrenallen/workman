@@ -14,6 +14,8 @@ export const CONTEXT_ACTION_IDS = [
   'send-prompt',
   'view-parent',
   'mark-read',
+  'notify-on-idle',
+  'cancel-idle-notification',
   'reveal-config',
   'complete-todo',
   'reopen-todo',
@@ -56,6 +58,8 @@ export type ContextActionId = (typeof CONTEXT_ACTION_IDS)[number];
 export type ContextActionIcon =
   | 'archive'
   | 'bot'
+  | 'bell'
+  | 'bell-off'
   | 'check'
   | 'circle-check'
   | 'clipboard-paste'
@@ -109,6 +113,8 @@ const CONTEXT_ACTION_ICONS: Record<ContextActionId, ContextActionIcon> = {
   'send-prompt': 'message-square',
   'view-parent': 'git-branch',
   'mark-read': 'check',
+  'notify-on-idle': 'bell',
+  'cancel-idle-notification': 'bell-off',
   'reveal-config': 'file-code',
   'complete-todo': 'circle-check',
   'reopen-todo': 'circle-check',

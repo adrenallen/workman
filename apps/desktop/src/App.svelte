@@ -181,6 +181,7 @@
   } from './lib/hotkeys';
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
   import { focusedResumeProcess } from './lib/processResume';
+  import { processLabel } from './lib/processLabel';
   import { deliverAgentInput, type AgentInputStep } from './lib/agentInputDelivery';
   import { agentDraftPromptInputSteps } from './lib/agentAttachmentDrafts';
   import { feedbackAgentInputSteps, trackFeedbackDelivery } from './lib/recordedFeedbackAgentDelivery';
@@ -4094,6 +4095,14 @@
     return { type: 'overview' };
   }
 
+  function processLabelForSelection(selected: ProjectTreeSelection, projectId: number): string {
+    const process = isProcessSelection(selected)
+      ? (projectId === selectedProject?.id ? processes : navigationIndex[projectId]?.processes ?? [])
+        .find(process => process.id === selected.id)
+      : null;
+    return process ? processLabel(process) : selected.label;
+  }
+
   function recentViewItems() {
     const labels: Record<string, string> = {
       overview: 'Overview', settings: 'Settings', todos: 'Todos', scratchpads: 'Scratchpads',
@@ -4104,7 +4113,9 @@
       const kind = pane.type === 'selection' ? pane.selection.kind : pane.type === 'processes' ? pane.kind : pane.type;
       return {
         view, kind, current: sameWorkspaceView(view, workspaceViewHistory.current),
-        label: pane.type === 'selection' ? pane.selection.label : labels[kind] ?? kind,
+        label: pane.type === 'selection'
+          ? processLabelForSelection(pane.selection, view.projectId)
+          : labels[kind] ?? kind,
         project: projectDisplayName(projects.find(project => project.id === view.projectId)!)
       };
     });
@@ -4455,12 +4466,6 @@
     if (process) void selectTreeItem(projectTreeSelection(process.kind, process.id, process.project_id, processLabel(process)));
   }
 
-  function processLabel(process: ProcessView): string {
-    if (process.kind !== 'terminal') return process.name;
-    const parts = process.working_dir.split('/').filter(Boolean);
-    return parts[0] === 'Users' && parts.length > 2 ? `~/${parts.slice(2).join('/')}` : process.working_dir;
-  }
-
   async function openTrustReview(process: ProcessView): Promise<void> {
     processBusyId = process.id;
     try {
@@ -4477,11 +4482,13 @@
     const review = trustReview;
     trustBusy = true;
     try {
-      await client.trustYmlProcess(review.process_id, review.expected_hash);
+      const approved = await client.trustYmlProcess(review.process_id, review.expected_hash);
       trustReview = null;
       await refreshProcesses(selectedProject.id);
       const process = processes.find((candidate) => candidate.id === review.process_id);
-      if (process) await startProcess(process);
+      if (process && !approved.auto_start && approved.status !== 'running' && approved.status !== 'starting') {
+        await startProcess(process);
+      }
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -5336,7 +5343,12 @@
       } else if (target.kind === 'process') {
         await runProcessContextAction(action, target);
       } else if (target.kind === 'terminal') {
-        dispatchTerminalContextAction(action, target);
+        if (action === 'notify-on-idle' || action === 'cancel-idle-notification') {
+          const process = processes.find(process => process.id === target.process.id);
+          if (process) await setProcessIdleNotification(process, action === 'notify-on-idle');
+        } else {
+          dispatchTerminalContextAction(action, target);
+        }
       } else if (target.kind === 'todo') {
         await runTodoContextAction(action, target);
       } else if (target.kind === 'draft') {
@@ -5455,12 +5467,21 @@
     }
   }
 
+  async function setProcessIdleNotification(process: ProcessView, enabled: boolean): Promise<void> {
+    await client.control('process.notify_on_idle', { process_id: process.id, enabled });
+    await refreshProcesses(process.project_id);
+  }
+
   async function runProcessContextAction(
     action: ContextActionId,
     target: Extract<ContextMenuTarget, { kind: 'process' }>
   ): Promise<void> {
     const process = target.process;
     switch (action) {
+      case 'notify-on-idle':
+      case 'cancel-idle-notification':
+        await setProcessIdleNotification(process, action === 'notify-on-idle');
+        return;
       case 'start':
         await startOrReviewProcess(process);
         return;
@@ -5546,6 +5567,7 @@
     action: ContextActionId,
     target: Extract<ContextMenuTarget, { kind: 'todo' }>
   ): Promise<void> {
+    if (action === 'rename') { treeRenameTarget = target; return; }
     if (action === 'copy-title') {
       await navigator.clipboard.writeText(target.todo.title);
       return;
@@ -5628,6 +5650,7 @@
     action: ContextActionId,
     target: Extract<ContextMenuTarget, { kind: 'feedback' }>
   ): Promise<void> {
+    if (action === 'rename') { treeRenameTarget = target; return; }
     if (action === 'copy-title') {
       await navigator.clipboard.writeText(target.feedback.title);
     } else if (action === 'archive-feedback') {
@@ -5718,6 +5741,25 @@
         if (selection?.kind === 'scratchpad' && selection.id === target.scratchpad.id) {
           selection = { ...selection, label: name };
           await loadScratchpad(target.scratchpad.id);
+        }
+      } else if (target.kind === 'todo') {
+        await client.control('coordination.todo_update', {
+          project_id: target.selection.projectId, todo_id: target.todo.id, title: name
+        });
+        await refreshCoordination(target.selection.projectId, false);
+        if (selection?.kind === 'todo' && selection.id === target.todo.id) {
+          selection = { ...selection, label: name };
+          await loadTodo(target.todo.id);
+        }
+      } else if (target.kind === 'feedback') {
+        const current = await client.recordedFeedbackGet(target.selection.projectId, target.feedback.id);
+        const next = await client.recordedFeedbackUpdate(
+          target.selection.projectId, current.id, current.revision, name, current.blocks, []
+        );
+        await refreshFeedback(target.selection.projectId);
+        if (selection?.kind === 'feedback' && selection.id === current.id) {
+          selection = { ...selection, label: name };
+          feedbackDetail = next;
         }
       }
     } catch (cause) {
@@ -6618,6 +6660,7 @@
         renameTarget={treeRenameTarget}
         onContextMenu={showContextMenu}
         onMiddleClick={(target) => void runTreeMiddleClick(target)}
+        onRename={(target) => { treeMultiSelection = null; treeRenameTarget = target; }}
         onRenameSubmit={(name) => void commitTreeRename(name)}
         onRenameCancel={() => (treeRenameTarget = null)}
       />
@@ -6758,6 +6801,7 @@
                 process={selectedProcess}
                 connected={connection.status === 'connected'}
                 visible={documentVisible}
+                allowAutoFocus={treeRenameTarget === null}
                 busy={processBusyId === selectedProcess.id}
                 onStart={(process) => void startOrReviewProcess(process)}
                 onRecoverPrompt={selectedProcess.kind === 'agent' && savedPrompt ? () => recoverAgentPrompt(savedPrompt) : undefined}

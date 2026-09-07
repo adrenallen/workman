@@ -75,16 +75,16 @@
     min-height: 30px;
     margin: 1px 4px;
     padding: 2px 7px 2px var(--rename-indent, 7px);
-    border: 1px solid #46636b;
+    border: 1px solid var(--ring);
     border-radius: 3px;
-    background: #172328;
+    background: var(--background);
   }
 
   .signal {
     align-self: stretch;
     width: 2px;
     border-radius: 2px;
-    background: #55b6c9;
+    background: var(--ring);
   }
 
   input {
@@ -94,12 +94,12 @@
     border: 0;
     outline: 0;
     background: transparent;
-    color: #f1f3f5;
+    color: var(--foreground);
     font: 560 var(--font-size-sm)/1.2 'Archivo Variable', sans-serif;
   }
 
   .hint {
-    color: #82909a;
+    color: var(--muted-foreground);
     font: var(--font-size-sm)/1 'JetBrains Mono Variable', monospace;
   }
 </style>

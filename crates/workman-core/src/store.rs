@@ -190,10 +190,20 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project_ready_notifications",
         include_str!("../migrations/0035_project_ready_notifications.sql"),
     ),
+    (
+        36,
+        "project_command_approvals",
+        include_str!("../migrations/0036_project_command_approvals.sql"),
+    ),
+    (
+        37,
+        "process_idle_notifications",
+        include_str!("../migrations/0037_process_idle_notifications.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 35;
+pub const LATEST_SCHEMA_VERSION: i64 = 37;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -1791,6 +1801,29 @@ impl Store {
             .optional()?)
     }
 
+    pub fn has_command_approval(
+        &self,
+        project_id: ProjectId,
+        trust_hash: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_command_approvals WHERE project_id = ?1 AND trust_hash = ?2)",
+            params![project_id, trust_hash], |row| row.get(0),
+        )?)
+    }
+
+    pub fn remember_command_approval(
+        &self,
+        project_id: ProjectId,
+        trust_hash: &str,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO project_command_approvals (project_id, trust_hash) VALUES (?1, ?2)",
+            params![project_id, trust_hash],
+        )?;
+        Ok(())
+    }
+
     pub fn put_process(&self, process: &Process) -> StoreResult<()> {
         let env = to_json(&process.env)?;
         let restart_when_changed = to_json(&process.restart_when_changed)?;
@@ -2646,6 +2679,49 @@ fn query_strings(connection: &Connection, sql: &str, id: i64) -> StoreResult<Vec
         .query_map([id], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(strings)
+}
+
+#[cfg(test)]
+#[test]
+fn command_approvals_migrate_and_survive_reopening_and_process_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 35) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO projects (id, path, name) VALUES (1, '/tmp/approval', 'Approval');
+        INSERT INTO processes (id, project_id, kind, name, working_dir, source, status, trust_hash)
+        VALUES (1, 1, 'command', 'Build', '/tmp/approval', 'yml', 'stopped', 'approved-hash');",
+        )
+        .unwrap();
+    let store = Store::from_connection(connection).unwrap();
+    assert!(store.has_command_approval(1, "approved-hash").unwrap());
+    store.set_process_idle_watch(1, true, true, 0).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert!(store.has_command_approval(1, "approved-hash").unwrap());
+    assert!(store.process_idle_watch_enabled(1).unwrap());
+    store.delete_process(1).unwrap();
+    assert!(store.has_command_approval(1, "approved-hash").unwrap());
+    store
+        .connection()
+        .execute("DELETE FROM projects WHERE id = 1", [])
+        .unwrap();
+    assert!(!store.has_command_approval(1, "approved-hash").unwrap());
 }
 
 #[cfg(test)]
