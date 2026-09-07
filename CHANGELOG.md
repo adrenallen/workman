@@ -4,6 +4,9 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Resume the focused stopped agent, terminal, or command with Control+R. Configure or clear
+  the shortcut in Settings → Hotkeys; running processes retain their normal Control+R input.
+
 - Keep scratchpad scroll, cursor, and unfinished edits when switching panes. Code fences now
   render as editable code blocks with Copy and Edit controls; comment markers open threads
   without hijacking text clicks. Open scratchpads in the configured editor and sync saved

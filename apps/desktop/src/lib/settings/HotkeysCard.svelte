@@ -41,7 +41,7 @@
     {
       id: 'terminal',
       title: 'Terminal',
-      description: 'Control terminal focus and search without sending keys to the process.',
+      description: 'Control terminal focus and search, or resume a stopped process.',
       scope: 'Terminal'
     },
     {
@@ -145,7 +145,10 @@
       class="recorder"
       aria-label={`Set shortcut for ${definition.label}`}
       aria-pressed={recording === definition.id}
-      onclick={() => {
+      onclick={(event) => {
+        // WebKit does not focus buttons on mouse click by default. The recorder
+        // must own keyboard focus before it can capture the next shortcut.
+        event.currentTarget.focus({ preventScroll: true });
         setRecording(recording === definition.id ? null : definition.id);
         message = recording === definition.id
           ? `Press a shortcut for ${definition.label}. Escape cancels; Delete clears.`

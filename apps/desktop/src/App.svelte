@@ -180,6 +180,7 @@
     type CreationHotkeyAction
   } from './lib/hotkeys';
   import { recordingHotkeyBindings } from './lib/recordedFeedbackHotkeys';
+  import { focusedResumeProcess } from './lib/processResume';
   import { deliverAgentInput, type AgentInputStep } from './lib/agentInputDelivery';
   import { agentDraftPromptInputSteps } from './lib/agentAttachmentDrafts';
   import { feedbackAgentInputSteps, trackFeedbackDelivery } from './lib/recordedFeedbackAgentDelivery';
@@ -1314,6 +1315,16 @@
     if (action === 'search-terminal' && (!terminalTarget || terminalView === null)) return false;
     if ((recordingHotkeyActions as readonly string[]).includes(action)) return false;
     if (action === 'start-feedback' && !$recordedFeedbackSupported) return false;
+
+    if (action === 'resume-process') {
+      if (workspaceViewNavigationBlocked() || connection.status !== 'connected') return false;
+      const process = focusedResumeProcess(target, visibleProcesses);
+      if (!process) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat && processBusyId === null) void startOrReviewProcess(process);
+      return true;
+    }
 
     event.preventDefault();
     event.stopPropagation();

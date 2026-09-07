@@ -23,6 +23,7 @@ import {
   primaryModifierLabel,
   shiftModifierLabel
 } from '../src/lib/primaryModifier.ts';
+import { canResumeProcess } from '../src/lib/processResume.ts';
 
 function keyboardEvent(code, overrides = {}) {
   return {
@@ -95,6 +96,39 @@ test('capture requires a safe modifier and reserves only operating-system chords
   }
   assert.equal(reservedHotkeyLabel(hotkeyFromKeyboardEvent(primaryKeyboardEvent('KeyQ'))), 'Quit');
   assert.equal(reservedHotkeyLabel(hotkeyFromKeyboardEvent(primaryKeyboardEvent('KeyC'))), 'Copy');
+});
+
+test('resume uses physical Control+R and only stopped processes can resume', () => {
+  const preferences = defaultHotkeyPreferences();
+  assert.equal(findHotkeyAction(keyboardEvent('KeyR', { ctrlKey: true }), preferences), 'resume-process');
+  assert.equal(findHotkeyAction(keyboardEvent('KeyR', { metaKey: true }), preferences), null);
+  assert.equal(hotkeyAriaLabel(preferences['resume-process']), 'Control+R');
+  for (const status of ['stopped', 'exited', 'crashed']) assert.equal(canResumeProcess({ status }), true);
+  for (const status of ['running', 'starting']) assert.equal(canResumeProcess({ status }), false);
+});
+
+test('resume can be rebound or cleared and new defaults preserve existing custom shortcuts', () => {
+  resetHotkeyBindings();
+  const custom = { code: 'KeyR', primary: false, secondary: false, alt: true, shift: false };
+  setHotkeyBinding('resume-process', custom);
+  const storage = memoryStorage();
+  saveHotkeyPreferences(currentPreferences(), storage);
+  assert.deepEqual(loadHotkeyPreferences(storage)['resume-process'], custom);
+  setHotkeyBinding('resume-process', null);
+  saveHotkeyPreferences(currentPreferences(), storage);
+  assert.equal(loadHotkeyPreferences(storage)['resume-process'], null);
+
+  const old = defaultHotkeyPreferences();
+  old['new-terminal'] = old['resume-process'];
+  delete old['resume-process'];
+  saveHotkeyPreferences(old, storage);
+  const loaded = loadHotkeyPreferences(storage);
+  assert.deepEqual(loaded['new-terminal'], old['new-terminal']);
+  assert.equal(loaded['resume-process'], null);
+  delete old['new-terminal'];
+  saveHotkeyPreferences(old, storage);
+  assert.deepEqual(loadHotkeyPreferences(storage)['resume-process'], defaultHotkeyPreferences()['resume-process']);
+  resetHotkeyBindings();
 });
 
 test('assigning a used chord moves it to the new action', () => {

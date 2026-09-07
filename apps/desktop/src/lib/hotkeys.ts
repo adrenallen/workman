@@ -51,7 +51,8 @@ export const navigationHotkeyActions = [
 
 export const terminalHotkeyActions = [
   'unfocus-terminal',
-  'search-terminal'
+  'search-terminal',
+  'resume-process'
 ] as const;
 
 export const editingHotkeyActions = [
@@ -212,6 +213,12 @@ export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
     id: 'search-terminal',
     label: 'Search terminal',
     description: 'Search the focused terminal buffer',
+    group: 'terminal'
+  },
+  {
+    id: 'resume-process',
+    label: 'Resume focused process',
+    description: 'Start or resume the focused stopped agent, terminal, or command',
     group: 'terminal'
   },
   {
@@ -424,6 +431,10 @@ const defaultPreferences: HotkeyPreferences = Object.fromEntries([
   ['open-context-menu', shiftChord('F10')],
   ['unfocus-terminal', terminalUnfocusChordValue()],
   ['search-terminal', primaryChord('KeyF')],
+  ['resume-process', {
+    code: 'KeyR', primary: primaryModifierLabel !== '⌘', secondary: primaryModifierLabel === '⌘',
+    alt: false, shift: false
+  }],
   ['submit-focused-form', primaryChord('Enter')],
   ['toggle-scratchpad-list', { ...primaryChord('KeyS'), shift: true }],
   ['toggle-todo-inspector', { ...primaryChord('KeyI'), shift: true }],
@@ -651,6 +662,16 @@ export function loadHotkeyPreferences(
             !canShareHotkey(action, candidate) && equalHotkey(next[candidate], chord)
           ))
         ) next[action] = { ...chord };
+      }
+    }
+    // New defaults must not displace a shortcut the user already assigned.
+    if (!legacyPreferences) {
+      for (const action of allHotkeyActions) {
+        if (Object.hasOwn(parsed.bindings, action) || !next[action]) continue;
+        if (allHotkeyActions.some(candidate => Object.hasOwn(parsed.bindings, candidate)
+          && !canShareHotkey(action, candidate) && equalHotkey(next[candidate], next[action]))) {
+          next[action] = null;
+        }
       }
     }
     return deduplicatePreferences(next);

@@ -26,3 +26,8 @@ For actual macOS testing, build the app and launch a disposable copy with
 `scripts/native-visual-qa.sh`. Test ordinary text clicks and Cmd+` in that native window;
 browser-only tests do not exercise the native menu accelerator. Stop only the disposable
 app and its isolated daemon when finished.
+
+For process-resume focus coverage, start Vite on port 1433 and run
+`process-resume-focus.js` in a fresh browser session. It checks terminal input,
+sidebar and overview rows, running/starting processes, editors, dialogs, menus,
+and removed processes against the real focus resolver, without starting processes.

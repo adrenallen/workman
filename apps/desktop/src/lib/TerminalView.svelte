@@ -31,6 +31,8 @@
   import { isDaemonRequestTimeoutError } from './daemonLog';
   import { EXTERNAL_LINK_TOOLTIP, openExternalUrl } from './externalLinks';
   import { primaryModifier } from './primaryModifier';
+  import { hotkeyAriaLabel, hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
+  import { canResumeProcess } from './processResume';
   import {
     hasRetainedTerminalOutput,
     isUnstyledRetainedSnapshot,
@@ -133,9 +135,7 @@
   let appliedThemeSignature = '';
   const encoder = new TextEncoder();
   const initialAppearance = currentAppearance();
-  let processDead = $derived(
-    process.status === 'stopped' || process.status === 'exited' || process.status === 'crashed'
-  );
+  let processDead = $derived(canResumeProcess(process));
   let processNeverRun = $derived(
     process.kind === 'command'
       && process.status === 'stopped'
@@ -1011,6 +1011,7 @@
 <section
   bind:this={frame}
   class="terminal-frame"
+  data-resume-process-id={process.id}
   class:has-ended-bar={processDead}
   class:is-drop-target={transferDropActive}
 >
@@ -1090,6 +1091,8 @@
       disabled={!onStart || !connected || busy}
       aria-busy={busy}
       aria-label={`${endedTitle()}. ${exitSummary()}. ${busy ? busyActionLabel() : startActionLabel()}`}
+      aria-keyshortcuts={hotkeyAriaLabel($hotkeyPreferences['resume-process']) ?? undefined}
+      title={hotkeyDisplayLabel($hotkeyPreferences['resume-process']) || undefined}
       onclick={() => onStart?.(process)}
     >
       <span class="ended-status">

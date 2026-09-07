@@ -162,6 +162,7 @@
       {@const activity = processActivity(process, $liveStats.processes[process.id])}
       <article
         class="process-row"
+        data-resume-process-id={process.id}
         class:with-actions={kind === 'command'}
         aria-busy={busyId === process.id}
       >
