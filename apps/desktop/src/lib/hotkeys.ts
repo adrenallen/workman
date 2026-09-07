@@ -120,8 +120,8 @@ export interface HotkeyDefinition {
 export const hotkeyDefinitions: readonly HotkeyDefinition[] = [
   {
     id: 'previous-view',
-    label: 'Previous view',
-    description: 'Switch between the two most recent project views',
+    label: 'Recent tabs',
+    description: 'Hold the modifier to cycle tabs visited in the last ten minutes',
     group: 'workspace'
   },
   {

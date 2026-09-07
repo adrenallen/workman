@@ -32,6 +32,8 @@
   import StrikethroughIcon from '@lucide/svelte/icons/strikethrough';
   import TextQuoteIcon from '@lucide/svelte/icons/text-quote';
   import { onMount } from 'svelte';
+  import { codeBlocks, codeBlockTheme, decorateCodeLine } from './liveCodeBlocks';
+  import { documentPosition, rememberDocumentPosition, markdownChange } from './documentViewMemory';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import type { ScratchpadComment } from './coordination';
@@ -51,6 +53,7 @@
 
   interface Props {
     value: string;
+    memoryKey?: string;
     focusRequest?: number;
     flow?: boolean;
     toolbar?: boolean;
@@ -71,6 +74,7 @@
 
   let {
     value,
+    memoryKey,
     focusRequest = 0,
     flow = false,
     toolbar = true,
@@ -502,9 +506,11 @@
         const quote = /^(\s*>)(\s?)/.exec(line.text);
         const bullet = /^(\s*)([-+*])(\s+)/.exec(line.text);
         const ordered = /^(\s*)(\d+\.)(\s+)/.exec(line.text);
-        const fence = /^(\s*```)/.exec(line.text);
 
-        if (heading) {
+
+        if (decorateCodeLine(editor, line.from, ranges)) {
+          // Code stays native editable text; do not render Markdown inside it.
+        } else if (heading) {
           const markerEnd = line.from + heading[0].length;
           ranges.push(
             Decoration.line({ class: `cm-live-heading cm-live-h${heading[1].length}` }).range(line.from)
@@ -540,9 +546,7 @@
             new MarkerWidget(ordered[2], 'cm-live-order')
           );
           decorateInline(ranges, editor, markerEnd, line.text.slice(ordered[0].length));
-        } else if (fence) {
-          ranges.push(Decoration.line({ class: 'cm-live-fence' }).range(line.from));
-          replaceMarker(ranges, editor, line.from, line.from + fence[0].length);
+
         } else {
           decorateInline(ranges, editor, line.from, line.text);
         }
@@ -669,7 +673,7 @@
       borderBottom: '1px solid var(--notification-unread)',
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 12%, transparent)',
       color: 'var(--foreground)',
-      cursor: 'pointer'
+      cursor: 'text'
     },
     '.cm-comment-highlight:hover': {
       backgroundColor: 'color-mix(in srgb, var(--notification-unread) 19%, transparent)'
@@ -723,10 +727,12 @@
   onMount(() => {
     const hideSelectionAction = (): void => { selectionAction = null; };
     window.addEventListener('scroll', hideSelectionAction, true);
+    const remembered = memoryKey ? documentPosition(memoryKey) : {};
     view = new EditorView({
       parent: host,
       state: EditorState.create({
         doc: value,
+        selection: { anchor: Math.min(value.length, remembered.anchor ?? 0), head: Math.min(value.length, remembered.head ?? remembered.anchor ?? 0) },
         extensions: [
           EditorState.tabSize.of(2),
           history(),
@@ -738,13 +744,15 @@
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           EditorView.lineWrapping,
           editorPlaceholder('Start writing Markdown…'),
+          codeBlocks,
           liveMarkdown,
           commentDecorationField,
           createEditorTheme(flow),
+          codeBlockTheme,
           EditorView.domEventHandlers({
             click: (event, editor) => {
               const target = event.target instanceof Element
-                ? event.target.closest<HTMLElement>('[data-scratchpad-comment-id]')
+                ? event.target.closest<HTMLElement>('.cm-comment-marker[data-scratchpad-comment-id]')
                 : null;
               const commentId = Number(target?.dataset.scratchpadCommentId);
               if (target && Number.isInteger(commentId)) {
@@ -759,7 +767,7 @@
               }
               if (!primaryModifier(event) || event.button !== 0) return false;
               const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
-              if (position === null) return false;
+              if (position === null || editor.state.field(codeBlocks).some(block => position >= block.from && position <= block.to)) return false;
               const href = markdownLinkAt(editor.state.doc.toString(), position);
               if (!href) return false;
               event.preventDefault();
@@ -800,6 +808,10 @@
             indentWithTab
           ]),
           EditorView.updateListener.of((update) => {
+            if (memoryKey && update.selectionSet) {
+              const { anchor, head } = update.state.selection.main;
+              rememberDocumentPosition(memoryKey, { anchor, head });
+            }
             if (update.docChanged || update.viewportChanged || update.geometryChanged) {
               reportViewportLine(update.view);
             }
@@ -822,8 +834,8 @@
         ]
       })
     });
+    appliedFocusRequest = focusRequest;
     if (focusRequest > 0) {
-      appliedFocusRequest = focusRequest;
       queueMicrotask(() => view?.focus());
     }
     queueMicrotask(() => {
@@ -831,6 +843,10 @@
     });
     return () => {
       window.removeEventListener('scroll', hideSelectionAction, true);
+      if (memoryKey && view) {
+        const { anchor, head } = view.state.selection.main;
+        rememberDocumentPosition(memoryKey, { anchor, head });
+      }
       view?.destroy();
       view = null;
       imageSourceDisposed = true;
@@ -844,7 +860,7 @@
     const next = value;
     if (!view || view.state.doc.toString() === next) return;
     view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: next },
+      changes: markdownChange(view.state.doc.toString(), next),
       annotations: externalChange.of(true)
     });
   });

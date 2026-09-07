@@ -5,6 +5,7 @@
   import Maximize2Icon from '@lucide/svelte/icons/maximize-2';
   import Minimize2Icon from '@lucide/svelte/icons/minimize-2';
   import type { Snippet } from 'svelte';
+  import { rememberDocumentScroll } from './documentViewMemory';
 
   import IconButton from '$lib/components/ds/IconButton.svelte';
   import { hotkeyDisplayLabel, hotkeyPreferences } from './hotkeys';
@@ -14,6 +15,7 @@
     breadcrumbRoot: string;
     breadcrumbCurrent: string;
     reference?: string;
+    scrollKey?: string;
     previousDisabled?: boolean;
     nextDisabled?: boolean;
     onBack?: () => void;
@@ -30,6 +32,7 @@
     breadcrumbRoot,
     breadcrumbCurrent,
     reference,
+    scrollKey,
     previousDisabled = true,
     nextDisabled = true,
     onBack,
@@ -96,7 +99,7 @@
     </div>
   </header>
 
-  <div class="document-viewport">
+  <div class="document-viewport" use:rememberDocumentScroll={scrollKey}>
     <div class:with-rail={rail} class="document-layout">
       <main class="document-column">{@render children()}</main>
       {#if rail}<aside class="document-rail">{@render rail()}</aside>{/if}

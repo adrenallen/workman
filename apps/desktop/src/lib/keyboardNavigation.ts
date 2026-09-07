@@ -44,7 +44,7 @@ export function focusPanel(panel: AppPanel, root: ParentNode = document): boolea
   if (panel === 'main') {
     const terminal = container.querySelector<HTMLElement>('.xterm-helper-textarea');
     if (terminal) {
-      terminal.focus();
+      terminal.focus({ preventScroll: true });
       return true;
     }
   }
@@ -53,17 +53,17 @@ export function focusPanel(panel: AppPanel, root: ParentNode = document): boolea
     ? ['.project-select[aria-current="page"]', '.project-select:not(:disabled)', 'button:not(:disabled)']
     : panel === 'tree'
       ? ['.draft-row.selected, .tree-row.selected', '[data-tree-row]:not(:disabled)', 'input:not(:disabled)', 'button:not(:disabled)']
-      : ['button:not(:disabled)', 'input:not(:disabled)', 'textarea:not(:disabled)', '[tabindex="0"]'];
+      : ['.cm-content[contenteditable="true"]', 'button:not(:disabled)', 'input:not(:disabled)', 'textarea:not(:disabled)', '[tabindex="0"]'];
 
   for (const selector of preferredSelectors) {
     const focusable = container.querySelector<HTMLElement>(selector);
     if (focusable) {
-      focusable.focus();
+      focusable.focus({ preventScroll: panel === 'main' });
       return true;
     }
   }
 
-  container.focus();
+  container.focus({ preventScroll: panel === 'main' });
   return document.activeElement === container;
 }
 

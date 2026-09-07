@@ -208,7 +208,7 @@
     emptyWorkspaceViewHistory,
     recordWorkspaceView,
     sameWorkspaceView,
-    swapWorkspaceViews,
+    recentWorkspaceViews,
     type WorkspaceViewHistory,
     type WorkspaceViewState
   } from './lib/workspaceViewHistory';
@@ -254,6 +254,7 @@
     syncNativeMenuAccelerators,
     type NativeMenuAction
   } from './lib/nativeMenu';
+  import RecentWorkspaceSwitcher from './lib/RecentWorkspaceSwitcher.svelte';
   import { primaryModifier, secondaryModifier } from './lib/primaryModifier';
   import {
     openerSettings,
@@ -513,7 +514,9 @@
   let navigationIndex = $state<Record<number, NavigationProjectSnapshot>>({});
   let projectPaneMemory = $state<ProjectPaneMemory>(loadProjectPaneMemory());
   let workspaceViewHistory = $state<WorkspaceViewHistory>(emptyWorkspaceViewHistory);
-  let workspaceViewSwapTarget: WorkspaceViewState | null = null;
+  let recentViewSwitcher: RecentWorkspaceSwitcher | undefined;
+  let workspaceViewSwapTarget = $state<WorkspaceViewState | null>(null);
+  let workspaceSwitchRequest = 0;
   let navigationIndexRequest = 0;
   let projectReorderBusy = $state(false);
   let flatProjectOrderChecked = false;
@@ -1211,7 +1214,7 @@
         openSettingsSection('about');
         return;
       case 'previous_view':
-        switchToPreviousWorkspaceView();
+        void recentViewSwitcher?.triggerFromNativeMenu();
         return;
       case 'toggle_project_rail':
         toggleProjectRail();
@@ -4080,38 +4083,55 @@
     return { type: 'overview' };
   }
 
-  function switchToPreviousWorkspaceView(): void {
-    if (workspaceViewNavigationBlocked()) return;
-    const target = workspaceViewHistory.previous;
-    if (!target) return;
-    if (!workspaceViewAvailable(target)) {
-      workspaceViewHistory = { ...workspaceViewHistory, previous: null };
-      return;
-    }
+  function recentViewItems() {
+    const labels: Record<string, string> = {
+      overview: 'Overview', settings: 'Settings', todos: 'Todos', scratchpads: 'Scratchpads',
+      feedback: 'Feedback', agent: 'Agents', terminal: 'Terminals', command: 'Commands'
+    };
+    return recentWorkspaceViews(workspaceViewHistory, workspaceViewAvailable).map(view => {
+      const pane = view.pane;
+      const kind = pane.type === 'selection' ? pane.selection.kind : pane.type === 'processes' ? pane.kind : pane.type;
+      return {
+        view, kind, current: sameWorkspaceView(view, workspaceViewHistory.current),
+        label: pane.type === 'selection' ? pane.selection.label : labels[kind] ?? kind,
+        project: projectDisplayName(projects.find(project => project.id === view.projectId)!)
+      };
+    });
+  }
 
-    const nextHistory = swapWorkspaceViews(workspaceViewHistory);
-    if (!nextHistory.current) return;
-    workspaceViewSwapTarget = nextHistory.current;
-    workspaceViewHistory = nextHistory;
+  function switchToPreviousWorkspaceView(): void {
+    const target = recentViewItems().find(item => !item.current)?.view;
+    if (target) activateWorkspaceView(target);
+  }
+
+  function activateWorkspaceView(target: WorkspaceViewState): void {
+    if (workspaceViewNavigationBlocked() || !workspaceViewAvailable(target)) return;
+    if (sameWorkspaceView(target, workspaceViewHistory.current)) return;
+    workspaceViewSwapTarget = target;
     rememberProjectPane(target.projectId, target.pane);
     if (!activateProject(target.projectId)) {
       workspaceViewSwapTarget = null;
-      workspaceViewHistory = swapWorkspaceViews(nextHistory);
       return;
     }
 
-    if (target.pane.type === 'selection') {
-      void selectTreeItem({ ...target.pane.selection, projectId: target.projectId });
-    } else {
-      applyProjectPane(target.projectId, target.pane);
-    }
-    void tick().then(() => {
+    const request = ++workspaceSwitchRequest;
+    void (async () => {
+      if (target.pane.type === 'selection') {
+        await selectTreeItem({ ...target.pane.selection, projectId: target.projectId });
+      } else {
+        applyProjectPane(target.projectId, target.pane);
+      }
+      await tick();
+      if (request !== workspaceSwitchRequest) return;
+      workspaceViewSwapTarget = null;
+      const pane = currentProjectPane();
+      if (!selectedProject || !pane || !sameWorkspaceView(target, { projectId: selectedProject.id, pane })) return;
       if (target.pane.type === 'selection' && isProcessSelection(target.pane.selection)) {
         terminalView?.focusInput();
       } else {
         focusPanel('main');
       }
-    });
+    })();
   }
 
   function workspaceViewNavigationBlocked(): boolean {
@@ -6119,6 +6139,8 @@
   onblur={hideProjectHotkeyHints}
 />
 
+<RecentWorkspaceSwitcher bind:this={recentViewSwitcher} getItems={recentViewItems} onChoose={activateWorkspaceView} blocked={workspaceViewNavigationBlocked} />
+
 <svelte:head>
   <title>{windowTitle}</title>
 </svelte:head>
@@ -6832,6 +6854,7 @@
             onTransfer={transferSelectedTodo}
           />
         {:else if selection?.kind === 'scratchpad'}
+          {#key `${selectedProject.id}:${selection.id}`}
           <ScratchpadDetailView
             read={scratchpadRead}
             loading={detailLoading}
@@ -6853,6 +6876,7 @@
             onResolveComment={resolveScratchpadComment}
             onDeleteComment={deleteScratchpadComment}
           />
+          {/key}
         {:else}
           <ProjectOverview
             project={selectedProject}

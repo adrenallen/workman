@@ -37,7 +37,29 @@ use workmand::{
 mod external_navigation;
 mod native_notifications;
 mod recorded_feedback;
+mod scratchpad_editor;
 mod terminal_clipboard;
+
+/// Native menu accelerators can swallow the modifier keyup before the webview sees it.
+/// Only queried while the recent-tab switcher is open (or invoked by the native menu).
+#[tauri::command]
+fn desktop_primary_modifier_pressed() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+        Some(NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command))
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
+        // SAFETY: GetAsyncKeyState reads the current key state and accepts a virtual key code.
+        Some(unsafe { GetAsyncKeyState(i32::from(VK_CONTROL.0)) } < 0)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        None
+    }
+}
 
 const STATUS_EVENT: &str = "daemon://status";
 const MESSAGE_EVENT: &str = "daemon://message";
@@ -1451,6 +1473,9 @@ pub fn run() {
             shell_open_url,
             shell_detect_editors,
             shell_open_with,
+            desktop_primary_modifier_pressed,
+            scratchpad_editor::scratchpad_editor_create,
+            scratchpad_editor::scratchpad_editor_read,
             terminal_clipboard::terminal_read_clipboard,
             terminal_clipboard::terminal_read_attachment_image,
             terminal_clipboard::terminal_import_draft_image,
@@ -1545,7 +1570,7 @@ fn build_native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> 
         .build(app)?;
     let check_updates =
         MenuItemBuilder::with_id(MENU_CHECK_UPDATES, "Check for Updates…").build(app)?;
-    let previous_view = MenuItemBuilder::with_id(MENU_PREVIOUS_VIEW, "Switch to Previous View")
+    let previous_view = MenuItemBuilder::with_id(MENU_PREVIOUS_VIEW, "Switch Recent Tabs")
         .accelerator("CmdOrCtrl+`")
         .build(app)?;
     let toggle_project_rail =

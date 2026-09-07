@@ -37,13 +37,7 @@ type NativeTerminalClipboardRead =
   | { kind: 'image'; path: string | null; clipboard_ready: boolean }
   | { kind: 'empty' };
 
-export async function writeTerminalClipboardText(text: string): Promise<void> {
-  if (isTauri()) {
-    await invoke('terminal_write_clipboard_text', { text });
-    return;
-  }
-  await navigator.clipboard.writeText(text);
-}
+export { writeClipboardText as writeTerminalClipboardText } from './clipboard';
 
 export function installTerminalTransfers(options: TerminalTransferOptions): TerminalTransfers {
   let disposed = false;

@@ -89,14 +89,15 @@ test('context-menu paste reuses image routing and xterm bracketed text paste', a
   const terminal = await readFile(new URL('../src/lib/TerminalView.svelte', import.meta.url), 'utf8');
 
   const nativeRead = transfers.indexOf("'terminal_read_clipboard'");
-  const nativeWrite = transfers.indexOf("'terminal_write_clipboard_text'");
+  const clipboard = await readFile(new URL('../src/lib/clipboard.ts', import.meta.url), 'utf8');
   const nativeAgentChord = transfers.indexOf('options.forwardAgentImagePaste();', nativeRead);
   const nativeShellPath = transfers.indexOf('insertPaths([clipboard.path])', nativeAgentChord);
   const clipboardRead = transfers.indexOf('navigator.clipboard.read()');
   const sharedPaste = transfers.indexOf('await pasteImages(images)', clipboardRead);
   const textPaste = transfers.indexOf('options.pasteText(text)', sharedPaste);
 
-  assert.ok(nativeWrite >= 0 && nativeRead > nativeWrite);
+  assert.match(clipboard, /invoke\('terminal_write_clipboard_text', \{ text \}\)/);
+  assert.match(transfers, /writeClipboardText as writeTerminalClipboardText/);
   assert.ok(nativeRead >= 0 && nativeAgentChord > nativeRead && nativeShellPath > nativeAgentChord);
   assert.ok(clipboardRead > nativeShellPath && sharedPaste > clipboardRead && textPaste > sharedPaste);
   assert.match(terminal, /pasteText: \(text\) => \{[\s\S]*pendingUserKeyTokens\.push\(\+\+nextUserKeyToken\);[\s\S]*instance\.paste\(text\);/);

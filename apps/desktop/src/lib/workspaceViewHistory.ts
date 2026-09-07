@@ -5,40 +5,63 @@ export interface WorkspaceViewState {
   pane: ProjectPane;
 }
 
+export interface RecentWorkspaceView {
+  view: WorkspaceViewState;
+  visitedAt: number;
+}
+
+export const recentViewLifetime = 10 * 60 * 1000;
+export const recentViewLimit = 10;
+
 export interface WorkspaceViewHistory {
   current: WorkspaceViewState | null;
   previous: WorkspaceViewState | null;
+  recent: RecentWorkspaceView[];
 }
 
 export const emptyWorkspaceViewHistory: WorkspaceViewHistory = {
   current: null,
-  previous: null
+  previous: null,
+  recent: []
 };
 
 export function recordWorkspaceView(
   history: WorkspaceViewHistory,
-  next: WorkspaceViewState
+  next: WorkspaceViewState,
+  now = Date.now()
 ): WorkspaceViewHistory {
-  if (!history.current) {
-    return { current: cloneWorkspaceView(next), previous: null };
-  }
   if (sameWorkspaceView(history.current, next)) {
-    return sameWorkspaceViewSnapshot(history.current, next)
+    return sameWorkspaceViewSnapshot(history.current!, next)
       ? history
       : { ...history, current: cloneWorkspaceView(next) };
   }
+  // A long stay still counts as recent when leaving the current view.
+  const recent = history.current
+    ? [{ view: cloneWorkspaceView(history.current), visitedAt: now }, ...history.recent]
+    : history.recent;
+  const unique = recent.filter((entry, index) => !sameWorkspaceView(entry.view, next)
+    && now - entry.visitedAt < recentViewLifetime
+    && recent.findIndex(other => sameWorkspaceView(other.view, entry.view)) === index);
   return {
     current: cloneWorkspaceView(next),
-    previous: cloneWorkspaceView(history.current)
+    previous: unique[0]?.view ?? null,
+    recent: unique.slice(0, recentViewLimit - 1)
   };
 }
 
+export function recentWorkspaceViews(
+  history: WorkspaceViewHistory,
+  available: (view: WorkspaceViewState) => boolean,
+  now = Date.now()
+): WorkspaceViewState[] {
+  return [
+    ...(history.current ? [history.current] : []),
+    ...history.recent.filter(entry => now - entry.visitedAt < recentViewLifetime).map(entry => entry.view)
+  ].filter(available).slice(0, recentViewLimit).map(cloneWorkspaceView);
+}
+
 export function swapWorkspaceViews(history: WorkspaceViewHistory): WorkspaceViewHistory {
-  if (!history.current || !history.previous) return history;
-  return {
-    current: cloneWorkspaceView(history.previous),
-    previous: cloneWorkspaceView(history.current)
-  };
+  return history.previous ? recordWorkspaceView(history, history.previous) : history;
 }
 
 export function sameWorkspaceView(

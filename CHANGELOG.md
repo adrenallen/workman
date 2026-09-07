@@ -4,6 +4,14 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+- Keep scratchpad scroll, cursor, and unfinished edits when switching panes. Code fences now
+  render as editable code blocks with Copy and Edit controls; comment markers open threads
+  without hijacking text clicks. Open scratchpads in the configured editor and sync saved
+  Markdown back with revision conflict handling.
+- Hold Cmd+` (Ctrl+` outside macOS) to cycle recent tabs with repeated backquote presses or
+  the arrow keys, then release the modifier to switch. The list contains up to ten available
+  tabs visited within the last ten minutes.
+
 - Repair self-update on Linux desktops and Windows. AppImage and package installs run the desktop
   as their daemon and have no wrk/workmand pair beside it; updates now install the command-line
   tools into the versioned layout, replace a writable AppImage in place and relaunch it, and give

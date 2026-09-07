@@ -1,4 +1,11 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { invoke, isTauri } from '@tauri-apps/api/core';
+  import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+  import { editorActionLabel, ensureOpenersLoaded, openerSettings, openProjectEditor } from './openers';
+  import { editorChangeAction, loadEditorSession, markdownHash, storeEditorSession, type ScratchpadEditorSession } from './scratchpadEditorSession';
+  import { readScratchpadDraft, storeScratchpadDraft } from './scratchpadDraftMemory';
+  import { writeClipboardText } from './clipboard';
   import ArchiveIcon from '@lucide/svelte/icons/archive';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
@@ -104,6 +111,14 @@
     onDeleteComment
   }: Props = $props();
 
+  const editorSupported = isTauri();
+  let editorSession = $state<ScratchpadEditorSession | null>(null);
+  let editorBusy = $state(false);
+  let editorError = $state('');
+  let pendingEditorMarkdown = $state<string | null>(null);
+  let editorCheck: Promise<void> | null = null;
+  let disposed = false;
+  let activeKey = $state('');
   let activeId = $state<number | null>(null);
   let baseRevision = $state(0);
   let baseMarkdown = $state('');
@@ -307,7 +322,8 @@
     }
     queueMicrotask(() => {
       const row = visibleElement<HTMLElement>(`[data-scratchpad-comment-row="${commentId}"]`);
-      row?.scrollIntoView({ block: 'nearest' });
+      const panel = row?.closest<HTMLElement>('.comments-panel');
+      if (panel && row) scrollOutlineItemWithinList(panel, row);
     });
   }
 
@@ -512,7 +528,7 @@
 
   function scheduleSave(): void {
     clearSaveTimer();
-    if (!dirty || conflict || !titleDraft.trim()) return;
+    if (disposed || !dirty || conflict || !titleDraft.trim()) return;
     saveTimer = setTimeout(() => void saveDraft(), 800);
   }
 
@@ -687,6 +703,10 @@
     if (activeId !== nextId) {
       clearSaveTimer();
       activeId = nextId;
+      activeKey = `${next.scratchpad.project_id}:${nextId}`;
+      editorSession = loadEditorSession(activeKey);
+      editorError = "";
+      pendingEditorMarkdown = null;
       baseRevision = next.scratchpad.revision;
       baseMarkdown = nextMarkdown;
       applyMarkdown(nextMarkdown);
@@ -705,6 +725,18 @@
       commentPopoverAnchor = null;
       replyDraft = '';
       editingCommentId = null;
+      const rememberedDraft = readScratchpadDraft(activeKey);
+      if (rememberedDraft && rememberedDraft.markdown !== nextMarkdown) {
+        applyMarkdown(rememberedDraft.markdown);
+        dirty = true;
+        if (rememberedDraft.baseMarkdown !== nextMarkdown) {
+          conflict = { remoteMarkdown: nextMarkdown, remoteRevision: next.scratchpad.revision };
+          saveState = 'conflict';
+        } else {
+          saveState = 'unsaved';
+          scheduleSave();
+        }
+      }
       return;
     }
     if (next.scratchpad.revision <= baseRevision) return;
@@ -771,7 +803,114 @@
     if (top !== list.scrollTop) list.scrollTo({ top });
   }
 
-  $effect(() => () => clearSaveTimer());
+  $effect(() => {
+    if (activeKey) storeScratchpadDraft(activeKey, dirty
+      ? { markdown: draft, baseMarkdown, baseRevision } : null);
+  });
+
+  function rememberEditorSession(session: ScratchpadEditorSession): void {
+    storeEditorSession(activeKey, session);
+    editorSession = session;
+  }
+
+  async function importEditorMarkdown(markdown: string, forceConflict: boolean): Promise<void> {
+    if (!editorSession) return;
+    const key = activeKey;
+    const currentDraft = draft;
+    const incomingHash = await markdownHash(markdown);
+    if (disposed || key !== activeKey) return;
+    if (draft !== currentDraft) { pendingEditorMarkdown = markdown; return; }
+    if (dirty) rememberRecovery({ label: 'Your Workman draft before importing editor changes', markdown: draft });
+    const remoteMarkdown = conflict?.remoteMarkdown ?? baseMarkdown;
+    const remoteRevision = conflict?.remoteRevision ?? baseRevision;
+    applyMarkdown(markdown);
+    dirty = draft !== baseMarkdown;
+    pendingEditorMarkdown = null;
+    if (forceConflict) {
+      clearSaveTimer();
+      conflict = { remoteMarkdown, remoteRevision };
+      saveState = 'conflict';
+    } else {
+      saveState = dirty ? 'unsaved' : 'saved';
+      await saveDraft();
+    }
+    if (disposed || key !== activeKey) return;
+    const baseHash = await markdownHash(baseMarkdown);
+    if (disposed || key !== activeKey) return;
+    rememberEditorSession({ ...editorSession, baseHash, observedHash: incomingHash });
+  }
+
+  async function checkEditorFile(): Promise<void> {
+    if (editorCheck) return editorCheck;
+    if (!editorSupported || !editorSession || saveState === 'saving') return;
+    const key = activeKey;
+    const session = editorSession;
+    editorCheck = (async () => {
+      try {
+        const markdown = (await invoke<string>('scratchpad_editor_read', { path: session.path })).replaceAll('\r\n', '\n');
+        const currentDraft = draft;
+        const [incomingHash, currentHash] = await Promise.all([markdownHash(markdown), markdownHash(currentDraft)]);
+        if (disposed || key !== activeKey || session !== editorSession || draft !== currentDraft) return;
+        const action = editorChangeAction(session, incomingHash, currentHash, dirty || conflict !== null);
+        if (action === 'pending') pendingEditorMarkdown = markdown;
+        else if (action === 'import' || action === 'conflict') await importEditorMarkdown(markdown, action === 'conflict');
+        else {
+          pendingEditorMarkdown = null;
+          if (action === 'acknowledge') rememberEditorSession({ ...session, baseHash: currentHash, observedHash: incomingHash });
+        }
+        editorError = '';
+      } catch (cause) {
+        if (!disposed && key === activeKey) editorError = String(cause);
+      }
+    })();
+    try { await editorCheck; } finally { editorCheck = null; }
+  }
+
+  async function openInEditor(fresh = false): Promise<void> {
+    if (!editorSupported || editorBusy) return;
+    editorBusy = true;
+    editorError = '';
+    const key = activeKey;
+    try {
+      await saveDraft();
+      if (disposed || key !== activeKey) return;
+      if (dirty || conflict || saveState !== 'saved') throw new Error('Save or resolve this draft before opening it in your editor.');
+      if (!fresh) await checkEditorFile();
+      if (disposed || key !== activeKey) return;
+      if (editorError && !fresh) return;
+      if (pendingEditorMarkdown || conflict) throw new Error('Review the editor changes below before opening another copy.');
+      const exportingMarkdown = draft;
+      const baseHash = await markdownHash(exportingMarkdown);
+      if (disposed || key !== activeKey) return;
+      if (draft !== exportingMarkdown) throw new Error('The draft changed while opening. Save it and try again.');
+      if (fresh || !editorSession || editorSession.baseHash !== baseHash) {
+        const path = await invoke<string>('scratchpad_editor_create', { name: titleDraft, markdown: exportingMarkdown });
+        if (disposed || key !== activeKey) return;
+        rememberEditorSession({ path, baseHash, observedHash: baseHash });
+      }
+      const state = await ensureOpenersLoaded();
+      if (!disposed && key === activeKey && editorSession) await openProjectEditor(editorSession.path, state);
+    } catch (cause) {
+      if (!disposed && key === activeKey) editorError = String(cause);
+    } finally {
+      editorBusy = false;
+    }
+  }
+
+  onMount(() => {
+    if (editorSupported) void ensureOpenersLoaded();
+    const check = () => { if (document.visibilityState === 'visible') void checkEditorFile(); };
+    const timer = setInterval(check, 1500);
+    window.addEventListener('focus', check);
+    check();
+    return () => {
+      disposed = true;
+      clearSaveTimer();
+      clearInterval(timer);
+      window.removeEventListener('focus', check);
+    };
+  });
+
 </script>
 
 <svelte:window bind:innerWidth={viewportWidth} />
@@ -934,6 +1073,7 @@
   <div class="state">Loading scratchpad…</div>
 {:else if read}
   <DocumentScaffold
+    scrollKey={`scratchpad:${read.scratchpad.project_id}:${read.scratchpad.id}`}
     ariaLabel={`Scratchpad #${read.scratchpad.id}`}
     breadcrumbRoot={projectName}
     breadcrumbCurrent={read.scratchpad.name}
@@ -943,9 +1083,14 @@
     onBack={onBack}
     onPrevious={() => navigate(previousId)}
     onNext={() => navigate(nextId)}
-    onCopyReference={() => void navigator.clipboard.writeText(`#${read!.scratchpad.id}`)}
+    onCopyReference={() => void writeClipboardText(`#${read!.scratchpad.id}`)}
   >
     {#snippet actions()}
+      {#if editorSupported}
+        <Button size="sm" variant="ghost" disabled={editorBusy} onclick={() => void openInEditor()} title="Save in your editor, then return here to sync changes">
+          <ExternalLinkIcon size={14} />{editorBusy ? 'Opening…' : editorActionLabel($openerSettings.config, $openerSettings.editors)}
+        </Button>
+      {/if}
       <DropdownMenu.Root>
         <DropdownMenu.Trigger>
           {#snippet child({ props })}
@@ -1072,9 +1217,21 @@
         </form>
       {/if}
 
+      {#if editorError}
+        <div class="recovery-banner" role="alert"><span>{editorError}</span>
+          <button type="button" disabled={editorBusy} onclick={() => void openInEditor(true)}>Open a fresh copy</button>
+        </div>
+      {/if}
+      {#if pendingEditorMarkdown !== null}
+        <div class="recovery-banner" role="status"><span>Your editor has saved changes. Review them alongside your Workman draft.</span>
+          <button type="button" onclick={() => void importEditorMarkdown(pendingEditorMarkdown!, true)}>Review editor changes</button>
+        </div>
+      {:else if editorSession}
+        <p class="editor-sync-note">Editor saves sync when you return here.</p>
+      {/if}
       {#if conflict}
         <div class="conflict-banner" role="alert">
-          <div><strong>An agent changed this scratchpad.</strong><span>Your draft and revision {conflict.remoteRevision} are both preserved.</span></div>
+          <div><strong>This scratchpad changed in more than one place.</strong><span>Your draft and revision {conflict.remoteRevision} are both preserved.</span></div>
           <button type="button" onclick={useTheirs}>Use theirs</button>
           <button class="primary" type="button" onclick={keepEditing}>Keep editing</button>
         </div>
@@ -1087,7 +1244,9 @@
       {/if}
 
       <section class="body-section" aria-label="Scratchpad document">
+        {#if activeId === read.scratchpad.id}
         <LiveMarkdownEditor
+          memoryKey={`scratchpad:${read.scratchpad.project_id}:${read.scratchpad.id}`}
           value={bodyDraft}
           focusRequest={editorFocusRequest}
           flow
@@ -1102,6 +1261,7 @@
           onCommentSelection={(anchor, point) => beginComment(anchor, point)}
           onCommentClick={focusComment}
         />
+        {/if}
       </section>
     </article>
   </DocumentScaffold>
@@ -1170,6 +1330,7 @@
 </AlertDialog.Root>
 
 <style>
+  .editor-sync-note { margin: 8px 0; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   .scratchpad-document { min-width: 0; min-height: 100%; }
   .title { display: block; width: 100%; min-height: calc(1.16em + 7px); overflow: hidden; resize: none; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; border: 0; border-radius: var(--radius); outline: 0; padding: 2px 4px 5px; background: transparent; color: var(--foreground); font: 680 clamp(25px, 3.1cqw, 34px)/1.16 var(--ui-font-family); letter-spacing: -0.025em; }
   .title:hover { background: var(--card); }
