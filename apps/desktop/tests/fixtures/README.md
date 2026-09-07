@@ -18,7 +18,7 @@ modifier release without a DOM keyup. They do not prove native editor launch or 
 delivery. Rust tests cover the real editor-file IO and containment checks.
 
 The interaction fixture checks a document scrolled more than 10,000 pixels, exact cursor
-restoration, unfinished edits, held/repeated shortcuts, both arrows, Escape, literal code
+restoration, unfinished edits, quick taps without an overlay flash, held/repeated shortcuts, both arrows, Escape, literal code
 copying, in-place edits, and typing a new fence. Clipboard writes are captured without
 changing the system clipboard. It saves a screenshot to `/tmp/workman-scratchpad-code-ui.png`.
 

@@ -27,7 +27,15 @@
   } = $props();
   let items = $state<RecentViewItem[]>([]);
   let index = $state(0);
+  let listVisible = $state(false);
   let list = $state<HTMLElement | undefined>();
+  $effect(() => {
+    if (!items.length) return;
+    // Quick taps commit on release without flashing an overlay. A deliberate
+    // hold reveals the list; another cycle key reveals it immediately.
+    const timer = setTimeout(() => (listVisible = true), 160);
+    return () => clearTimeout(timer);
+  });
   $effect(() => {
     const selected = index;
     const row = list?.children[selected] as HTMLElement | undefined;
@@ -45,6 +53,7 @@
   function choose(selected = index): void {
     const item = items[selected];
     items = [];
+    listVisible = false;
     if (item) onChoose(item.view);
   }
 
@@ -55,8 +64,11 @@
 
   export function trigger(hold = primaryHeld): void {
     if (blocked()) return;
-    if (items.length) index = (index + 1) % items.length;
-    else {
+    if (items.length) {
+      index = (index + 1) % items.length;
+      listVisible = true;
+    } else {
+      listVisible = false;
       items = getItems();
       index = Math.max(0, items.findIndex(item => !item.current));
     }
@@ -89,9 +101,11 @@
     const down = (event: KeyboardEvent) => {
       primaryHeld = primaryModifier(event);
       if (items.length) {
-        if (event.key === 'Escape') items = [];
-        else if (event.key === 'ArrowUp') index = (index - 1 + items.length) % items.length;
-        else if (event.key === 'ArrowDown') index = (index + 1) % items.length;
+        if (event.key === 'Escape') { items = []; listVisible = false; }
+        else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+          index = (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+          listVisible = true;
+        }
         else if (event.key === 'Enter') choose();
         else if (matchesHotkeyAction(event, 'previous-view', $hotkeyPreferences)) {
           if (!event.repeat) trigger(primaryHeld);
@@ -113,7 +127,7 @@
         choose();
       }
     };
-    const blur = () => { primaryHeld = false; items = []; };
+    const blur = () => { primaryHeld = false; items = []; listVisible = false; };
     window.addEventListener('keydown', down, true);
     window.addEventListener('keyup', up, true);
     window.addEventListener('blur', blur);
@@ -125,7 +139,7 @@
   });
 </script>
 
-{#if items.length}
+{#if items.length && listVisible}
   <div class="recent-backdrop" role="presentation">
     <section class="recent-switcher" aria-label="Recent tabs">
       <header><strong>Recent tabs</strong><span>Last 10 minutes</span></header>

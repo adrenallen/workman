@@ -31,6 +31,27 @@ async page => {
   assert(before.text.startsWith('Paragraph'), 'Click did not place the cursor in the clicked paragraph');
 
   const modifier = await page.evaluate(() => /Mac/.test(navigator.platform) ? 'Meta' : 'Control');
+  await page.evaluate(() => {
+    window.__switcherFlashed = false;
+    window.__switcherObserver = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element && (node.matches('.recent-backdrop') || node.querySelector('.recent-backdrop'))) window.__switcherFlashed = true;
+      }
+    });
+    window.__switcherObserver.observe(document.body, { childList: true, subtree: true });
+  });
+  await page.keyboard.down(modifier);
+  await page.keyboard.press('Backquote');
+  await page.keyboard.up(modifier);
+  await page.getByText('Another pane', { exact: true }).waitFor();
+  assert(!(await page.evaluate(() => window.__switcherFlashed)), 'A quick tap flashed the recent-tab list');
+  await page.keyboard.down(modifier);
+  await page.keyboard.press('Backquote');
+  await page.keyboard.up(modifier);
+  await page.waitForSelector('.cm-content');
+  await page.waitForTimeout(200);
+  assert(!(await page.evaluate(() => window.__switcherFlashed)), 'A quick return tap flashed the recent-tab list');
+  await page.evaluate(() => window.__switcherObserver.disconnect());
   await page.keyboard.down(modifier);
   await page.keyboard.press('Backquote');
   assert(await page.getByRole('option', { selected: true }).innerText() === 'Overview\nFixture', 'First press should select the previous tab');
@@ -93,5 +114,5 @@ async page => {
   await page.keyboard.type('```');
   assert((await page.locator('.cm-code-line').allTextContents()).some(line => line.includes('const typedFence = 1;')), 'Typing a fence did not render an editable code block');
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
-  return { passed: ['plain-text click', 'hold/repeat/arrows/release switcher', 'cancel switcher', 'scroll and cursor restore', 'unsaved draft restore', 'literal code copy', 'edit code in place', 'type a new fence'], before, returned };
+  return { passed: ['plain-text click', 'quick tap without list flash', 'hold/repeat/arrows/release switcher', 'cancel switcher', 'scroll and cursor restore', 'unsaved draft restore', 'literal code copy', 'edit code in place', 'type a new fence'], before, returned };
 }
