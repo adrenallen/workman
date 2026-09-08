@@ -7,18 +7,6 @@ const editor = await readFile(
   'utf8'
 );
 
-test('scratchpad selections override CodeMirror focused light-theme defaults with tokens', () => {
-  assert.match(
-    editor,
-    /&\.cm-focused > \.cm-scroller > \.cm-selectionLayer \.cm-selectionBackground'/
-  );
-  assert.match(
-    editor,
-    /backgroundColor: 'color-mix\(in srgb, var\(--ring\) 22%, transparent\) !important'/
-  );
-  assert.doesNotMatch(editor, /#d7d4f0|background(?:Color)?: ['"]Highlight/);
-});
-
 test('scratchpad comment states preserve foreground and cap translucent fills', () => {
   const commentStyles = editor.slice(
     editor.indexOf("'.cm-comment-highlight':"),

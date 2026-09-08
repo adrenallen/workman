@@ -30,7 +30,7 @@
         '// **literal** [text](https://example.com) inside code',
         'console.log(section);',
         '```',
-        'Text after the code block.'
+        'Text after the code block with `inline code`.'
       ].join('\n\n')).join('\n\n')
     },
     total_lines: 1200, comments: [], comment_total_count: 0,

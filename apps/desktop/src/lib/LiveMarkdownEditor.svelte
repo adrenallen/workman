@@ -8,7 +8,6 @@
     EditorView,
     ViewPlugin,
     WidgetType,
-    drawSelection,
     dropCursor,
     highlightActiveLine,
     highlightSpecialChars,
@@ -597,10 +596,6 @@
       caretColor: 'var(--ring)'
     },
     '.cm-line': { padding: '0 2px' },
-    '.cm-cursor': { borderLeftColor: 'var(--ring)' },
-    '.cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
-      backgroundColor: 'color-mix(in srgb, var(--ring) 22%, transparent) !important'
-    },
     '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent) 55%, transparent)' },
     '.cm-live-heading': {
       color: 'var(--foreground)',
@@ -736,7 +731,8 @@
         extensions: [
           EditorState.tabSize.of(2),
           history(),
-          drawSelection(),
+          // Keep native selection: it paints above code/comment backgrounds and
+          // applies our shared selection text color. drawSelection paints below them.
           dropCursor(),
           highlightActiveLine(),
           highlightSpecialChars(),

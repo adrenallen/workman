@@ -35,6 +35,8 @@
   --border-token: #2b3038;
   --input: #363c46;
   --ring: #7aa2f7;
+  --selection-background: #264f86;
+  --selection-foreground: #f0f5ff;
   --success: #51b986;
   --success-foreground: #dff8e9;
   --pull-request-merged: #a371f7;
@@ -126,6 +128,8 @@
   --border-token: #d1d5db;
   --input: #bcc2ca;
   --ring: #4f72bd;
+  --selection-background: #bad6ff;
+  --selection-foreground: #182d4d;
   --success: #267f5b;
   --success-foreground: #0e3e2a;
   --pull-request-merged: #8250df;
@@ -251,8 +255,8 @@
   }
 
   ::selection {
-    background: color-mix(in srgb, var(--ring) 34%, transparent);
-    color: var(--foreground);
+    background: var(--selection-background);
+    color: var(--selection-foreground);
   }
 }
 
