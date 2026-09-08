@@ -1,6 +1,6 @@
 # Workman interface style guide
 
-Workman is a dense, local-first developer instrument panel. It should feel closer to a precise desktop tool than a marketing site: quiet graphite surfaces, clear hierarchy, fast keyboard paths, and color reserved for state.
+Workman is a dense, local-first developer instrument panel. It should feel closer to a precise desktop tool than a marketing site: quiet graphite surfaces, clear hierarchy, fast keyboard paths, with restrained blue and purple details from the Workman logo. Status colors remain distinct from decorative brand accents.
 
 ## Compose from the system
 
@@ -17,7 +17,7 @@ Workman is a dense, local-first developer instrument panel. It should feel close
 - Use `--background`, `--card`, and `--popover` for the surface stack; `--border-token` and `--input` for edges; `--foreground` and `--muted-foreground` for copy.
 - Semantic state color comes only from the `--agent-state-*`, `--todo-state-*`, and `--notification-unread*` tokens in `apps/desktop/src/styles.css`. The map is gray = idle, green = working/healthy, orange = waiting/timer, amber = claimed ownership, blue = needs attention (needs input or unread/notification), and red = exited/crashed/destructive. Needs input uses a plain leading dot while unread uses its trailing badge/halo treatment, so they remain visually distinct. Blue `--ring` remains a non-state keyboard-focus affordance; do not use blue for waiting, progress, or generic information.
 - The standard radius is `--radius`. Avoid pills unless the value is genuinely a compact status or count.
-- The signature treatment is a crisp blue focus frame on an otherwise quiet, low-contrast chrome. Do not add glow, gradients, glass effects, or ornamental motion.
+- The signature treatment borrows the logo’s blue-to-purple gradient for thin chrome accents, navigation selection, and the first-project welcome screen. Use the `--brand-*` tokens; keep reading and editing surfaces quiet. Avoid glow behind text, glass effects, and continuous ornamental motion. Respect reduced motion. Selected rows always use theme-aware foregrounds, including in light mode.
 
 ## Icons, labels, and status
 

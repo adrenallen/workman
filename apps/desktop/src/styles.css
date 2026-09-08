@@ -35,6 +35,12 @@
   --border-token: #2b3038;
   --input: #363c46;
   --ring: #7aa2f7;
+  /* Logo colors belong to navigation and chrome, never process status. */
+  --brand-blue: #5189ff;
+  --brand-violet: #a078ff;
+  --brand-gradient: linear-gradient(110deg, var(--brand-blue), var(--brand-violet));
+  --brand-surface: color-mix(in srgb, var(--brand-blue) 12%, var(--card));
+  --brand-selection: color-mix(in srgb, var(--brand-blue) 17%, var(--sidebar));
   --selection-background: #264f86;
   --selection-foreground: #f0f5ff;
   --success: #51b986;
@@ -80,6 +86,8 @@
   --font-size-base: 0.875rem;
   --font-size-lg: 1rem;
   --font-size-xl: 1.25rem;
+  --font-size-settings-title: calc(24rem / 14);
+  --font-size-welcome-title: clamp(calc(22rem / 14), 3vw, calc(30rem / 14));
 
   /* Compatibility aliases: all existing surfaces resolve back to this token set. */
   --night: var(--background);
@@ -128,6 +136,8 @@
   --border-token: #d1d5db;
   --input: #bcc2ca;
   --ring: #4f72bd;
+  --brand-blue: #365fc4;
+  --brand-violet: #8050c9;
   --selection-background: #bad6ff;
   --selection-foreground: #182d4d;
   --success: #267f5b;
@@ -160,6 +170,16 @@
   --sidebar-border: #cbd0d7;
   --sidebar-ring: #4f72bd;
   --text-soft: #4e5661;
+}
+
+/* Settings are reading surfaces. Resolve actual 12/13/14px copy against the 14px root,
+   while preserving the established density of terminal and tree controls. */
+.settings-panel, .settings-section-options, .welcome {
+  --font-size-xs: calc(12rem / 14);
+  --font-size-sm: calc(13rem / 14);
+  --font-size-base: 1rem;
+  --font-size-lg: calc(16rem / 14);
+  --font-size-xl: calc(20rem / 14);
 }
 
 @theme inline {

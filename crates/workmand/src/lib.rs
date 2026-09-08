@@ -41,6 +41,7 @@ mod control;
 mod coordination;
 mod identity;
 pub mod lifecycle;
+mod maintenance;
 mod mcp;
 mod migration;
 #[cfg(test)]
@@ -418,6 +419,11 @@ impl DaemonServer {
             timer_events.clone(),
             shutdown_rx.clone(),
         );
+        let maintenance_task = maintenance::spawn_storage_maintenance(
+            self.registry.clone(),
+            self.data_dir.clone(),
+            shutdown_rx.clone(),
+        );
         let live_stats = process_stats::LiveStatsHub::new(status_invalidations.clone());
         let live_stats_task = process_stats::spawn_live_stats_sampler(
             live_stats.clone(),
@@ -465,6 +471,7 @@ impl DaemonServer {
         let _ = lifecycle_shutdown.send(true);
         let _ = lifecycle_task.await;
         let _ = timer_task.await;
+        let _ = maintenance_task.await;
         let _ = live_stats_task.await;
         result
     }

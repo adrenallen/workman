@@ -1036,8 +1036,8 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
             .await
             .store()
             .get_project_by_path_any(remote_path.to_str().unwrap())?
-            .is_some(),
-        "registration-only removal keeps the canonical project available to other profiles"
+            .is_none(),
+        "the last profile removal clears canonical data while keeping the checkout on disk"
     );
     assert!(
         git(&fixture.main, &["worktree", "list", "--porcelain"])?
@@ -1048,19 +1048,19 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         &fixture.registry,
         AdoptWorktree {
             path: remote_path.clone(),
-            display_name: Some("Folder default must not replace a rename".into()),
+            display_name: Some("Re-added remote checkout".into()),
             preferences: BTreeMap::new(),
         },
     )
     .await?;
     assert_eq!(
-        readopted.project.project.id, remote.project.project.id,
-        "a kept checkout must reattach its canonical project instead of duplicating it"
+        readopted.project.project.path, remote.project.project.path,
+        "a kept checkout can be registered again without changing its files"
     );
     assert_eq!(
         readopted.project.project.display_name.as_deref(),
-        Some("Remote checkout"),
-        "re-adopting a known checkout must preserve its explicit title"
+        Some("Re-added remote checkout"),
+        "re-adopting after the last registration was removed starts with fresh Workman settings"
     );
 
     git(

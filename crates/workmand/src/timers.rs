@@ -813,9 +813,11 @@ impl<'a> TimerService<'a> {
         self.registry
             .store()
             .connection()
-            .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM timers", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT next_id FROM timer_id_sequence WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
             .map_err(persistence)
     }
 

@@ -1262,21 +1262,21 @@
   .agent-row-shell.agent-child { width: calc(100% - min(calc(var(--agent-depth) * 12px), 48px)); margin-left: min(calc(var(--agent-depth) * 12px), 48px); }
   .agent-row-shell.agent-child .agent-row { grid-template-columns: 12px 17px minmax(0, 1fr) auto; }
   .tree-row:hover, .add-row:hover, .show-all:hover { background: var(--popover); }
-  .tree-row.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .tree-row.selected { background: var(--brand-selection); color: var(--sidebar-accent-foreground); box-shadow: inset 2px 0 var(--brand-blue); }
   .tree-row.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
   .process-row-shell { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; border-radius: 3px; }
   .process-row-shell.has-actions { grid-template-columns: minmax(0, 1fr) 28px; }
   .process-row-shell:hover { background: var(--popover); }
-  .process-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .process-row-shell.selected { background: var(--brand-selection); color: var(--sidebar-accent-foreground); box-shadow: inset 2px 0 var(--brand-blue); }
   .process-row-shell.multi-selected { background: color-mix(in srgb, var(--ring) 15%, var(--card)); color: var(--foreground); box-shadow: inset 2px 0 color-mix(in srgb, var(--ring) 72%, var(--border)); }
   .process-row-shell.multi-selected .tree-row { color: var(--foreground); }
   .process-row-shell .tree-row:hover { background: transparent; }
-  .process-row-shell.selected .tree-row { color: #fff; }
+  .process-row-shell.selected .tree-row { color: var(--sidebar-accent-foreground); }
   .process-actions { display: flex; width: 28px; align-items: center; justify-content: center; opacity: 0; transition: opacity 120ms ease; }
   .process-row-shell:hover .process-actions, .process-row-shell:focus-within .process-actions { opacity: 1; }
   .command-row-shell { display: grid; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; border-radius: 3px; }
   .command-row-shell:hover { background: var(--popover); }
-  .command-row-shell.selected { background: var(--accent); color: #fff; box-shadow: inset 2px 0 var(--muted-foreground); }
+  .command-row-shell.selected { background: var(--brand-selection); color: var(--sidebar-accent-foreground); box-shadow: inset 2px 0 var(--brand-blue); }
   .command-row-shell .command-row:hover { background: transparent; }
   .command-actions { display: flex; width: 52px; align-items: center; justify-content: flex-end; gap: 2px; padding-right: 2px; opacity: 0; transition: opacity 120ms ease; }
   .command-row-shell:hover .command-actions, .command-row-shell:focus-within .command-actions { opacity: 1; }

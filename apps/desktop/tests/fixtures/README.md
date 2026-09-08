@@ -46,3 +46,13 @@ history restoration, busy/unavailable states, and light/dark layouts at narrow w
 and 90–120% app scale. The fixture captures submissions in memory; it never launches
 an agent, records audio, or accesses the system clipboard. Screenshots go to
 `/tmp/workman-new-agent-*.png`.
+
+Settings and first-project welcome:
+
+```sh
+playwright-cli -s=settings open http://127.0.0.1:1432/tests/fixtures/settings.html --browser webkit
+playwright-cli -s=settings run-code --filename=apps/desktop/tests/fixtures/settings-interactions.js
+```
+
+This fixture uses an in-memory client. It exercises template editing, keyboard and compact
+section navigation, welcome actions, both themes, and narrow layouts at 90–120% text scale.

@@ -128,8 +128,8 @@ impl<'store> RecordedFeedbackService<'store> {
         let title = normalized_title(title)?;
         self.store.connection().execute(
             "INSERT INTO recorded_feedback (
-                project_id, title, status, lease_owner, lease_expires_at, created_at, updated_at
-             ) VALUES (?1, ?2, 'recording', ?3, ?4, ?5, ?5)",
+                id, project_id, title, status, lease_owner, lease_expires_at, created_at, updated_at
+             ) VALUES ((SELECT next_id FROM feedback_id_sequence WHERE singleton = 1), ?1, ?2, 'recording', ?3, ?4, ?5, ?5)",
             params![project_id, title, lease_owner, lease_expires_at, now_ms],
         )?;
         self.require(project_id, self.store.connection().last_insert_rowid())

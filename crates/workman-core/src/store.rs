@@ -200,10 +200,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "process_idle_notifications",
         include_str!("../migrations/0037_process_idle_notifications.sql"),
     ),
+    (
+        38,
+        "storage_maintenance",
+        include_str!("../migrations/0038_storage_maintenance.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 37;
+pub const LATEST_SCHEMA_VERSION: i64 = 38;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -278,6 +283,15 @@ impl Store {
     pub fn from_connection(connection: Connection) -> StoreResult<Self> {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(Duration::from_secs(5))?;
+        let tables: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table'",
+            [],
+            |row| row.get(0),
+        )?;
+        if tables == 0 {
+            connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        }
+        connection.pragma_update(None, "journal_size_limit", 8 * 1024 * 1024)?;
 
         // In-memory SQLite databases report `memory` here; file databases switch to WAL.
         let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
@@ -816,6 +830,21 @@ impl Store {
             .ok_or_else(|| StoreError::InvalidProfile("renamed profile was not found".into()))
     }
 
+    /// Projects that disappear when this profile is deleted. Shared registrations stay intact.
+    pub fn profile_exclusive_project_ids(
+        &self,
+        profile_id: ProfileId,
+    ) -> StoreResult<Vec<ProjectId>> {
+        let mut query = self.connection.prepare(
+            "SELECT project_id FROM profile_projects
+            WHERE profile_id = ?1 AND project_id NOT IN
+                (SELECT project_id FROM profile_projects WHERE profile_id != ?1)",
+        )?;
+        Ok(query
+            .query_map([profile_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Delete an inactive profile and return its agent-tool IDs for icon cleanup.
     pub fn delete_profile(&self, profile_id: ProfileId) -> StoreResult<Vec<i64>> {
         let profile = self.get_profile(profile_id)?.ok_or_else(|| {
@@ -834,8 +863,15 @@ impl Store {
                 .query_map([profile_id], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        self.connection
-            .execute("DELETE FROM profiles WHERE id = ?1", [profile_id])?;
+        let transaction = self.connection.unchecked_transaction()?;
+        // Only collect projects owned by the deleted profile; unrelated orphan registrations
+        // may be part of an interrupted worktree operation and are reconciled separately.
+        let unshared_projects = self.profile_exclusive_project_ids(profile_id)?;
+        transaction.execute("DELETE FROM profiles WHERE id = ?1", [profile_id])?;
+        for id in unshared_projects {
+            transaction.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+        }
+        transaction.commit()?;
         Ok(tool_ids)
     }
 
@@ -1117,12 +1153,21 @@ impl Store {
     }
 
     pub fn delete_project(&self, id: ProjectId) -> StoreResult<bool> {
-        Ok(self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        let removed = transaction.execute(
             "DELETE FROM profile_projects
-             WHERE profile_id = (SELECT id FROM profiles WHERE active = 1)
-               AND project_id = ?1",
+             WHERE profile_id = (SELECT id FROM profiles WHERE active = 1) AND project_id = ?1",
             [id],
-        )? > 0)
+        )? > 0;
+        if removed {
+            transaction.execute(
+                "DELETE FROM projects WHERE id = ?1 AND NOT EXISTS
+                (SELECT 1 FROM profile_projects WHERE project_id = ?1)",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(removed)
     }
 
     /// Permanently remove a canonical project and every profile membership.
@@ -2807,4 +2852,62 @@ fn feedback_history_migration_preserves_legacy_attempts_and_scratchpad_receipts(
     assert_eq!(feedback.deliveries[1].status, "unverified");
     assert_eq!(feedback.deliveries[1].target_id, Some(42));
     assert!(feedback.append_state.is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn storage_migration_preserves_existing_notifications_and_enables_stable_ids_without_vacuum() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 37) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version,name) VALUES(?1,?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection.execute_batch("INSERT INTO notifications(id,type,body,created_at,read_at) VALUES(50,'agent_done','Keep',100,200);").unwrap();
+    let store = Store::from_connection(connection).unwrap();
+    let value: (String, i64, i64) = store
+        .connection
+        .query_row(
+            "SELECT body,created_at,read_at FROM notifications WHERE id=50",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(value, ("Keep".into(), 100, 200));
+    store
+        .connection
+        .execute("DELETE FROM notifications", [])
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO notifications(type,body,created_at) VALUES('agent_done','Next',300)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(store.connection.last_insert_rowid(), 51);
+    let mode: i64 = store
+        .connection
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        mode, 0,
+        "Existing databases are not rewritten during upgrade"
+    );
+    let violations: i64 = store
+        .connection
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
 }

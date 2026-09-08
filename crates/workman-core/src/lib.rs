@@ -4,6 +4,7 @@ pub mod agent_notifications;
 pub mod attention;
 pub mod domain;
 pub mod locks;
+mod maintenance;
 pub mod notifications;
 mod output_spill;
 mod paths;

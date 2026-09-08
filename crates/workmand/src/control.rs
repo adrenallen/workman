@@ -1060,7 +1060,7 @@ async fn dispatch(
         "profile.delete" => {
             let params: ProfileDeleteParams = params_as(params)?;
             return crate::profiles::delete(
-                &registry,
+                &mut registry,
                 data_dir,
                 params.profile_id,
                 params.confirm_delete,

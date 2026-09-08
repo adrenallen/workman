@@ -97,6 +97,10 @@
 
   <Separator />
 
+  <div class="border-t border-border px-5 py-4">
+    <strong class="text-sm font-medium">Storage upkeep</strong>
+    <p class="mt-1 text-xs text-muted-foreground">Workman checks for unused output files hourly. Read notifications expire after 30 days, all notifications after 90 days, and completed one-time timers after 7 days. Project data is cleared when the project is removed from every profile.</p>
+  </div>
   <footer class="flex flex-wrap items-center justify-between gap-4 bg-muted/40 px-4 py-3">
     <div>
       <strong class="block text-sm font-medium">Restart the control plane</strong>

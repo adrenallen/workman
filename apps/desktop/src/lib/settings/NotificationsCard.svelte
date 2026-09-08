@@ -98,7 +98,6 @@
         <BellIcon class="size-4" aria-hidden="true" />
       </span>
       <div>
-        <p class="font-mono text-xs font-semibold tracking-[0.08em] text-muted-foreground uppercase">Attention</p>
         <h2 id="notifications-card-title" class="mt-1 text-lg font-semibold tracking-tight">Notifications</h2>
         <p class="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
           Keep notifications inside Workman or also show them on your computer.
@@ -128,9 +127,6 @@
         <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Show background banners, system notification alerts, and Dock/taskbar badges. Turn off to keep new notifications inside Workman.</span>
       </label>
     </div>
-    <span class="font-mono text-xs text-muted-foreground">
-      {$nativeNotificationPreferences.enabled ? 'In-app + computer' : 'In-app only'}
-    </span>
   </div>
 
   <Separator />
@@ -179,9 +175,6 @@
           <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">Also alert when an unwatched agent reaches a new prompt that needs you.</span>
         </label>
       </div>
-      <span class="font-mono text-xs text-muted-foreground">
-        {$nativeNotificationPreferences.needsInput ? 'On' : 'Off'}
-      </span>
     </div>
     <Separator />
   {/if}

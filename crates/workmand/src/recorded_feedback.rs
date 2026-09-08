@@ -30,6 +30,58 @@ const PACKET_DIRECTORY: &str = "feedback-packets";
 // from a brief daemon hiccup without leaving the sidebar stuck for a full minute.
 const LEASE_MS: i64 = 15_000;
 
+/// Remove media left by project deletion or an interrupted feedback deletion. Call while
+/// holding the registry lock so no new recording can race the database snapshot.
+pub(crate) fn sweep_orphaned_media(store: &workman_core::Store, data_dir: &Path) -> io::Result<()> {
+    let live = store
+        .connection()
+        .prepare("SELECT id FROM recorded_feedback")
+        .map_err(io::Error::other)?
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(io::Error::other)?
+        .collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(io::Error::other)?;
+    for directory in [FEEDBACK_DIRECTORY, PACKET_DIRECTORY] {
+        let root = data_dir.join(directory);
+        let metadata = match fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other(
+                "feedback media root is not a private directory",
+            ));
+        }
+        let mut removed = 0;
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let id = if let Some((id, suffix)) = name.split_once(".deleting-") {
+                if Uuid::parse_str(suffix).is_err() {
+                    continue;
+                }
+                id.parse::<i64>().ok()
+            } else {
+                name.parse::<i64>().ok()
+            };
+            let Some(id) = id else {
+                continue;
+            };
+            if live.contains(&id) || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            fs::remove_dir_all(entry.path())?;
+            removed += 1;
+            if removed >= 100 {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateParams {
     project_id: ProjectId,
@@ -1179,6 +1231,58 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use tempfile::tempdir;
     use workman_core::{Project, RecordedFeedbackSnapshot, Store};
+
+    #[test]
+    fn media_sweep_keeps_live_recordings_and_removes_only_owned_orphan_directories() {
+        let temp = tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: temp.path().to_string_lossy().into(),
+                name: "Media".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let feedback = RecordedFeedbackService::new(&store)
+            .create(1, "Keep", "actor", 100, 1)
+            .unwrap();
+        for root in [FEEDBACK_DIRECTORY, PACKET_DIRECTORY] {
+            let root = temp.path().join(root);
+            fs::create_dir_all(root.join(feedback.id.to_string())).unwrap();
+            fs::write(
+                root.join(feedback.id.to_string()).join("capture.wav"),
+                "keep",
+            )
+            .unwrap();
+            fs::create_dir_all(root.join("999")).unwrap();
+            fs::write(root.join("999").join("orphan.wav"), "remove").unwrap();
+            fs::create_dir_all(root.join("unrecognized")).unwrap();
+        }
+        sweep_orphaned_media(&store, temp.path()).unwrap();
+        for root in [FEEDBACK_DIRECTORY, PACKET_DIRECTORY] {
+            let root = temp.path().join(root);
+            assert!(
+                root.join(feedback.id.to_string())
+                    .join("capture.wav")
+                    .exists()
+            );
+            assert!(!root.join("999").exists());
+            assert!(root.join("unrecognized").exists());
+        }
+        store.delete_project(1).unwrap();
+        sweep_orphaned_media(&store, temp.path()).unwrap();
+        assert!(
+            !temp
+                .path()
+                .join(FEEDBACK_DIRECTORY)
+                .join(feedback.id.to_string())
+                .exists()
+        );
+    }
 
     #[test]
     fn direct_feedback_accepts_fast_composer_readiness_without_weakening_queued_delivery() {

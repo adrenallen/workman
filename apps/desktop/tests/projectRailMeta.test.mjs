@@ -42,7 +42,7 @@ test('project rows order agent, terminal, command, then PR in expanded and colla
   assert.match(app, /\.project-meta-strip \{[^}]*grid-column: 1;[^}]*overflow: visible;[^}]*pointer-events: none;/);
   assert.match(app, /\.project-meta-strip :global\(\.worktree-meta\)[^}]*pointer-events: auto;/);
   assert.match(app, /\.project-compact-meta \{[^}]*display: inline-flex;[^}]*height: 8px;/);
-  assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--accent\);/);
+  assert.match(app, /\.project-row\.active \{ --project-icon-badge-background: var\(--brand-selection\);/);
   assert.doesNotMatch(app, /\.project-row\.has-unread \.project-meta-strip/);
 });
 

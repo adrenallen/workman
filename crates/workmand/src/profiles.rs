@@ -154,7 +154,7 @@ pub(crate) fn rename(
 }
 
 pub(crate) fn delete(
-    registry: &ProcessRegistry,
+    registry: &mut ProcessRegistry,
     data_dir: &Path,
     profile_id: ProfileId,
     confirm_delete: bool,
@@ -164,6 +164,38 @@ pub(crate) fn delete(
             "confirmation_required",
             "set confirm_delete=true to delete this profile".into(),
         ));
+    }
+    let profile = registry
+        .store()
+        .get_profile(profile_id)
+        .map_err(profile_store_error)?
+        .ok_or_else(|| profile_store_error(format!("profile {profile_id} was not found")))?;
+    if profile.active {
+        return Err(profile_store_error(
+            "switch away before deleting the active profile",
+        ));
+    }
+    // Close owned processes through the normal lifecycle so PTYs, output, and attachments
+    // are released before their canonical project records disappear.
+    let projects = registry
+        .store()
+        .profile_exclusive_project_ids(profile_id)
+        .map_err(profile_store_error)?;
+    for project_id in projects {
+        let processes = registry
+            .store()
+            .list_processes(Some(project_id))
+            .map_err(profile_store_error)?;
+        for process in processes {
+            if registry
+                .store()
+                .get_process(process.id)
+                .map_err(profile_store_error)?
+                .is_some()
+            {
+                registry.close(process.id).map_err(profile_store_error)?;
+            }
+        }
     }
     let tool_ids = registry
         .store()

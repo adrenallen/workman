@@ -210,22 +210,17 @@
 
 <section class="settings-panel" aria-label="Settings controls">
   <header class="settings-header">
-    <div>
-      <span class="eyebrow">Application preferences</span>
-      <h2>Settings</h2>
-    </div>
-    <p><strong>{activeDefinition?.label}</strong><span>{activeDefinition?.description}</span></p>
+    <h1>Settings</h1>
+    <SettingsStatusStrip {connection} {info} />
   </header>
-
-  <SettingsStatusStrip {connection} {info} />
-  <SettingsSectionNav />
-
-  <ScrollArea class="min-h-0 min-w-0 w-full overflow-hidden px-0.5 pb-3" bind:viewportRef={viewport}>
+  <div class="settings-layout">
+    <SettingsSectionNav />
+    <ScrollArea class="settings-scroll min-h-0 min-w-0 w-full overflow-hidden" bind:viewportRef={viewport}>
     <div
       class="section-panel"
       id={`settings-panel-${$settingsSection}`}
       role="tabpanel"
-      aria-labelledby={`settings-tab-${$settingsSection}`}
+      aria-label={activeDefinition?.label}
       tabindex="0"
     >
       {#if $settingsSection === 'appearance'}
@@ -329,23 +324,28 @@
         {/if}
       {/if}
     </div>
-  </ScrollArea>
+    </ScrollArea>
+  </div>
 </section>
 
 <style>
-  .settings-panel { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 7px; overflow: hidden; padding: 9px 12px 12px; }
-  .settings-header { display: flex; min-height: 45px; align-items: center; justify-content: space-between; gap: 18px; padding: 0 2px; }
-  .settings-header .eyebrow { color: var(--muted); font: 700 var(--font-size-xs)/1.2 'JetBrains Mono Variable', monospace; letter-spacing: .08em; text-transform: uppercase; }
-  .settings-header h2 { margin: 2px 0 0; color: var(--text); font-size: 18px; line-height: 1.05; }
-  .settings-header p { display: grid; min-width: 150px; margin: 0; padding-left: 12px; border-left: 1px solid var(--border); text-align: right; }
-  .settings-header p strong { color: var(--text-soft); font-size: var(--font-size-sm); }
-  .settings-header p span { margin-top: 2px; color: var(--muted); font: var(--font-size-xs)/1.25 'JetBrains Mono Variable', monospace; }
-  .section-panel { width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; outline: 0; }
-  .section-panel:focus-visible { outline: 1px solid var(--signal); outline-offset: 2px; }
-  .section-stack { display: grid; gap: 9px; }
-
-  @media (max-width: 660px) {
-    .settings-panel { padding-inline: 8px; }
-    .settings-header p { display: none; }
+  .settings-panel { container: settings / inline-size; display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--background); }
+  .settings-header { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; border-top: 2px solid; border-image: var(--brand-gradient) 1; }
+  .settings-header h1 { margin: 0; color: var(--foreground); font-size: var(--font-size-settings-title); font-weight: 650; letter-spacing: -.025em; line-height: 1.25; }
+  .settings-layout { display: grid; min-width: 0; min-height: 0; grid-template-columns: 184px minmax(0, 1fr); padding: 0 24px 0 16px; }
+  .section-panel { width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; padding: 0 2px 32px; outline: 0; }
+  .section-panel:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .section-stack { display: grid; gap: 20px; }
+  /* Cards share a reading rhythm while their controls retain their own layouts. */
+  .section-panel :global(.card > header), .section-panel :global(section > header:first-child) { padding: 20px; gap: 16px; }
+  .section-panel :global(h2) { font-size: 18px; line-height: 1.35; letter-spacing: -.015em; }
+  .section-panel :global(p) { line-height: 1.6; }
+  .section-panel :global(.eyebrow) { font-family: inherit; font-size: var(--font-size-xs); letter-spacing: 0; text-transform: none; }
+  .section-panel :global(.setting-row) { padding-block: 16px; gap: 16px; }
+  .section-panel :global(.setting-copy small) { font-size: var(--font-size-xs); line-height: 1.6; }
+  @container settings (max-width: 720px) {
+    .settings-header { min-height: 64px; padding: 16px; }
+    .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 16px; padding: 0 14px; }
+    .section-panel :global(.card > header), .section-panel :global(section > header:first-child) { padding: 16px; }
   }
 </style>

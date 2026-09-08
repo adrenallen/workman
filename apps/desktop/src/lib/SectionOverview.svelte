@@ -95,12 +95,12 @@
     place-items: center;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    background: var(--card);
-    color: var(--text-soft);
+    background: var(--brand-surface);
+    color: var(--brand-blue);
   }
 
   .overview-icon :global(svg) { width: 18px; height: 18px; }
-  .overview-icon.project-identity { position: relative; }
+  .overview-icon.project-identity { position: relative; background: var(--card); color: var(--text-soft); }
   .section-mark { position: absolute; right: -4px; bottom: -4px; display: grid; width: 15px; height: 15px; place-items: center; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--popover); color: var(--muted-foreground); }
   .section-mark :global(svg) { width: 9px; height: 9px; }
   .overview-copy { min-width: 0; }

@@ -82,6 +82,7 @@
   import WorktreeRowMeta from './lib/WorktreeRowMeta.svelte';
   import workmanMark24 from '../../../assets/branding/workman-icon-cropped-24-transparent.png';
   import workmanMark48 from '../../../assets/branding/workman-icon-cropped-48-transparent.png';
+  import WelcomeProject from './lib/WelcomeProject.svelte';
   import workmanLogoWide from '../../../assets/branding/workman-logo-wide-transparent.png';
   import {
     getAgentToolsStore,
@@ -651,12 +652,6 @@
   });
   let activeWorktreeOperation = $derived(
     $worktreeOperations.find((operation) => operation.id === activeWorktreeOperationId) ?? null
-  );
-  let projectRailCount = $derived(
-    projects.length
-      + standaloneWorktreeOperations($worktreeOperations, projects).filter((operation) =>
-        operation.status === 'pending' || operation.status === 'running'
-      ).length
   );
   let treeProcesses = $derived([
     ...visibleProcesses.filter((process) => process.kind === 'agent'),
@@ -6536,7 +6531,7 @@
       </div>
     </header>
 
-    <div class="rail-label"><span>Projects</span><small>{projectRailCount.toString().padStart(2, '0')}</small></div>
+    <div class="rail-label"><span>Projects</span></div>
     <div class="project-list" aria-live="polite" onscroll={closeProjectRailTooltip}>
       {#if projects.length === 0 && projectFolders.length === 0 && connection.status === 'connected' && !busy}
         <div class="project-empty"><strong>No projects</strong><p>Add a folder or switch profiles.</p><Button size="sm" onclick={showAddProject}>Add project</Button><Button size="sm" variant="ghost" onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button></div>
@@ -6969,13 +6964,12 @@
         />
       {/if}
     {:else}
-      <div class="onboarding">
-        <span>Local workspaces</span><h1>Add a project</h1><p>Choose a folder from this computer, or create a worktree from a project already here.</p>
-        <div class="flex gap-2">
-          <Button disabled={connection.status !== 'connected' || busy} onclick={showAddProject}><PlusIcon size={14} />Add project</Button>
-          <Button variant="outline" disabled={connection.status !== 'connected'} onclick={() => { selectSettingsSection('profiles'); settingsOpen = true; }}>Profiles</Button>
-        </div>
-      </div>
+      <WelcomeProject
+        connected={connection.status === 'connected'}
+        {busy}
+        onAddProject={showAddProject}
+        onProfiles={() => { selectSettingsSection('profiles'); settingsOpen = true; }}
+      />
     {/if}
   </section>
 </main>
@@ -7228,14 +7222,13 @@
   .notification-slot { display: flex; flex: none; }
   .keep-awake-slot { display: flex; flex: none; }
 
-  .rail-label { display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
-  .rail-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  .rail-label { border-image: var(--brand-gradient) 1; display: flex; align-items: center; justify-content: space-between; min-height: 26px; border-top: 1px solid var(--border); padding: 4px 8px; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 680; letter-spacing: 0.04em; text-transform: uppercase; }
   .project-list { min-height: 0; flex: 1; overflow-y: auto; padding: 2px 5px 6px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
   .folder-children { margin-left: 17px; border-left: 1px solid var(--border-strong); padding-left: 4px; }
   .project-row { --project-icon-badge-background: var(--card); position: relative; display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; margin: 1px 0; border: 1px solid transparent; border-radius: 3px; }
   .project-row.nested { min-height: 42px; }
   .project-row:hover { --project-icon-badge-background: var(--popover); background: var(--popover); }
-  .project-row.active { --project-icon-badge-background: var(--accent); border-color: var(--border-strong); background: var(--accent); box-shadow: inset 2px 0 var(--muted-foreground); }
+  .project-row.active { --project-icon-badge-background: var(--brand-selection); border-color: var(--border-strong); background: var(--brand-selection); box-shadow: inset 2px 0 var(--brand-blue); }
   .project-row.has-operation { border-color: color-mix(in srgb, var(--agent-state-working) 34%, var(--border)); background: color-mix(in srgb, var(--agent-state-working) 6%, var(--card)); box-shadow: inset 2px 0 var(--agent-state-working); }
   .project-row.has-operation:hover, .project-row.operation-active { background: color-mix(in srgb, var(--agent-state-working) 10%, var(--card)); }
   .project-row[data-operation-status='failed'] { border-color: color-mix(in srgb, var(--destructive) 38%, var(--border)); background: color-mix(in srgb, var(--destructive) 7%, var(--card)); box-shadow: inset 2px 0 var(--destructive); }
@@ -7322,9 +7315,5 @@
   .pane-restoring strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 600; }
   .pane-restoring small { margin-top: 3px; font-size: var(--font-size-xs); }
   @keyframes pane-restoring-spin { to { transform: rotate(360deg); } }
-  .onboarding { display: grid; width: min(440px, calc(100% - 36px)); place-items: start; align-content: center; margin: auto; }
-  .onboarding > span { color: var(--muted); font-size: var(--font-size-sm); text-transform: uppercase; }
-  .onboarding h1 { margin: 5px 0 0; color: var(--foreground); font-size: 28px; }
-  .onboarding p { margin: 7px 0 13px; color: var(--text-soft); font-size: 12px; }
 
 </style>

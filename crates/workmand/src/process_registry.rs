@@ -2271,6 +2271,57 @@ impl ProcessRegistry {
         }
     }
 
+    pub(crate) fn maintain_storage(&self) -> io::Result<()> {
+        if self
+            .store
+            .maintain_storage(now_millis())
+            .map_err(io::Error::other)?
+            > 0
+        {
+            self.status_invalidations.invalidate();
+        }
+        self.sweep_orphaned_output_files()?;
+        self.sweep_orphaned_agent_attachments()?;
+        Ok(())
+    }
+
+    fn sweep_orphaned_output_files(&self) -> io::Result<()> {
+        let Some(persistence) = &self.output_persistence else {
+            return Ok(());
+        };
+        let metadata = match fs::symlink_metadata(&persistence.directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(io::Error::other("output root is not a private directory"));
+        }
+        let live: HashSet<_> = self
+            .store
+            .list_processes(None)
+            .map_err(io::Error::other)?
+            .into_iter()
+            .map(|process| process.id)
+            .collect();
+        for entry in fs::read_dir(&persistence.directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Only Workman's own spill files; never follow links or remove unknown files.
+            let Some(id) = name
+                .strip_suffix(".raw")
+                .and_then(|id| id.parse::<ProcessId>().ok())
+            else {
+                continue;
+            };
+            if !live.contains(&id) && entry.file_type()?.is_file() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
     fn sweep_orphaned_agent_attachments(&self) -> io::Result<()> {
         let Some(root) = &self.agent_attachments_directory else {
             return Ok(());
@@ -2991,6 +3042,39 @@ mod tests {
             spawned_by_process_id: None,
             sort_order: 0,
         }
+    }
+
+    #[test]
+    fn maintenance_removes_orphan_spills_but_preserves_registered_processes_and_unknown_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let path = temp.path().to_str().unwrap();
+        store
+            .put_project(&Project {
+                id: 1,
+                path: path.into(),
+                name: "Cleanup".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let mut registry = ProcessRegistry::with_output_persistence(store, &output, 4096).unwrap();
+        registry.create(output_test_process(path)).unwrap();
+        fs::write(output.join("31.raw"), "keep active output").unwrap();
+        fs::write(output.join("999.raw"), "orphan output").unwrap();
+        fs::write(output.join("notes.txt"), "unrecognized file").unwrap();
+        registry.maintain_storage().unwrap();
+        assert_eq!(
+            fs::read_to_string(output.join("31.raw")).unwrap(),
+            "keep active output"
+        );
+        assert!(!output.join("999.raw").exists());
+        assert!(output.join("notes.txt").exists());
+        assert!(registry.store().get_process(31).unwrap().is_some());
     }
 
     #[test]

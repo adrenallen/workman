@@ -273,7 +273,7 @@
 {#if removeRequest}
   <ConfirmationDialog
     title={`Delete the ${removeRequest.name} profile?`}
-    description="Projects and their coordination data stay on disk."
+    description="Project files stay on disk. Projects kept by another profile retain their Workman data; the others lose their notes, tasks, feedback, and settings."
     confirmLabel="Delete profile"
     onConfirm={() => void confirmRemove()}
     onClose={() => (removeRequest = null)}

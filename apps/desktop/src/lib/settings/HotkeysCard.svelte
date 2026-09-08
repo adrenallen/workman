@@ -233,7 +233,7 @@
   .hotkey-copy { min-width: 0; }
   .hotkey-copy strong, .hotkey-copy small { display: block; }
   .hotkey-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 650; }
-  .hotkey-copy small { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+  .hotkey-copy small { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: var(--font-size-xs); line-height: 1.6; }
   .recorder { display: grid; min-height: 31px; place-items: center; border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 7px; background: var(--night); color: var(--muted); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; cursor: pointer; }
   .recorder:hover, .recorder:focus-visible { border-color: var(--ring); color: var(--text-soft); outline: 0; }
   .recorder.recording { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--night)); color: var(--foreground); box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal) 15%, transparent); }

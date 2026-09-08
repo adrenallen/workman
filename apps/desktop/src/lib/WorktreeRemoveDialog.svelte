@@ -54,6 +54,9 @@
       <AlertDialog.Description class="text-sm leading-relaxed">
         {#if knownMissingRegistration}This worktree is known to be missing. Workman will unregister it; files stay untouched.{:else}Workman will unregister this project. Its folder stays on your computer unless you explicitly choose local deletion below.{/if}
       </AlertDialog.Description>
+      <p class="text-sm leading-relaxed text-muted-foreground">
+        {#if deleteFromDisk || knownMissingRegistration}This also deletes the project’s Workman notes, tasks, feedback, and settings from every profile.{:else}If no other profile keeps this project, its Workman notes, tasks, feedback, and settings are also deleted.{/if}
+      </p>
     </AlertDialog.Header>
 
     <section class="grid min-h-0 content-start gap-3 overflow-y-auto overscroll-contain px-4 py-4">

@@ -230,24 +230,25 @@
     <div class="divide-y divide-border">
       {#each templateSnapshot.templates as template, index (template.id)}
         {@const tool = toolFor(template)}
-        <article class="grid min-h-14 grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-3 px-3 py-2">
-          <div class="grid grid-cols-2 gap-0.5" aria-label={`Reorder ${template.name}`}>
+        <article class="template-row grid min-h-20 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 px-5 py-4">
+          <AgentBrandMark {tool} fallbackName={template.name} size={20} />
+          <div class="min-w-0">
+            <div class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+              <strong class="text-sm font-semibold">{template.name}</strong>
+              <span class="shrink-0 text-xs text-muted-foreground">{tool?.name ?? 'Missing default agent'}</span>
+            </div>
+            {#if template.extra_args.length > 0}<p class="mt-1 text-xs text-muted-foreground">{templateLaunchSummary(template, tool)}</p>{/if}
+            <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              {template.prompt || 'No template prompt'}
+            </p>
+          </div>
+          <div class="grid grid-cols-1 gap-0.5" aria-label={`Reorder ${template.name}`}>
             <IconButton label={`Move ${template.name} up`} disabled={!connected || busyId !== null || index === 0} onclick={() => void move(template, -1)}>
               {#snippet icon()}<ArrowUpIcon size={13} />{/snippet}
             </IconButton>
             <IconButton label={`Move ${template.name} down`} disabled={!connected || busyId !== null || index === templateSnapshot.templates.length - 1} onclick={() => void move(template, 1)}>
               {#snippet icon()}<ArrowDownIcon size={13} />{/snippet}
             </IconButton>
-          </div>
-          <AgentBrandMark {tool} fallbackName={template.name} size={20} />
-          <div class="min-w-0">
-            <div class="flex min-w-0 items-center gap-2">
-              <strong class="truncate text-sm font-medium">{template.name}</strong>
-              <span class="shrink-0 text-xs text-muted-foreground">{tool?.name ?? 'Missing default agent'}</span>
-            </div>
-            <p class="mt-0.5 truncate text-xs text-muted-foreground">
-              {templateLaunchSummary(template, tool)} · {template.prompt || 'No template prompt'}
-            </p>
           </div>
           <div class="flex gap-1">
             <IconButton label={`Edit ${template.name}`} disabled={!connected || draft !== null || busyId !== null} onclick={() => beginEdit(template)}>

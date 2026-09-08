@@ -40,9 +40,9 @@ test('settings identify their application-wide scope and use platform-neutral lo
   ]);
   const settings = [panel, status, appearance, sidebar, openers].join('\n');
 
-  assert.match(panel, /Application preferences/);
-  assert.match(status, /<strong>Application settings<\/strong>/);
-  assert.match(status, /Preferences saved locally/);
+  assert.match(panel, /<h1>Settings<\/h1>/);
+  assert.match(status, /aria-label="Settings status"/);
+  assert.doesNotMatch(status, /Preferences saved locally/);
   assert.doesNotMatch(status, /projectDisplayName|project: Project/);
   assert.match(navigation, /\| \{ type: 'settings' \}/);
   assert.match(navigation, /return 'settings'/);
