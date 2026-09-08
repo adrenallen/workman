@@ -16,6 +16,7 @@
     onCreate: () => void;
     onDiscard: () => void;
     secondaryAction?: Snippet;
+    heading?: Snippet;
     children: Snippet;
   }
 
@@ -30,6 +31,7 @@
     onCreate,
     onDiscard,
     secondaryAction,
+    heading,
     children
   }: Props = $props();
 
@@ -67,9 +69,13 @@
   <div class="draft-viewport">
     <main class="draft-column">
       <div class="draft-heading">
-        <span>{kindLabel} draft</span>
-        <h1>{title}</h1>
-        <p>This draft stays in the project tree until you create or discard it.</p>
+        {#if heading}
+          {@render heading()}
+        {:else}
+          <span>{kindLabel} draft</span>
+          <h1>{title}</h1>
+          <p>This draft stays in the project tree until you create or discard it.</p>
+        {/if}
       </div>
       {@render children()}
     </main>
@@ -90,6 +96,8 @@
 
 <style>
   .draft-shell { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--background); color: var(--foreground); }
+  .draft-shell[data-creation-draft='agent'] { container: agent-draft / inline-size; }
+  .draft-shell[data-creation-draft='agent'] .draft-heading { margin-bottom: 28px; padding-bottom: 0; border: 0; }
   .document-bar { display: flex; min-width: 0; min-height: 38px; align-items: center; justify-content: space-between; gap: var(--space-2); border-bottom: 1px solid var(--border); padding: 4px 10px 4px 12px; background: var(--card); }
   nav { display: flex; min-width: 0; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: var(--font-size-xs); }
   nav span, nav strong { overflow: hidden; max-width: min(40vw, 360px); text-overflow: ellipsis; white-space: nowrap; }
@@ -106,5 +114,8 @@
 
   @media (max-width: 620px) {
     .draft-column { padding: 20px 14px 36px; }
+  }
+  @container agent-draft (max-width: 600px) {
+    .draft-column { padding: 24px 20px 36px; }
   }
 </style>

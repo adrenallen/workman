@@ -37,3 +37,12 @@ For command review and branch selection, start Vite on port 1438 and open
 This checks dark/light/narrow trust review, Escape dismissal, and typing `origin/dev`
 then Enter and Create without silently changing the starting ref. Screenshots are
 written to `/tmp/workman-trust-*.png`; data is in memory and no daemon is contacted.
+
+For the new-agent page, start Vite on port 1432 and open `/tests/fixtures/new-agent.html`.
+Run `new-agent-interactions.js` in fresh Chrome and WebKit sessions. It checks the
+template/model paths, template preview and agent overrides, launch payloads, retained
+instructions and attachments, initial focus without scrolling, keyboard navigation,
+history restoration, busy/unavailable states, and light/dark layouts at narrow widths
+and 90–120% app scale. The fixture captures submissions in memory; it never launches
+an agent, records audio, or accesses the system clipboard. Screenshots go to
+`/tmp/workman-new-agent-*.png`.

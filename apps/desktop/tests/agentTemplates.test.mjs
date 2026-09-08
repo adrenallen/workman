@@ -75,8 +75,8 @@ test('new-agent draft keeps template and agent roster choices independent and pe
     readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
   ]);
-  assert.match(source, /<h2[^>]*>Templates<\/h2>/);
-  assert.match(source, /<h2[^>]*>Models &amp; tools<\/h2>/);
+  assert.match(source, /<h2[^>]*>Choose a template<\/h2>/);
+  assert.match(source, /<h2[^>]*>Choose a model or tool<\/h2>/);
   assert.match(source, /name={`draft-agent-launch-\$\{draft\.id\}`}/);
   assert.match(source, /type="radio"/);
   assert.match(source, /agent_template_id: selectedTemplate\.id, agent_tool_id: selectedTool\.id/);
@@ -91,13 +91,13 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /draft\.agentToolId !== tool\.id \? \{ model: '', effort: '' \}/);
   assert.match(source, /Template launch args are skipped when using/);
   assert.match(source, /Template instructions/);
-  assert.match(source, /Combined with \$\{selectedTemplate\.name\}'s instructions in one starting prompt\./);
+  assert.match(source, /\$\{selectedTemplate\.name\}'s instructions are already included\./);
   assert.match(source, />Model &amp; effort</);
   assert.match(source, /AGENT_EFFORT_LEVELS/);
   assert.match(source, /Inherits \{inheritedLaunchOptions\.model/);
   assert.match(source, /lastWordBoundary = excerpt\.lastIndexOf\(' '\)/);
   assert.match(source, /agentOverridden \? 'Override' : 'Template default'/);
-  assert.match(source, /Paste images to place them at the cursor/);
+  assert.match(source, /Paste or drop images to attach/);
   assert.match(source, /insertAgentDraftImageTokens/);
   assert.match(source, /removeAgentDraftAttachment/);
   assert.match(source, /let templateInstructionsOpen = \$state\(false\)/);
@@ -106,13 +106,13 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(source, /<CreationDraftScaffold[\s\S]*onCreate=\{submit\}/);
   assert.match(source, /\{#each templateChoices as templateChoice/);
   assert.match(source, /disabled=\{!tool\.enabled\}/);
-  assert.match(source, /agent disabled/);
+  assert.match(source, /Uses \{tool\.name\}\{#if !tool\.enabled\} · disabled/);
   assert.match(source, /No enabled agents\. Add or enable one in Settings\./);
   assert.doesNotMatch(source, /No enabled agent tools/);
-  assert.match(source, /class="prompt-textarea min-h-\[8rem\] resize-y text-sm leading-6"/);
+  assert.match(source, /class="prompt-textarea min-h-\[10rem\] resize-y text-base leading-6"/);
   assert.doesNotMatch(source, /rows=\{11\}/);
   assert.match(source, /bind:ref=\{promptTextarea\}/);
-  assert.match(source, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
+  assert.match(source, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\{ preventScroll: true \}\)/);
   assert.match(source, /selectedTemplate \? 'Additional instructions' : 'Instructions'/);
   assert.match(source, /showFooterCreate=\{false\}/);
   assert.match(source, /&& !choice\.missingTemplate[\s\S]*&& !choice\.missingTool/);
@@ -140,8 +140,8 @@ test('desktop spawn entry surfaces route through the inline draft panel', async 
   assert.match(app, /<NewAgentDraftPanel/);
   assert.match(app, /await openAgentDraft\(tool\.id\)/);
   assert.match(app, /onCreate=\{\(submission\) => createAgentFromDraft\(draft, submission\)\}/);
-  assert.match(draftPanel, /Combined with \$\{selectedTemplate\.name\}'s instructions in one starting prompt\./);
-  assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\)/);
+  assert.match(draftPanel, /\$\{selectedTemplate\.name\}'s instructions are already included\./);
+  assert.match(draftPanel, /if \(!focusOnMount\) return;[\s\S]*promptTextarea\?\.focus\(\{ preventScroll: true \}\)/);
   assert.match(draftPanel, /Template #\{draft\.templateId\} is no longer available/);
   assert.match(draftPanel, /showFooterCreate=\{false\}/);
   assert.doesNotMatch(app, /NewAgentDialog|AgentsPanel/);

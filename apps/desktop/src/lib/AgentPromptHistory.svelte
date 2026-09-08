@@ -1,6 +1,7 @@
 <script lang="ts">
   import HistoryIcon from '@lucide/svelte/icons/history';
   import { Button } from './components/ui/button';
+  import * as Popover from './components/ui/popover';
   import type { AgentPromptHistoryEntry } from './agentPromptHistory';
   import { writeTerminalClipboardText } from './terminalTransfers';
 
@@ -12,6 +13,8 @@
     onError: (message: string) => void;
   } = $props();
   let copied = $state<string | null>(null);
+  let open = $state(false);
+  let trigger = $state<HTMLButtonElement | null>(null);
 
   async function copy(entry: AgentPromptHistoryEntry): Promise<void> {
     try {
@@ -23,36 +26,46 @@
   }
 </script>
 
-<details class="history">
-  <summary><HistoryIcon size={14} />Prompt history <span>{entries.length}</span></summary>
-  <div class="history-content">
-    <div class="history-heading">
-      <small>Recent launches in this project, saved on this computer. Reuse opens a new draft with the saved instructions and settings.</small>
-      {#if entries.length}<Button type="button" variant="ghost" size="sm" disabled={busy} onclick={onClear}>Clear history</Button>{/if}
+<Popover.Root bind:open>
+  <Popover.Trigger bind:ref={trigger}>
+    {#snippet child({ props })}
+      <Button {...props} type="button" variant="ghost" class="text-muted-foreground">
+        <HistoryIcon size={15} strokeWidth={1.8} />Prompt history
+        {#if entries.length}<span class="history-count">{entries.length}</span>{/if}
+      </Button>
+    {/snippet}
+  </Popover.Trigger>
+  <Popover.Content align="end" class="w-[520px] gap-0 p-0" aria-label="Prompt history"
+    onCloseAutoFocus={(event) => { event.preventDefault(); trigger?.focus(); }}>
+    <h2>Prompt history</h2>
+    <div class="history-content">
+      <div class="history-heading">
+        <small>Recent launches in this project, saved on this computer. Reuse opens a new draft with the saved instructions and settings.</small>
+        {#if entries.length}<Button type="button" variant="ghost" size="sm" disabled={busy} onclick={onClear}>Clear history</Button>{/if}
+      </div>
+      {#each entries as entry (entry.id)}
+        <details class="history-entry">
+          <summary><strong>{entry.label}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{new Date(entry.createdAt).toLocaleString()}</time></summary>
+          <pre>{entry.draft.prompt || 'No written instructions'}</pre>
+          <div class="entry-actions">
+            <small>{entry.draft.attachments.length ? `${entry.draft.attachments.length} image(s) attached` : ''}{entry.draft.feedbackId !== null ? ' · Recorded feedback attached' : ''}</small>
+            <Button type="button" variant="ghost" size="sm" disabled={!entry.draft.prompt} onclick={() => void copy(entry)}>{copied === entry.id ? 'Copied' : 'Copy instructions'}</Button>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onclick={() => { open = false; onRestore(entry); }}>Use in new draft</Button>
+          </div>
+        </details>
+      {:else}
+        <p>Your next agent launch will be saved here, including its template instructions.</p>
+      {/each}
     </div>
-    {#each entries as entry (entry.id)}
-      <details class="history-entry">
-        <summary><strong>{entry.label}</strong><time datetime={new Date(entry.createdAt).toISOString()}>{new Date(entry.createdAt).toLocaleString()}</time></summary>
-        <pre>{entry.draft.prompt || 'No written instructions'}</pre>
-        <div class="entry-actions">
-          <small>{entry.draft.attachments.length ? `${entry.draft.attachments.length} image(s) attached` : ''}{entry.draft.feedbackId !== null ? ' · Recorded feedback attached' : ''}</small>
-          <Button type="button" variant="ghost" size="sm" disabled={!entry.draft.prompt} onclick={() => void copy(entry)}>{copied === entry.id ? 'Copied' : 'Copy instructions'}</Button>
-          <Button type="button" variant="outline" size="sm" disabled={busy} onclick={() => onRestore(entry)}>Use in new draft</Button>
-        </div>
-      </details>
-    {:else}
-      <p>Your next agent launch will be saved here, including its template instructions.</p>
-    {/each}
-  </div>
-</details>
+  </Popover.Content>
+</Popover.Root>
 
 <style>
-  .history { border: 1px solid var(--border); border-radius: var(--radius); font-size: var(--font-size-sm); }
+  h2 { margin: 0; padding: 16px 16px 0; font-size: var(--font-size-base); font-weight: 620; }
+  .history-count { color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
   summary { cursor: pointer; padding: 9px 10px; }
-  .history > summary { display: flex; align-items: center; gap: 8px; font-weight: 550; }
-  .history > summary span { margin-left: auto; color: var(--muted-foreground); }
   summary:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-  .history-content { max-height: 360px; overflow-y: auto; border-top: 1px solid var(--border); }
+  .history-content { max-height: min(480px, 70vh); overflow-y: auto; padding: 4px 6px 8px; }
   .history-heading, .entry-actions { display: flex; align-items: center; gap: 8px; padding: 8px 10px; flex-wrap: wrap; }
   .history-heading small, .entry-actions small { flex: 1; color: var(--muted-foreground); }
   .history-entry { border-top: 1px solid var(--border); }

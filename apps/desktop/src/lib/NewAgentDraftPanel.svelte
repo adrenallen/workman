@@ -1,6 +1,9 @@
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import CpuIcon from '@lucide/svelte/icons/cpu';
+  import LayoutTemplateIcon from '@lucide/svelte/icons/layout-template';
   import FileImageIcon from '@lucide/svelte/icons/file-image';
+  import FileTextIcon from '@lucide/svelte/icons/file-text';
   import MessageSquareMoreIcon from '@lucide/svelte/icons/message-square-more';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import XIcon from '@lucide/svelte/icons/x';
@@ -50,6 +53,7 @@
   import * as Collapsible from './components/ui/collapsible';
   import { Input } from './components/ui/input';
   import * as Select from './components/ui/select';
+  import * as Tabs from './components/ui/tabs';
   import { Textarea } from './components/ui/textarea';
   import {
     hotkeyDisplayLabel,
@@ -139,6 +143,7 @@
   const templateChoices = $derived(agentTemplateRosterChoices(templates, tools));
   const selectedTemplate = $derived(choice.selectedTemplate);
   const selectedTool = $derived(choice.selectedTool);
+  const launchMode = $derived(draft.templateId !== null ? 'template' : 'tool');
   const templateDefaultTool = $derived(
     selectedTemplate
       ? tools.find((tool) => tool.id === selectedTemplate.agent_tool_id) ?? null
@@ -179,7 +184,7 @@
   $effect(() => {
     if (!focusOnMount) return;
     requestAnimationFrame(() => {
-      promptTextarea?.focus();
+      promptTextarea?.focus({ preventScroll: true });
       onInitialFocusHandled();
     });
   });
@@ -197,6 +202,16 @@
       localStorage.setItem(lastAgentChoiceStorageKey, choiceValue(choice));
     } catch {
       // Draft editing remains available if webview storage is unavailable.
+    }
+  }
+
+  function switchLaunchMode(mode: string): void {
+    if (loading || busy || mode === launchMode) return;
+    if (mode === 'template' && availableTemplates[0]) {
+      selectTemplate(availableTemplates[0]);
+    } else if (mode === 'tool') {
+      const tool = selectedTool ?? enabledTools[0];
+      if (tool) selectStandaloneAgent(tool);
     }
   }
 
@@ -513,6 +528,15 @@
   onCreate={submit}
   {onDiscard}
 >
+  {#snippet heading()}
+    <div class="agent-heading">
+      <div>
+        <h1>{draft.name.trim() || 'New agent'}</h1>
+        <p>Choose a starting point, then give your agent a task.</p>
+      </div>
+      <AgentPromptHistory entries={promptHistory} {busy} onRestore={onRestorePrompt} onClear={onClearPromptHistory} {onError} />
+    </div>
+  {/snippet}
   {#if draft.feedbackId !== null}
     <div class="feedback-handoff" role="note">
       <MessageSquareMoreIcon size={17} strokeWidth={1.8} />
@@ -525,26 +549,32 @@
     {/if}
   {/snippet}
   <section class="agent-fields">
-    <AgentPromptHistory entries={promptHistory} {busy} onRestore={onRestorePrompt} onClear={onClearPromptHistory} {onError} />
     <fieldset
       class="launch-fieldset"
       disabled={loading || busy}
       aria-busy={loading}
       aria-describedby={`draft-agent-choice-help-${draft.id}`}
     >
-      <legend>Start from</legend>
-      <p id={`draft-agent-choice-help-${draft.id}`} class="selection-help">
-        Choose a template, or launch a model or tool directly.
-      </p>
+      <legend>How would you like to start?</legend>
+      <p id={`draft-agent-choice-help-${draft.id}`} class="selection-help">Pick one. A template includes instructions; a model starts fresh.</p>
+      <Tabs.Root value={launchMode} onValueChange={switchLaunchMode} class="launch-tabs">
+        <Tabs.List class="launch-modes" aria-label="Agent starting point">
+          <Tabs.Trigger value="template" class="launch-mode" disabled={loading || busy || availableTemplates.length === 0}>
+            <LayoutTemplateIcon size={20} strokeWidth={1.8} />
+            <span><strong>Use a template</strong><small>Saved instructions &amp; setup</small></span>
+          </Tabs.Trigger>
+          <Tabs.Trigger value="tool" class="launch-mode" disabled={loading || busy || enabledTools.length === 0}>
+            <CpuIcon size={20} strokeWidth={1.8} />
+            <span><strong>Choose a model</strong><small>Start with your own instructions</small></span>
+          </Tabs.Trigger>
+        </Tabs.List>
       <div class="launch-roster" class:roster-loading={loading}>
         {#if loading}
           <div class="loading-choice" role="status">Loading launch choices…</div>
         {:else}
-          {#if templateChoices.length > 0}
+          <Tabs.Content value="template">
             <section class="roster-group" aria-labelledby={`draft-agent-templates-${draft.id}`}>
-              <div class="roster-heading">
-                <h2 id={`draft-agent-templates-${draft.id}`}>Templates</h2><span>Prompt and setup included</span>
-              </div>
+              <h2 id={`draft-agent-templates-${draft.id}`} class="roster-heading">Choose a template</h2>
               <div class="roster-options">
                 {#each templateChoices as templateChoice (templateChoice.template.id)}
                   {@const template = templateChoice.template}
@@ -559,10 +589,10 @@
                       onclick={() => selectTemplate(template)}
                     />
                     <span class="choice-card">
-                      <AgentBrandMark {tool} size={18} />
+                      <AgentBrandMark {tool} size={22} />
                       <span class="choice-copy">
                         <strong>{template.name}</strong>
-                        <small>{tool.name}{#if !tool.enabled} · agent disabled{/if}</small>
+                        <small>Uses {tool.name}{#if !tool.enabled} · disabled{/if}</small>
                       </span>
                       <span class="choice-indicator" aria-hidden="true"></span>
                     </span>
@@ -570,12 +600,11 @@
                 {/each}
               </div>
             </section>
-          {/if}
+          </Tabs.Content>
 
+          <Tabs.Content value="tool">
           <section class="roster-group" aria-labelledby={`draft-agent-tools-${draft.id}`}>
-            <div class="roster-heading">
-              <h2 id={`draft-agent-tools-${draft.id}`}>Models &amp; tools</h2><span>Launch directly</span>
-            </div>
+            <h2 id={`draft-agent-tools-${draft.id}`} class="roster-heading">Choose a model or tool</h2>
             <div class="roster-options">
               {#each enabledTools as tool (tool.id)}
                 <label class="launch-choice">
@@ -588,15 +617,20 @@
                   />
                   <span class="choice-card">
                     <AgentBrandMark {tool} size={16} />
-                    <span class="choice-copy"><span>{tool.name}</span><small>Standalone agent</small></span>
+                    <span class="choice-copy"><strong>{tool.name}</strong></span>
                     <span class="choice-indicator" aria-hidden="true"></span>
                   </span>
                 </label>
               {/each}
             </div>
           </section>
+          </Tabs.Content>
         {/if}
       </div>
+      </Tabs.Root>
+      {#if !loading && availableTemplates.length === 0 && !choice.missingTemplate}
+        <small class="selection-help">No templates available yet. You can add them in Settings.</small>
+      {/if}
       {#if choice.missingTemplate}
         <small class="choice-warning">Template #{draft.templateId} is no longer available. Choose another template or a standalone agent.</small>
       {/if}
@@ -605,16 +639,14 @@
       {/if}
     </fieldset>
 
+    <section class="launch-configuration" aria-label="Agent setup">
     {#if selectedTemplate}
-      <section class="template-options" aria-labelledby={`draft-template-options-${draft.id}`}>
-        <div class="template-options-heading">
-          <span>Selected template</span>
-          <h2 id={`draft-template-options-${draft.id}`}>{selectedTemplate.name}</h2>
-        </div>
+      <section class="template-options" aria-label="Template setup">
 
         <div class="template-detail">
           <Collapsible.Root bind:open={templateInstructionsOpen}>
             <Collapsible.Trigger class="template-detail-trigger">
+              <FileTextIcon class="text-muted-foreground" size={16} strokeWidth={1.8} />
               <span class="template-detail-copy">
                 <strong>Template instructions</strong>
                 <small>{templateInstructionsSummary(selectedTemplate.prompt)}</small>
@@ -630,8 +662,9 @@
         <div class="template-detail">
           <Collapsible.Root bind:open={templateAgentOpen}>
             <Collapsible.Trigger class="template-detail-trigger">
+              <CpuIcon class="text-muted-foreground" size={16} strokeWidth={1.8} />
               <span class="template-detail-copy">
-                <strong>Template agent</strong>
+                <strong>Runs with</strong>
                 <small>{choice.missingTool ? 'Agent unavailable · choose another' : `${selectedTool?.name ?? 'Choose an agent'} · ${agentOverridden ? 'Override' : 'Template default'}`}</small>
               </span>
               <ChevronDownIcon class={`template-detail-chevron ${templateAgentOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
@@ -670,11 +703,11 @@
       </section>
     {/if}
 
-    <Collapsible.Root bind:open={modelSettingsOpen} class="overflow-hidden rounded-md border border-border">
-      <Collapsible.Trigger class="flex min-h-9 w-full items-center gap-2 px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-        <SlidersHorizontalIcon class="text-muted-foreground" size={14} />
-        <span class="min-w-0 flex-1 text-sm font-medium">Model settings</span>
-        <ChevronDownIcon class={`text-muted-foreground ${modelSettingsOpen ? 'rotate-180' : ''}`} size={14} />
+    <Collapsible.Root bind:open={modelSettingsOpen} class={selectedTemplate ? 'model-settings with-template' : 'model-settings'}>
+      <Collapsible.Trigger class="template-detail-trigger">
+        <SlidersHorizontalIcon class="text-muted-foreground" size={16} strokeWidth={1.8} />
+        <span class="template-detail-copy"><strong>Model settings</strong><small>Model, effort, name &amp; launch options</small></span>
+        <ChevronDownIcon class={`template-detail-chevron ${modelSettingsOpen ? 'open' : ''}`} size={14} aria-hidden="true" />
       </Collapsible.Trigger>
       <Collapsible.Content>
         <div class="model-settings-grid">
@@ -741,6 +774,7 @@
         </div>
       </Collapsible.Content>
     </Collapsible.Root>
+    </section>
 
     <div
       bind:this={promptField}
@@ -758,12 +792,12 @@
     >
       <label class="field-label instruction-label" for={`draft-agent-prompt-${draft.id}`}>
         <span>{selectedTemplate ? 'Additional instructions' : 'Instructions'} <small>optional</small></span>
-        <small>{selectedTemplate ? `Combined with ${selectedTemplate.name}'s instructions in one starting prompt.` : 'Tell this agent what to do.'}</small>
+        <small>{selectedTemplate ? `Add a task or extra context. ${selectedTemplate.name}'s instructions are already included.` : 'Tell this agent what to do.'}</small>
       </label>
       <div class="prompt-composer">
         <Textarea
           id={`draft-agent-prompt-${draft.id}`}
-          class="prompt-textarea min-h-[8rem] resize-y text-sm leading-6"
+          class="prompt-textarea min-h-[10rem] resize-y text-base leading-6"
           bind:ref={promptTextarea}
           value={draft.prompt}
           placeholder={selectedTemplate ? 'Add anything this agent should do beyond the template.' : 'What should this agent do?'}
@@ -801,17 +835,19 @@
         {/if}
         <div class="prompt-actions">
           <VoiceInputButton textarea={promptTextarea} disabled={busy || attachmentSaving} onText={(prompt) => onChange({ prompt })} onBusyChange={(value) => { dictationBusy = value; }} />
-          <small id={`draft-agent-create-help-${draft.id}`} aria-live="polite">
-            {attachmentSaving ? 'Saving image…' : 'Paste images to place them at the cursor'} · {hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line
-          </small>
           <Button
             type="submit"
+            class="min-h-9 px-5"
             disabled={busy || !canCreate}
             aria-busy={busy}
             aria-describedby={`draft-agent-create-help-${draft.id}`}
           >{busy ? 'Creating…' : 'Create agent'}</Button>
         </div>
       </div>
+      <p class="composer-help" id={`draft-agent-create-help-${draft.id}`} aria-live="polite">
+        {attachmentSaving ? 'Saving image…' : 'Paste or drop images to attach'}
+        <span>{hotkeyDisplayLabel($hotkeyPreferences['submit-focused-form']) || 'No hotkey'} creates · Shift+Enter adds a line</span>
+      </p>
     </div>
 
     {#if !loading && enabledTools.length === 0}
@@ -825,73 +861,75 @@
   .feedback-handoff span, .feedback-handoff strong { display: block; }
   .feedback-handoff strong { margin-bottom: 2px; color: var(--text-soft); font-size: var(--font-size-sm); }
   .feedback-handoff span { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
-  .agent-fields { display: grid; gap: 11px; }
-  .model-settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .field-label { display: grid; align-content: start; gap: 6px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
-  .field-label > span { color: var(--text-soft); }
-  .field-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
+  .agent-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+  .agent-heading h1 { margin: 0; color: var(--foreground); font: 650 26px/1.2 'Archivo Variable', var(--ui-font-family); letter-spacing: -.025em; overflow-wrap: anywhere; }
+  .agent-heading p { margin: 8px 0 0; color: var(--muted-foreground); font-size: var(--font-size-sm); line-height: 1.5; }
+  .agent-heading > div { min-width: 0; }
+  .agent-fields { display: grid; gap: 24px; }
+  .field-label { display: grid; align-content: start; gap: 8px; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 560; }
+  .field-label small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.5; }
   .launch-fieldset, .override-fieldset { min-width: 0; margin: 0; border: 0; padding: 0; }
-  .launch-fieldset > legend, .override-fieldset > legend { padding: 0; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
-  .selection-help { margin: 3px 0 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.45; }
-  .launch-roster { max-height: min(27vh, 230px); overflow-y: auto; overscroll-behavior: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
-  .launch-roster.roster-loading { min-height: 94px; }
-  .loading-choice { display: grid; min-height: 92px; place-items: center; padding: 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
-  .roster-group + .roster-group { border-top: 1px solid var(--border); }
-  .roster-heading { position: sticky; z-index: 1; top: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 5px 9px; background: var(--card); }
-  .roster-heading h2 { margin: 0; color: var(--text-soft); font-size: var(--font-size-xs); font-weight: 650; letter-spacing: .025em; text-transform: uppercase; }
-  .roster-heading span { color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .roster-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); }
-  .roster-options > .launch-choice:last-child:nth-child(odd),
-  .override-options > .override-choice:last-child:nth-child(odd) { grid-column: 1 / -1; }
-  .launch-choice, .override-choice { position: relative; min-width: 0; cursor: pointer; background: var(--background); }
+  .launch-fieldset > legend { padding: 0; color: var(--foreground); font-size: 16px; font-weight: 620; }
+  .selection-help { display: block; margin: 6px 0 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); line-height: 1.5; }
+  .agent-fields :global(.launch-tabs) { gap: 20px; }
+  .agent-fields :global(.launch-modes) { display: grid; width: 100%; height: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); }
+  .agent-fields :global(.launch-mode) { height: auto; min-height: 72px; justify-content: flex-start; gap: 12px; padding: 12px 16px; border-radius: 5px; white-space: normal; text-align: left; box-shadow: none; color: var(--muted-foreground); transition: background-color 120ms ease, color 120ms ease; }
+  .agent-fields :global(.launch-mode[data-state='active']) { border-color: var(--border-strong); background: var(--accent); color: var(--foreground); box-shadow: none; }
+  .agent-fields :global(.launch-mode:hover:not(:disabled)) { color: var(--foreground); }
+  .agent-fields :global(.launch-mode:focus-visible) { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .agent-fields :global(.launch-mode > span) { display: grid; gap: 4px; }
+  .agent-fields :global(.launch-mode strong) { font-size: var(--font-size-base); font-weight: 620; line-height: 1.3; }
+  .agent-fields :global(.launch-mode small) { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; line-height: 1.4; }
+  .launch-roster { min-width: 0; }
+  .loading-choice { display: grid; min-height: 80px; place-items: center; padding: 16px; color: var(--muted-foreground); font-size: var(--font-size-sm); }
+  .roster-heading { margin: 0 0 10px; color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 560; }
+  .roster-options { display: grid; max-height: 264px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 2px; scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }
+  .launch-choice, .override-choice { position: relative; min-width: 0; cursor: pointer; }
   .launch-choice:has(input:disabled), .override-choice:has(input:disabled) { cursor: not-allowed; opacity: .52; }
   .choice-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  .choice-card { display: flex; min-width: 0; min-height: 50px; align-items: center; gap: 9px; padding: 7px 10px; color: var(--foreground); transition: background-color 120ms ease, box-shadow 120ms ease; }
-  .choice-card.compact { min-height: 42px; padding: 5px 9px; }
-  .choice-copy { display: grid; min-width: 0; flex: 1; gap: 1px; }
-  .choice-copy strong, .choice-copy > span, .choice-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .choice-copy strong, .choice-copy > span { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 590; }
-  .choice-copy small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; }
-  .choice-indicator { width: 13px; height: 13px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--background); box-shadow: inset 0 0 0 3px var(--background); }
-  .choice-radio:checked + .choice-card { background: color-mix(in srgb, var(--primary) 7%, var(--background)); box-shadow: inset 2px 0 var(--primary); }
+  .choice-card { display: flex; min-width: 0; min-height: 60px; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; background: var(--background); color: var(--foreground); transition: background-color 120ms ease, border-color 120ms ease; }
+  .choice-card.compact { min-height: 48px; padding: 8px 10px; }
+  .choice-copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
+  .choice-copy strong { color: var(--foreground); font-size: var(--font-size-sm); font-weight: 590; overflow-wrap: anywhere; }
+  .choice-copy small { color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; overflow-wrap: anywhere; }
+  .choice-indicator { width: 15px; height: 15px; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--background); box-shadow: inset 0 0 0 3px var(--background); }
+  .choice-radio:checked + .choice-card { border-color: var(--text-soft); background: var(--card); }
   .choice-radio:checked + .choice-card .choice-indicator { border-color: var(--primary); background: var(--primary); }
-  .choice-radio:focus-visible + .choice-card { position: relative; z-index: 2; outline: 2px solid var(--ring); outline-offset: -2px; }
-  .launch-choice:hover .choice-card, .override-choice:hover .choice-card { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
-  .choice-radio:checked + .choice-card:hover { background: color-mix(in srgb, var(--primary) 10%, var(--background)); }
-  .choice-warning { display: block; margin-top: 6px; color: var(--warning-token); font-size: var(--font-size-xs); line-height: 1.4; }
-  .template-options { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); }
-  .template-options-heading { display: flex; min-height: 36px; align-items: baseline; gap: 8px; padding: 7px 10px; background: var(--card); }
-  .template-options-heading > span { flex: none; color: var(--muted-foreground); font-size: var(--font-size-xs); }
-  .template-options-heading h2 { min-width: 0; overflow: hidden; margin: 0; color: var(--foreground); font-size: var(--font-size-sm); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-  .template-detail { border-top: 1px solid var(--border); }
-  :global(.template-detail-trigger) { display: flex; width: 100%; min-height: 43px; align-items: center; gap: 10px; border: 0; padding: 6px 9px 6px 10px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
-  :global(.template-detail-trigger:hover) { background: color-mix(in srgb, var(--muted) 38%, var(--background)); }
-  :global(.template-detail-trigger:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
-  :global(.template-detail-trigger > .template-detail-chevron) { flex: none; color: var(--muted-foreground); transition: transform 120ms ease; }
-  :global(.template-detail-trigger > .template-detail-chevron.open) { transform: rotate(180deg); }
-  .template-detail-copy { display: grid; min-width: 0; flex: 1; grid-template-columns: 132px minmax(0, 1fr); align-items: baseline; gap: 9px; }
+  .choice-radio:focus-visible + .choice-card { outline: 2px solid var(--ring); outline-offset: 0; }
+  .launch-choice:hover .choice-card, .override-choice:hover .choice-card { background: var(--card); border-color: var(--text-soft); }
+  .choice-warning { display: block; margin-top: 12px; color: var(--warning-token); font-size: var(--font-size-sm); line-height: 1.5; }
+  .launch-configuration { overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--card); }
+  .template-detail + .template-detail, .launch-configuration :global(.model-settings.with-template) { border-top: 1px solid var(--border); }
+  .launch-configuration :global(.template-detail-trigger) { display: flex; width: 100%; min-height: 52px; align-items: center; gap: 12px; border: 0; padding: 12px 16px; background: transparent; color: var(--foreground); text-align: left; cursor: pointer; }
+  .launch-configuration :global(.template-detail-trigger:hover) { background: var(--accent); }
+  .launch-configuration :global(.template-detail-trigger:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .launch-configuration :global(.template-detail-chevron) { flex: none; color: var(--muted-foreground); transition: transform 120ms ease; }
+  .launch-configuration :global(.template-detail-chevron.open) { transform: rotate(180deg); }
+  .template-detail-copy { display: grid; min-width: 0; flex: 1; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; gap: 12px; }
   .template-detail-copy strong { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
   .template-detail-copy small { overflow: hidden; color: var(--muted-foreground); font-size: var(--font-size-xs); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-  .override-fieldset { padding: 8px 10px 10px; background: var(--card); }
-  .override-options { display: grid; max-height: 260px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 1px); background: var(--border); scrollbar-width: thin; }
-  .override-note { display: block; margin-top: 7px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
-  .template-preview { border-top: 1px solid var(--border); padding: 8px 10px 9px; background: var(--card); color: var(--muted-foreground); font: var(--font-size-xs)/1.55 var(--terminal-font-family); white-space: pre-wrap; }
-  .model-settings-grid { border-top: 1px solid var(--border); padding: 12px; }
-  .launch-tuning { display: grid; grid-column: 1 / -1; gap: 9px; border-top: 1px solid var(--border); padding-top: 11px; }
-  .launch-tuning-heading { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .override-fieldset { padding: 0 16px 16px; }
+  .override-options { display: grid; max-height: 260px; overflow-y: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 2px; scrollbar-width: thin; }
+  .override-note { display: block; margin-top: 10px; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
+  .template-preview { max-height: 280px; overflow-y: auto; margin: 0 16px 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); color: var(--text-soft); font: var(--font-size-sm)/1.6 var(--ui-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .model-settings-grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--border); padding: 16px; }
+  .launch-tuning { display: grid; grid-column: 1 / -1; gap: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .launch-tuning-heading { display: grid; gap: 4px; }
   .launch-tuning-heading > span { color: var(--text-soft); font-size: var(--font-size-sm); font-weight: 590; }
-  .launch-tuning-heading small { overflow: hidden; color: var(--muted-foreground); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
-  .launch-tuning-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .empty-note { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted-foreground); font-size: var(--font-size-sm); }
-  .prompt-field { display: grid; align-content: start; gap: 6px; }
-  .prompt-composer { overflow: hidden; border: 1px solid var(--input); border-radius: var(--radius); background: var(--background); transition: border-color 120ms ease, box-shadow 120ms ease; }
-  .prompt-composer:focus-within { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent); }
-  .prompt-composer :global(.prompt-textarea) { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-  .prompt-composer :global(.prompt-textarea:focus-visible) { border-color: transparent; box-shadow: none; }
-  .instruction-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-  .instruction-label > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .prompt-actions { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 6px 7px 6px 10px; background: var(--card); }
-  .prompt-actions small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.4; }
+  .launch-tuning-heading small { color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
+  .launch-tuning-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .prompt-field { display: grid; min-width: 0; gap: 12px; }
+  .prompt-composer { overflow: hidden; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--card); }
+  .prompt-composer:focus-within { border-color: var(--ring); outline: 2px solid var(--ring); outline-offset: 1px; }
+  .prompt-composer :global(.prompt-textarea) { padding: 14px 16px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .prompt-composer :global(.prompt-textarea:focus-visible) { outline: none; border-color: transparent; box-shadow: none; }
+  .instruction-label { gap: 6px; }
+  .instruction-label > span { font-size: 16px; font-weight: 620; }
+  .instruction-label > span small { margin-left: 6px; }
+  .instruction-label > small { font-size: var(--font-size-sm); }
+  .prompt-actions { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding: 8px 12px; }
+  .prompt-actions :global(button[type='submit']) { margin-left: auto; }
+  .composer-help { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin: 0; color: var(--muted-foreground); font-size: var(--font-size-xs); line-height: 1.5; }
   .attachment-drop-active { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: var(--radius); }
   .attachment-list { display: flex; flex-wrap: wrap; gap: 7px; border-top: 1px solid var(--border); padding: 8px 10px; }
   .attachment-chip { display: inline-flex; max-width: 220px; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 5px 3px 3px; background: var(--muted); color: var(--foreground); font-size: var(--font-size-xs); font-weight: 500; }
@@ -899,16 +937,20 @@
   .attachment-copy { display: grid; min-width: 0; line-height: 1.2; }
   .attachment-copy strong, .attachment-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .attachment-copy strong { color: var(--signal); font: 600 var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
-  .attachment-copy small { color: var(--muted-foreground); font-size: 10px; }
-  @media (max-width: 620px) {
+  .attachment-copy small { color: var(--muted-foreground); font-size: var(--font-size-xs); }
+  @container agent-draft (max-width: 600px) {
+    .agent-heading { flex-direction: column; gap: 12px; }
+    .agent-fields :global(.launch-mode) { padding: 12px; gap: 8px; align-items: flex-start; }
+    .agent-fields :global(.launch-mode > svg) { display: none; }
+    .template-detail-copy { grid-template-columns: 1fr; gap: 4px; }
+    .template-detail-copy small { white-space: normal; }
+  }
+  @container agent-draft (max-width: 420px) {
     .model-settings-grid, .launch-tuning-fields, .roster-options, .override-options { grid-template-columns: 1fr; }
-    .template-detail-copy { grid-template-columns: 1fr; gap: 1px; }
-    .instruction-label { align-items: flex-start; flex-direction: column; gap: 2px; }
-    .prompt-actions { align-items: stretch; flex-direction: column; }
-    .prompt-actions :global(button) { width: 100%; }
+    .agent-fields :global(.launch-mode small) { font-size: var(--font-size-xs); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .choice-card, .prompt-composer, :global(.template-detail-trigger > .template-detail-chevron) { transition: none; }
+    .choice-card, .agent-fields :global(.launch-mode), .launch-configuration :global(.template-detail-chevron) { transition: none; }
   }
   @media (forced-colors: active) {
     .launch-choice, .override-choice { display: flex; align-items: center; }

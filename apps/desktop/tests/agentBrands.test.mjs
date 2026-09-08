@@ -78,7 +78,7 @@ test('new-agent picker renders the shared brand mark for every tool option', asy
   );
   const toolLoop = source.indexOf('{#each enabledTools as tool (tool.id)}');
   const mark = source.indexOf('<AgentBrandMark {tool} size={16} />', toolLoop);
-  const name = source.indexOf('<span>{tool.name}</span>', toolLoop);
+  const name = source.indexOf('<strong>{tool.name}</strong>', toolLoop);
 
   assert.ok(toolLoop >= 0 && mark > toolLoop && name > mark);
 });
