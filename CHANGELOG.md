@@ -4,6 +4,28 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.15 - 2026-09-08
+
+Workman 0.1.15 brings a clearer workspace, easier scratchpad editing, recoverable agent prompts,
+and more control over feedback and notifications.
+
+### Workspace and navigation
+
+- Bring restrained blue and purple accents from the Workman logo into navigation and chrome,
+  with readable selected sidebar text in both themes. Remove the total Projects count while
+  retaining folder counts.
+- Introduce a full-logo first-project welcome screen with “Let’s get to work” and an Add a project
+  action. Reorganize Settings into grouped navigation with larger copy, roomier rows, and a
+  compact section selector when space is limited.
+- Clarify the New Agent flow with distinct template and model choices while preserving template
+  overrides, model settings, prompt history, attachments, and instructions.
+- Show terminal name overrides in the sidebar and allow double-click renaming of project items.
+  Show the actual branch name instead of an ambiguous HEAD label in branch selection.
+- Remember trusted exact commands per project and use a theme-aware command review dialog.
+- Add a checked Notify when idle context-menu option for agents, terminals, and commands.
+
+### Scratchpads and process controls
+
 - Resume the focused stopped agent, terminal, or command with Control+R. Configure or clear
   the shortcut in Settings → Hotkeys; running processes retain their normal Control+R input.
 
@@ -14,6 +36,9 @@ All notable changes to Workman are recorded here.
 - Hold Cmd+` (Ctrl+` outside macOS) to cycle recent tabs with repeated backquote presses or
   the arrow keys, then release the modifier to switch. The list contains up to ten available
   tabs visited within the last ten minutes.
+- Make scratchpad text selections visible with a blue highlight, including inside code blocks.
+
+### Updates and storage
 
 - Repair self-update on Linux desktops and Windows. AppImage and package installs run the desktop
   as their daemon and have no wrk/workmand pair beside it; updates now install the command-line
@@ -25,6 +50,12 @@ All notable changes to Workman are recorded here.
   without a package for the current platform are shown as download-only instead of offering an
   update that cannot install, and the release pipeline, manifest, and download page carry the
   Windows archive whose bundled `install.ps1` now installs prebuilt binaries.
+- Run bounded storage maintenance at startup and hourly: expire old notifications, completed
+  one-time timers, and abandoned leases; clean orphan output and feedback media; and reuse or
+  reclaim free SQLite pages. Removing a project from its last profile clears its Workman data.
+  Shared projects retain their data, user documents do not expire, and agent deletion is unchanged.
+
+### Notifications and dictation
 
 - Keep speech-model verification off the UI thread and recover abandoned dictation recordings
   safely after a crash. Keep live notifications responsive during audio previews, repair damaged
@@ -75,6 +106,14 @@ All notable changes to Workman are recorded here.
   used for Recorded Feedback, without needing screen capture. Keep temporary recording directories
   private and accessible so macOS voice input can create its audio file.
 - Move the collapsed Model settings section above agent instructions, alongside template options.
+
+### Recorded Feedback
+
+- Append more recordings to existing feedback and review delivery history. Browse archived
+  recordings and restore them when work needs to continue.
+- Share the recording pipeline with Windows, including capture, annotation, and audio handling,
+  while keeping unavailable recording shortcuts from blocking the session. Windows binaries
+  still require a separate Windows build and are not included in this release's download set.
 - Enlarge feedback delivery actions, join a compact agent picker to Send, and align destination
   buttons in a wrapping row. Keep unavailable agents visible with status icons and simplify
   feedback sidebar entries to a single title line.
