@@ -4,6 +4,20 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.16 - 2026-09-13
+
+- Restore custom agent aliases and functions from zsh, Bash, and Fish startup files in both
+  availability checks and agent launches. Agents use an interactive login shell by default.
+- Add per-profile Agent startup settings under Settings → Terminal: Auto, Login only,
+  Interactive only, and Interactive login. Bash users whose login profile does not source
+  `.bashrc` can choose Interactive only. Profile copies, imports, exports, and switches retain
+  the setting.
+- Preserve the configured shell when an unrecognized startup mode appears in user YAML, with
+  a warning and an Auto fallback. Keep profile switching working after terminal settings are
+  reset in a config that contains only comments.
+- Preserve literal quotes, backslashes, and JSON in generated agent arguments under Fish,
+  and recognize Fish aliases/functions without executing them during health checks.
+
 ## 0.1.15 - 2026-09-08
 
 Workman 0.1.15 brings a clearer workspace, easier scratchpad editing, recoverable agent prompts,
