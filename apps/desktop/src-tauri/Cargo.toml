@@ -12,7 +12,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 futures-util = "0.3.31"
 hound = "3.5.1"
 image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
@@ -25,7 +25,7 @@ tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-notification = "2.3.3"
 notify-rust = { version = "4.18.0", features = ["preview-macos-un"] }
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 url = "2.5.8"
 uuid = { version = "1.18.1", features = ["v4"] }
 
@@ -34,9 +34,9 @@ uuid = { version = "1.18.1", features = ["v4"] }
 # and the screen-capture permission model differ per platform.
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 cpal = "0.18.2"
-imageproc = { version = "0.25.0", default-features = false }
+imageproc = { version = "0.27.0", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 xcap = "0.9.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -51,7 +51,7 @@ whisper-rs = { version = "0.16.0", features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
-windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell_PropertiesSystem", "Win32_Storage_EnhancedStorage"] }
+windows = { version = "0.62.2", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell_PropertiesSystem", "Win32_Storage_EnhancedStorage"] }
 # Metal is macOS-only; Windows transcribes on the CPU build of whisper.cpp.
 whisper-rs = "0.16.0"
 
