@@ -315,7 +315,7 @@ mod tests {
         use crate::process_registry::ProcessRegistry;
         use crate::timers::now_millis;
 
-        let mut registry = ProcessRegistry::new(store()).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store()).unwrap();
         let mut process = agent(1, 1, AttentionState::Idle).process;
         process.status = ProcessStatus::Starting;
         registry.store().put_process(&process).unwrap();

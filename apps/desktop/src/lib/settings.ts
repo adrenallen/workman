@@ -30,12 +30,17 @@ export interface McpConnectionInfo {
   setups: McpClientSetup[];
 }
 
+export type AgentShellMode = 'auto' | 'login' | 'interactive' | 'interactive_login';
+
 export interface UserEnvironmentInfo {
   active_shell: string;
   configured_shell: string | null;
   inferred_shell: string;
   inferred_from: string;
   using_override: boolean;
+  agent_shell_mode?: AgentShellMode;
+  agent_launch_summary?: string;
+  agent_shell_mode_supported?: boolean;
   capture_mode:
     | 'interactive_login'
     | 'non_interactive_login_fallback'
@@ -132,6 +137,10 @@ export function setUserShell(
   shell: string | null
 ): Promise<UserEnvironmentInfo> {
   return client.control<UserEnvironmentInfo>('settings.user_shell', { shell });
+}
+
+export function setAgentShellMode(client: DaemonClient, mode: AgentShellMode): Promise<UserEnvironmentInfo> {
+  return client.control<UserEnvironmentInfo>('settings.agent_shell_mode', { mode });
 }
 
 export function importTerminalTheme(client: DaemonClient): Promise<TerminalThemeImportReport> {

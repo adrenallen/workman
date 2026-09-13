@@ -539,6 +539,38 @@ struct OutputPersistence {
 }
 
 impl ProcessRegistry {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(store: Store) -> RegistryResult<Self> {
+        Self::with_user_environment(store, crate::user_environment::test_user_environment())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stop_grace_for_test(
+        store: Store,
+        stop_grace: Duration,
+    ) -> RegistryResult<Self> {
+        Self::with_options(
+            store,
+            stop_grace,
+            None,
+            crate::user_environment::test_user_environment(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_output_persistence_for_test(
+        store: Store,
+        directory: impl Into<PathBuf>,
+        capacity: usize,
+    ) -> RegistryResult<Self> {
+        Self::with_output_persistence_and_environment(
+            store,
+            directory,
+            capacity,
+            crate::user_environment::test_user_environment(),
+        )
+    }
+
     /// Create a registry and mark process rows left running by an earlier daemon as crashed.
     pub fn new(store: Store) -> RegistryResult<Self> {
         Self::with_options(
@@ -1161,6 +1193,11 @@ impl ProcessRegistry {
         }
         options = if interactive_terminal {
             options.with_login_shell(user_environment.active_shell())
+        } else if process.kind == ProcessKind::Agent {
+            options.with_shell_command(
+                user_environment.active_shell(),
+                user_environment.agent_shell_invocation(),
+            )
         } else {
             options.with_login_shell_command(user_environment.active_shell())
         };
@@ -3044,6 +3081,95 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stopping_native_interactive_agents_reaps_separate_job_groups() {
+        for shell in crate::shell_test_support::installed_shells() {
+            for immediate in [false, true] {
+                let fixture = crate::shell_test_support::ShellFixture::new(&shell);
+                if workman_core::shell::is_fish(&shell) {
+                    // Fish can keep `-c` jobs in its own group. Exercise the stronger
+                    // job-control setting a user's config.fish can enable as well.
+                    let config = fixture.home.path().join("fish/config.fish");
+                    let source = std::fs::read_to_string(&config).unwrap();
+                    std::fs::write(config, format!("{source}\nstatus job-control full\n")).unwrap();
+                }
+                let executable = fixture.home.path().join("long-agent");
+                std::fs::write(&executable, "#!/bin/sh\ntrap '' HUP TERM\nprintf '%s' $$ > \"$HOME/child-pid\"\nexec /bin/sleep 300\n").unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let store = Store::open_in_memory().unwrap();
+                store
+                    .put_project(&Project {
+                        id: 1,
+                        path: fixture.home.path().to_string_lossy().into_owned(),
+                        name: "shell cleanup".into(),
+                        display_name: None,
+                        icon: None,
+                        selected: true,
+                        sort_order: 0,
+                    })
+                    .unwrap();
+                let resolver = UserEnvironmentResolver::new(&fixture.config);
+                let mut registry =
+                    ProcessRegistry::with_options(store, Duration::from_millis(50), None, resolver)
+                        .unwrap();
+                let mut process = output_test_process(fixture.home.path().to_str().unwrap());
+                process.kind = ProcessKind::Agent;
+                // Keep the shell alive after the child so its exec optimization cannot
+                // bypass the separate job-control process group we need to exercise.
+                process.command = Some(format!(
+                    "{}; :",
+                    workman_core::shell::quote_word(&shell, executable.to_str().unwrap()),
+                ));
+                registry.create(process).unwrap();
+                registry.start(31).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let child_pid = loop {
+                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid")) {
+                        if let Ok(pid) = pid.parse::<i32>() {
+                            break pid;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{} did not launch child",
+                        shell.display()
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                };
+                if matches!(shell.file_name().unwrap().to_str(), Some("bash" | "fish")) {
+                    let shell_pid = registry.get(31).unwrap().pid.unwrap() as i32;
+                    assert_ne!(
+                        shell_pid, child_pid,
+                        "fixture must exercise a separate child"
+                    );
+                    assert_ne!(
+                        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(shell_pid))).unwrap(),
+                        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(child_pid))).unwrap(),
+                        "{} fixture must exercise a separate job-control process group",
+                        shell.display()
+                    );
+                }
+                let started = Instant::now();
+                if immediate {
+                    registry.kill(31).unwrap();
+                } else {
+                    registry.stop(31).unwrap();
+                }
+                assert!(started.elapsed() < Duration::from_secs(6));
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while nix::sys::signal::kill(nix::unistd::Pid::from_raw(child_pid), None).is_ok() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{} leaked child {child_pid} (kill={immediate})",
+                        shell.display()
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     #[test]
     fn maintenance_removes_orphan_spills_but_preserves_registered_processes_and_unknown_files() {
         let temp = tempfile::tempdir().unwrap();
@@ -3062,7 +3188,8 @@ mod tests {
             .unwrap();
         let output = temp.path().join("output");
         fs::create_dir(&output).unwrap();
-        let mut registry = ProcessRegistry::with_output_persistence(store, &output, 4096).unwrap();
+        let mut registry =
+            ProcessRegistry::with_output_persistence_for_test(store, &output, 4096).unwrap();
         registry.create(output_test_process(path)).unwrap();
         fs::write(output.join("31.raw"), "keep active output").unwrap();
         fs::write(output.join("999.raw"), "orphan output").unwrap();
@@ -3094,7 +3221,7 @@ mod tests {
             })
             .unwrap();
         let mut registry =
-            ProcessRegistry::with_stop_grace(store, Duration::from_millis(50)).unwrap();
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(50)).unwrap();
         let mut process = output_test_process(temp.path().to_str().unwrap());
         process.command = Some("exec /bin/sh -i".into());
         registry.create(process).unwrap();
@@ -3168,7 +3295,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store).unwrap();
         let mut process = output_test_process(temp.path().to_str().unwrap());
         process.kind = ProcessKind::Command;
         process.command = Some("true".into());
@@ -3205,7 +3332,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store).unwrap();
         let mut process = output_test_process(temp.path().to_str().unwrap());
         process.kind = ProcessKind::Agent;
         registry.create(process).unwrap();
@@ -3259,7 +3386,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::with_output_persistence(
+        let mut registry = ProcessRegistry::with_output_persistence_for_test(
             store,
             temp.path().join(OUTPUT_DIRECTORY),
             1024,
@@ -3382,7 +3509,8 @@ mod tests {
             .put_process(&output_test_process(temp.path().to_str().unwrap()))
             .unwrap();
 
-        let _registry = ProcessRegistry::with_output_persistence(store, output, 1024).unwrap();
+        let _registry =
+            ProcessRegistry::with_output_persistence_for_test(store, output, 1024).unwrap();
         assert!(attachment_root.join("31").is_dir());
         assert!(!attachment_root.join("999").exists());
         assert!(!attachment_root.join(".staged-abandoned").exists());
@@ -3579,7 +3707,7 @@ mod tests {
         );
         store.put_process(&process).unwrap();
 
-        let registry = ProcessRegistry::new(store).unwrap();
+        let registry = ProcessRegistry::new_for_test(store).unwrap();
 
         assert!(!home.exists());
         assert_eq!(
@@ -3647,7 +3775,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store).unwrap();
         let process = registry.get(2).unwrap();
         assert_eq!(process.status, ProcessStatus::Crashed);
         assert_eq!(process.pid, None);
@@ -3668,6 +3796,7 @@ mod tests {
                     "shift\n",
                     "if [ \"$1\" = -i ]; then\n",
                     "  export PATH={:?}\n",
+                    "  export WORKMAN_INTERACTIVE_FIXTURE=loaded\n",
                     "  shift\n",
                     "fi\n",
                     "[ \"$1\" = -c ] || exit 92\n",
@@ -3767,7 +3896,7 @@ mod tests {
                 kind: ProcessKind::Agent,
                 name: "agent terminal capability".into(),
                 command: Some(
-                    r#"printf 'AGENT_ENV:%s|%s|%s|%s|%s\n' "$TERM_PROGRAM" "$PATH" "$HOME" "$TMPDIR" "$LANG""#.into(),
+                    r#"printf 'AGENT_ENV:%s|%s|%s|%s|%s|%s\n' "$TERM_PROGRAM" "$PATH" "$HOME" "$TMPDIR" "$LANG" "$WORKMAN_INTERACTIVE_FIXTURE""#.into(),
                 ),
                 working_dir: temp.path().to_string_lossy().into_owned(),
                 env: environment.clone(),
@@ -3801,6 +3930,10 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         assert!(output.contains("AGENT_ENV:WezTerm|/opt/interactive/bin:/usr/bin:/bin|"));
+        assert!(
+            output.contains("|loaded"),
+            "agent shell must load interactive startup files: {output}"
+        );
         assert!(output.contains(temp.path().to_string_lossy().as_ref()));
         assert!(output.contains("|/tmp/workman-env-fixture|"));
         assert!(output.contains("C.UTF-8") || output.contains("en_US.UTF-8"));
@@ -3870,7 +4003,8 @@ mod tests {
                 })
                 .unwrap();
             let mut registry =
-                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+                ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 64 * 1024)
+                    .unwrap();
             registry.create(output_test_process(&project_path)).unwrap();
             registry.start(31).unwrap();
             wait_for_persisted_output(&mut registry);
@@ -3889,7 +4023,8 @@ mod tests {
         {
             let store = Store::open(&database).unwrap();
             let mut registry =
-                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+                ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 64 * 1024)
+                    .unwrap();
             assert_eq!(registry.get(31).unwrap().status, ProcessStatus::Stopped);
             let raw = registry.raw_output(31, None, usize::MAX).unwrap();
             assert!(String::from_utf8_lossy(&raw.data).contains("PERSISTED-OUTPUT-313"));
@@ -3904,7 +4039,8 @@ mod tests {
         {
             let store = Store::open(&database).unwrap();
             let mut registry =
-                ProcessRegistry::with_output_persistence(store, &output_dir, 64 * 1024).unwrap();
+                ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 64 * 1024)
+                    .unwrap();
             assert!(registry.rendered_output(31).unwrap().text.is_empty());
             registry.start(31).unwrap();
             wait_for_persisted_output(&mut registry);
@@ -3936,8 +4072,9 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
-            .expect("create process registry");
+        let mut registry =
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(50))
+                .expect("create process registry");
         registry
             .create(Process {
                 id: 20,
@@ -4006,8 +4143,9 @@ mod tests {
                 continue_args: None,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(50))
-            .expect("create process registry");
+        let mut registry =
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(50))
+                .expect("create process registry");
         registry
             .create(Process {
                 id: 21,
@@ -4105,8 +4243,9 @@ mod tests {
             })
             .unwrap();
 
-        let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(100))
-            .expect("create process registry");
+        let mut registry =
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100))
+                .expect("create process registry");
         registry
             .create(Process {
                 id: 10,

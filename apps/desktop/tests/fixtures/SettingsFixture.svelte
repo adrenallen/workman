@@ -1,5 +1,7 @@
 <script lang="ts">
   import SettingsPanel from '../../src/lib/SettingsPanel.svelte';
+  import TerminalAppearanceCard from '../../src/lib/settings/TerminalAppearanceCard.svelte';
+  import type { UserEnvironmentInfo } from '../../src/lib/settings';
   import WelcomeProject from '../../src/lib/WelcomeProject.svelte';
   import type { DaemonClient } from '../../src/lib/daemon';
   import { selectSettingsSection } from '../../src/lib/settingsSections';
@@ -19,9 +21,24 @@
     saveAgentTemplate: async (draft: typeof templates[number]) => { templates = templates.map(t => t.id === draft.id ? {...t, ...draft} : t); return draft; }
   } as unknown as DaemonClient;
   let action = $state('');
+  let environment = $state<UserEnvironmentInfo>({
+    active_shell: '/bin/zsh', configured_shell: null, inferred_shell: '/bin/zsh',
+    inferred_from: 'account', using_override: false, capture_mode: 'interactive_login',
+    resolved_path: '/usr/bin:/bin', capture_error: null, warning: null,
+    agent_shell_mode: 'auto', agent_launch_summary: '/bin/zsh -l -i -c',
+    agent_shell_mode_supported: !query.has('windows')
+  });
 </script>
 <div class="fixture">
-  {#if welcome}
+  {#if query.has('terminal-shell')}
+    <TerminalAppearanceCard {client} {environment} connected={true}
+      onShellChange={async shell => { environment = { ...environment, configured_shell: shell }; }}
+      onAgentShellModeChange={async mode => {
+        if (query.has('fail-save')) throw new Error('Fixture save failed');
+        environment = { ...environment, agent_shell_mode: mode };
+        action = mode;
+      }} />
+  {:else if welcome}
     <WelcomeProject connected={true} busy={false} onAddProject={() => action = 'add'} onProfiles={() => action = 'profiles'} />
   {:else}
     <SettingsPanel {client} project={null} connection={{status: 'connected', daemon_version: '0.1.14'}} updateFlow={{ kind: 'idle' }} onApplyUpdate={async () => {}} onRestartUpdate={async () => {}} onDismissUpdate={() => {}} onError={() => {}} onProfileSwitched={() => {}} />

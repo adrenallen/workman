@@ -13,6 +13,7 @@ pub mod project_folders;
 pub mod recorded_feedback;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
+pub mod shell;
 pub mod store;
 pub mod terminal;
 pub mod todo_claims;

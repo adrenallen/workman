@@ -1383,7 +1383,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store).unwrap();
         for auto_archive in [false, true] {
             for target in ["agent", "scratchpad", "clipboard", "failed_agent"] {
                 let service = RecordedFeedbackService::new(registry.store());
@@ -1478,7 +1478,7 @@ mod tests {
                 sort_order: 0,
             })
             .unwrap();
-        let mut registry = ProcessRegistry::new(store).unwrap();
+        let mut registry = ProcessRegistry::new_for_test(store).unwrap();
         let mut rpc = |method: &str, params: Value| {
             dispatch(method, params, &mut registry, temp.path())
                 .expect("known method")

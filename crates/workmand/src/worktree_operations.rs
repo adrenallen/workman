@@ -1245,7 +1245,7 @@ mod tests {
             })
             .unwrap();
         let registry = Arc::new(tokio::sync::Mutex::new(
-            crate::ProcessRegistry::new(store).unwrap(),
+            crate::ProcessRegistry::new_for_test(store).unwrap(),
         ));
         let hub = WorktreeOperationHub::default();
 

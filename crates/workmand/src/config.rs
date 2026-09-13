@@ -901,7 +901,7 @@ mod tests {
             Self {
                 root,
                 outside,
-                registry: ProcessRegistry::new(store).unwrap(),
+                registry: ProcessRegistry::new_for_test(store).unwrap(),
             }
         }
 

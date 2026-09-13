@@ -17,6 +17,7 @@ use crate::domain::{
     QuickPrompt, Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
     WorktreeRepositoryId,
 };
+use crate::shell::{AgentShellMode, ProfileTerminalSettings};
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial", include_str!("../migrations/0001_initial.sql")),
@@ -205,10 +206,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "storage_maintenance",
         include_str!("../migrations/0038_storage_maintenance.sql"),
     ),
+    (
+        39,
+        "profile_agent_shell_mode",
+        include_str!("../migrations/0039_profile_agent_shell_mode.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 38;
+pub const LATEST_SCHEMA_VERSION: i64 = 39;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -463,12 +469,54 @@ impl Store {
             .flatten())
     }
 
+    pub fn profile_terminal_settings(
+        &self,
+        profile_id: ProfileId,
+    ) -> StoreResult<ProfileTerminalSettings> {
+        let (shell, mode): (Option<String>, Option<String>) = self.connection.query_row(
+            "SELECT terminal_shell, agent_shell_mode FROM profiles WHERE id = ?1",
+            [profile_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(ProfileTerminalSettings {
+            shell,
+            agent_shell_mode: mode
+                .as_deref()
+                .unwrap_or("auto")
+                .parse()
+                .map_err(StoreError::InvalidProfile)?,
+        })
+    }
+
+    pub fn active_profile_terminal_settings(&self) -> StoreResult<ProfileTerminalSettings> {
+        self.profile_terminal_settings(self.active_profile_id()?)
+    }
+
+    pub fn set_active_profile_terminal_settings(
+        &self,
+        settings: &ProfileTerminalSettings,
+    ) -> StoreResult<()> {
+        self.connection.execute(
+            "UPDATE profiles SET terminal_shell = ?1, agent_shell_mode = ?2 WHERE active = 1",
+            params![settings.shell, settings.agent_shell_mode.stored_value()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_active_profile_agent_shell_mode(&self, mode: AgentShellMode) -> StoreResult<()> {
+        self.connection.execute(
+            "UPDATE profiles SET agent_shell_mode = ?1 WHERE active = 1",
+            [mode.stored_value()],
+        )?;
+        Ok(())
+    }
+
     /// Import a fully validated inactive profile. Project paths are canonicalized by the caller.
     /// Returned tool IDs follow `tools` order for custom-icon installation.
     pub fn import_profile(
         &self,
         name: &str,
-        terminal_shell: Option<&str>,
+        terminal: &ProfileTerminalSettings,
         projects: &[(String, bool)],
         tools: &[AgentTool],
     ) -> StoreResult<(Profile, Vec<i64>)> {
@@ -486,9 +534,9 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO profiles (
-                id, name, active, terminal_shell, legacy_config_imported, created_at
-             ) VALUES (?1, ?2, 0, ?3, 1, unixepoch())",
-            params![profile_id, name, terminal_shell],
+                id, name, active, terminal_shell, agent_shell_mode, legacy_config_imported, created_at
+             ) VALUES (?1, ?2, 0, ?3, ?4, 1, unixepoch())",
+            params![profile_id, name, terminal.shell, terminal.agent_shell_mode.stored_value()],
         )?;
 
         let mut next_project_id: i64 =
@@ -588,6 +636,10 @@ impl Store {
             params![profile_id, name, shell],
         )?;
         if copy_active {
+            transaction.execute(
+                "UPDATE profiles SET agent_shell_mode = (SELECT agent_shell_mode FROM profiles WHERE id = ?1) WHERE id = ?2",
+                params![source_profile_id, profile_id],
+            )?;
             transaction.execute(
                 "INSERT INTO profile_projects (
                     profile_id, project_id, sort_order, selected, folder_id

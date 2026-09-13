@@ -35,6 +35,8 @@ use uuid::Uuid;
 
 mod agent_sessions;
 mod command_line;
+#[cfg(all(test, unix))]
+mod shell_test_support;
 pub mod config;
 mod context_actions;
 mod control;
@@ -246,12 +248,15 @@ pub struct DaemonServer {
 impl DaemonServer {
     /// Bind only IPv4 loopback and publish this identity's stable port and bearer token.
     pub async fn bind(config: DaemonConfig) -> io::Result<Self> {
+        Self::bind_with_config_path(config, user_config_path()).await
+    }
+
+    async fn bind_with_config_path(config: DaemonConfig, user_config_path: PathBuf) -> io::Result<Self> {
         let started_at = Instant::now();
         migration::migrate_default_paths_if_needed(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
         let store = workman_core::Store::open(database_path(&config.data_dir))
             .map_err(registry_io_error)?;
-        let user_config_path = user_config_path();
         let user_environment = UserEnvironmentResolver::new(&user_config_path);
         if store
             .active_profile_needs_legacy_config_import()
@@ -263,18 +268,20 @@ impl DaemonServer {
                     format!("{}: {error}", user_config_path.display()),
                 )
             })?;
-            let legacy_shell = match std::fs::read_to_string(&user_config_path) {
+            let legacy_terminal = match std::fs::read_to_string(&user_config_path) {
                 Ok(yaml) => {
                     parse_user_config(&yaml)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
                         .terminal
-                        .shell
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Default::default(),
                 Err(error) => return Err(error),
             };
             store
-                .set_active_profile_terminal_shell(legacy_shell.as_deref())
+                .set_active_profile_terminal_settings(&workman_core::shell::ProfileTerminalSettings {
+                    agent_shell_mode: legacy_terminal.resolved_agent_shell_mode().0,
+                    shell: legacy_terminal.shell,
+                })
                 .map_err(registry_io_error)?;
             store
                 .mark_active_profile_legacy_config_imported()
@@ -1913,6 +1920,10 @@ async fn clean_failed_spawn(child: &mut tokio::process::Child, pid: Option<u32>,
 
 #[cfg(test)]
 mod tests {
+    async fn bind_test_daemon(config: DaemonConfig) -> io::Result<DaemonServer> {
+        DaemonServer::bind_with_config_path(config, crate::user_environment::test_user_environment().config_path().to_path_buf()).await
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -2120,12 +2131,16 @@ mod tests {
 
     impl TestServer {
         async fn start() -> Self {
+            Self::start_with_config(crate::user_environment::test_user_environment().config_path().to_path_buf()).await
+        }
+
+        async fn start_with_config(config_path: PathBuf) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let data_dir = temp.path().to_path_buf();
-            let server = DaemonServer::bind(DaemonConfig {
+            let server = DaemonServer::bind_with_config_path(DaemonConfig {
                 data_dir: data_dir.clone(),
                 port: 0,
-            })
+            }, config_path)
             .await
             .unwrap();
             let discovery = server.discovery().clone();
@@ -2635,6 +2650,69 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_startup_settings_persist_and_old_shell_requests_preserve_the_mode() {
+        use std::fs;
+        let fixture = crate::shell_test_support::ShellFixture::new(Path::new("/bin/sh"));
+        let server = TestServer::start_with_config(fixture.config.clone()).await;
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        let changed = rpc(
+            &mut socket,
+            1,
+            "settings.agent_shell_mode",
+            json!({"mode": "interactive"}),
+        )
+        .await;
+        assert_eq!(changed["ok"], true);
+        assert_eq!(changed["result"]["agent_shell_mode"], "interactive");
+        assert!(changed["result"]["configured_shell"].is_string());
+        assert_eq!(
+            server
+                .registry
+                .lock()
+                .await
+                .store()
+                .active_profile_terminal_settings()
+                .unwrap()
+                .agent_shell_mode,
+            workman_core::shell::AgentShellMode::Interactive
+        );
+        let previous = fs::read_to_string(&fixture.config).unwrap();
+        let rejected = rpc(
+            &mut socket,
+            2,
+            "settings.agent_shell_mode",
+            json!({"mode": "invalid"}),
+        )
+        .await;
+        assert_eq!(rejected["ok"], false);
+        assert_eq!(fs::read_to_string(&fixture.config).unwrap(), previous);
+        let shell = rpc(
+            &mut socket,
+            3,
+            "settings.user_shell",
+            json!({"shell": null}),
+        )
+        .await;
+        assert_eq!(shell["result"]["agent_shell_mode"], "interactive");
+        let reset = rpc(
+            &mut socket,
+            4,
+            "settings.agent_shell_mode",
+            json!({"mode": "auto"}),
+        )
+        .await;
+        assert_eq!(reset["result"]["agent_shell_mode"], "auto");
+        let parsed =
+            crate::user_config::parse_user_config(&fs::read_to_string(&fixture.config).unwrap())
+                .unwrap();
+        assert!(parsed.terminal.shell.is_none());
+        assert!(parsed.terminal.agent_shell_mode.is_none());
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
     #[tokio::test]
     async fn websocket_drives_full_process_lifecycle_and_bulk_commands() {
         let server = TestServer::start().await;
@@ -2869,7 +2947,7 @@ mod tests {
         let primary_dir = temp.path().join("com.workman.todo462");
         let secondary_dir = temp.path().join("com.workman.todo462.second");
 
-        let first = DaemonServer::bind(DaemonConfig {
+        let first = bind_test_daemon(DaemonConfig {
             data_dir: primary_dir.clone(),
             port: 0,
         })
@@ -2884,7 +2962,7 @@ mod tests {
         shutdown.send(()).unwrap();
         task.await.unwrap().unwrap();
 
-        let restarted = DaemonServer::bind(DaemonConfig {
+        let restarted = bind_test_daemon(DaemonConfig {
             data_dir: primary_dir.clone(),
             port: 0,
         })
@@ -2907,7 +2985,7 @@ mod tests {
             "the pre-restart URL and bearer token must authenticate to the restarted daemon"
         );
 
-        let secondary = DaemonServer::bind(DaemonConfig {
+        let secondary = bind_test_daemon(DaemonConfig {
             data_dir: secondary_dir,
             port: 0,
         })
@@ -2923,7 +3001,7 @@ mod tests {
         let blocker = TcpListener::bind((Ipv4Addr::LOCALHOST, original.port))
             .await
             .unwrap();
-        let error = match DaemonServer::bind(DaemonConfig {
+        let error = match bind_test_daemon(DaemonConfig {
             data_dir: primary_dir.clone(),
             port: 0,
         })
@@ -2953,7 +3031,7 @@ mod tests {
         let free = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let override_port = free.local_addr().unwrap().port();
         drop(free);
-        let overridden = DaemonServer::bind(DaemonConfig {
+        let overridden = bind_test_daemon(DaemonConfig {
             data_dir: primary_dir.clone(),
             port: override_port,
         })
@@ -2963,7 +3041,7 @@ mod tests {
         assert_eq!(overridden.discovery().token, original.token);
         drop(overridden);
 
-        let after_override = DaemonServer::bind(DaemonConfig {
+        let after_override = bind_test_daemon(DaemonConfig {
             data_dir: primary_dir,
             port: 0,
         })
@@ -3002,7 +3080,7 @@ mod tests {
         };
         let previous_guard = DiscoveryGuard::publish(temp.path(), &previous).unwrap();
 
-        let upgraded = DaemonServer::bind(DaemonConfig {
+        let upgraded = bind_test_daemon(DaemonConfig {
             data_dir: temp.path().to_path_buf(),
             port: 0,
         })

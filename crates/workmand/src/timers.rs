@@ -1192,7 +1192,7 @@ mod tests {
             })
             .unwrap();
         let mut registry =
-            ProcessRegistry::with_stop_grace(store, Duration::from_millis(100)).unwrap();
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100)).unwrap();
         registry
             .create(process(
                 DELIVERY_ID,
@@ -1700,7 +1700,7 @@ mod tests {
                 })
                 .unwrap();
             let mut registry =
-                ProcessRegistry::with_stop_grace(store, Duration::from_millis(100)).unwrap();
+                ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100)).unwrap();
             registry
                 .create(process(
                     DELIVERY_ID,
@@ -1725,7 +1725,7 @@ mod tests {
 
         let store = Store::open(&database).unwrap();
         let mut registry =
-            ProcessRegistry::with_stop_grace(store, Duration::from_millis(100)).unwrap();
+            ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100)).unwrap();
         registry.start(DELIVERY_ID).unwrap();
         assert!(
             TimerService::new(&mut registry)

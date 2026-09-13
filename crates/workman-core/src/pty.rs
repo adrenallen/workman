@@ -28,6 +28,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
 use crate::attention::{AgentState, AttentionTracker};
 use crate::output_spill::{OutputSpill, OutputSpillSink};
+use crate::shell::ShellInvocation;
+#[cfg(test)]
+use crate::shell::command_prelude as shell_command_prelude;
 use crate::terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput};
 
 /// Portable PTY exit status and terminal dimensions used by the host API.
@@ -356,8 +359,8 @@ pub struct PtySpawnOptions {
     /// Agent tool family used for terminal-attention classification.
     pub tool_type: Option<String>,
     shell: PathBuf,
-    login_shell: bool,
-    interactive_shell: bool,
+    shell_invocation: ShellInvocation,
+    shell_session: bool,
     output_spill: Option<OutputSpillOptions>,
     mcp_token: String,
 }
@@ -380,8 +383,8 @@ impl PtySpawnOptions {
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             tool_type: None,
             shell: PathBuf::from("/bin/sh"),
-            login_shell: false,
-            interactive_shell: false,
+            shell_invocation: ShellInvocation::default(),
+            shell_session: false,
             output_spill: None,
             mcp_token: mcp_token.into(),
         }
@@ -427,16 +430,34 @@ impl PtySpawnOptions {
     /// Run the command through `<shell> -l -c <command>`.
     pub fn with_login_shell_command(mut self, shell: impl Into<PathBuf>) -> Self {
         self.shell = shell.into();
-        self.login_shell = true;
-        self.interactive_shell = false;
+        self.shell_invocation = ShellInvocation::LOGIN;
+        self.shell_session = false;
+        self
+    }
+
+    /// Run an agent through `<shell> -l -i -c <command>` on Unix so aliases and
+    /// functions from interactive startup files (such as `.zshrc`) are available.
+    pub fn with_interactive_login_shell_command(self, shell: impl Into<PathBuf>) -> Self {
+        self.with_shell_command(shell, ShellInvocation::INTERACTIVE_LOGIN)
+    }
+
+    /// Use the same startup policy as the agent health probe.
+    pub fn with_shell_command(
+        mut self,
+        shell: impl Into<PathBuf>,
+        invocation: ShellInvocation,
+    ) -> Self {
+        self.shell = shell.into();
+        self.shell_invocation = invocation;
+        self.shell_session = false;
         self
     }
 
     /// Start `<shell> -l` as an interactive login-shell session.
     pub fn with_login_shell(mut self, shell: impl Into<PathBuf>) -> Self {
         self.shell = shell.into();
-        self.login_shell = true;
-        self.interactive_shell = true;
+        self.shell_invocation = ShellInvocation::LOGIN;
+        self.shell_session = true;
         self
     }
 
@@ -601,15 +622,10 @@ impl PtyProcess {
             .context("open PTY")?;
 
         let mut command = CommandBuilder::new(&options.shell);
-        // Login-shell semantics only exist on Unix; Windows shells reject `-l`.
-        if cfg!(unix) && options.login_shell {
-            command.arg("-l");
-        }
-        if !options.interactive_shell {
-            for flag in shell_command_prelude(&options.shell) {
-                command.arg(flag);
-            }
-            command.arg(shell_command_flag(&options.shell));
+        if options.shell_session {
+            command.args(options.shell_invocation.startup_args());
+        } else {
+            command.args(options.shell_invocation.command_args(&options.shell));
             // Keep the complete command as one argv item. The login shell, not Workman,
             // owns its quoting and expansion semantics.
             command.arg(&options.command);
@@ -1473,41 +1489,6 @@ fn profile_enabled() -> bool {
     })
 }
 
-/// Flags the configured shell needs before it will run one command string.
-///
-/// Windows PowerShell's default Restricted execution policy refuses `.ps1`
-/// launchers, which is how npm ships agent CLIs on PATH. The command string is
-/// explicit user intent, so bypass the policy for the spawned session only;
-/// interactive terminals keep the account's policy.
-fn shell_command_prelude(shell: &std::path::Path) -> &'static [&'static str] {
-    #[cfg(windows)]
-    if shell.file_name().is_some_and(|name| {
-        ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
-            .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate))
-    }) {
-        return &["-ExecutionPolicy", "Bypass"];
-    }
-    #[cfg(not(windows))]
-    let _ = shell;
-    &[]
-}
-
-/// Flag that makes the configured shell run one command string.
-///
-/// POSIX shells and PowerShell both accept `-c`; only `cmd.exe` insists on `/c`.
-fn shell_command_flag(shell: &std::path::Path) -> &'static str {
-    #[cfg(windows)]
-    if shell.file_name().is_some_and(|name| {
-        name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
-    }) {
-        return "/c";
-    }
-    #[cfg(not(windows))]
-    let _ = shell;
-    "-c"
-}
-
 /// Ask every process in the PTY session to stop, gracefully where the platform allows.
 ///
 /// Unix delivers SIGTERM to the process group. Windows has no group-wide graceful
@@ -1981,6 +1962,41 @@ mod tests {
             output.contains("quoted:two words and a ' quote"),
             "command was reinterpreted or split: {output}"
         );
+        assert!(process.wait().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_agent_command_loads_zsh_aliases_and_functions() {
+        let shell = std::path::Path::new("/bin/zsh");
+        if !shell.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".zshenv"), "unsetopt GLOBAL_RCS\n").unwrap();
+        std::fs::write(
+            temp.path().join(".zshrc"),
+            concat!(
+                "[[ -o interactive ]] || return\n",
+                "workman_alias_target() { printf 'ALIAS:%s|%s|%s|%s\\n' \"$WORKMAN_PROCESS_ID\" \"$WORKMAN_MCP_TOKEN\" \"$1\" \"$2\"; }\n",
+                "alias workman-agent-alias='workman_alias_target \"alias argument\"'\n",
+            ),
+        )
+        .unwrap();
+        let mut process = PtyProcess::spawn(
+            PtySpawnOptions::new(
+                48,
+                "real-token",
+                "workman-agent-alias \"two words and a ' quote\"",
+            )
+            .with_env("HOME", temp.path())
+            .with_env("ZDOTDIR", temp.path())
+            .with_env(WORKMAN_MCP_TOKEN_ENV, "wrong")
+            .with_interactive_login_shell_command(shell),
+        )
+        .unwrap();
+        let output = wait_for_output(&process, b"ALIAS:48|real-token|alias argument|");
+        assert!(String::from_utf8_lossy(&output).contains("|two words and a ' quote"));
         assert!(process.wait().unwrap().success());
     }
 

@@ -28,6 +28,7 @@ pub struct AgentToolHealth {
     pub tool_type: String,
     pub enabled: bool,
     pub source: AgentToolSource,
+    /// Legacy availability field: true for executable files and shell aliases/functions.
     pub found_on_path: bool,
     pub resolved_binary: Option<String>,
     pub version: Option<String>,
@@ -92,6 +93,8 @@ struct DoctorEnvironment {
     interactive_path: Option<OsString>,
     non_interactive_path: Option<OsString>,
     capture_error: Option<String>,
+    invocation: workman_core::shell::ShellInvocation,
+    probe_variables: Option<BTreeMap<OsString, OsString>>,
 }
 
 impl DoctorEnvironment {
@@ -110,6 +113,8 @@ impl DoctorEnvironment {
             interactive_path: None,
             non_interactive_path: None,
             capture_error: None,
+            invocation: workman_core::shell::AgentShellMode::Auto.invocation(),
+            probe_variables: None,
         }
     }
 }
@@ -154,6 +159,8 @@ pub async fn check_agent_tools_with_user_environment(
         interactive_path,
         non_interactive_path,
         capture_error: resolved.info().capture_error.clone(),
+        invocation: resolved.agent_shell_invocation(),
+        probe_variables: Some(resolved.agent_probe_environment()),
     };
     check_agent_tools_in(tools, environment).await
 }
@@ -165,16 +172,43 @@ async fn check_agent_tools_in(
     let environment_capture_mode = environment.capture_mode;
     let environment_capture_error = environment.capture_error.clone();
     let resolved_path = environment.path.to_string_lossy().into_owned();
+    // Start version checks before waiting on startup files, so a slow rc file does not
+    // serialize all the binary probes behind command discovery.
     let mut checks = JoinSet::new();
-    for tool in tools {
+    for tool in tools.iter().cloned() {
         let environment = environment.clone();
         checks.spawn(async move { check_agent_tool(tool, &environment).await });
     }
+    let shell_commands = check_shell_commands(&tools, &environment).await;
 
     let mut health = Vec::new();
     while let Some(result) = checks.join_next().await {
         if let Ok(result) = result {
             health.push(result);
+        }
+    }
+    for tool in &mut health {
+        if tool.found_on_path {
+            continue;
+        }
+        let Some(name) = shell_command_executable(&tool.command) else {
+            continue;
+        };
+        match &shell_commands {
+            Ok(names) if names.contains(&name) => {
+                tool.found_on_path = true;
+                tool.launch_ready = tool.enabled && tool.mcp_launch_supported;
+                tool.path_diagnostic = None;
+            }
+            Err(error) => {
+                let detail =
+                    format!("Could not check aliases/functions in the agent launch shell: {error}");
+                tool.path_diagnostic = Some(tool.path_diagnostic.take().map_or_else(
+                    || detail.clone(),
+                    |diagnostic| format!("{diagnostic} {detail}"),
+                ));
+            }
+            _ => {}
         }
     }
     health.sort_by_key(|tool| tool.id);
@@ -199,6 +233,41 @@ async fn check_agent_tools_in(
         summary: format!("{ready_count} of {total_count} agent tools are MCP-ready"),
         tools: health,
     }
+}
+
+async fn check_shell_commands(
+    tools: &[AgentTool],
+    environment: &DoctorEnvironment,
+) -> Result<Vec<String>, String> {
+    #[cfg(unix)]
+    if let Some(shell) = &environment.shell {
+        let names = tools
+            .iter()
+            .filter_map(|tool| shell_command_executable(&tool.command))
+            .filter(|name| resolve_executable(name, &environment.path).is_none())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            let shell = shell.clone();
+            let variables = environment
+                .probe_variables
+                .as_ref()
+                .unwrap_or(&environment.variables)
+                .clone();
+            let invocation = environment.invocation;
+            return tokio::task::spawn_blocking(move || {
+                crate::user_environment::available_shell_commands(
+                    &shell, &variables, invocation, &names,
+                )
+            })
+            .await
+            .map_err(|error| format!("check shell commands: {error}"))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (tools, environment);
+    Ok(Vec::new())
 }
 
 async fn check_agent_tool(tool: AgentTool, environment: &DoctorEnvironment) -> AgentToolHealth {
@@ -430,6 +499,14 @@ fn command_executable(command: &str) -> Option<String> {
     Some(first)
 }
 
+fn shell_command_executable(command: &str) -> Option<String> {
+    let executable = crate::command_line::split_permissive(command)
+        .into_iter()
+        .find(|word| !is_environment_assignment(word))?;
+    // `env` executes a file itself; it cannot invoke a shell alias or function.
+    (executable != "env").then_some(executable)
+}
+
 fn is_environment_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
@@ -480,8 +557,15 @@ fn missing_path_diagnostic(executable: &str, environment: &DoctorEnvironment) ->
     let (interactive_rc, login_rc) = shell_rc_guidance(environment.shell.as_deref());
 
     if found_interactively && !found_non_interactively {
+        let advice = if environment.invocation.interactive {
+            "Agent launches read interactive startup files; refresh health or restart Workman to refresh the captured PATH.".to_owned()
+        } else {
+            format!(
+                "The selected login-only agent mode does not read {interactive_rc}; choose Auto or Interactive startup in Settings → Terminal, or move PATH initialization to {login_rc}."
+            )
+        };
         return Some(format!(
-            "{executable} is on PATH in your interactive shell (likely via {interactive_rc} — nvm/fnm/volta init). Non-interactive launches don't read {interactive_rc}; move that PATH setup to {login_rc}. Active environment capture mode: {}.",
+            "{executable} is on PATH in your interactive shell (likely via {interactive_rc} — nvm/fnm/volta init). {advice} Active environment capture mode: {}.",
             environment.capture_mode.as_str()
         ));
     }
@@ -904,6 +988,199 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn health_finds_zsh_aliases_and_functions_without_executing_them() {
+        let shell = Path::new("/bin/zsh");
+        if !shell.is_file() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(".zshenv"), "unsetopt GLOBAL_RCS\n").unwrap();
+        fs::write(
+            temp.path().join(".zshrc"),
+            concat!(
+                "[[ -o interactive ]] || return\n",
+                "printf 'startup noise\\n'\n",
+                "workman_test_function() { printf 'ran' > \"$HOME/executed\"; }\n",
+                "alias workman-test-alias='workman_test_function --alias-arg'\n",
+            ),
+        )
+        .unwrap();
+        let environment = DoctorEnvironment {
+            home: temp.path().to_owned(),
+            path: OsString::from("/usr/bin:/bin"),
+            variables: BTreeMap::from([
+                (OsString::from("HOME"), temp.path().as_os_str().to_owned()),
+                (
+                    OsString::from("ZDOTDIR"),
+                    temp.path().as_os_str().to_owned(),
+                ),
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            ]),
+            shell: Some(shell.to_owned()),
+            ..DoctorEnvironment::current()
+        };
+        let health = check_agent_tools_in(
+            vec![
+                tool(1, "Alias", "workman-test-alias --flag", "codex", true),
+                tool(2, "Function", "workman_test_function", "claude", true),
+                tool(3, "Missing", "workman-no-such-agent", "codex", true),
+                tool(4, "Custom alias", "workman-test-alias", "custom", true),
+                tool(
+                    5,
+                    "Env alias",
+                    "env FOO=bar workman-test-alias",
+                    "codex",
+                    true,
+                ),
+                tool(
+                    6,
+                    "Quoted input",
+                    "\"bad'$(touch $HOME/executed)\"",
+                    "custom",
+                    true,
+                ),
+            ],
+            environment,
+        )
+        .await;
+        assert!(health.tools[0].launch_ready);
+        assert!(health.tools[1].launch_ready);
+        assert!(!health.tools[2].found_on_path);
+        assert!(health.tools[3].found_on_path);
+        assert!(!health.tools[3].mcp_launch_supported);
+        assert!(!health.tools[4].found_on_path);
+        assert!(!health.tools[5].found_on_path);
+        for tool in &health.tools[..2] {
+            assert!(tool.resolved_binary.is_none());
+            assert!(tool.version.is_none());
+            assert!(tool.version_error.is_none());
+            assert!(tool.path_diagnostic.is_none());
+        }
+        assert_eq!(health.enabled_ready_count, 2);
+        assert!(!temp.path().join("executed").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_shell_modes_match_alias_health_and_pty_launches() {
+        use crate::shell_test_support::{ShellFixture, installed_shells};
+        use workman_core::{
+            pty::{PtyProcess, PtySpawnOptions},
+            shell::{AgentShellMode, quote_word},
+        };
+        for shell in installed_shells() {
+            let fixture = ShellFixture::new(&shell);
+            for mode in [
+                AgentShellMode::Auto,
+                AgentShellMode::Login,
+                AgentShellMode::Interactive,
+                AgentShellMode::InteractiveLogin,
+            ] {
+                let marker = fixture.home.path().join("executed");
+                let _ = fs::remove_file(&marker);
+                let health = check_agent_tools_in(
+                    vec![
+                        tool(1, "Alias", "workman-fixture-alias", "codex", true),
+                        tool(2, "Function", "workman_fixture_fn", "claude", true),
+                        tool(3, "Missing", "workman-no-such-agent", "codex", true),
+                        tool(
+                            4,
+                            "Env alias",
+                            "env FOO=bar workman-fixture-alias",
+                            "codex",
+                            true,
+                        ),
+                    ],
+                    DoctorEnvironment {
+                        home: fixture.home.path().to_owned(),
+                        path: fixture
+                            .variables
+                            .get(std::ffi::OsStr::new("PATH"))
+                            .unwrap()
+                            .clone(),
+                        variables: fixture.variables.clone(),
+                        shell: Some(fixture.shell.clone()),
+                        invocation: mode.invocation(),
+                        ..DoctorEnvironment::current()
+                    },
+                )
+                .await;
+                let expected = mode != AgentShellMode::Login;
+                for tool in &health.tools[..2] {
+                    assert_eq!(
+                        tool.found_on_path,
+                        expected,
+                        "{} {mode:?}: {tool:?}",
+                        shell.display()
+                    );
+                    assert_eq!(tool.launch_ready, expected);
+                    assert!(tool.version.is_none());
+                }
+                assert!(!health.tools[2].found_on_path);
+                assert!(!health.tools[3].found_on_path);
+                assert!(!marker.exists(), "health executed the runtime");
+                if !expected {
+                    continue;
+                }
+                let argument = "spaces 'single' \"double\" \\backslash\\ $literal";
+                let command = format!("workman-fixture-alias {}", quote_word(&shell, argument));
+                let mut options = PtySpawnOptions::new(48, "fixture-token", command)
+                    .with_shell_command(&shell, mode.invocation());
+                for (key, value) in &fixture.variables {
+                    options = options.with_env(key, value);
+                }
+                let mut process = PtyProcess::spawn(options).unwrap();
+                let expected_output = format!("ARGS:<{argument}>");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let output =
+                        String::from_utf8_lossy(&process.raw_output().snapshot()).into_owned();
+                    if output.contains(&expected_output) {
+                        assert!(output.contains("ARGS:<alias arg>"));
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{} {mode:?}: {output}",
+                        shell.display()
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(process.wait().unwrap().success());
+                assert!(marker.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_reports_a_shell_that_exits_before_checking_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = temp.path().join("early-exit-shell");
+        fs::write(&shell, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let health = check_agent_tools_in(
+            vec![tool(1, "Alias", "workman-test-alias", "codex", true)],
+            DoctorEnvironment {
+                home: temp.path().to_owned(),
+                path: OsString::from("/usr/bin:/bin"),
+                shell: Some(shell),
+                ..DoctorEnvironment::current()
+            },
+        )
+        .await;
+        assert!(!health.tools[0].found_on_path);
+        assert!(
+            health.tools[0]
+                .path_diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("exited before checking command names")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn missing_runtime_names_interactive_rc_path_cause() {
         let temp = tempfile::tempdir().unwrap();
         let interactive_bin = temp.path().join("interactive-bin");
@@ -915,7 +1192,14 @@ mod tests {
         let environment = DoctorEnvironment {
             home: temp.path().join("home"),
             path: fallback_path.clone(),
-            variables: BTreeMap::from([(OsString::from("PATH"), fallback_path.clone())]),
+            variables: BTreeMap::from([
+                (OsString::from("PATH"), fallback_path.clone()),
+                (OsString::from("HOME"), temp.path().as_os_str().to_owned()),
+                (
+                    OsString::from("ZDOTDIR"),
+                    temp.path().as_os_str().to_owned(),
+                ),
+            ]),
             version_timeout: Duration::from_secs(2),
             capture_mode: crate::EnvironmentCaptureMode::NonInteractiveLoginFallback,
             shell: Some(Path::new("/bin/zsh").to_owned()),
@@ -924,6 +1208,8 @@ mod tests {
             capture_error: Some(
                 "interactive login environment capture failed: timed out after 10000ms".into(),
             ),
+            invocation: workman_core::shell::ShellInvocation::LOGIN,
+            probe_variables: None,
         };
 
         let health = check_agent_tools_in(
@@ -960,6 +1246,7 @@ mod tests {
             capture_error: Some(
                 "interactive login environment capture failed: interactive login shell /bin/zsh timed out after 10000ms".into(),
             ),
+            ..DoctorEnvironment::current()
         };
 
         let diagnostic = super::missing_path_diagnostic("codex", &environment).unwrap();

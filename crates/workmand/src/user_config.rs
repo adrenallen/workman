@@ -104,11 +104,26 @@ pub struct UserConfig {
 pub struct UserTerminalConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    // Keep unknown strings readable so one typo does not discard the user's shell/tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_shell_mode: Option<String>,
 }
 
 impl UserTerminalConfig {
     fn is_empty(&self) -> bool {
-        self.shell.is_none()
+        self.shell.is_none() && self.agent_shell_mode.is_none()
+    }
+
+    pub fn resolved_agent_shell_mode(
+        &self,
+    ) -> (workman_core::shell::AgentShellMode, Option<String>) {
+        match self.agent_shell_mode.as_deref().unwrap_or("auto").parse() {
+            Ok(mode) => (mode, None),
+            Err(error) => (
+                workman_core::shell::AgentShellMode::Auto,
+                Some(format!("{error} Using auto.")),
+            ),
+        }
     }
 }
 
@@ -450,6 +465,15 @@ pub(crate) fn save_user_shell_from_settings_at(
     path: &Path,
     shell: Option<&str>,
 ) -> Result<(), UserConfigError> {
+    save_user_terminal_settings_at(path, shell, None)
+}
+
+/// Update the terminal block once; omitted mode preserves the current startup preference.
+pub(crate) fn save_user_terminal_settings_at(
+    path: &Path,
+    shell: Option<&str>,
+    agent_shell_mode: Option<workman_core::shell::AgentShellMode>,
+) -> Result<(), UserConfigError> {
     let shell = shell
         .map(|shell| {
             let shell = shell.trim();
@@ -484,6 +508,28 @@ pub(crate) fn save_user_shell_from_settings_at(
         terminal.remove(serde_yaml::Value::String("shell".to_owned()));
         if terminal.is_empty() {
             root.remove(&terminal_key);
+        }
+    }
+    if let Some(mode) = agent_shell_mode {
+        let key = serde_yaml::Value::String("agent_shell_mode".into());
+        let terminal_key = serde_yaml::Value::String("terminal".into());
+        if let Some(value) = mode.stored_value() {
+            let terminal = root
+                .entry(terminal_key)
+                .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()))
+                .as_mapping_mut()
+                .ok_or_else(|| {
+                    UserConfigError::Invalid("per-user config terminal must be a mapping".into())
+                })?;
+            terminal.insert(key, serde_yaml::Value::String(value.into()));
+        } else if let Some(terminal) = root
+            .get_mut(&terminal_key)
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        {
+            terminal.remove(&key);
+            if terminal.is_empty() {
+                root.remove(&terminal_key);
+            }
         }
     }
     validated_document(&root)?;
@@ -592,7 +638,10 @@ fn read_user_config_document(
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
     };
-    let root = if source.trim().is_empty() {
+    let root = if source
+        .lines()
+        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+    {
         serde_yaml::Mapping::new()
     } else {
         serde_yaml::from_str::<serde_yaml::Value>(&source)?
@@ -1261,6 +1310,50 @@ mod tests {
             assert_eq!(configured.resume_args, tool.resume_args);
             assert_eq!(configured.continue_args, tool.continue_args);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_startup_mode_roundtrips_without_overwriting_the_shell() {
+        use super::save_user_terminal_settings_at;
+        use std::fs;
+        use workman_core::shell::AgentShellMode;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yml");
+        fs::write(
+            &path,
+            "# heading\nterminal:\n  shell: /bin/sh\ntelemetry: false # keep note\n",
+        )
+        .unwrap();
+        for mode in [
+            AgentShellMode::Login,
+            AgentShellMode::Interactive,
+            AgentShellMode::InteractiveLogin,
+            AgentShellMode::Auto,
+        ] {
+            save_user_terminal_settings_at(&path, Some("/bin/sh"), Some(mode)).unwrap();
+            let source = fs::read_to_string(&path).unwrap();
+            let config = parse_user_config(&source).unwrap();
+            assert_eq!(config.terminal.resolved_agent_shell_mode(), (mode, None));
+            assert_eq!(config.terminal.shell.as_deref(), Some("/bin/sh"));
+            assert!(source.contains("# heading"));
+            assert!(source.contains("telemetry: false # keep note"));
+            assert_eq!(
+                source.contains("agent_shell_mode:"),
+                mode != AgentShellMode::Auto
+            );
+        }
+        save_user_terminal_settings_at(&path, Some("/bin/sh"), Some(AgentShellMode::Interactive))
+            .unwrap();
+        save_user_shell_from_settings_at(&path, None).unwrap();
+        let config = parse_user_config(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            config.terminal.resolved_agent_shell_mode().0,
+            AgentShellMode::Interactive
+        );
+        assert!(config.terminal.shell.is_none());
+        save_user_terminal_settings_at(&path, None, Some(AgentShellMode::Auto)).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("terminal:"));
     }
 
     #[cfg(unix)]

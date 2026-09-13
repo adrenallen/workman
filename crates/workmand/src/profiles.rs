@@ -19,9 +19,10 @@ use workman_core::{
 };
 
 use crate::{ProcessRegistry, control::agent_icons};
+use workman_core::shell::{AgentShellMode, ProfileTerminalSettings};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
-const ARCHIVE_VERSION: u32 = 3;
+const ARCHIVE_VERSION: u32 = 4;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -47,6 +48,8 @@ struct ProfileArchive {
     version: u32,
     name: String,
     terminal_shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_shell_mode: Option<AgentShellMode>,
     #[serde(default)]
     folders: Vec<ArchiveFolder>,
     projects: Vec<ArchiveProject>,
@@ -253,25 +256,27 @@ pub(crate) fn switch(
         stopped.push(process.id);
     }
 
-    let outgoing_shell = registry
+    let outgoing_terminal = registry
         .store()
-        .active_profile_terminal_shell()
+        .active_profile_terminal_settings()
         .map_err(store_error)?;
-    let target_shell = registry
+    let target_terminal = registry
         .store()
-        .profile_terminal_shell(profile_id)
+        .profile_terminal_settings(profile_id)
         .map_err(store_error)?;
-    crate::user_config::save_user_shell_from_settings_at(
+    crate::user_config::save_user_terminal_settings_at(
         registry.user_environment_resolver().config_path(),
-        target_shell.as_deref(),
+        target_terminal.shell.as_deref(),
+        Some(target_terminal.agent_shell_mode),
     )
     .map_err(|error| ("profile_config_error", error.to_string()))?;
     let switched = match registry.store().switch_profile(profile_id) {
         Ok(profile) => profile,
         Err(error) => {
-            let _ = crate::user_config::save_user_shell_from_settings_at(
+            let _ = crate::user_config::save_user_terminal_settings_at(
                 registry.user_environment_resolver().config_path(),
-                outgoing_shell.as_deref(),
+                outgoing_terminal.shell.as_deref(),
+                Some(outgoing_terminal.agent_shell_mode),
             );
             return Err(profile_store_error(error));
         }
@@ -364,14 +369,19 @@ pub(crate) fn export(
             icon_png_base64,
         });
     }
+    let terminal = registry
+        .store()
+        .profile_terminal_settings(profile_id)
+        .map_err(store_error)?;
+    let mode =
+        (terminal.agent_shell_mode != AgentShellMode::Auto).then_some(terminal.agent_shell_mode);
     let archive = ProfileArchive {
         format: ARCHIVE_FORMAT.into(),
-        version: ARCHIVE_VERSION,
+        // Auto archives retain the previous schema so older Workman releases can read them.
+        version: if mode.is_some() { ARCHIVE_VERSION } else { 3 },
         name: profile.name,
-        terminal_shell: registry
-            .store()
-            .profile_terminal_shell(profile_id)
-            .map_err(store_error)?,
+        terminal_shell: terminal.shell,
+        agent_shell_mode: mode,
         folders,
         projects,
         agent_tools,
@@ -558,7 +568,15 @@ pub(crate) fn import(
     // checks, and PNG decoding finish before this first durable write.
     let (profile, tool_ids) = registry
         .store()
-        .import_profile(name, terminal_shell.as_deref(), &projects, &tools)
+        .import_profile(
+            name,
+            &ProfileTerminalSettings {
+                shell: terminal_shell,
+                agent_shell_mode: archive.agent_shell_mode.unwrap_or_default(),
+            },
+            &projects,
+            &tools,
+        )
         .map_err(profile_store_error)?;
     if let Err(error) = registry.store().restore_imported_project_folders(
         profile.id,
@@ -744,6 +762,117 @@ fn profile_store_error(error: impl std::fmt::Display) -> (&'static str, String) 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn startup_mode_survives_profile_copy_switch_and_archive_roundtrips() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.yml");
+        fs::write(
+            &config,
+            "# user preferences\nterminal:\n  shell: /bin/sh\n  agent_shell_mode: interactive\n",
+        )
+        .unwrap();
+        let store = workman_core::Store::open_in_memory().unwrap();
+        store
+            .set_active_profile_terminal_settings(&ProfileTerminalSettings {
+                shell: Some("/bin/sh".into()),
+                agent_shell_mode: AgentShellMode::Interactive,
+            })
+            .unwrap();
+        let resolver = crate::UserEnvironmentResolver::new(&config);
+        let mut registry = ProcessRegistry::with_user_environment(store, resolver).unwrap();
+        let (copy, _) = registry.store().create_profile("Copy", true).unwrap();
+        assert_eq!(
+            registry
+                .store()
+                .profile_terminal_settings(copy.id)
+                .unwrap()
+                .agent_shell_mode,
+            AgentShellMode::Interactive
+        );
+        let (empty, _) = registry.store().create_profile("Empty", false).unwrap();
+        assert_eq!(
+            registry
+                .store()
+                .profile_terminal_settings(empty.id)
+                .unwrap(),
+            ProfileTerminalSettings::default()
+        );
+        switch(&mut registry, empty.id, false).unwrap();
+        let parsed =
+            crate::user_config::parse_user_config(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            parsed.terminal.resolved_agent_shell_mode().0,
+            AgentShellMode::Auto
+        );
+        assert!(parsed.terminal.shell.is_none());
+        switch(&mut registry, copy.id, false).unwrap();
+        let info = registry.resolved_user_environment().info().clone();
+        assert_eq!(info.agent_shell_mode, AgentShellMode::Interactive);
+        assert_eq!(info.active_shell, "/bin/sh");
+        assert!(
+            fs::read_to_string(&config)
+                .unwrap()
+                .contains("# user preferences")
+        );
+        registry.store().connection().execute_batch("CREATE TRIGGER block_profile_switch BEFORE UPDATE OF active ON profiles BEGIN SELECT RAISE(ABORT, 'fixture switch failure'); END;").unwrap();
+        assert!(switch(&mut registry, empty.id, false).is_err());
+        assert_eq!(
+            crate::user_config::parse_user_config(&fs::read_to_string(&config).unwrap())
+                .unwrap()
+                .terminal
+                .resolved_agent_shell_mode()
+                .0,
+            AgentShellMode::Interactive
+        );
+        registry
+            .store()
+            .connection()
+            .execute_batch("DROP TRIGGER block_profile_switch;")
+            .unwrap();
+        let archive_path = temp.path().join("profile.json");
+        export(&registry, temp.path(), copy.id, &archive_path).unwrap();
+        let mut archive: serde_json::Value =
+            serde_json::from_slice(&fs::read(&archive_path).unwrap()).unwrap();
+        assert_eq!(archive["agent_shell_mode"], "interactive");
+        assert_eq!(archive["version"], 4);
+        let imported = import(&registry, temp.path(), &archive_path, Some("Imported")).unwrap();
+        let imported_id = imported["profile"]["id"].as_i64().unwrap();
+        assert_eq!(
+            registry
+                .store()
+                .profile_terminal_settings(imported_id)
+                .unwrap()
+                .agent_shell_mode,
+            AgentShellMode::Interactive
+        );
+        archive["agent_shell_mode"] = json!("wrong");
+        fs::write(&archive_path, serde_json::to_vec(&archive).unwrap()).unwrap();
+        assert_eq!(
+            import(&registry, temp.path(), &archive_path, Some("Invalid"))
+                .unwrap_err()
+                .0,
+            "profile_import_invalid"
+        );
+        archive.as_object_mut().unwrap().remove("agent_shell_mode");
+        archive["version"] = json!(3);
+        fs::write(&archive_path, serde_json::to_vec(&archive).unwrap()).unwrap();
+        let old = import(&registry, temp.path(), &archive_path, Some("Old archive")).unwrap();
+        let old_id = old["profile"]["id"].as_i64().unwrap();
+        assert_eq!(
+            registry
+                .store()
+                .profile_terminal_settings(old_id)
+                .unwrap()
+                .agent_shell_mode,
+            AgentShellMode::Auto
+        );
+        export(&registry, temp.path(), old_id, &archive_path).unwrap();
+        let old_export: Value = serde_json::from_slice(&fs::read(&archive_path).unwrap()).unwrap();
+        assert!(old_export.get("agent_shell_mode").is_none());
+        assert_eq!(old_export["version"], 3);
+    }
+
     #[test]
     fn archive_schema_excludes_secret_bearing_global_fields() {
         let archive = ProfileArchive {
@@ -751,6 +880,7 @@ mod tests {
             version: ARCHIVE_VERSION,
             name: "Demo".into(),
             terminal_shell: None,
+            agent_shell_mode: None,
             folders: Vec::new(),
             projects: Vec::new(),
             agent_tools: Vec::new(),

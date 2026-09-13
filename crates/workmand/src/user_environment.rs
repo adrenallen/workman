@@ -26,6 +26,7 @@ use nix::{
 };
 
 use serde::{Deserialize, Serialize};
+use workman_core::shell::{AgentShellMode, ShellInvocation};
 
 use crate::user_config::{UserConfigError, parse_user_config};
 
@@ -66,6 +67,12 @@ pub struct UserEnvironmentInfo {
     pub inferred_shell: String,
     pub inferred_from: String,
     pub using_override: bool,
+    #[serde(default)]
+    pub agent_shell_mode: AgentShellMode,
+    #[serde(default)]
+    pub agent_launch_summary: String,
+    #[serde(default)]
+    pub agent_shell_mode_supported: bool,
     pub capture_mode: EnvironmentCaptureMode,
     pub resolved_path: String,
     pub capture_error: Option<String>,
@@ -110,6 +117,18 @@ impl ResolvedUserEnvironment {
 
     pub fn active_shell(&self) -> &Path {
         Path::new(&self.info.active_shell)
+    }
+
+    pub fn agent_shell_invocation(&self) -> ShellInvocation {
+        self.info.agent_shell_mode.invocation()
+    }
+
+    /// Match the inherited daemon environment and explicit PTY baseline used by agent launches.
+    pub(crate) fn agent_probe_environment(&self) -> BTreeMap<OsString, OsString> {
+        let mut environment = env::vars_os().collect::<BTreeMap<_, _>>();
+        environment.extend(self.pty_environment.clone());
+        environment.insert(OsString::from("TERM_PROGRAM"), OsString::from("WezTerm"));
+        environment
     }
 
     pub fn pty_environment(&self) -> &BTreeMap<OsString, OsString> {
@@ -199,15 +218,18 @@ impl UserEnvironmentResolver {
     }
 
     fn resolve_with_capture(&self, refresh: bool) -> ResolvedUserEnvironment {
-        let (configured_shell, config_warning) = configured_shell(&self.config_path)
-            .unwrap_or_else(|error| (None, Some(error.to_string())));
+        let (terminal, config_warning) = configured_terminal(&self.config_path)
+            .map(|terminal| (terminal, None))
+            .unwrap_or_else(|error| (Default::default(), Some(error.to_string())));
+        let (agent_shell_mode, mode_warning) = terminal.resolved_agent_shell_mode();
+        let configured_shell = terminal.shell;
         let inferred = infer_shell();
         let configured_path = configured_shell.as_deref().map(Path::new);
         let valid_override = configured_path
             .filter(|path| executable_shell(path))
             .map(Path::to_owned);
         let active_shell = valid_override.as_deref().unwrap_or(&inferred.path);
-        let warning = if let Some(configured_path) =
+        let mut warning = if let Some(configured_path) =
             configured_path.filter(|_| valid_override.is_none())
         {
             Some(format!(
@@ -218,6 +240,12 @@ impl UserEnvironmentResolver {
         } else {
             config_warning.or(inferred.warning)
         };
+        if let Some(mode_warning) = mode_warning {
+            warning = Some(warning.map_or_else(
+                || mode_warning.clone(),
+                |warning| format!("{warning} {mode_warning}"),
+            ));
+        }
         let capture = if refresh {
             self.capture(active_shell)
         } else {
@@ -239,6 +267,16 @@ impl UserEnvironmentResolver {
             inferred_shell: inferred.path.to_string_lossy().into_owned(),
             inferred_from: inferred.source.to_owned(),
             using_override: valid_override.is_some(),
+            agent_shell_mode,
+            agent_launch_summary: format!(
+                "{} {}",
+                active_shell.display(),
+                agent_shell_mode
+                    .invocation()
+                    .command_args(active_shell)
+                    .join(" ")
+            ),
+            agent_shell_mode_supported: cfg!(unix),
             capture_mode: capture.mode,
             resolved_path,
             capture_error: capture.error.clone(),
@@ -343,13 +381,18 @@ struct InferredShell {
 }
 
 fn configured_shell(path: &Path) -> Result<(Option<String>, Option<String>), UserConfigError> {
+    Ok((configured_terminal(path)?.shell, None))
+}
+
+fn configured_terminal(
+    path: &Path,
+) -> Result<crate::user_config::UserTerminalConfig, UserConfigError> {
     let yaml = match fs::read_to_string(path) {
         Ok(yaml) => yaml,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
     };
-    let configured = parse_user_config(&yaml)?.terminal.shell;
-    Ok((configured, None))
+    Ok(parse_user_config(&yaml)?.terminal)
 }
 
 fn infer_shell() -> InferredShell {
@@ -555,16 +598,16 @@ fn capture_user_environment_with_baseline(
     let non_interactive = capture_shell_environment(
         shell,
         baseline,
-        ShellCaptureKind::NonInteractiveLogin,
+        ShellInvocation::LOGIN,
         remaining_until(deadline),
     );
     let interactive_baseline = non_interactive.as_ref().unwrap_or(baseline);
     let interactive_kind = if is_bash(shell) {
         // Bash login shells do not read ~/.bashrc. Capture the login profile first, then feed
         // that environment into a real non-login interactive shell so both rc chains apply.
-        ShellCaptureKind::Interactive
+        ShellInvocation::INTERACTIVE
     } else {
-        ShellCaptureKind::InteractiveLogin
+        ShellInvocation::INTERACTIVE_LOGIN
     };
     let interactive = capture_shell_environment(
         shell,
@@ -618,25 +661,6 @@ fn pending_user_environment_capture(shell: &Path) -> CapturedUserEnvironment {
 }
 
 #[cfg(not(windows))]
-#[derive(Clone, Copy, Debug)]
-enum ShellCaptureKind {
-    InteractiveLogin,
-    Interactive,
-    NonInteractiveLogin,
-}
-
-#[cfg(not(windows))]
-impl ShellCaptureKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::InteractiveLogin => "interactive login",
-            Self::Interactive => "interactive",
-            Self::NonInteractiveLogin => "non-interactive login",
-        }
-    }
-}
-
-#[cfg(not(windows))]
 fn is_bash(shell: &Path) -> bool {
     shell
         .file_name()
@@ -653,7 +677,7 @@ fn remaining_until(deadline: Instant) -> Duration {
 fn capture_shell_environment(
     shell: &Path,
     baseline: &BTreeMap<OsString, OsString>,
-    kind: ShellCaptureKind,
+    kind: ShellInvocation,
     timeout: Duration,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let capture_command = concat!(
@@ -663,6 +687,72 @@ fn capture_shell_environment(
         "printf '\\036WORKMAN_ENV_END\\037'; ",
         "exit $workman_env_status",
     );
+    let capture_command = if workman_core::shell::is_fish(shell) {
+        "printf '\\036WORKMAN_ENV_START\\037'; /usr/bin/env -0; set -l workman_env_status $status; printf '\\036WORKMAN_ENV_END\\037'; exit $workman_env_status"
+    } else {
+        capture_command
+    };
+    let stdout = capture_shell_output(shell, baseline, kind, capture_command, timeout)?;
+    parse_environment_capture(&stdout).map_err(|error| {
+        format!(
+            "could not parse {} shell environment: {error}",
+            kind.label()
+        )
+    })
+}
+
+/// Query shell command names without executing their aliases/functions. Use one bounded
+/// shell for the whole health check, using the same startup mode as agent PTY launches.
+#[cfg(unix)]
+pub(crate) fn available_shell_commands(
+    shell: &Path,
+    baseline: &BTreeMap<OsString, OsString>,
+    invocation: ShellInvocation,
+    names: &[String],
+) -> Result<Vec<String>, String> {
+    let mut script = String::new();
+    for (index, name) in names.iter().enumerate() {
+        let probe = workman_core::shell::command_probe(shell, name);
+        script.push_str(&format!(
+            "{probe} && printf '\\036WORKMAN_COMMAND_{index}\\037';\n"
+        ));
+    }
+    script.push_str("printf '\\036WORKMAN_COMMANDS_DONE\\037'\n");
+    let output = capture_shell_output(
+        shell,
+        baseline,
+        invocation,
+        &script,
+        LOGIN_ENVIRONMENT_TIMEOUT,
+    )?;
+    if find_bytes(&output, b"\x1eWORKMAN_COMMANDS_DONE\x1f").is_none() {
+        return Err(format!(
+            "{} shell exited before checking command names",
+            invocation.label()
+        ));
+    }
+    Ok(names
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            find_bytes(
+                &output,
+                format!("\x1eWORKMAN_COMMAND_{index}\x1f").as_bytes(),
+            )
+            .is_some()
+        })
+        .map(|(_, name)| name.clone())
+        .collect())
+}
+
+#[cfg(not(windows))]
+fn capture_shell_output(
+    shell: &Path,
+    baseline: &BTreeMap<OsString, OsString>,
+    kind: ShellInvocation,
+    capture_command: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let mode = kind.label();
     if timeout.is_zero() {
         return Err(format!(
@@ -671,19 +761,9 @@ fn capture_shell_environment(
         ));
     }
     let mut command = Command::new(shell);
-    match kind {
-        ShellCaptureKind::InteractiveLogin => {
-            command.args(["-l", "-i"]);
-        }
-        ShellCaptureKind::Interactive => {
-            command.arg("-i");
-        }
-        ShellCaptureKind::NonInteractiveLogin => {
-            command.arg("-l");
-        }
-    }
     command
-        .args(["-c", capture_command])
+        .args(kind.command_args(shell))
+        .arg(capture_command)
         .envs(baseline)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -773,8 +853,7 @@ fn capture_shell_environment(
             shell.display()
         ));
     }
-    parse_environment_capture(&stdout)
-        .map_err(|error| format!("could not parse {mode} shell environment: {error}"))
+    Ok(stdout)
 }
 
 #[cfg(not(windows))]
@@ -905,9 +984,115 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Isolated shell for unit-test registries; never consult the developer's rc files and
+/// never mutate process-global environment variables while parallel tests are running.
+#[cfg(test)]
+pub(crate) fn test_user_environment() -> UserEnvironmentResolver {
+    static FIXTURE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let shell = temp.path().join("fixture-shell");
+            fs::write(&shell, "#!/bin/sh\nunset ENV BASH_ENV\nwhile [ \"$1\" = -l ] || [ \"$1\" = -i ]; do shift; done\nexec /bin/sh \"$@\"\n").unwrap();
+            fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(temp.path().join("config.yml"), format!("terminal:\n  shell: {:?}\n", shell)).unwrap();
+        }
+        temp
+    });
+    UserEnvironmentResolver::new(fixture.path().join("config.yml"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_agent_mode_keeps_the_configured_shell_and_warns() {
+        let fixture = crate::shell_test_support::ShellFixture::new(Path::new("/bin/bash"));
+        let mut source = fs::read_to_string(&fixture.config).unwrap();
+        source.push_str("  agent_shell_mode: interactiv_typo\n");
+        fs::write(&fixture.config, source).unwrap();
+        let resolver = UserEnvironmentResolver::new(&fixture.config);
+        let info = resolver.resolve().info().clone();
+        assert!(info.using_override);
+        assert_eq!(info.agent_shell_mode, AgentShellMode::Auto);
+        assert!(info.warning.unwrap().contains("interactiv_typo"));
+        assert_eq!(Path::new(&info.active_shell).file_name().unwrap(), "bash");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_modes_follow_native_profile_and_bashrc_rules() {
+        let shell = Path::new("/bin/bash");
+        if !shell.is_file() {
+            return;
+        }
+        let fixture = crate::shell_test_support::ShellFixture::new(shell);
+        fs::write(
+            fixture.home.path().join(".bash_profile"),
+            "alias workman-profile-alias='printf profile'\n",
+        )
+        .unwrap();
+        let names: Vec<String> = vec![
+            "workman-profile-alias".into(),
+            "workman-fixture-alias".into(),
+        ];
+        for (mode, expected) in [
+            (AgentShellMode::Auto, vec![names[0].clone()]),
+            (AgentShellMode::InteractiveLogin, vec![names[0].clone()]),
+            (AgentShellMode::Interactive, vec![names[1].clone()]),
+            (AgentShellMode::Login, vec![]),
+        ] {
+            assert_eq!(
+                available_shell_commands(shell, &fixture.variables, mode.invocation(), &names)
+                    .unwrap(),
+                expected,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_shell_probes_quote_names_and_capture_environment() {
+        for shell in crate::shell_test_support::installed_shells() {
+            let fixture = crate::shell_test_support::ShellFixture::new(&shell);
+            let names = vec![
+                "workman-fixture-alias".into(),
+                "bad'\\\\$(touch $HOME/executed)".into(),
+            ];
+            assert_eq!(
+                available_shell_commands(
+                    &shell,
+                    &fixture.variables,
+                    ShellInvocation::INTERACTIVE_LOGIN,
+                    &names
+                )
+                .unwrap(),
+                vec![names[0].clone()]
+            );
+            assert!(!fixture.home.path().join("executed").exists());
+            let captured = capture_user_environment_with_baseline(
+                &shell,
+                &fixture.variables,
+                Duration::from_secs(4),
+            );
+            assert_eq!(
+                captured.mode,
+                EnvironmentCaptureMode::InteractiveLogin,
+                "{} {:?}",
+                shell.display(),
+                captured.error
+            );
+            assert_eq!(
+                captured.environment.get(OsStr::new("HOME")),
+                fixture.variables.get(OsStr::new("HOME"))
+            );
+        }
+    }
 
     #[cfg(unix)]
     use std::{os::unix::fs::PermissionsExt, thread};
@@ -1353,6 +1538,9 @@ mod tests {
                 inferred_shell: shell.display().to_string(),
                 inferred_from: "test".to_owned(),
                 using_override: false,
+                agent_shell_mode: AgentShellMode::Auto,
+                agent_launch_summary: "/bin/sh -l -i -c".into(),
+                agent_shell_mode_supported: true,
                 capture_mode: EnvironmentCaptureMode::InteractiveLogin,
                 resolved_path: String::new(),
                 capture_error: None,

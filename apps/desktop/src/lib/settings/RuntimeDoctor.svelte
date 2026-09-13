@@ -128,7 +128,7 @@
     <div class="summary-copy">
       <span class="eyebrow">Runtime Doctor</span>
       <h2 id="runtime-doctor-title">{health?.summary ?? 'Checking agent runtimes…'}</h2>
-      <p>Ready means both the executable and isolated Workman MCP wiring are available.</p>
+      <p>Ready means the command and isolated Workman MCP wiring are available. Aliases and functions use the agent startup mode in Terminal settings.</p>
     </div>
     <button class="refresh" type="button" disabled={!connected || loading} onclick={() => void refresh()}>
       <span aria-hidden="true" class:spinning={loading}>↻</span>{loading ? 'Checking…' : 'Refresh health'}

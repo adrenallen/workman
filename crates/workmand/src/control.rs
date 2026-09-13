@@ -507,6 +507,11 @@ struct UserShellParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentShellModeParams {
+    mode: workman_core::shell::AgentShellMode,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentToolConfigWriteParams {
     agent_tool_id: AgentToolId,
     confirm_write: bool,
@@ -914,6 +919,24 @@ async fn dispatch(
                 .await
                 .map_err(|error| ("terminal_theme_import_error", error.to_string()))?;
             return Ok(json_value(report));
+        }
+        "settings.agent_shell_mode" => {
+            let params: AgentShellModeParams = params_as(params)?;
+            let resolver = registry.lock().await.user_environment_resolver().clone();
+            let resolved = resolver.resolve();
+            crate::user_config::save_user_terminal_settings_at(
+                resolver.config_path(),
+                resolved.info().configured_shell.as_deref(),
+                Some(params.mode),
+            )
+            .map_err(|error| ("user_config_error", error.to_string()))?;
+            registry
+                .lock()
+                .await
+                .store()
+                .set_active_profile_agent_shell_mode(params.mode)
+                .map_err(project_store_error)?;
+            return Ok(json_value(resolver.resolve().info().clone()));
         }
         "settings.user_shell" => {
             let params: UserShellParams = params_as(params)?;

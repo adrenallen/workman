@@ -89,6 +89,15 @@ have installed. Workman shows a live status beside each agent and notifies you w
 or finishes. Agent templates let you save a preferred tool, setup, and starting prompt for work you
 repeat often.
 
+On macOS and Linux, agent commands can use aliases and functions from your shell's startup
+files. Workman starts agents in an interactive login shell by default, with native zsh, Bash,
+and Fish startup behavior. In **Settings > Terminal > Agent startup**, choose **Interactive only**
+if your Bash login profile does not source `.bashrc`, or **Login only** to skip interactive
+startup files that are noisy or block startup. The mode applies to new agent launches and
+availability checks, and is saved with the active profile. You can also set
+`terminal.agent_shell_mode` in your user YAML config to `auto`, `login`, `interactive`, or
+`interactive_login`.
+
 ### Terminals and commands
 
 A terminal is a normal shell connected to the selected project. Commands are saved development

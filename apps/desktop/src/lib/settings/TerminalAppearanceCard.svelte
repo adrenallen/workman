@@ -12,7 +12,7 @@
     type TerminalFontId
   } from '../appearance';
   import type { DaemonClient } from '../daemon';
-  import type { UserEnvironmentInfo } from '../settings';
+  import type { AgentShellMode, UserEnvironmentInfo } from '../settings';
   import TerminalThemeControls from './TerminalThemeControls.svelte';
 
   interface Props {
@@ -20,15 +20,18 @@
     environment: UserEnvironmentInfo | null;
     connected: boolean;
     onShellChange: (shell: string | null) => Promise<void>;
+    onAgentShellModeChange: (mode: AgentShellMode) => Promise<void>;
   }
 
-  let { client, environment, connected, onShellChange }: Props = $props();
+  let { client, environment, connected, onShellChange, onAgentShellModeChange }: Props = $props();
 
   let fontChoices = $state(installedTerminalFonts($appearance.terminalProfileStyle));
   let shellMode = $state<'auto' | 'custom'>('auto');
   let customShell = $state('');
   let savingShell = $state(false);
   let shellError = $state<string | null>(null);
+  let savingAgentMode = $state(false);
+  let agentModeError = $state<string | null>(null);
   let terminalPreviewStyle = $derived(terminalProfileXtermOptions(
     $appearance.terminalProfileStyle,
     terminalFontCss($appearance.terminalFont, $appearance.terminalProfileStyle),
@@ -70,6 +73,21 @@
       savingShell = false;
     }
   }
+
+  async function saveAgentMode(event: Event): Promise<void> {
+    const select = event.currentTarget as HTMLSelectElement;
+    const mode = select.value as AgentShellMode;
+    savingAgentMode = true;
+    agentModeError = null;
+    try {
+      await onAgentShellModeChange(mode);
+    } catch (cause) {
+      select.value = environment?.agent_shell_mode ?? 'auto';
+      agentModeError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      savingAgentMode = false;
+    }
+  }
 </script>
 
 <section class="terminal-section" aria-labelledby="terminal-appearance-title">
@@ -85,7 +103,7 @@
   <div class="setting-row shell-row">
     <div class="setting-copy">
       <strong>Shell</strong>
-      <small>Login profiles provide the PATH used by launches and runtime checks.</small>
+      <small>Your shell provides the startup files used by terminals and agents.</small>
     </div>
     <div class="shell-control">
       <div class="shell-fields">
@@ -140,6 +158,33 @@
       {/if}
     </div>
   </div>
+
+  {#if environment?.agent_shell_mode_supported}
+    <div class="setting-row shell-row">
+      <div class="setting-copy">
+        <strong>Agent startup</strong>
+        <small>Auto loads login and interactive startup files. Choose Interactive only if your Bash login profile does not load .bashrc.</small>
+      </div>
+      <div class="shell-control">
+        <span class="select-wrap">
+          <select
+            aria-label="Agent startup mode"
+            value={environment.agent_shell_mode ?? 'auto'}
+            disabled={!connected || savingAgentMode || savingShell}
+            onchange={saveAgentMode}
+          >
+            <option value="auto">Auto (recommended)</option>
+            <option value="login">Login only</option>
+            <option value="interactive">Interactive only</option>
+            <option value="interactive_login">Interactive login</option>
+          </select>
+          <span aria-hidden="true">⌄</span>
+        </span>
+        <p class="shell-summary">Applies to new agent launches and health checks in this profile. Login only skips interactive startup files.</p>
+        {#if agentModeError}<p class="shell-warning" role="status">{agentModeError}</p>{/if}
+      </div>
+    </div>
+  {/if}
 
   <label class="setting-row">
     <span class="setting-copy"><strong>Font family</strong><small>Bundled or installed monospace faces.</small></span>

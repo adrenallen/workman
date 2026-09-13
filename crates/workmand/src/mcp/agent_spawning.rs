@@ -2985,6 +2985,18 @@ fn shell_quote(argument: &str) -> String {
     {
         return argument.to_owned();
     }
+    // Fish interprets pairs of backslashes even inside single quotes. Emit each
+    // literal backslash outside quotes so generated arguments work in both Fish
+    // and POSIX shells without rewriting the user's command.
+    #[cfg(unix)]
+    {
+        argument
+            .split('\\')
+            .map(|part| format!("'{}'", part.replace('\'', "'\"'\"'")))
+            .collect::<Vec<_>>()
+            .join("\\\\")
+    }
+    #[cfg(not(unix))]
     format!("'{}'", argument.replace('\'', "'\"'\"'"))
 }
 
@@ -3122,7 +3134,7 @@ mod tests {
 
     #[test]
     fn template_agent_overrides_skip_template_args_but_keep_its_prompt() {
-        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
         for (id, name, enabled) in [
             (91, "Default agent", true),
             (92, "Override agent", true),
@@ -3358,7 +3370,7 @@ mod tests {
 
     #[test]
     fn template_model_override_is_duplicate_free_and_omission_preserves_composed_args() {
-        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
         let mut tool = load_agent_tools(&registry)
             .unwrap()
             .into_iter()
@@ -3432,7 +3444,7 @@ mod tests {
 
     #[test]
     fn template_summaries_skip_a_dangling_tool_without_hiding_valid_templates() {
-        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
         let tool = load_agent_tools(&registry).unwrap().remove(0);
         registry
             .store()
@@ -3533,7 +3545,7 @@ mod tests {
 
     #[test]
     fn migration_presets_and_custom_commands_are_listed_together() {
-        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
         registry
             .store()
             .put_agent_tool(&AgentTool {
@@ -3564,7 +3576,7 @@ mod tests {
 
     #[test]
     fn config_managed_tools_are_read_only_through_registry_mutations() {
-        let registry = ProcessRegistry::new(Store::open_in_memory().unwrap()).unwrap();
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
         registry
             .store()
             .put_agent_tool(&AgentTool {
@@ -3611,6 +3623,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command, "claude --flag plain 'two words' 'don'\"'\"'t' ''");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_shells_preserve_generated_agent_arguments() {
+        for shell in crate::shell_test_support::installed_shells() {
+            let fixture = crate::shell_test_support::ShellFixture::new(&shell);
+            let arguments = vec![
+                "two words".into(),
+                "don't \"expand\" $HOME $(touch injected)".into(),
+                r"one\two\\three\".into(),
+                String::new(),
+                r#"{"path":"a\\b","text":"quoted\"text"}"#.into(),
+            ];
+            let command = command_with_args("workman-fixture-alias", &arguments).unwrap();
+            let output = std::process::Command::new(&shell)
+                .args(
+                    workman_core::shell::AgentShellMode::Auto
+                        .invocation()
+                        .command_args(&shell),
+                )
+                .arg(command)
+                .env_clear()
+                .envs(&fixture.variables)
+                .current_dir(fixture.home.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}: {:?}", shell.display(), output);
+            let expected = std::iter::once("alias arg".to_owned())
+                .chain(arguments)
+                .map(|argument| format!("ARGS:<{argument}>\n"))
+                .collect::<String>();
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                expected,
+                "{}",
+                shell.display()
+            );
+            assert!(!fixture.home.path().join("injected").exists());
+        }
     }
 
     #[test]

@@ -7,8 +7,10 @@
     restartDaemon,
     setAutomaticUpdateChecks,
     setUserShell,
+    setAgentShellMode,
     setUpdateChannel,
     type DaemonSettingsInfo,
+    type AgentShellMode,
     type UpdateChannel
   } from './settings';
   import {
@@ -145,6 +147,16 @@
     }
   }
 
+  async function saveAgentShellMode(mode: AgentShellMode): Promise<void> {
+    if (!info || connection.status !== 'connected') return;
+    try {
+      info = { ...info, user_environment: await setAgentShellMode(client, mode) };
+    } catch (cause) {
+      onError(message(cause));
+      throw cause;
+    }
+  }
+
   async function checkUpdate(): Promise<void> {
     if (!info || updateBusy) return;
     updateBusy = 'check';
@@ -238,6 +250,7 @@
           environment={info?.user_environment ?? null}
           connected={connection.status === 'connected'}
           onShellChange={saveUserShell}
+          onAgentShellModeChange={saveAgentShellMode}
         />
       {:else if $settingsSection === 'sidebar'}
         <SidebarCard />
