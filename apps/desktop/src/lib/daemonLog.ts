@@ -33,6 +33,14 @@ export function isDaemonRequestTimeoutError(cause: unknown): cause is DaemonRequ
   return cause instanceof DaemonRequestTimeoutError;
 }
 
+/** Clear a stale timeout banner, including errors passed through string-only UI callbacks. */
+export function clearRecoveredDaemonTimeout(message: string | null): string | null {
+  return message !== null
+    && /^(?:Error:\s*)?(?:The )?daemon did not (?:answer|respond) in time[.!]?$/i.test(message.trim())
+    ? null
+    : message;
+}
+
 export function appendDaemonLogEntry(
   entries: DaemonLogEntry[],
   entry: NewDaemonLogEntry,

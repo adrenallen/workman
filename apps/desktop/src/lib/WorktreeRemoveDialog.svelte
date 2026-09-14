@@ -82,7 +82,7 @@
         <span class="grid gap-1">
           <strong>Also delete from my computer</strong>
           <span class="text-xs leading-relaxed text-muted-foreground">
-            {#if knownMissingRegistration}Unavailable because the folder is already missing; files stay untouched.{:else if entry && entry.kind !== 'main'}Runs local Git worktree removal and pruning. The branch is kept in {repository?.name ?? 'the repository'}.{:else if entry}Deletes this primary checkout. Remote Git branches are never changed.{:else}Permanently deletes this local folder.{/if}
+            {#if knownMissingRegistration}Unavailable because the folder is already missing; files stay untouched.{:else if entry && entry.kind !== 'main'}Runs local Git worktree removal and pruning. {#if entry.branch.startsWith('detached@')}This worktree has no branch.{:else}The branch is kept in {repository?.name ?? 'the repository'}.{/if}{:else if entry}Deletes this primary checkout. Remote Git branches are never changed.{:else}Permanently deletes this local folder.{/if}
           </span>
         </span>
       </label>
@@ -97,46 +97,28 @@
       {#if forceRequired}
         <div class="grid gap-3 rounded border border-warning/40 bg-warning/10 px-3 py-3">
           <div class="grid gap-1">
-            <strong class="text-sm text-warning">Pending local work will be permanently deleted</strong>
+            <strong class="text-sm text-warning">Local work at risk</strong>
             <span class="text-xs leading-relaxed text-muted-foreground">Review the exact changes below, then choose <strong class="text-foreground">Delete anyway</strong>.</span>
           </div>
           {#if safety}
             <ul class="change-groups">
               {#if safety.dirty_files > 0}
                 <li>
-                  <strong>{safety.dirty_files} changed file{safety.dirty_files === 1 ? '' : 's'} · {safety.untracked_files} untracked</strong>
+                  <strong>{safety.dirty_files} uncommitted file{safety.dirty_files === 1 ? '' : 's'} · {safety.untracked_files} untracked</strong>
+                  <span class="summary">These changes will be permanently deleted. Gitignored files are excluded from this list.</span>
                   <ul class="path-list">
                     {#each safety.dirty_paths.slice(0, 6) as dirtyPath}<li><code>{dirtyPath}</code></li>{/each}
                     {#if safety.dirty_paths.length > 6}<li class="more">+{safety.dirty_paths.length - 6} more</li>{/if}
                   </ul>
                 </li>
               {/if}
-              {#if safety.ignored_files > 0}
+              {#if safety.at_risk_commits > 0}
                 <li>
-                  <strong>{safety.ignored_files} ignored local path{safety.ignored_files === 1 ? '' : 's'}</strong>
-                  <span class="summary">Build output, dependencies, and other ignored content are included in deletion.</span>
-                  <ul class="path-list">
-                    {#each safety.ignored_paths.slice(0, 4) as ignoredPath}<li><code>{ignoredPath}</code></li>{/each}
-                    {#if safety.ignored_paths.length > 4}<li class="more">+{safety.ignored_paths.length - 4} more</li>{/if}
-                  </ul>
-                </li>
-              {/if}
-              {#if safety.unpushed_commits > 0}
-                <li>
-                  <strong>{safety.unpushed_commits} unpushed commit{safety.unpushed_commits === 1 ? '' : 's'}</strong>
-                  <span class="summary">{safety.push_target ? `Not pushed to ${safety.push_target}.` : `No upstream; not present in ${safety.merge_target}.`}</span>
+                  <strong>{safety.at_risk_commits} local commit{safety.at_risk_commits === 1 ? '' : 's'} at risk</strong>
+                  <span class="summary">Deletion removes their last local reference. They are not present in any fetched remote branch.</span>
                   <ul class="subject-list">
-                    {#each safety.unpushed_subjects as subject}<li>{subject}</li>{/each}
-                    {#if safety.unpushed_commits > safety.unpushed_subjects.length}<li class="more">+{safety.unpushed_commits - safety.unpushed_subjects.length} more</li>{/if}
-                  </ul>
-                </li>
-              {/if}
-              {#if safety.unmerged_commits > 0}
-                <li>
-                  <strong>{safety.unmerged_commits} commit{safety.unmerged_commits === 1 ? '' : 's'} not merged into <code>{safety.merge_target}</code></strong>
-                  <ul class="subject-list">
-                    {#each safety.unmerged_subjects as subject}<li>{subject}</li>{/each}
-                    {#if safety.unmerged_commits > safety.unmerged_subjects.length}<li class="more">+{safety.unmerged_commits - safety.unmerged_subjects.length} more</li>{/if}
+                    {#each safety.at_risk_subjects as subject}<li>{subject}</li>{/each}
+                    {#if safety.at_risk_commits > safety.at_risk_subjects.length}<li class="more">+{safety.at_risk_commits - safety.at_risk_subjects.length} more</li>{/if}
                   </ul>
                 </li>
               {/if}

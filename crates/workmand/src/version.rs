@@ -41,14 +41,20 @@ mod tests {
 
     #[test]
     fn current_version_is_compatible_and_other_builds_are_not() {
-        assert!(DaemonVersion::current().matches_current_build());
-        assert!(
-            !DaemonVersion {
-                version: BUILD_VERSION.to_owned(),
-                build_id: "older-build".to_owned(),
-                control_protocol_version: CONTROL_PROTOCOL_VERSION,
-            }
-            .matches_current_build()
-        );
+        let current = DaemonVersion::current();
+        assert!(current.matches_current_build());
+
+        let mut different_version = current.clone();
+        different_version.version.push_str("-other");
+        assert!(!different_version.matches_current_build());
+
+        let mut different_build = current.clone();
+        different_build.build_id.push_str("-other");
+        assert!(!different_build.matches_current_build());
+
+        let mut different_protocol = current;
+        different_protocol.control_protocol_version =
+            different_protocol.control_protocol_version.wrapping_add(1);
+        assert!(!different_protocol.matches_current_build());
     }
 }

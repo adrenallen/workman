@@ -956,10 +956,11 @@ impl<'a> TimerService<'a> {
 
     fn process_is_idle(&mut self, process_id: ProcessId) -> TimerResult<bool> {
         match self.registry.get_status(process_id) {
-            Ok(status) => Ok(matches!(
-                status.agent_state.state,
-                AttentionState::Idle | AttentionState::Waiting
-            )),
+            Ok(status) => Ok(!self.registry.has_pending_prompts(process_id)
+                && matches!(
+                    status.agent_state.state,
+                    AttentionState::Idle | AttentionState::Waiting
+                )),
             Err(RegistryError::NotFound(_)) => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -982,6 +983,11 @@ impl<'a> TimerService<'a> {
                     timer.kind == TimerKind::IdleAll && idle,
                 ));
             let before = progress.clone();
+            // A new prompt invalidates an earlier completion while idle_all is
+            // still waiting for the other children (or wake delivery is retrying).
+            if self.registry.has_pending_prompts(*process_id) {
+                *progress = WatchProgress::new(false, false);
+            }
             advance_watch_progress(progress, idle);
             changed |= *progress != before;
             if !before.satisfied && progress.satisfied {
@@ -1957,6 +1963,123 @@ mod tests {
             "max-wait wake must not suppress the watched process's later completion"
         );
         wait_for_output(&mut registry, DELIVERY_ID, "received:[timeout wake]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_watches_wait_for_pending_prompts_and_the_resulting_turn() {
+        let mut registry = test_registry(true);
+        let initial_prompt = registry.reserve_prompt(WORKER_ID).unwrap();
+        let another_prompt = registry.reserve_prompt(WORKER_ID).unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+
+        let mut timer_ids = Vec::new();
+        for kind in [TimerKind::IdleAny, TimerKind::IdleAll] {
+            let outcome = TimerService::new(&mut registry)
+                .set_idle(
+                    "pending-prompt-owner".into(),
+                    DELIVERY_ID,
+                    "child finished".into(),
+                    kind,
+                    vec![WORKER_ID],
+                    100_000,
+                    0,
+                )
+                .unwrap();
+            let IdleTimerOutcome::Created(timer) = outcome else {
+                panic!("a pending initial prompt must prevent already_satisfied");
+            };
+            timer_ids.push(timer.timer.id);
+        }
+        registry.set_notify_on_idle(WORKER_ID, true).unwrap();
+        // Even an expired alert debounce must not consume a startup idle frame.
+        registry
+            .store()
+            .connection()
+            .execute("UPDATE process_idle_watches SET ready_since = 0", [])
+            .unwrap();
+        assert!(registry.get_status(WORKER_ID).unwrap().notify_on_idle);
+        assert!(TimerService::new(&mut registry).tick(1).unwrap().is_empty());
+        drop(another_prompt);
+        assert!(TimerService::new(&mut registry).tick(2).unwrap().is_empty());
+
+        registry.submit_input(WORKER_ID, b"go").unwrap();
+        drop(initial_prompt);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        assert!(TimerService::new(&mut registry).tick(3).unwrap().is_empty());
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let fires = TimerService::new(&mut registry).tick(4).unwrap();
+        assert_eq!(fires.len(), 2);
+        assert!(
+            fires
+                .iter()
+                .all(|fire| fire.reason == TimerFireReason::IdleTransition)
+        );
+        assert!(fires.iter().all(|fire| timer_ids.contains(&fire.timer_id)));
+        assert!(!registry.has_pending_prompts(WORKER_ID));
+        registry
+            .store()
+            .connection()
+            .execute("UPDATE process_idle_watches SET ready_since = 0", [])
+            .unwrap();
+        assert!(!registry.get_status(WORKER_ID).unwrap().notify_on_idle);
+        assert!(TimerService::new(&mut registry).tick(5).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_all_invalidates_a_completed_child_when_another_prompt_is_pending() {
+        let mut registry = test_registry(true);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let other_prompt = registry.reserve_prompt(DELIVERY_ID).unwrap();
+        wait_for_state(&mut registry, DELIVERY_ID, AttentionState::Idle);
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "pending-prompt-owner".into(),
+                DELIVERY_ID,
+                "all finished".into(),
+                TimerKind::IdleAll,
+                vec![WORKER_ID, DELIVERY_ID],
+                100_000,
+                0,
+            )
+            .unwrap();
+        assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
+        let new_prompt = registry.reserve_prompt(WORKER_ID).unwrap();
+        drop(other_prompt);
+        assert!(TimerService::new(&mut registry).tick(1).unwrap().is_empty());
+        // Dropping an abandoned prompt releases its reservation too.
+        drop(new_prompt);
+        let fires = TimerService::new(&mut registry).tick(2).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].reason, TimerFireReason::IdleTransition);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_prompts_preserve_the_idle_watch_max_wait_deadline() {
+        let mut registry = test_registry(true);
+        let _pending_prompt = registry.reserve_prompt(WORKER_ID).unwrap();
+        TimerService::new(&mut registry)
+            .set_idle(
+                "pending-prompt-owner".into(),
+                DELIVERY_ID,
+                "deadline reached".into(),
+                TimerKind::IdleAll,
+                vec![WORKER_ID],
+                100,
+                0,
+            )
+            .unwrap();
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(99)
+                .unwrap()
+                .is_empty()
+        );
+        let fires = TimerService::new(&mut registry).tick(100).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].reason, TimerFireReason::MaxWait);
     }
 
     #[cfg(unix)]

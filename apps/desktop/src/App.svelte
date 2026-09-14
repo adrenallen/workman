@@ -159,6 +159,7 @@
   } from './lib/daemon';
   import {
     appendDaemonLogEntry,
+    clearRecoveredDaemonTimeout,
     isDaemonRequestTimeoutError,
     type DaemonLogEntry,
     type DaemonLogTone
@@ -955,6 +956,9 @@
       if (active) stopWindowFocus = stop;
       else stop();
     }).catch(reportError);
+    const stopDaemonRecovery = client.onResponsive(() => {
+      if (active) error = clearRecoveredDaemonTimeout(error);
+    });
     const stopStatuses = client.onProcessStatuses((next) => {
       if (!active) return;
       profileProcesses = next;
@@ -1123,6 +1127,7 @@
       if (updateProgressTimer) clearTimeout(updateProgressTimer);
       if (updateRestartTimer) clearTimeout(updateRestartTimer);
       stopStatuses();
+      stopDaemonRecovery();
       stopNavigation();
       stopNativeMenu();
       stopFeedbackEvents();

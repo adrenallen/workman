@@ -166,7 +166,7 @@
   });
 
   $effect(() => {
-    const initialRef = defaultRef ?? refOptions.find(option => option.source === 'current')?.name;
+    const initialRef = refOptions.find(option => option.source === 'current')?.name ?? defaultRef;
     if (mode !== 'create' || !initialRef || baseRefTouched || appliedDefaultRef) return;
     appliedDefaultRef = true;
     baseRef = initialRef;
@@ -582,7 +582,7 @@
                     aria-activedescendant={baseRefOpen && activeRefOption ? `worktree-ref-option-${baseRefOptionIndex}` : undefined}
                     aria-invalid={refValidation === 'invalid'}
                     aria-describedby={refValidationError ? 'worktree-base-ref-help worktree-base-ref-error' : 'worktree-base-ref-help'}
-                    placeholder={branchesLoading ? 'Detecting origin default…' : 'HEAD, origin/main, tag, or commit'}
+                    placeholder={branchesLoading ? 'Reading current branch…' : 'HEAD, origin/main, tag, or commit'}
                     autocomplete="off"
                     autocapitalize="off"
                     autocorrect="off"
@@ -636,7 +636,7 @@
                   </div>
                 {/if}
               </div>
-              <small id="worktree-base-ref-help" class="text-xs text-muted-foreground">HEAD = your current checkout state; {defaultRef ? `${defaultRef} = the latest remote default branch.` : 'use origin/<branch> for the latest remote branch.'}</small>
+              <small id="worktree-base-ref-help" class="text-xs text-muted-foreground">Defaults to the branch checked out in the repository home. HEAD uses that checkout’s current commit; use origin/&lt;branch&gt; for the latest remote branch.</small>
               {#if refValidationError}
                 <p id="worktree-base-ref-error" class="text-xs text-destructive" role="alert">{refValidationError}</p>
               {/if}

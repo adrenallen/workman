@@ -358,6 +358,7 @@ export class DaemonClient
   private unlisten: UnlistenFn[] = [];
   private terminalListeners = new Set<(frame: TerminalFrame) => void>();
   private processListeners = new Set<(processes: ProcessView[]) => void>();
+  private responsiveListeners = new Set<() => void>();
   private updateProgressListeners = new Map<string, (progress: UpdateProgress) => void>();
 
   async start(
@@ -1088,6 +1089,12 @@ export class DaemonClient
     return () => this.processListeners.delete(listener);
   }
 
+  /** Reports daemon recovery even when a reply arrives after its request timed out. */
+  onResponsive(listener: () => void): () => void {
+    this.responsiveListeners.add(listener);
+    return () => this.responsiveListeners.delete(listener);
+  }
+
   /**
    * `desktopSurface` names the file this desktop was launched from (an AppImage on Linux) so a
    * daemon started by the command-line tools can refresh that desktop too.
@@ -1139,6 +1146,7 @@ export class DaemonClient
     this.pending.clear();
     this.terminalListeners.clear();
     this.processListeners.clear();
+    this.responsiveListeners.clear();
     this.updateProgressListeners.clear();
     resetLiveStats();
     resetTimerLifecycle();
@@ -1217,7 +1225,14 @@ export class DaemonClient
 
   private setConnectionStatus(status: ConnectionStatus): void {
     this.connected = status.status === 'connected';
-    if (this.connected) this.flushInputQueue();
+    if (this.connected) {
+      this.notifyResponsive();
+      this.flushInputQueue();
+    }
+  }
+
+  private notifyResponsive(): void {
+    for (const listener of this.responsiveListeners) listener();
   }
 
   private flushInputQueue(): void {
@@ -1260,6 +1275,7 @@ export class DaemonClient
     }
     const event = response as ProcessStatusesEvent;
     if (event.event === 'process.statuses' && Array.isArray(event.processes)) {
+      this.notifyResponsive();
       if (event.stats && typeof event.stats.sampled_at === 'number') {
         updateLiveStats(event.stats);
       }
@@ -1288,7 +1304,11 @@ export class DaemonClient
       return;
     }
     const rpc = response as DaemonResponse;
-    if (typeof rpc.id !== 'string') return;
+    if (typeof rpc.id !== 'string' || typeof rpc.ok !== 'boolean') return;
+
+    // An expired request has no pending promise, but its late reply still proves
+    // the daemon is responding and should clear a stale timeout banner.
+    this.notifyResponsive();
 
     const pending = this.pending.get(rpc.id);
     if (!pending) return;

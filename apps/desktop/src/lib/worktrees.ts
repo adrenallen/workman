@@ -87,15 +87,8 @@ export interface WorktreeDeleteSafety {
   dirty_files: number;
   untracked_files: number;
   dirty_paths: string[];
-  ignored_files: number;
-  ignored_paths: string[];
-  unpushed_commits: number;
-  unpushed_subjects: string[];
-  unmerged_commits: number;
-  unmerged_subjects: string[];
-  upstream: string | null;
-  push_target: string | null;
-  merge_target: string;
+  at_risk_commits: number;
+  at_risk_subjects: string[];
   dependent_worktrees: string[];
   requires_force: boolean;
 }

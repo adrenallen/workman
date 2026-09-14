@@ -106,7 +106,7 @@ struct WorktreeRemoveArgs {
     /// Also delete the exact local project directory. Linked worktrees use Git removal and local metadata pruning. Defaults to false.
     #[serde(default)]
     delete_from_disk: bool,
-    /// Permit deleting dirty, untracked, or ignored local paths, unpublished commits, or a primary checkout with dependent worktrees.
+    /// Permit deleting uncommitted, non-ignored files, commits whose last local reference would be removed, or a primary checkout with dependent worktrees.
     #[serde(default)]
     force_dirty: bool,
 }

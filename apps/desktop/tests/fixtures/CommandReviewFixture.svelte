@@ -19,7 +19,7 @@
 }} onClose={() => { dialog = null; }} onApprove={() => { result = 'Approved'; dialog = null; }} />
 {:else if dialog === 'branch'}
 <WorktreeDialog mode="create" sourceProject={project} {repository}
-  refOptions={[{ name: 'main', source: 'current' }, { name: 'origin/main', source: 'default' }, { name: 'origin/dev', source: 'remote' }]}
+  refOptions={[{ name: 'dev', source: 'current' }, { name: 'origin/main', source: 'default' }, { name: 'origin/dev', source: 'remote' }]}
   defaultRef="origin/main" onLoadBranches={() => {}}
   onValidateRef={async ref => ({ repository_id: 1, requested_ref: ref, resolved_ref: ref, commit: '0123456789abcdef' })}
   onSubmit={submission => { result = JSON.stringify(submission); dialog = null; }}

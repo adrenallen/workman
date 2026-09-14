@@ -26,7 +26,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
-use crate::attention::{AgentState, AttentionTracker};
+use crate::attention::{AgentState, AttentionTracker, PendingPrompt};
 use crate::output_spill::{OutputSpill, OutputSpillSink};
 use crate::shell::ShellInvocation;
 #[cfg(test)]
@@ -523,6 +523,7 @@ pub struct PtyProcess {
 pub struct PtyInputHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     submission_tx: mpsc::Sender<PtySubmission>,
+    attention: AttentionTracker,
 }
 
 impl PtyInputHandle {
@@ -562,6 +563,7 @@ impl PtyInputHandle {
                 content: content.to_vec(),
                 key_delay,
                 verification,
+                _pending_prompt: self.attention.reserve_prompt(),
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
     }
@@ -571,6 +573,7 @@ struct PtySubmission {
     content: Vec<u8>,
     key_delay: Duration,
     verification: Option<PtySubmissionVerification>,
+    _pending_prompt: PendingPrompt,
 }
 
 /// Verification policy for an interactive-agent submission.
@@ -839,6 +842,7 @@ impl PtyProcess {
         Some(PtyInputHandle {
             writer: Arc::clone(self.writer.as_ref()?),
             submission_tx: self.submission_tx.as_ref()?.clone(),
+            attention: self.attention.clone(),
         })
     }
 
@@ -1095,6 +1099,9 @@ fn process_submissions(
             if write_and_flush(&writer, b"\r").is_err() {
                 return;
             }
+            // Queueing may precede Enter by seconds; start the input grace period
+            // at the actual keypress as well as when the daemon accepted the prompt.
+            attention.observe_input();
             let Some(verification) = submission.verification else {
                 break;
             };
@@ -2100,6 +2107,14 @@ mod tests {
             started.elapsed()
         );
 
+        let attention = process.attention_tracker();
+        assert!(attention.has_pending_prompts());
+        wait_for_output(&process, b"MSG:first");
+        assert!(
+            attention.has_pending_prompts(),
+            "the second prompt is still queued"
+        );
+
         let output = wait_for_output(&process, b"MSG:second");
         let output = String::from_utf8_lossy(&output);
         let first = output.find("MSG:first").expect("first submission output");
@@ -2114,6 +2129,28 @@ mod tests {
             status.success(),
             "submission fixture exited with {status:?}"
         );
+        assert!(!attention.has_pending_prompts());
+        assert!(attention.snapshot().last_input_at.is_some());
+    }
+
+    #[test]
+    fn failed_or_discarded_submissions_release_pending_prompts() {
+        let attention = AttentionTracker::new(None);
+        let (submission_tx, submission_rx) = mpsc::channel();
+        let input = PtyInputHandle {
+            writer: Arc::new(Mutex::new(Box::new(io::sink()))),
+            submission_tx,
+            attention: attention.clone(),
+        };
+        input.submit_input(b"first", Duration::ZERO).unwrap();
+        input.submit_input(b"second", Duration::ZERO).unwrap();
+        let first = submission_rx.recv().unwrap();
+        drop(first);
+        assert!(attention.has_pending_prompts());
+        drop(submission_rx);
+        assert!(!attention.has_pending_prompts());
+        assert!(input.submit_input(b"closed", Duration::ZERO).is_err());
+        assert!(!attention.has_pending_prompts());
     }
 
     #[cfg(unix)]

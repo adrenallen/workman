@@ -840,6 +840,118 @@ async fn branch_picker_lists_unchecked_local_and_origin_branches() -> Result<(),
 }
 
 #[tokio::test]
+async fn new_worktree_base_uses_the_repository_home_local_checkout() -> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    git(&fixture.main, &["remote", "set-head", "origin", "main"])?;
+    git(&fixture.main, &["checkout", "-b", "dev"])?;
+    git(&fixture.main, &["push", "-u", "origin", "dev"])?;
+    let remote_dev = git(&fixture.main, &["rev-parse", "origin/dev"])?;
+    fs::write(
+        fixture.main.join("local-dev.txt"),
+        "unpushed development work\n",
+    )?;
+    git(&fixture.main, &["add", "local-dev.txt"])?;
+    git(&fixture.main, &["commit", "-m", "local dev is ahead"])?;
+    let local_dev = git(&fixture.main, &["rev-parse", "HEAD"])?;
+    assert_ne!(local_dev, remote_dev);
+
+    // Opening Create from a linked project must still use the repository home,
+    // not that project's branch or the origin default.
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/source",
+            fixture.external.to_str().unwrap(),
+            "main",
+        ],
+    )?;
+    let adopted = worktrees::adopt(
+        &fixture.registry,
+        AdoptWorktree {
+            path: fixture.external.clone(),
+            display_name: None,
+            preferences: BTreeMap::new(),
+        },
+    )
+    .await?;
+    let source_id = adopted.project.project.id;
+    let choices = worktrees::origin_branches_for_project(&fixture.registry, source_id).await?;
+    assert_eq!(choices.default_ref.as_deref(), Some("origin/main"));
+    let current = choices
+        .ref_options
+        .iter()
+        .find(|option| option.source == "current")
+        .unwrap();
+    assert_eq!(current.name, "dev");
+    for selected in [current.name.as_str(), "HEAD"] {
+        let validated =
+            worktrees::validate_ref_for_project(&fixture.registry, source_id, selected).await?;
+        assert_eq!(validated.resolved_ref, selected);
+        assert_eq!(validated.commit, local_dev.trim());
+    }
+    let remote =
+        worktrees::validate_ref_for_project(&fixture.registry, source_id, "origin/dev").await?;
+    assert_eq!(remote.resolved_ref, "origin/dev");
+    assert_eq!(remote.commit, remote_dev.trim());
+
+    let created = worktrees::create(
+        &fixture.registry,
+        CreateWorktree {
+            source_project_id: source_id,
+            branch: "feature/from-local-dev".into(),
+            display_name: None,
+            from_ref: Some(current.name.clone()),
+            resolution: None,
+            managed_root: Some(fixture.managed.clone()),
+            preferences: BTreeMap::from([
+                ("herd_enabled".into(), "no".into()),
+                ("copy_env".into(), "no".into()),
+            ]),
+            env_policy: None,
+            remember_env_policy: false,
+        },
+    )
+    .await?;
+    assert_eq!(
+        git(Path::new(&created.worktree.path), &["rev-parse", "HEAD"])?.trim(),
+        local_dev.trim()
+    );
+    assert!(
+        Path::new(&created.worktree.path)
+            .join("local-dev.txt")
+            .exists()
+    );
+
+    // Each dialog load reads the current checkout again, including detached HEAD.
+    git(&fixture.main, &["checkout", "main"])?;
+    let refreshed = worktrees::origin_branches_for_project(&fixture.registry, source_id).await?;
+    assert_eq!(
+        refreshed
+            .ref_options
+            .iter()
+            .find(|option| option.source == "current")
+            .unwrap()
+            .name,
+        "main"
+    );
+    git(&fixture.main, &["checkout", "--detach", local_dev.trim()])?;
+    let detached = worktrees::origin_branches_for_project(&fixture.registry, source_id).await?;
+    let current = detached
+        .ref_options
+        .iter()
+        .find(|option| option.source == "current")
+        .unwrap();
+    assert_eq!(current.name, local_dev.trim());
+    let validated =
+        worktrees::validate_ref_for_project(&fixture.registry, source_id, &current.name).await?;
+    assert_eq!(validated.commit, local_dev.trim());
+    Ok(())
+}
+
+#[tokio::test]
 async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
 -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
@@ -1148,8 +1260,8 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
         .find(|entry| entry.project_id == Some(created.project.project.id))
         .and_then(|entry| entry.delete_safety.as_ref())
         .expect("pending work has concrete deletion safety details");
-    assert_eq!(pending.unpushed_subjects, ["child head"]);
-    assert_eq!(pending.unmerged_subjects, ["child head"]);
+    assert_eq!(pending.at_risk_commits, 0, "the local branch is kept");
+    assert!(pending.at_risk_subjects.is_empty());
     let dirty = worktrees::remove(
         &fixture.registry,
         RemoveWorktree {
@@ -1168,11 +1280,8 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     assert!(dirty_warning.contains("feature/new-ui"));
     assert!(dirty_warning.contains("dirty file(s)"));
     assert!(dirty_warning.contains("dirty.txt"));
-    assert!(
-        dirty_warning.contains("commit(s) not pushed")
-            || dirty_warning.contains("commit(s) have no branch upstream")
-    );
-    assert!(dirty_warning.contains("commit(s) not merged"));
+    assert!(!dirty_warning.contains("commit(s)"));
+    assert!(!dirty_warning.contains("not merged"));
     assert!(Path::new(&created.worktree.path).exists());
 
     let removed = worktrees::remove(
@@ -1237,6 +1346,311 @@ async fn swm_semantics_cover_remote_discovery_adoption_and_safe_removal()
     Ok(())
 }
 
+// All deletion scenarios below use disposable repositories and a local bare remote.
+async fn fixture_delete_safety(
+    fixture: &GitFixture,
+    project_id: i64,
+) -> Result<worktrees::WorktreeDeleteSafety, Box<dyn Error>> {
+    let listed = worktrees::list_for_project(&fixture.registry, 1).await?;
+    Ok(listed
+        .worktrees
+        .iter()
+        .find(|entry| entry.project_id == Some(project_id))
+        .and_then(|entry| entry.delete_safety.clone())
+        .expect("registered checkout has deletion safety"))
+}
+
+fn fixture_delete_request(project_id: i64, force_dirty: bool) -> RemoveWorktree {
+    RemoveWorktree {
+        project_id,
+        confirm_remove: true,
+        confirm_stop_running: true,
+        delete_from_disk: true,
+        force_dirty,
+        confirm_branch: None,
+    }
+}
+
+#[tokio::test]
+async fn linked_worktree_commits_with_surviving_refs_do_not_require_force()
+-> Result<(), Box<dyn Error>> {
+    for protection in [
+        "local_branch",
+        "remote_branch",
+        "tag",
+        "custom_ref",
+        "other_worktree_head",
+    ] {
+        let fixture = GitFixture::new()?;
+        git(
+            &fixture.main,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                fixture.external.to_str().unwrap(),
+                "main",
+            ],
+        )?;
+        git(
+            &fixture.external,
+            &["commit", "--allow-empty", "-m", "unmerged feature"],
+        )?;
+        let commit = git(&fixture.external, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        match protection {
+            "local_branch" => {
+                git(&fixture.external, &["switch", "-c", "feature/unmerged"])?;
+            }
+            "remote_branch" => {
+                git(
+                    &fixture.external,
+                    &["push", "origin", "HEAD:refs/heads/published-elsewhere"],
+                )?;
+            }
+            "tag" => {
+                git(&fixture.main, &["tag", "kept", &commit])?;
+            }
+            "custom_ref" => {
+                git(&fixture.main, &["update-ref", "refs/backup/kept", &commit])?;
+            }
+            "other_worktree_head" => {
+                git(
+                    &fixture.main,
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        fixture.managed.to_str().unwrap(),
+                        &commit,
+                    ],
+                )?;
+            }
+            _ => unreachable!(),
+        }
+        let adopted = worktrees::adopt(
+            &fixture.registry,
+            AdoptWorktree {
+                path: fixture.external.clone(),
+                display_name: None,
+                preferences: BTreeMap::new(),
+            },
+        )
+        .await?;
+        let id = adopted.project.project.id;
+        let safety = fixture_delete_safety(&fixture, id).await?;
+        assert_eq!(safety.at_risk_commits, 0, "{protection}");
+        assert!(!safety.requires_force, "{protection}");
+        assert_eq!(
+            git(
+                &fixture.external,
+                &["rev-list", "--count", "origin/main..HEAD"]
+            )?
+            .trim(),
+            "1"
+        );
+
+        let removed =
+            worktrees::remove(&fixture.registry, fixture_delete_request(id, false)).await?;
+        assert!(
+            removed.deleted_from_disk && removed.metadata_pruned,
+            "{protection}"
+        );
+        assert!(!fixture.external.exists());
+        assert!(
+            git(&fixture.main, &["rev-list", "--all"])?
+                .lines()
+                .any(|line| line == commit),
+            "commit stays referenced by {protection}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_worktree_commits_without_surviving_refs_require_force()
+-> Result<(), Box<dyn Error>> {
+    for per_worktree_ref in [false, true] {
+        let fixture = GitFixture::new()?;
+        git(
+            &fixture.main,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                fixture.external.to_str().unwrap(),
+                "main",
+            ],
+        )?;
+        git(
+            &fixture.external,
+            &["commit", "--allow-empty", "-m", "only local detached work"],
+        )?;
+        if per_worktree_ref {
+            git(
+                &fixture.external,
+                &["update-ref", "refs/worktree/private", "HEAD"],
+            )?;
+            git(&fixture.external, &["checkout", "--detach", "main"])?;
+        }
+        let adopted = worktrees::adopt(
+            &fixture.registry,
+            AdoptWorktree {
+                path: fixture.external.clone(),
+                display_name: None,
+                preferences: BTreeMap::new(),
+            },
+        )
+        .await?;
+        let id = adopted.project.project.id;
+        let safety = fixture_delete_safety(&fixture, id).await?;
+        assert_eq!(safety.dirty_files, 0);
+        assert_eq!(safety.at_risk_commits, 1);
+        assert_eq!(safety.at_risk_subjects, ["only local detached work"]);
+        assert!(safety.requires_force);
+        let refused = worktrees::remove(&fixture.registry, fixture_delete_request(id, false))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "dirty_worktree");
+        assert!(refused.to_string().contains("last local reference"));
+        assert!(fixture.external.exists());
+        let removed =
+            worktrees::remove(&fixture.registry, fixture_delete_request(id, true)).await?;
+        assert!(removed.deleted_from_disk && removed.metadata_pruned);
+        assert!(!fixture.external.exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_checkout_checks_all_local_refs_against_every_remote_branch()
+-> Result<(), Box<dyn Error>> {
+    for local_ref in [
+        "current_branch",
+        "other_branch",
+        "tag",
+        "detached_head",
+        "stash",
+    ] {
+        let fixture = GitFixture::new()?;
+        fs::write(fixture.main.join("README.md"), "local work\n")?;
+        let commit = if local_ref == "stash" {
+            git(&fixture.main, &["stash", "push", "-m", "only local work"])?;
+            git(&fixture.main, &["rev-parse", "refs/stash"])?
+        } else {
+            git(&fixture.main, &["commit", "-am", "only local work"])?;
+            git(&fixture.main, &["rev-parse", "HEAD"])?
+        };
+        let commit = commit.trim();
+        match local_ref {
+            "other_branch" => {
+                git(&fixture.main, &["branch", "private", commit])?;
+                git(&fixture.main, &["reset", "--hard", "origin/main"])?;
+            }
+            "tag" => {
+                git(&fixture.main, &["tag", "private", commit])?;
+                git(&fixture.main, &["reset", "--hard", "origin/main"])?;
+            }
+            "detached_head" => {
+                git(&fixture.main, &["checkout", "--detach", commit])?;
+                git(&fixture.main, &["branch", "-f", "main", "origin/main"])?;
+            }
+            _ => {}
+        }
+        let safety = fixture_delete_safety(&fixture, 1).await?;
+        assert_eq!(safety.dirty_files, 0, "{local_ref}");
+        assert_eq!(
+            safety.at_risk_commits,
+            if local_ref == "stash" { 2 } else { 1 },
+            "{local_ref}"
+        );
+        assert!(
+            safety
+                .at_risk_subjects
+                .iter()
+                .any(|subject| subject.contains("only local work")),
+            "{local_ref}"
+        );
+        assert!(safety.requires_force, "{local_ref}");
+        let refused = worktrees::remove(&fixture.registry, fixture_delete_request(1, false))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "dirty_worktree");
+        assert!(fixture.main.exists());
+
+        // Publish to a different remote and branch, without changing origin/main
+        // or configuring an upstream. A remote copy is sufficient protection.
+        git(
+            &fixture.main,
+            &["remote", "add", "backup", fixture.origin.to_str().unwrap()],
+        )?;
+        git(
+            &fixture.main,
+            &["push", "backup", &format!("{commit}:refs/heads/preserved")],
+        )?;
+        let safety = fixture_delete_safety(&fixture, 1).await?;
+        assert_eq!(safety.at_risk_commits, 0, "{local_ref}");
+        assert!(!safety.requires_force, "{local_ref}");
+        let removed =
+            worktrees::remove(&fixture.registry, fixture_delete_request(1, false)).await?;
+        assert!(removed.deleted_from_disk);
+        assert!(!fixture.main.exists());
+        assert_eq!(
+            git(&fixture.origin, &["rev-parse", "refs/heads/preserved"])?.trim(),
+            commit
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn deletion_warns_for_staged_unstaged_and_untracked_files_but_not_ignored_files()
+-> Result<(), Box<dyn Error>> {
+    let fixture = GitFixture::new()?;
+    fs::write(
+        fixture.main.join(".gitignore"),
+        ".env\nnode_modules/\ntracked.env\n",
+    )?;
+    fs::write(
+        fixture.main.join("tracked.env"),
+        "tracked despite ignore pattern\n",
+    )?;
+    git(&fixture.main, &["add", ".gitignore"])?;
+    git(&fixture.main, &["add", "-f", "tracked.env"])?;
+    git(&fixture.main, &["commit", "-m", "ignore generated files"])?;
+    git(&fixture.main, &["push", "origin", "main"])?;
+    fs::write(fixture.main.join(".env"), "ignored fixture\n")?;
+    fs::create_dir(fixture.main.join("node_modules"))?;
+    fs::write(fixture.main.join("node_modules/cache"), "ignored cache\n")?;
+    fs::write(fixture.main.join("README.md"), "unstaged changes\n")?;
+    fs::write(fixture.main.join("tracked.env"), "tracked modifications\n")?;
+    fs::write(fixture.main.join("staged.txt"), "staged changes\n")?;
+    git(&fixture.main, &["add", "staged.txt"])?;
+    fs::write(fixture.main.join("notes.txt"), "untracked changes\n")?;
+    let safety = fixture_delete_safety(&fixture, 1).await?;
+    assert_eq!(safety.dirty_files, 4);
+    assert_eq!(safety.untracked_files, 1);
+    assert_eq!(
+        safety
+            .dirty_paths
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["README.md", "tracked.env", "staged.txt", "notes.txt"])
+    );
+    assert_eq!(safety.at_risk_commits, 0);
+    let refused = worktrees::remove(&fixture.registry, fixture_delete_request(1, false))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), "dirty_worktree");
+    assert!(refused.to_string().contains("notes.txt"));
+    assert!(!refused.to_string().contains("node_modules"));
+    assert!(!refused.to_string().contains("not merged"));
+    assert!(fixture.main.join("notes.txt").exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
@@ -1283,8 +1697,7 @@ async fn clean_merged_worktree_is_deleted_and_pruned_without_force() -> Result<(
         .and_then(|worktree| worktree.delete_safety.as_ref())
         .expect("managed worktree has deletion safety details");
     assert_eq!(safety.dirty_files, 0);
-    assert_eq!(safety.unpushed_commits, 0);
-    assert_eq!(safety.unmerged_commits, 0);
+    assert_eq!(safety.at_risk_commits, 0);
     assert!(!safety.requires_force);
 
     let removed = worktrees::remove(
@@ -1679,7 +2092,7 @@ async fn primary_checkout_with_linked_worktree_requires_force_and_never_changes_
 }
 
 #[tokio::test]
-async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<dyn Error>> {
+async fn ignored_local_files_are_deleted_without_force() -> Result<(), Box<dyn Error>> {
     let fixture = GitFixture::new()?;
     std::fs::write(fixture.main.join(".gitignore"), ".env\n")?;
     git(&fixture.main, &["add", ".gitignore"])?;
@@ -1706,23 +2119,16 @@ async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<d
     let path = PathBuf::from(&created.worktree.path);
     std::fs::write(path.join(".env"), "LOCAL_SECRET=fixture\n")?;
 
-    let refused = worktrees::remove(
-        &fixture.registry,
-        RemoveWorktree {
-            project_id: created.project.project.id,
-            confirm_remove: true,
-            confirm_stop_running: true,
-            delete_from_disk: true,
-            force_dirty: false,
-            confirm_branch: None,
-        },
-    )
-    .await
-    .expect_err("ignored local files must require force");
-    assert_eq!(refused.code(), "dirty_worktree");
-    assert!(refused.to_string().contains("ignored local path(s)"));
-    assert!(refused.to_string().contains(".env"));
-    assert!(path.exists());
+    let listed = worktrees::list_for_project(&fixture.registry, 1).await?;
+    let safety = listed
+        .worktrees
+        .iter()
+        .find(|entry| entry.project_id == Some(created.project.project.id))
+        .and_then(|entry| entry.delete_safety.as_ref())
+        .expect("ignored-only worktree has safety details");
+    assert_eq!(safety.dirty_files, 0);
+    assert!(safety.dirty_paths.is_empty());
+    assert!(!safety.requires_force);
 
     let removed = worktrees::remove(
         &fixture.registry,
@@ -1731,7 +2137,7 @@ async fn ignored_local_files_require_force_before_deletion() -> Result<(), Box<d
             confirm_remove: true,
             confirm_stop_running: true,
             delete_from_disk: true,
-            force_dirty: true,
+            force_dirty: false,
             confirm_branch: None,
         },
     )
@@ -1787,16 +2193,10 @@ async fn git_directory_not_empty_falls_back_to_verified_deletion_and_prunes()
         .iter()
         .find(|entry| entry.project_id == Some(created.project.project.id))
         .and_then(|entry| entry.delete_safety.as_ref())
-        .expect("ignored and untracked content is summarized before deletion");
+        .expect("only uncommitted, non-ignored content is summarized before deletion");
     assert_eq!(safety.untracked_files, 1);
-    assert!(safety.ignored_files >= 3);
-    assert!(
-        safety
-            .ignored_paths
-            .iter()
-            .any(|entry| entry == "node_modules/")
-    );
-    assert!(safety.ignored_paths.iter().any(|entry| entry == "vendor/"));
+    assert_eq!(safety.dirty_files, 1);
+    assert_eq!(safety.dirty_paths, ["notes.tmp"]);
     let remote_refs_before = git(
         &fixture.origin,
         &[

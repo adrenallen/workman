@@ -21,7 +21,7 @@ test('unified project removal defaults to unregister-only and makes disk deletio
   assert.match(dialog, /Project removal failed: \{error\}/);
 });
 
-test('pending local work is listed and requires one explicit Delete anyway click', async () => {
+test('only work at risk is listed and requires one explicit Delete anyway click', async () => {
   const dialog = await readFile(
     new URL('../src/lib/WorktreeRemoveDialog.svelte', import.meta.url),
     'utf8'
@@ -29,13 +29,14 @@ test('pending local work is listed and requires one explicit Delete anyway click
   const app = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
 
   assert.match(dialog, /safety\?\.requires_force/);
-  assert.match(dialog, /safety\.unpushed_commits/);
-  assert.match(dialog, /safety\.unmerged_commits/);
-  assert.match(dialog, /safety\.ignored_files/);
-  assert.match(dialog, /safety\.ignored_paths/);
+  assert.match(dialog, /safety\.at_risk_commits/);
+  assert.doesNotMatch(dialog, /safety\.(unmerged_commits|unpushed_commits|ignored_files|ignored_paths)/);
+  assert.match(dialog, /uncommitted file/);
+  assert.match(dialog, /last local reference/);
+  assert.match(dialog, /not present in any fetched remote branch/);
   assert.match(dialog, /safety\.dirty_paths\.slice\(0, 6\)/);
-  assert.match(dialog, /safety\.unpushed_subjects/);
-  assert.match(dialog, /safety\.unmerged_subjects/);
+  assert.match(dialog, /safety\.at_risk_subjects/);
+  assert.doesNotMatch(dialog, /not merged into|No upstream/);
   assert.match(dialog, /Delete anyway/);
   assert.doesNotMatch(dialog, /confirmBranch|Type <code>|Allow forced deletion/);
   assert.match(dialog, /safety\.dependent_worktrees/);

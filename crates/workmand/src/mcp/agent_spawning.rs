@@ -21,7 +21,7 @@ use uuid::Uuid;
 use workman_core::{
     AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
     ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
-    attention::{AttentionState, DEFAULT_IDLE_AFTER},
+    attention::{AttentionState, DEFAULT_IDLE_AFTER, PendingPrompt},
     pty::{is_kimi_tool_type, kimi_session_started},
 };
 
@@ -1098,7 +1098,9 @@ pub(crate) async fn spawn_registered_agent(
             .map_err(|error| format!("could not stage agent attachments: {error}"))?,
         )
     };
-    let mut result = match spawn_registered_agent_for(
+    let prompt_pending = !defer_initial_prompt
+        && (resolved.initial_prompt.is_some() || staged_attachments.is_some());
+    let (mut result, pending_prompt) = match spawn_registered_agent_for(
         registry.clone(),
         project,
         resolved.agent_tool_id,
@@ -1109,6 +1111,7 @@ pub(crate) async fn spawn_registered_agent(
         auto_acknowledge_dialogs,
         spawned_by_process_id,
         AgentLaunchPurpose::Normal,
+        prompt_pending,
     )
     .await
     {
@@ -1182,6 +1185,7 @@ pub(crate) async fn spawn_registered_agent(
                 result.process_id,
                 prompt,
                 is_kimi_tool_type(&resolved.agent_tool_type),
+                pending_prompt.expect("scheduled initial prompt was reserved during spawn"),
             );
         }
     }
@@ -1447,8 +1451,12 @@ fn schedule_initial_prompt(
     process_id: ProcessId,
     prompt: String,
     verify_kimi_submission: bool,
+    pending_prompt: PendingPrompt,
 ) {
     tokio::spawn(async move {
+        // Hold the reservation through readiness polling and verification. The
+        // PTY queue takes its own reservation before this one can be released.
+        let _pending_prompt = pending_prompt;
         let started = Instant::now();
         let ready_deadline = started + INITIAL_PROMPT_READY_TIMEOUT;
         let hard_deadline = started + INITIAL_PROMPT_HARD_TIMEOUT;
@@ -1689,7 +1697,8 @@ async fn spawn_registered_agent_for(
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
     purpose: AgentLaunchPurpose,
-) -> Result<SpawnResult, String> {
+    prompt_pending: bool,
+) -> Result<(SpawnResult, Option<PendingPrompt>), String> {
     let (tool, user_environment) = {
         let registry = registry.lock().await;
         (
@@ -1768,8 +1777,17 @@ async fn spawn_registered_agent_for(
             prepared.launch.env,
             spawned_by_process_id,
         )
+        .and_then(|result| {
+            // Reserve under the lifecycle lock, before another task can observe
+            // the new child or arm an idle watch on its startup prompt.
+            let pending = prompt_pending
+                .then(|| locked.reserve_prompt(result.process_id))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            Ok((result, pending))
+        })
     };
-    let result = match result {
+    let (result, pending_prompt) = match result {
         Ok(result) => result,
         Err(error) => {
             if let Some(home) = &ephemeral_home {
@@ -1805,7 +1823,7 @@ async fn spawn_registered_agent_for(
             result.process_id
         );
     }
-    Ok(result)
+    Ok((result, pending_prompt))
 }
 
 #[derive(Debug, Serialize)]
@@ -1914,7 +1932,7 @@ pub(crate) async fn deep_check_registered_agent(
         ),
         _ => (Vec::new(), true),
     };
-    let spawned = spawn_registered_agent_for(
+    let (spawned, pending_prompt) = spawn_registered_agent_for(
         registry.clone(),
         project,
         agent_tool_id,
@@ -1925,6 +1943,7 @@ pub(crate) async fn deep_check_registered_agent(
         true,
         spawned_by_process_id,
         AgentLaunchPurpose::DeepCheck,
+        submit_prompt,
     )
     .await?;
     let process_id = {
@@ -1937,6 +1956,7 @@ pub(crate) async fn deep_check_registered_agent(
         }
         spawned.process_id
     };
+    drop(pending_prompt);
 
     let deadline =
         Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 60_000));
@@ -3056,6 +3076,113 @@ fn agent_instructions(
 mod tests {
     use super::*;
     use workman_core::Store;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_initial_prompt_blocks_idle_watch_before_the_delivery_task_runs() {
+        use crate::timers::{IdleTimerOutcome, TimerFireReason, TimerService};
+        use workman_core::TimerKind;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = Project {
+            id: 1,
+            path: temp.path().to_string_lossy().into_owned(),
+            name: "pending-prompt-fixture".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+        store.put_project(&project).unwrap();
+        store.put_agent_tool(&AgentTool {
+            id: 91,
+            name: "Scripted child".into(),
+            command: r#"printf '❯\n'; while IFS= read -r line; do printf '\033[2J\033[Hworking\n'; sleep 0.2; printf '\033[2J\033[Hdone\n❯\n'; done"#.into(),
+            tool_type: "custom".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        }).unwrap();
+        let registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+            ProcessRegistry::new_for_test(store).unwrap(),
+        ));
+        let spawned = spawn_registered_agent(
+            registry.clone(),
+            project,
+            Some(91),
+            None,
+            None,
+            Vec::new(),
+            None,
+            Some("go".into()),
+            Vec::new(),
+            false,
+            AttachmentSourceScope::McpProject,
+            "http://127.0.0.1:1/mcp",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut locked = registry.lock().await;
+        assert!(locked.has_pending_prompts(spawned.process_id));
+        // Keep the delivery task blocked on this lock until the child is idle,
+        // reproducing the timer/readiness poll ordering without a timing race.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while locked
+            .agent_attention_snapshot(spawned.process_id)
+            .unwrap()
+            .state
+            != AttentionState::Idle
+        {
+            assert!(
+                Instant::now() < deadline,
+                "child never reached its startup prompt"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let outcome = TimerService::new(&mut locked)
+            .set_idle(
+                "fixture-owner".into(),
+                spawned.process_id,
+                "child finished".into(),
+                TimerKind::IdleAll,
+                vec![spawned.process_id],
+                100_000,
+                0,
+            )
+            .unwrap();
+        assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
+        assert!(TimerService::new(&mut locked).tick(1).unwrap().is_empty());
+        drop(locked);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut locked = registry.lock().await;
+            let fires = TimerService::new(&mut locked).tick(2).unwrap();
+            if !fires.is_empty() {
+                assert_eq!(fires.len(), 1);
+                assert_eq!(fires[0].reason, TimerFireReason::IdleTransition);
+                assert!(
+                    locked
+                        .rendered_output(spawned.process_id)
+                        .unwrap()
+                        .text
+                        .contains("done")
+                );
+                locked.close(spawned.process_id).unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "idle watch did not fire after the child finished"
+            );
+            drop(locked);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 
     #[test]
     fn dialog_acknowledgment_defaults_on_and_can_be_disabled() {

@@ -169,15 +169,9 @@ pub struct WorktreeDeleteSafety {
     pub dirty_files: usize,
     pub untracked_files: usize,
     pub dirty_paths: Vec<String>,
-    pub ignored_files: usize,
-    pub ignored_paths: Vec<String>,
-    pub unpushed_commits: usize,
-    pub unpushed_subjects: Vec<String>,
-    pub unmerged_commits: usize,
-    pub unmerged_subjects: Vec<String>,
-    pub upstream: Option<String>,
-    pub push_target: Option<String>,
-    pub merge_target: String,
+    /// Commits not protected by refs that survive this deletion.
+    pub at_risk_commits: usize,
+    pub at_risk_subjects: Vec<String>,
     pub dependent_worktrees: Vec<String>,
     pub requires_force: bool,
 }
@@ -2503,13 +2497,9 @@ async fn list_from_snapshot(
         };
         let delete_safety =
             if registered && !record.bare && !record.prunable && record.path.exists() {
-                let mut safety = worktree_delete_safety(
-                    &record.path,
-                    &snapshot.root_path,
-                    &branch,
-                    command_environment,
-                )
-                .await?;
+                let mut safety =
+                    worktree_delete_safety(&record.path, &snapshot.root_path, command_environment)
+                        .await?;
                 if is_main && !dependent_worktrees.is_empty() {
                     safety.dependent_worktrees = dependent_worktrees.clone();
                     safety.requires_force = true;
@@ -2752,6 +2742,26 @@ async fn resolve_start_point(
             "HEAD".to_owned()
         }
     };
+
+    // An explicitly selected local ref (including HEAD) means the local
+    // commit, even when a same-named origin branch exists. Explicit origin/...
+    // selections still refresh that remote branch below.
+    if requested.is_some_and(|value| !value.trim().is_empty())
+        && !from_ref.starts_with("origin/")
+        && git_success(
+            repository,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                format!("{from_ref}^{{commit}}").as_str(),
+            ],
+            environment,
+        )
+        .await?
+    {
+        return Ok(from_ref);
+    }
 
     let looks_like_commit = (7..=64).contains(&from_ref.len())
         && from_ref
@@ -3253,21 +3263,13 @@ async fn delete_target_safety(
             dirty_files: 0,
             untracked_files: 0,
             dirty_paths: Vec::new(),
-            ignored_files: 0,
-            ignored_paths: Vec::new(),
-            unpushed_commits: 0,
-            unpushed_subjects: Vec::new(),
-            unmerged_commits: 0,
-            unmerged_subjects: Vec::new(),
-            upstream: None,
-            push_target: None,
-            merge_target: target.branch.clone(),
+            at_risk_commits: 0,
+            at_risk_subjects: Vec::new(),
             dependent_worktrees: Vec::new(),
             requires_force: true,
         }));
     }
-    let mut safety =
-        worktree_delete_safety(&target.path, repository_root, &target.branch, environment).await?;
+    let mut safety = worktree_delete_safety(&target.path, repository_root, environment).await?;
     safety
         .dependent_worktrees
         .clone_from(&target.dependent_worktrees);
@@ -3299,96 +3301,85 @@ fn require_delete_confirmation(
 async fn worktree_delete_safety(
     path: &Path,
     repository_root: &Path,
-    branch: &str,
     environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<WorktreeDeleteSafety> {
     let status = git_required_bytes(
         path,
-        [
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ],
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         "inspect worktree",
         environment,
     )
     .await?;
-    let (dirty_paths, untracked_files, ignored_paths) = parse_status_paths(&status);
-    let merge_target = default_merge_target(repository_root, environment).await?;
-    let upstream = git_optional(
-        path,
-        [
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-        environment,
-    )
-    .await?
-    .filter(|value| !value.is_empty());
-    let remote_branch = format!("origin/{branch}");
-    let push_target = if let Some(upstream) = upstream.as_deref() {
-        Some(upstream.to_owned())
-    } else if git_success(
-        repository_root,
-        [
-            "show-ref",
-            "--verify",
-            "--quiet",
-            format!("refs/remotes/{remote_branch}").as_str(),
-        ],
-        environment,
-    )
-    .await?
-    {
-        Some(remote_branch)
+    let (dirty_paths, untracked_files) = parse_status_paths(&status);
+    let revisions = deletion_commit_revisions(path, repository_root, environment).await?;
+    let at_risk_commits = rev_list_count(path, &revisions, environment).await?;
+    let at_risk_subjects = if at_risk_commits > 0 {
+        rev_list_subjects(path, &revisions, environment).await?
     } else {
-        None
+        Vec::new()
     };
-    let unpushed_commits = rev_list_count(
-        path,
-        push_target.as_deref().unwrap_or(&merge_target),
-        environment,
-    )
-    .await?;
-    let unpushed_subjects = rev_list_subjects(
-        path,
-        push_target.as_deref().unwrap_or(&merge_target),
-        environment,
-    )
-    .await?;
-    let unmerged_commits = rev_list_count(path, &merge_target, environment).await?;
-    let unmerged_subjects = rev_list_subjects(path, &merge_target, environment).await?;
     let dirty_files = dirty_paths.len();
-    let ignored_files = ignored_paths.len();
     Ok(WorktreeDeleteSafety {
         dirty_files,
         untracked_files,
         dirty_paths,
-        ignored_files,
-        ignored_paths,
-        unpushed_commits,
-        unpushed_subjects,
-        unmerged_commits,
-        unmerged_subjects,
-        upstream,
-        push_target,
-        merge_target,
+        at_risk_commits,
+        at_risk_subjects,
         dependent_worktrees: Vec::new(),
-        requires_force: dirty_files > 0
-            || ignored_files > 0
-            || unpushed_commits > 0
-            || unmerged_commits > 0,
+        requires_force: dirty_files > 0 || at_risk_commits > 0,
     })
 }
 
-fn parse_status_paths(status: &[u8]) -> (Vec<String>, usize, Vec<String>) {
+/// Compare against refs that will survive deletion, never a merge target.
+async fn deletion_commit_revisions(
+    path: &Path,
+    repository_root: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> WorktreeResult<Vec<String>> {
+    if same_path(path, repository_root) {
+        // Removing the primary checkout removes the shared object database:
+        // inspect every local branch, tag, stash, and detached worktree HEAD.
+        // Remote-tracking refs are our last fetched evidence of a remote copy.
+        return Ok(["--all", "--not", "--remotes"].map(str::to_owned).to_vec());
+    }
+
+    // Linked worktree removal keeps shared refs (including its local branch).
+    // Its own HEAD and per-worktree refs disappear; do not use --all on the
+    // negative side, as that would exclude the very HEAD we need to inspect.
+    let mut revisions = [
+        "--single-worktree",
+        "--all",
+        "--not",
+        "--exclude=refs/bisect/*",
+        "--exclude=refs/worktree/*",
+        "--exclude=refs/rewritten/*",
+        "--glob=refs/*",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let porcelain = git_required_bytes(
+        repository_root,
+        ["worktree", "list", "--porcelain", "-z"],
+        "inspect surviving worktrees",
+        environment,
+    )
+    .await?;
+    for worktree in parse_porcelain(&porcelain)? {
+        if !same_path(&worktree.path, path)
+            && !worktree.prunable
+            && worktree.path.exists()
+            && !worktree.head.is_empty()
+            && !worktree.head.bytes().all(|byte| byte == b'0')
+        {
+            revisions.push(worktree.head);
+        }
+    }
+    Ok(revisions)
+}
+
+fn parse_status_paths(status: &[u8]) -> (Vec<String>, usize) {
     let mut paths = Vec::new();
     let mut untracked = 0;
-    let mut ignored_paths = Vec::new();
     let mut skip_rename_source = false;
     for record in status
         .split(|byte| *byte == 0)
@@ -3407,7 +3398,6 @@ fn parse_status_paths(status: &[u8]) -> (Vec<String>, usize, Vec<String>) {
             continue;
         }
         if x == b'!' && y == b'!' {
-            ignored_paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
             continue;
         }
         if x == b'?' && y == b'?' {
@@ -3416,7 +3406,7 @@ fn parse_status_paths(status: &[u8]) -> (Vec<String>, usize, Vec<String>) {
         skip_rename_source = matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C');
         paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
     }
-    (paths, untracked, ignored_paths)
+    (paths, untracked)
 }
 
 fn is_porcelain_status(value: u8) -> bool {
@@ -3426,79 +3416,16 @@ fn is_porcelain_status(value: u8) -> bool {
     )
 }
 
-async fn default_merge_target(
-    repository_root: &Path,
-    environment: &BTreeMap<OsString, OsString>,
-) -> WorktreeResult<String> {
-    // The symbolic ref can survive after its target was deleted, so verify
-    // the actual commit before using it as a safety base.
-    if let Some(remote_head) = git_optional(
-        repository_root,
-        [
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-        environment,
-    )
-    .await?
-    .filter(|value| !value.is_empty())
-    .filter(|remote_head| !remote_head.chars().any(char::is_whitespace))
-        && git_success(
-            repository_root,
-            ["rev-parse", "--verify", "--quiet", remote_head.as_str()],
-            environment,
-        )
-        .await?
-    {
-        return Ok(remote_head);
-    }
-    let primary_branch = git_optional(
-        repository_root,
-        ["symbolic-ref", "--quiet", "--short", "HEAD"],
-        environment,
-    )
-    .await?
-    .filter(|value| !value.is_empty());
-    if let Some(primary_branch) = primary_branch {
-        let remote_primary = format!("origin/{primary_branch}");
-        if git_success(
-            repository_root,
-            [
-                "show-ref",
-                "--verify",
-                "--quiet",
-                format!("refs/remotes/{remote_primary}").as_str(),
-            ],
-            environment,
-        )
-        .await?
-        {
-            Ok(remote_primary)
-        } else {
-            Ok(primary_branch)
-        }
-    } else {
-        git_required(
-            repository_root,
-            ["rev-parse", "--verify", "HEAD"],
-            "resolve primary checkout commit",
-            environment,
-        )
-        .await
-    }
-}
-
 async fn rev_list_count(
     path: &Path,
-    base: &str,
+    revisions: &[String],
     environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<usize> {
-    let range = format!("{base}..HEAD");
     let count = git_required(
         path,
-        ["rev-list", "--count", range.as_str()],
+        ["rev-list", "--count"]
+            .into_iter()
+            .chain(revisions.iter().map(String::as_str)),
         "inspect worktree commits",
         environment,
     )
@@ -3511,13 +3438,14 @@ async fn rev_list_count(
 
 async fn rev_list_subjects(
     path: &Path,
-    base: &str,
+    revisions: &[String],
     environment: &BTreeMap<OsString, OsString>,
 ) -> WorktreeResult<Vec<String>> {
-    let range = format!("{base}..HEAD");
     let subjects = git_required(
         path,
-        ["log", "--format=%s", "--max-count=3", range.as_str()],
+        ["log", "--format=%s", "--max-count=3"]
+            .into_iter()
+            .chain(revisions.iter().map(String::as_str)),
         "inspect worktree commit subjects",
         environment,
     )
@@ -3563,49 +3491,13 @@ fn delete_safety_warning(path: &Path, branch: &str, safety: &WorktreeDeleteSafet
             paths.join(", ")
         ));
     }
-    if safety.ignored_files > 0 {
-        let mut paths = safety
-            .ignored_paths
-            .iter()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>();
-        if safety.ignored_paths.len() > paths.len() {
-            paths.push(format!(
-                "… and {} more",
-                safety.ignored_paths.len() - paths.len()
-            ));
-        }
-        reasons.push(format!(
-            "{} ignored local path(s) that Git would delete: {}",
-            safety.ignored_files,
-            paths.join(", ")
-        ));
-    }
-    if safety.unpushed_commits > 0 {
-        let mut reason = if let Some(push_target) = &safety.push_target {
-            format!(
-                "{} commit(s) not pushed to {push_target}",
-                safety.unpushed_commits
-            )
-        } else {
-            format!(
-                "{} commit(s) have no branch upstream and are not present in {}",
-                safety.unpushed_commits, safety.merge_target
-            )
-        };
-        if !safety.unpushed_subjects.is_empty() {
-            reason.push_str(&format!(": {}", safety.unpushed_subjects.join("; ")));
-        }
-        reasons.push(reason);
-    }
-    if safety.unmerged_commits > 0 {
+    if safety.at_risk_commits > 0 {
         let mut reason = format!(
-            "{} commit(s) not merged into {}",
-            safety.unmerged_commits, safety.merge_target
+            "{} local commit(s) would lose their last local reference and are not present in any fetched remote branch",
+            safety.at_risk_commits
         );
-        if !safety.unmerged_subjects.is_empty() {
-            reason.push_str(&format!(": {}", safety.unmerged_subjects.join("; ")));
+        if !safety.at_risk_subjects.is_empty() {
+            reason.push_str(&format!(": {}", safety.at_risk_subjects.join("; ")));
         }
         reasons.push(reason);
     }
@@ -3911,7 +3803,7 @@ mod tests {
     #[test]
     fn status_parser_counts_untracked_files_and_skips_rename_sources() {
         let status = b" M tracked.txt\0 T executable.txt\0?? untracked.txt\0R  renamed.txt\0old-name.txt\0!! .env\0";
-        let (paths, untracked, ignored) = parse_status_paths(status);
+        let (paths, untracked) = parse_status_paths(status);
         assert_eq!(
             paths,
             [
@@ -3922,7 +3814,6 @@ mod tests {
             ]
         );
         assert_eq!(untracked, 1);
-        assert_eq!(ignored, [".env"]);
     }
 
     #[tokio::test(flavor = "current_thread")]

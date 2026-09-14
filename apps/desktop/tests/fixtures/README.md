@@ -34,8 +34,8 @@ and removed processes against the real focus resolver, without starting processe
 
 For command review and branch selection, start Vite on port 1438 and open
 `/tests/fixtures/command-review.html`, then run `command-review-interactions.js`.
-This checks dark/light/narrow trust review, Escape dismissal, and typing `origin/dev`
-then Enter and Create without silently changing the starting ref. Screenshots are
+This checks dark/light/narrow trust review, Escape dismissal, the local `dev` default,
+and typing `origin/dev` then Enter and Create without changing the selected starting ref. Screenshots are
 written to `/tmp/workman-trust-*.png`; data is in memory and no daemon is contacted.
 
 For the new-agent page, start Vite on port 1432 and open `/tests/fixtures/new-agent.html`.
@@ -56,3 +56,9 @@ playwright-cli -s=settings run-code --filename=apps/desktop/tests/fixtures/setti
 
 This fixture uses an in-memory client. It exercises template editing, keyboard and compact
 section navigation, welcome actions, both themes, and narrow layouts at 90–120% text scale.
+
+For project removal, start Vite on port 1434 and open
+`/tests/fixtures/worktree-removal.html`, then run `worktree-removal-interactions.js`
+in fresh Chrome and WebKit sessions. This checks the loss warning for uncommitted
+files, detached commits, and dependent checkouts, its absence for clean worktrees,
+and the delete/force confirmation payload. All data is in memory; no files are deleted.

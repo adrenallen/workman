@@ -142,7 +142,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up when any watched process makes a fresh non-idle-to-idle transition or the hard timeout expires. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Create a no-poll wake-up when any watched process makes a fresh non-idle-to-idle transition or the hard timeout expires. Pending initial or queued prompts keep a process non-idle until delivery finishes and the process reaches idle. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
     )]
     async fn timer_fire_when_idle_any(
         &self,
@@ -153,7 +153,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up once each watched process is idle at arm time or later reaches idle, or when the hard timeout expires. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Create a no-poll wake-up once each watched process is idle at arm time or later reaches idle, or when the hard timeout expires. Pending initial or queued prompts keep a process non-idle and invalidate any earlier idle completion until delivery finishes and the process reaches idle again. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
     )]
     async fn timer_fire_when_idle_all(
         &self,

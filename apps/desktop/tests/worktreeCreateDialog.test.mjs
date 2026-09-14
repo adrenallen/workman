@@ -25,8 +25,8 @@ test('new branch flow explains the starting ref and keeps free-text entry', asyn
   const dialog = await readFile(dialogUrl, 'utf8');
 
   assert.match(dialog, /Start branch from…/);
-  assert.match(dialog, /HEAD = your current checkout state/);
-  assert.match(dialog, /the latest remote default branch/);
+  assert.match(dialog, /Defaults to the branch checked out in the repository home/);
+  assert.match(dialog, /HEAD uses that checkout’s current commit/);
   assert.match(dialog, /role="combobox"/);
   assert.match(dialog, /aria-autocomplete="list"/);
   assert.match(dialog, /or type any ref/);
@@ -36,12 +36,13 @@ test('new branch flow explains the starting ref and keeps free-text entry', asyn
   assert.match(dialog, /event\.stopPropagation\(\)/);
 });
 
-test('detected origin default is applied until the user edits the ref', async () => {
+test('the repository home checkout takes priority until the user edits the ref', async () => {
   const dialog = await readFile(dialogUrl, 'utf8');
   const app = await readFile(appUrl, 'utf8');
 
   assert.match(dialog, /!initialRef \|\| baseRefTouched \|\| appliedDefaultRef/);
   assert.match(dialog, /baseRef = initialRef/);
+  assert.match(dialog, /const initialRef = refOptions\.find\(option => option\.source === 'current'\)\?\.name \?\? defaultRef/);
   assert.match(app, /worktreeDefaultRef = response\.default_ref \?\? null/);
   assert.match(app, /if \(mode === 'create'\) void loadOriginBranches\(\)/);
 });

@@ -1,7 +1,10 @@
 //! Process attention signals and tool-aware state classification.
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -416,6 +419,23 @@ type AttentionInvalidation = Arc<dyn Fn(Option<i64>) + Send + Sync>;
 pub struct AttentionTracker {
     inner: Arc<Mutex<AttentionEngine>>,
     invalidation: Arc<Mutex<Option<AttentionInvalidation>>>,
+    pending_prompts: Arc<AtomicUsize>,
+}
+
+/// Keeps orchestration idle watches blocked until a prompt is delivered or abandoned.
+#[derive(Debug)]
+#[must_use]
+pub struct PendingPrompt {
+    attention: AttentionTracker,
+}
+
+impl Drop for PendingPrompt {
+    fn drop(&mut self) {
+        self.attention
+            .pending_prompts
+            .fetch_sub(1, Ordering::AcqRel);
+        self.attention.notify_change();
+    }
 }
 
 impl AttentionTracker {
@@ -456,7 +476,23 @@ impl AttentionTracker {
                 exited: false,
             })),
             invalidation: Arc::new(Mutex::new(None)),
+            pending_prompts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Reserve a prompt before starting asynchronous readiness or submission work.
+    /// Raw attention remains available so delivery can still detect a safe composer.
+    pub fn reserve_prompt(&self) -> PendingPrompt {
+        self.pending_prompts.fetch_add(1, Ordering::AcqRel);
+        self.notify_change();
+        PendingPrompt {
+            attention: self.clone(),
+        }
+    }
+
+    /// Whether any prompt is waiting for readiness, queued, or being submitted.
+    pub fn has_pending_prompts(&self) -> bool {
+        self.pending_prompts.load(Ordering::Acquire) != 0
     }
 
     fn lock(&self) -> MutexGuard<'_, AttentionEngine> {

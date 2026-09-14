@@ -18,7 +18,7 @@ use workman_core::{
     ProcessStatus, ProjectId, Store, StoreError, TimerKind,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionState, AttentionTracker,
-        PendingDialog, pending_dialog,
+        PendingDialog, PendingPrompt, pending_dialog,
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
@@ -800,6 +800,22 @@ impl ProcessRegistry {
         Ok(AgentState::exited(tool_type, process.exited_at))
     }
 
+    pub(crate) fn reserve_prompt(&self, process_id: ProcessId) -> RegistryResult<PendingPrompt> {
+        Ok(self
+            .input_router
+            .target(process_id)?
+            .attention
+            .reserve_prompt())
+    }
+
+    pub(crate) fn has_pending_prompts(&self, process_id: ProcessId) -> bool {
+        self.running.contains_key(&process_id)
+            && self
+                .outputs
+                .get(&process_id)
+                .is_some_and(|output| output.attention.has_pending_prompts())
+    }
+
     pub fn list(&mut self, project_id: Option<ProjectId>) -> RegistryResult<Vec<Process>> {
         self.refresh_exits()?;
         Ok(match project_id {
@@ -908,6 +924,9 @@ impl ProcessRegistry {
         }
         if process.kind == ProcessKind::Command || process.status == ProcessStatus::Starting {
             return Some(false); // A quiet command is still running until it exits.
+        }
+        if self.has_pending_prompts(process.id) {
+            return Some(false);
         }
         if process.kind == ProcessKind::Agent {
             return Some(attention.state != AttentionState::Working);
