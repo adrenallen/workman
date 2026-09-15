@@ -4,6 +4,9 @@
   import XIcon from '@lucide/svelte/icons/x';
 
   import IconButton from './components/ds/IconButton.svelte';
+  import type { ProcessView } from './daemon';
+  import { nativeNotificationPreferences } from './nativeNotifications';
+  import { notificationMatchesPreferences } from './notificationAttention';
 
   export interface AgentDoneNotice {
     id: string;
@@ -15,15 +18,21 @@
 
   interface Props {
     notices: AgentDoneNotice[];
+    processes: ProcessView[];
     onOpen: (notice: AgentDoneNotice) => void;
     onDismiss: (id: string) => void;
   }
 
-  let { notices, onOpen, onDismiss }: Props = $props();
+  let { notices, processes, onOpen, onDismiss }: Props = $props();
+  let visibleNotices = $derived(notices.filter((notice) => notificationMatchesPreferences(
+    { type: notice.kind, process_id: notice.processId, project_id: notice.projectId },
+    processes,
+    $nativeNotificationPreferences
+  )));
 </script>
 
 <section class="toast-stack" aria-label="Agent notifications" aria-live="polite">
-  {#each notices as notice (notice.id)}
+  {#each visibleNotices as notice (notice.id)}
     <article class="done-toast">
       <button
         class="toast-open"

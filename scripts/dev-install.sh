@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 Build and install the current Workman working tree as an isolated development identity.
 
-Usage: scripts/dev-install.sh [--reset-permissions] [--no-relaunch]
+Usage: scripts/dev-install.sh [--reset-permissions] [--relaunch | --no-relaunch] [--cleanup | --no-cleanup]
 
 Installs:
   ~/.local/bin/wrk-dev
@@ -18,7 +18,7 @@ Environment overrides:
   WORKMAN_DEV_INSTALL_DIR   Private binary directory (default: ~/.local/share/workman-dev)
   WORKMAN_DEV_APP_PATH      App destination (default: ~/Applications/Workman Dev.app)
   WORKMAN_DEV_BUILD_DIR     Cargo/Tauri target directory (default: target)
-  WORKMAN_DEV_RELAUNCH      Relaunch after install: 1 or 0 (default: 1)
+  WORKMAN_DEV_RELAUNCH      Relaunch after install: ask, 1, or 0 (default: 1)
   WORKMAN_DEV_RESET_PERMISSIONS
                             macOS capture permission handling: auto, 1, or 0
                             (default: auto; reset when the signing identity changes)
@@ -29,17 +29,28 @@ Environment overrides:
 Options:
   --reset-permissions       Reset Screen Recording and Microphone access even when
                             the installed app has the same signing identity
-  --no-relaunch             Install without reopening Workman Dev
+  --relaunch               Open Workman Dev after installation (default)
+  --no-relaunch            Keep Workman Dev closed
+  --cleanup                Remove Rust and frontend build output after installation (default)
+  --no-cleanup             Keep build output for faster rebuilds
+
+Successful installs clean build output, then run the installed wrk-dev app command,
+without prompting. Use --no-cleanup and/or --no-relaunch to skip either step.
+Cleanup makes the next build slower. WORKMAN_DEV_RELAUNCH=ask enables a launch prompt.
 EOF
 }
 
 reset_permissions=${WORKMAN_DEV_RESET_PERMISSIONS:-auto}
 relaunch=${WORKMAN_DEV_RELAUNCH:-1}
+cleanup_mode=clean
 while (( $# > 0 )); do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --reset-permissions) reset_permissions=1 ;;
+    --relaunch) relaunch=1 ;;
     --no-relaunch) relaunch=0 ;;
+    --cleanup) cleanup_mode=clean ;;
+    --no-cleanup) cleanup_mode=keep ;;
     *) printf 'workman dev: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
   shift
@@ -49,11 +60,13 @@ case "$reset_permissions" in
   *) printf 'workman dev: WORKMAN_DEV_RESET_PERMISSIONS must be auto, 1, or 0\n' >&2; exit 2 ;;
 esac
 case "$relaunch" in
-  0|1) ;;
-  *) printf 'workman dev: WORKMAN_DEV_RELAUNCH must be 1 or 0\n' >&2; exit 2 ;;
+  ask|0|1) ;;
+  *) printf 'workman dev: WORKMAN_DEV_RELAUNCH must be ask, 1, or 0\n' >&2; exit 2 ;;
 esac
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+source "$repo_root/scripts/lib/dev-install-cleanup.sh"
+source "$repo_root/scripts/lib/dev-install-relaunch.sh"
 install_home=${HOME:?HOME must be set}
 bin_dir=${WORKMAN_DEV_BIN_DIR:-"$install_home/.local/bin"}
 install_dir=${WORKMAN_DEV_INSTALL_DIR:-"$install_home/.local/share/workman-dev"}
@@ -73,7 +86,7 @@ if [[ $(uname -s) != Darwin ]]; then
   printf 'workman dev: Workman Dev.app currently requires macOS\n' >&2
   exit 1
 fi
-for required in cargo npm ditto codesign security /usr/bin/tccutil /usr/libexec/PlistBuddy "$lsregister"; do
+for required in cargo npm xcrun ditto codesign security /usr/bin/tccutil /usr/libexec/PlistBuddy "$lsregister"; do
   if [[ "$required" == /* ]]; then
     [[ -x "$required" ]] || { printf 'workman dev: required tool not found: %s\n' "$required" >&2; exit 1; }
   elif ! command -v "$required" >/dev/null 2>&1; then
@@ -81,6 +94,11 @@ for required in cargo npm ditto codesign security /usr/bin/tccutil /usr/libexec/
     exit 1
   fi
 done
+
+# Keep native dependencies on the active toolchain's SDK. Clang's default can point
+# at a newer Command Line Tools SDK that the selected Xcode linker cannot read.
+SDKROOT=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
+export SDKROOT
 
 app_executable_name=workman-desktop
 if [[ -f "$app_path/Contents/Info.plist" ]]; then
@@ -433,11 +451,9 @@ printf '    Binaries %s\n' "$install_dir"
 printf '    App      %s\n' "$app_path"
 printf '    Data     %s\n' "$data_dir"
 printf '    Config   %s\n' "$data_dir/config.yml"
-if [[ "$relaunch" == 1 ]]; then
-  printf '\n  ▸ Opening Workman Dev\n'
-  "$install_dir/wrk-dev" app
-  printf '  ✓ Workman Dev is running\n\n'
-else
-  printf '\n  Workman Dev was not relaunched (--no-relaunch).\n'
-  printf '  Run wrk-dev app when you are ready.\n\n'
-fi
+# Cleanup runs before opening the installed app; either step can be disabled.
+completion_status=0
+workman_dev_cleanup "$cleanup_mode" "$repo_root" "$build_dir" \
+  "$install_dir" "$bin_dir" "$app_path" "$data_dir" || completion_status=$?
+workman_dev_relaunch "$relaunch" "$install_dir" || completion_status=$?
+exit "$completion_status"

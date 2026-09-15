@@ -26,6 +26,7 @@ use workman_core::{
         PtySubmissionVerificationMode, RawOutput, WORKMAN_PTY_PROFILE_ENV, is_kimi_tool_type,
     },
     terminal::{DEFAULT_SCROLLBACK_LINES, TerminalKeyboardProtocol, TerminalOutput},
+    terminal_queries::SharedTerminalColors,
 };
 
 // Preserve a minimum packet boundary; the process-local worker additionally
@@ -190,6 +191,8 @@ pub type RegistryResult<T> = Result<T, RegistryError>;
 #[derive(Clone, Default)]
 pub struct ProcessInputRouter {
     targets: Arc<RwLock<HashMap<ProcessId, ProcessInputTarget>>>,
+    typing_pause: Arc<RwLock<crate::settings::TypingPauseSettings>>,
+    pub(crate) terminal_colors: SharedTerminalColors,
 }
 
 #[derive(Clone)]
@@ -214,6 +217,16 @@ pub struct ProcessTerminalAttachment {
 impl ProcessInputRouter {
     /// Send raw terminal bytes without taking the lifecycle registry mutex.
     pub fn send_input(&self, process_id: ProcessId, data: &[u8]) -> RegistryResult<Process> {
+        self.send_terminal_input(process_id, data, false)
+    }
+
+    /// Route terminal bytes with explicit provenance so protocol replies never extend the pause.
+    pub(crate) fn send_terminal_input(
+        &self,
+        process_id: ProcessId,
+        data: &[u8],
+        user_initiated: bool,
+    ) -> RegistryResult<Process> {
         let target = self.target(process_id)?;
         let active = target
             .active
@@ -231,13 +244,15 @@ impl ProcessInputRouter {
         {
             target.attention.suppress_ui_activity();
         }
-        target
-            .input
-            .write_all(data)
-            .map_err(|error| RegistryError::Pty {
-                process_id,
-                message: error.to_string(),
-            })?;
+        (if user_initiated {
+            target.input.write_user_input(data)
+        } else {
+            target.input.write_all(data)
+        })
+        .map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
         if submits_prompt {
             target.attention.observe_input();
         }
@@ -275,7 +290,7 @@ impl ProcessInputRouter {
         content: &[u8],
         key_delay: Duration,
     ) -> RegistryResult<Process> {
-        self.submit_input_with_verification(process_id, content, key_delay, None)
+        self.submit_input_with_verification(process_id, content, key_delay, None, false)
     }
 
     fn submit_initial_prompt(
@@ -301,7 +316,7 @@ impl ProcessInputRouter {
         } else {
             SUBMIT_KEY_DELAY
         };
-        self.submit_input_with_verification(process_id, content, key_delay, verification)
+        self.submit_input_with_verification(process_id, content, key_delay, verification, false)
     }
 
     fn submit_input_with_verification(
@@ -310,6 +325,7 @@ impl ProcessInputRouter {
         content: &[u8],
         key_delay: Duration,
         verification: Option<PtySubmissionVerification>,
+        allow_dialog: bool,
     ) -> RegistryResult<Process> {
         let target = self.target(process_id)?;
         let active = target
@@ -319,16 +335,21 @@ impl ProcessInputRouter {
         if !*active {
             return Err(RegistryError::NotRunning(process_id));
         }
-        let queued = if target.process.kind == ProcessKind::Agent {
-            target.input.submit_input_verified(
-                content,
-                key_delay,
-                verification.unwrap_or(PtySubmissionVerification {
-                    timeout: SUBMIT_VERIFY_TIMEOUT,
-                    max_attempts: SUBMIT_MAX_ATTEMPTS,
-                    mode: PtySubmissionVerificationMode::TurnStart,
-                }),
-            )
+        let verification = (target.process.kind == ProcessKind::Agent).then(|| {
+            verification.unwrap_or(PtySubmissionVerification {
+                timeout: SUBMIT_VERIFY_TIMEOUT,
+                max_attempts: SUBMIT_MAX_ATTEMPTS,
+                mode: PtySubmissionVerificationMode::TurnStart,
+            })
+        });
+        let queued = if allow_dialog {
+            target
+                .input
+                .submit_dialog_response(content, key_delay, verification)
+        } else if let Some(verification) = verification {
+            target
+                .input
+                .submit_input_verified(content, key_delay, verification)
         } else {
             target.input.submit_input(content, key_delay)
         };
@@ -349,7 +370,35 @@ impl ProcessInputRouter {
             .ok_or(RegistryError::NotRunning(process_id))
     }
 
+    pub(crate) fn typing_pause(&self) -> crate::settings::TypingPauseSettings {
+        *self
+            .typing_pause
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
+        let mut current = self
+            .typing_pause
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = settings;
+        for target in self
+            .targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+        {
+            target.input.set_typing_idle_delay(settings.delay());
+        }
+    }
+
     fn insert(&self, target: ProcessInputTarget) {
+        let settings = self
+            .typing_pause
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        target.input.set_typing_idle_delay(settings.delay());
         self.targets
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1177,7 +1226,9 @@ impl ProcessRegistry {
             .get(&process_id)
             .copied()
             .unwrap_or(DEFAULT_PTY_SIZE);
-        let mut options = PtySpawnOptions::new(process.id, token, command).with_size(size);
+        let mut options = PtySpawnOptions::new(process.id, token, command)
+            .with_size(size)
+            .with_terminal_colors(self.input_router.terminal_colors.clone());
         let spawn_environment = if interactive_terminal {
             user_environment.interactive_terminal_environment()
         } else {
@@ -2019,6 +2070,22 @@ impl ProcessRegistry {
         self.submit_input_with_delay(process_id, content, SUBMIT_KEY_DELAY)
     }
 
+    /// Explicit force=true responses retain their dialog override even after a typing pause.
+    pub(crate) fn submit_dialog_response(
+        &mut self,
+        process_id: ProcessId,
+        content: &[u8],
+    ) -> RegistryResult<Process> {
+        self.refresh_exits()?;
+        self.input_router.submit_input_with_verification(
+            process_id,
+            content,
+            SUBMIT_KEY_DELAY,
+            None,
+            true,
+        )
+    }
+
     /// Queue a launch-time prompt with tool-specific submission verification.
     pub(crate) fn submit_initial_prompt(
         &mut self,
@@ -2214,6 +2281,18 @@ impl ProcessRegistry {
         let changed = !events.is_empty();
         for (process_id, event) in events {
             let (kind, message) = match event.kind {
+                PtySubmissionEventKind::StaleDialogResponse => (
+                    "submit_stale_dialog_response",
+                    "Dialog response was not sent because the dialog changed while it was queued. Check the current prompt before responding.".into(),
+                ),
+                PtySubmissionEventKind::EnterBlockedByDialog => (
+                    "submit_enter_blocked_by_dialog",
+                    "Message text was written, but Enter was withheld because a dialog appeared or changed, or typing resumed during the response. Check the terminal before submitting or resending.".into(),
+                ),
+                PtySubmissionEventKind::RetryBlockedByDialog => (
+                    "submit_retry_blocked_by_dialog",
+                    "Enter was already sent; an automatic retry was skipped because a dialog appeared or changed. Check the terminal before resending.".into(),
+                ),
                 PtySubmissionEventKind::Retried => (
                     "submit_retry",
                     format!(

@@ -1,6 +1,6 @@
 //! PTY process hosting and bounded raw-output capture.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::future::Future;
@@ -26,12 +26,13 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
 
-use crate::attention::{AgentState, AttentionTracker, PendingPrompt};
+use crate::attention::{AgentState, AttentionTracker, PendingDialog, PendingPrompt};
 use crate::output_spill::{OutputSpill, OutputSpillSink};
 use crate::shell::ShellInvocation;
 #[cfg(test)]
 use crate::shell::command_prelude as shell_command_prelude;
 use crate::terminal::{DEFAULT_SCROLLBACK_LINES, TerminalOutput};
+use crate::terminal_queries::{SharedTerminalColors, TerminalColorQueries};
 
 /// Portable PTY exit status and terminal dimensions used by the host API.
 pub use portable_pty::{ExitStatus, PtySize};
@@ -358,6 +359,7 @@ pub struct PtySpawnOptions {
     pub scrollback_lines: usize,
     /// Agent tool family used for terminal-attention classification.
     pub tool_type: Option<String>,
+    pub terminal_colors: SharedTerminalColors,
     shell: PathBuf,
     shell_invocation: ShellInvocation,
     shell_session: bool,
@@ -382,6 +384,7 @@ impl PtySpawnOptions {
             raw_buffer_capacity: DEFAULT_RAW_BUFFER_CAPACITY,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             tool_type: None,
+            terminal_colors: SharedTerminalColors::default(),
             shell: PathBuf::from("/bin/sh"),
             shell_invocation: ShellInvocation::default(),
             shell_session: false,
@@ -406,6 +409,11 @@ impl PtySpawnOptions {
     /// Set the initial PTY dimensions.
     pub fn with_size(mut self, size: PtySize) -> Self {
         self.size = size;
+        self
+    }
+
+    pub fn with_terminal_colors(mut self, colors: SharedTerminalColors) -> Self {
+        self.terminal_colors = colors;
         self
     }
 
@@ -502,6 +510,7 @@ pub struct PtyProcess {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     submission_tx: Option<mpsc::Sender<PtySubmission>>,
+    typing_activity: Arc<TypingActivity>,
     submission_event_rx: mpsc::Receiver<PtySubmissionEvent>,
     child: Option<Box<dyn Child + Send + Sync>>,
     exit_status: Option<ExitStatus>,
@@ -524,6 +533,44 @@ pub struct PtyInputHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     submission_tx: mpsc::Sender<PtySubmission>,
     attention: AttentionTracker,
+    typing_activity: Arc<TypingActivity>,
+    terminal_output: TerminalOutput,
+}
+
+/// User typing is independent of agent attention: editing a prompt does not start a turn.
+#[derive(Default)]
+struct TypingActivity {
+    last_input: Mutex<Option<Instant>>,
+    delay_ms: AtomicU64,
+}
+
+impl TypingActivity {
+    fn typed_since(&self, since: Instant) -> bool {
+        self.delay_ms.load(Ordering::Acquire) != 0
+            && self
+                .last_input
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some_and(|last| last >= since)
+    }
+
+    fn active_since(&self, queued_at: Instant) -> bool {
+        let delay = Duration::from_millis(self.delay_ms.load(Ordering::Acquire));
+        !delay.is_zero()
+            && self
+                .last_input
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some_and(|last| last >= queued_at || queued_at.duration_since(last) < delay)
+    }
+
+    fn remaining(&self) -> Duration {
+        let delay = Duration::from_millis(self.delay_ms.load(Ordering::Acquire));
+        self.last_input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map_or(Duration::ZERO, |last| delay.saturating_sub(last.elapsed()))
+    }
 }
 
 impl PtyInputHandle {
@@ -537,9 +584,34 @@ impl PtyInputHandle {
         writer.flush()
     }
 
+    /// Record a real keyboard/paste event and write it without waiting for queued messages.
+    /// The writer lock makes recording input atomic with automatic delivery's final check.
+    pub fn write_user_input(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // An empty user frame is an IME composition activity notification: no text is ready yet.
+        *self
+            .typing_activity
+            .last_input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        writer.write_all(bytes)?;
+        writer.flush()
+    }
+
+    /// Update the delay for both future and already-queued submissions. Zero disables it.
+    pub fn set_typing_idle_delay(&self, delay: Duration) {
+        self.typing_activity.delay_ms.store(
+            delay.as_millis().try_into().unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+    }
+
     /// Queue content followed by Enter as one ordered process-local submission.
     pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
-        self.queue_submission(content, key_delay, None)
+        self.queue_submission(content, key_delay, None, false)
     }
 
     /// Queue a submission whose Enter is retried when no turn-start output appears.
@@ -549,7 +621,17 @@ impl PtyInputHandle {
         key_delay: Duration,
         verification: PtySubmissionVerification,
     ) -> io::Result<()> {
-        self.queue_submission(content, key_delay, Some(verification))
+        self.queue_submission(content, key_delay, Some(verification), false)
+    }
+
+    /// An explicitly requested dialog answer may pass the delivery-time dialog guard.
+    pub fn submit_dialog_response(
+        &self,
+        content: &[u8],
+        key_delay: Duration,
+        verification: Option<PtySubmissionVerification>,
+    ) -> io::Result<()> {
+        self.queue_submission(content, key_delay, verification, true)
     }
 
     fn queue_submission(
@@ -557,12 +639,23 @@ impl PtyInputHandle {
         content: &[u8],
         key_delay: Duration,
         verification: Option<PtySubmissionVerification>,
+        allow_dialog: bool,
     ) -> io::Result<()> {
+        let queued_at = Instant::now();
+        let dialog = if allow_dialog {
+            current_submission_dialog(&self.attention, &self.terminal_output)
+        } else {
+            None
+        };
         self.submission_tx
             .send(PtySubmission {
                 content: content.to_vec(),
                 key_delay,
                 verification,
+                allow_dialog,
+                dialog,
+                queued_at,
+                held: !self.typing_activity.remaining().is_zero(),
                 _pending_prompt: self.attention.reserve_prompt(),
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))
@@ -573,6 +666,10 @@ struct PtySubmission {
     content: Vec<u8>,
     key_delay: Duration,
     verification: Option<PtySubmissionVerification>,
+    allow_dialog: bool,
+    dialog: Option<PendingDialog>,
+    queued_at: Instant,
+    held: bool,
     _pending_prompt: PendingPrompt,
 }
 
@@ -599,6 +696,9 @@ pub enum PtySubmissionVerificationMode {
 /// A retry/failure notice emitted by the process-local input worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PtySubmissionEventKind {
+    StaleDialogResponse,
+    EnterBlockedByDialog,
+    RetryBlockedByDialog,
     Retried,
     Unverified,
 }
@@ -724,6 +824,7 @@ impl PtyProcess {
                     reader_terminal,
                     reader_spill,
                     reader_response_writer,
+                    options.terminal_colors,
                     attention_render_tx,
                     capture_metrics,
                 );
@@ -739,6 +840,8 @@ impl PtyProcess {
                 return Err(error).context("spawn PTY output reader");
             }
         };
+        let typing_activity = Arc::new(TypingActivity::default());
+        let submission_typing_activity = Arc::clone(&typing_activity);
         let submission_writer = Arc::clone(&writer);
         let (submission_tx, submission_rx) = mpsc::channel();
         let (submission_event_tx, submission_event_rx) = mpsc::channel();
@@ -755,6 +858,7 @@ impl PtyProcess {
                     submission_attention,
                     submission_terminal,
                     submission_event_tx,
+                    submission_typing_activity,
                 )
             }) {
             Ok(thread) => thread,
@@ -772,6 +876,7 @@ impl PtyProcess {
             master: Some(pair.master),
             writer: Some(writer),
             submission_tx: Some(submission_tx),
+            typing_activity,
             submission_event_rx,
             child: Some(child),
             exit_status: None,
@@ -842,7 +947,9 @@ impl PtyProcess {
         Some(PtyInputHandle {
             writer: Arc::clone(self.writer.as_ref()?),
             submission_tx: self.submission_tx.as_ref()?.clone(),
+            typing_activity: Arc::clone(&self.typing_activity),
             attention: self.attention.clone(),
+            terminal_output: self.terminal_output.clone(),
         })
     }
 
@@ -901,7 +1008,7 @@ impl PtyProcess {
     ) -> io::Result<()> {
         self.input_handle()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "PTY input worker is closed"))?
-            .queue_submission(content, key_delay, verification)
+            .queue_submission(content, key_delay, verification, false)
     }
 
     /// Drain retry/failure notices produced since the previous read.
@@ -1074,14 +1181,66 @@ fn process_submissions(
     attention: AttentionTracker,
     terminal_output: TerminalOutput,
     events: mpsc::Sender<PtySubmissionEvent>,
+    typing_activity: Arc<TypingActivity>,
 ) {
-    for submission in submissions {
-        let output_before_content = raw_output.total_bytes_seen();
+    let mut pending: VecDeque<PtySubmission> = VecDeque::new();
+    let mut waiting_for_dialog = false;
+    let mut queue_was_held = false;
+    'submissions: loop {
+        if pending.is_empty() {
+            queue_was_held = false;
+            let Ok(submission) = submissions.recv() else {
+                break;
+            };
+            pending.push_back(submission);
+        }
+        pending.extend(submissions.try_iter());
+        // A deliberate dialog answer must be able to unblock the FIFO without discarding
+        // the automatic messages waiting ahead of it. Ordinary messages retain their order.
+        let index = if waiting_for_dialog {
+            pending
+                .iter()
+                .position(|submission| submission.allow_dialog)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut submission = pending.remove(index).unwrap();
+        let mut gate = SubmissionGate {
+            typing_activity: &typing_activity,
+            attention: &attention,
+            terminal_output: &terminal_output,
+            raw_output: &raw_output,
+            held: queue_was_held
+                || submission.held
+                || typing_activity.active_since(submission.queued_at),
+            queued_at: submission.queued_at,
+            allow_dialog: submission.allow_dialog,
+            dialog: submission.dialog.clone(),
+            force_enter: false,
+            force_enter_interrupted: false,
+            last_write_at: submission.queued_at,
+        };
         let content =
             framed_submission_content(&submission.content, terminal_output.is_bracketed_paste());
-        if write_and_flush(&writer, &content).is_err() {
-            break;
-        }
+        let output_before_content = match gate.write(&writer, &content) {
+            Ok(Some(offset)) => offset,
+            Ok(None) => {
+                if submission.allow_dialog {
+                    report_dialog_block(&events, PtySubmissionEventKind::StaleDialogResponse);
+                } else {
+                    submission.held = gate.held;
+                    queue_was_held |= gate.held;
+                    pending.push_front(submission);
+                    waiting_for_dialog = true;
+                    thread::sleep(Duration::from_millis(25));
+                }
+                continue;
+            }
+            Err(_) => break,
+        };
+        queue_was_held |= gate.held;
+        waiting_for_dialog = false;
         thread::sleep(submission.key_delay);
         if let Some(verification) = submission.verification {
             // Interactive composers redraw asynchronously after receiving the
@@ -1089,16 +1248,30 @@ fn process_submissions(
             // settles, otherwise late draft output can masquerade as a turn.
             wait_for_output_quiet(&raw_output, output_before_content, verification.mode);
         }
+        gate.prepare_for_enter(&writer);
 
         let attempts = submission
             .verification
             .map(|verification| verification.max_attempts.max(1))
             .unwrap_or(1);
         for attempt in 1..=attempts {
-            let output_before_enter = raw_output.total_bytes_seen();
-            if write_and_flush(&writer, b"\r").is_err() {
-                return;
-            }
+            let output_before_enter = match gate.write(&writer, b"\r") {
+                Ok(Some(offset)) => offset,
+                Ok(None) => {
+                    queue_was_held |= gate.held;
+                    report_dialog_block(
+                        &events,
+                        if attempt == 1 {
+                            PtySubmissionEventKind::EnterBlockedByDialog
+                        } else {
+                            PtySubmissionEventKind::RetryBlockedByDialog
+                        },
+                    );
+                    continue 'submissions;
+                }
+                Err(_) => return,
+            };
+            queue_was_held |= gate.held;
             // Queueing may precede Enter by seconds; start the input grace period
             // at the actual keypress as well as when the daemon accepted the prompt.
             attention.observe_input();
@@ -1134,6 +1307,31 @@ fn process_submissions(
     }
 }
 
+fn current_submission_dialog(
+    attention: &AttentionTracker,
+    terminal_output: &TerminalOutput,
+) -> Option<PendingDialog> {
+    let viewport = terminal_output.read_viewport();
+    let mut rendered = String::new();
+    let mut draft_wrap = false;
+    for row in &viewport.rows {
+        let line = row.text.trim_start();
+        let draft = line.strip_prefix('❯').or_else(|| line.strip_prefix('›'));
+        let composer =
+            draft.is_some_and(|draft| !crate::attention::is_claude_dialog_choice(draft.trim()));
+        if composer {
+            // Keep the prompt marker as a resting-state boundary, but never classify the
+            // user's draft (or our just-pasted body) as a permission request.
+            rendered.push(line.chars().next().unwrap());
+        } else if !draft_wrap {
+            rendered.push_str(&row.text);
+        }
+        draft_wrap = (composer || draft_wrap) && row.wrapped;
+        rendered.push('\n');
+    }
+    attention.dialog_in_viewport(&rendered, viewport.alternate_screen)
+}
+
 fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
     if !bracketed_paste || content.is_empty() {
         return content.to_vec();
@@ -1146,12 +1344,91 @@ fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
     framed
 }
 
-fn write_and_flush(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> io::Result<()> {
-    let mut writer = writer
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    writer.write_all(bytes)?;
-    writer.flush()
+struct SubmissionGate<'a> {
+    typing_activity: &'a TypingActivity,
+    attention: &'a AttentionTracker,
+    terminal_output: &'a TerminalOutput,
+    raw_output: &'a RawOutput,
+    held: bool,
+    queued_at: Instant,
+    allow_dialog: bool,
+    dialog: Option<PendingDialog>,
+    force_enter: bool,
+    force_enter_interrupted: bool,
+    last_write_at: Instant,
+}
+
+impl SubmissionGate<'_> {
+    fn prepare_for_enter(&mut self, writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+        if !self.allow_dialog {
+            return;
+        }
+        let _writer = writer.lock().unwrap_or_else(|p| p.into_inner());
+        // A response can echo or move the selected menu item. Use its settled redraw for
+        // Enter, not the pre-body viewport. Only fresh typing can arm this second guard.
+        self.queued_at = self.last_write_at;
+        self.force_enter = true;
+        self.held = self.typing_activity.typed_since(self.queued_at);
+        self.force_enter_interrupted = self.held;
+        if !self.force_enter_interrupted {
+            self.dialog = current_submission_dialog(self.attention, self.terminal_output);
+        }
+        // If typing already resumed during the redraw, there is no trustworthy baseline:
+        // leave Enter to the user instead of accepting an unknown replacement prompt.
+    }
+
+    /// None leaves a normal body queued, or suppresses an unsafe Enter/stale dialog answer.
+    fn write(
+        &mut self,
+        writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+        bytes: &[u8],
+    ) -> io::Result<Option<u64>> {
+        loop {
+            if self.attention.snapshot().exited {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "PTY process exited",
+                ));
+            }
+            let mut writer = writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let remaining = self.typing_activity.remaining();
+            self.held |= if self.force_enter {
+                self.typing_activity.typed_since(self.queued_at)
+            } else {
+                self.typing_activity.active_since(self.queued_at)
+            };
+            if remaining.is_zero() {
+                if self.held {
+                    let current = current_submission_dialog(self.attention, self.terminal_output);
+                    if self.allow_dialog {
+                        if self.force_enter_interrupted || current != self.dialog {
+                            return Ok(None);
+                        }
+                    } else if current.is_some() {
+                        return Ok(None);
+                    }
+                }
+                let output_before_write = self.raw_output.total_bytes_seen();
+                writer.write_all(bytes)?;
+                writer.flush()?;
+                self.last_write_at = Instant::now();
+                return Ok(Some(output_before_write));
+            }
+            drop(writer);
+            thread::sleep(remaining.min(Duration::from_millis(25)));
+        }
+    }
+}
+
+fn report_dialog_block(events: &mpsc::Sender<PtySubmissionEvent>, kind: PtySubmissionEventKind) {
+    let _ = events.send(PtySubmissionEvent {
+        kind,
+        attempt: 0,
+        max_attempts: 0,
+        timeout: Duration::ZERO,
+    });
 }
 
 fn wait_for_turn_start(
@@ -1335,11 +1612,13 @@ fn capture_output(
     terminal_output: TerminalOutput,
     output_spill: Option<OutputSpillSink>,
     response_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    terminal_colors: SharedTerminalColors,
     attention_render_tx: mpsc::SyncSender<()>,
     metrics: Arc<PtyCaptureMetrics>,
 ) {
     let mut profiler = PtyCaptureProfiler::new(Arc::clone(&metrics));
     let mut chunk = [0_u8; 8192];
+    let mut color_queries = TerminalColorQueries::new(terminal_colors);
     #[cfg(windows)]
     let mut probe_filter = ConptyProbeFilter::default();
     loop {
@@ -1350,13 +1629,11 @@ fn capture_output(
                 metrics
                     .parsed_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
-                let replies = terminal_output.feed_with_replies(&chunk[..count]);
+                let (recorded, mut replies) = color_queries.filter(&chunk[..count]);
+                replies.extend(terminal_output.feed_with_replies(&chunk[..count]));
                 #[cfg(windows)]
-                let recorded = probe_filter.filter(&chunk[..count]);
-                #[cfg(windows)]
+                let recorded = probe_filter.filter(&recorded);
                 let recorded = recorded.as_slice();
-                #[cfg(not(windows))]
-                let recorded = &chunk[..count];
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
@@ -1383,9 +1660,10 @@ fn capture_output(
             Err(_) => break,
         }
     }
+    let held = color_queries.flush();
     #[cfg(windows)]
+    let held = [probe_filter.filter(&held), probe_filter.flush()].concat();
     {
-        let held = probe_filter.flush();
         if !held.is_empty() {
             raw_output.push(&held);
             if let Some(spill) = &output_spill {
@@ -2133,12 +2411,475 @@ mod tests {
         assert!(attention.snapshot().last_input_at.is_some());
     }
 
+    struct ObservedWriter(mpsc::Sender<(Vec<u8>, Instant)>);
+
+    impl Write for ObservedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .send((bytes.to_vec(), Instant::now()))
+                .map_err(io::Error::other)?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn submission_fixture() -> (
+        PtyInputHandle,
+        mpsc::Receiver<(Vec<u8>, Instant)>,
+        JoinHandle<()>,
+    ) {
+        let (input, writes, task, _) = submission_fixture_for(
+            TerminalOutput::new(24, 80, 100),
+            AttentionTracker::new(None),
+        );
+        (input, writes, task)
+    }
+
+    fn submission_fixture_for(
+        terminal: TerminalOutput,
+        attention: AttentionTracker,
+    ) -> (
+        PtyInputHandle,
+        mpsc::Receiver<(Vec<u8>, Instant)>,
+        JoinHandle<()>,
+        mpsc::Receiver<PtySubmissionEvent>,
+    ) {
+        let (written_tx, written_rx) = mpsc::channel();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(ObservedWriter(written_tx))));
+        let (submission_tx, submission_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let typing_activity = Arc::new(TypingActivity::default());
+        let input = PtyInputHandle {
+            writer: writer.clone(),
+            submission_tx,
+            attention: attention.clone(),
+            terminal_output: terminal.clone(),
+            typing_activity: typing_activity.clone(),
+        };
+        let task = thread::spawn(move || {
+            process_submissions(
+                writer,
+                submission_rx,
+                RawOutput::new(64),
+                attention,
+                terminal,
+                event_tx,
+                typing_activity,
+            )
+        });
+        (input, written_rx, task, event_rx)
+    }
+
+    #[test]
+    fn typing_pause_restarts_on_user_input_and_preserves_message_order() {
+        let (input, writes, task) = submission_fixture();
+        let delay = Duration::from_millis(300);
+        input.set_typing_idle_delay(Duration::from_secs(60));
+        input.write_user_input(b"draft").unwrap();
+        assert_eq!(writes.recv().unwrap().0, b"draft");
+        input.submit_input(b"first", Duration::ZERO).unwrap();
+        input.submit_input(b"second", Duration::ZERO).unwrap();
+        assert!(writes.recv_timeout(Duration::from_millis(30)).is_err());
+        input.write_user_input(b" more").unwrap();
+        let (bytes, last_input) = writes.recv().unwrap();
+        assert_eq!(bytes, b" more");
+        input.set_typing_idle_delay(delay);
+        let (bytes, delivered) = writes.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(bytes, b"first");
+        // Record time precedes the raw write by a few instructions.
+        assert!(delivered.duration_since(last_input) >= delay - Duration::from_millis(5));
+        for expected in [b"\r".as_slice(), b"second", b"\r"] {
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                expected
+            );
+        }
+        drop(input);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn typing_pause_is_process_local_and_disabling_releases_queued_messages() {
+        let (input, writes, task) = submission_fixture();
+        let (other, other_writes, other_task) = submission_fixture();
+        input.set_typing_idle_delay(Duration::from_secs(60));
+        other.set_typing_idle_delay(Duration::from_secs(60));
+        input.write_user_input(b"typing").unwrap();
+        writes.recv().unwrap();
+        input.submit_input(b"wake", Duration::ZERO).unwrap();
+        // Protocol replies are immediate and do not count as typing in the other terminal.
+        other.write_all(b"reply").unwrap();
+        assert_eq!(other_writes.recv().unwrap().0, b"reply");
+        other.submit_input(b"other", Duration::ZERO).unwrap();
+        assert_eq!(
+            other_writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"other"
+        );
+        assert_eq!(
+            other_writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"\r"
+        );
+        assert!(writes.try_recv().is_err());
+        input.set_typing_idle_delay(Duration::ZERO);
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"wake"
+        );
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"\r"
+        );
+        drop(input);
+        drop(other);
+        task.join().unwrap();
+        other_task.join().unwrap();
+    }
+
+    #[test]
+    fn typing_pause_checks_enter_and_retries_after_content_has_been_written() {
+        let (input, writes, task) = submission_fixture();
+        let delay = Duration::from_millis(300);
+        input.set_typing_idle_delay(delay);
+        input
+            .submit_input_verified(
+                b"wake",
+                Duration::from_secs(1),
+                PtySubmissionVerification {
+                    timeout: Duration::from_secs(1),
+                    max_attempts: 2,
+                    mode: PtySubmissionVerificationMode::TurnStart,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            b"wake"
+        );
+        // A user can start typing during the paste/Enter boundary.
+        for text in [b"typing".as_slice(), b"again"] {
+            input.write_user_input(text).unwrap();
+            let (bytes, typed_at) = writes.recv().unwrap();
+            assert_eq!(bytes, text);
+            let (bytes, enter_at) = writes.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(bytes, b"\r");
+            assert!(enter_at.duration_since(typed_at) >= delay - Duration::from_millis(5));
+        }
+        drop(input);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn typing_pause_releases_pending_prompts_when_process_exits() {
+        let (input, writes, task) = submission_fixture();
+        input.set_typing_idle_delay(Duration::from_secs(60));
+        input.write_user_input(b"typing").unwrap();
+        writes.recv().unwrap();
+        input.submit_input(b"wake", Duration::ZERO).unwrap();
+        let attention = input.attention.clone();
+        attention.mark_exited();
+        drop(input);
+        task.join().unwrap();
+        assert!(!attention.has_pending_prompts());
+        assert!(writes.try_recv().is_err());
+    }
+
+    #[test]
+    fn typing_pause_ignores_same_terminal_protocol_replies_but_counts_ime_activity() {
+        let (input, writes, task) = submission_fixture();
+        input.write_user_input(b"typed").unwrap();
+        writes.recv().unwrap();
+        let typed_at = *input.typing_activity.last_input.lock().unwrap();
+        input.write_all(b"\x1b[0n").unwrap();
+        writes.recv().unwrap();
+        input.write_all(b"").unwrap();
+        assert_eq!(*input.typing_activity.last_input.lock().unwrap(), typed_at);
+        input.write_user_input(b"").unwrap();
+        assert!(input.typing_activity.last_input.lock().unwrap().unwrap() >= typed_at.unwrap());
+        drop(input);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn typing_pause_holds_multiple_wakes_and_allows_a_matching_dialog_response() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("claude_code".into()));
+        let (input, writes, task, events) =
+            submission_fixture_for(terminal.clone(), attention.clone());
+        input.set_typing_idle_delay(Duration::from_millis(100));
+        input.write_user_input(b"draft").unwrap();
+        writes.recv().unwrap();
+        for body in [b"first".as_slice(), b"second"] {
+            input.submit_input(body, Duration::ZERO).unwrap();
+        }
+        terminal
+            .feed_with_replies(b"Do you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm");
+        // Both messages stay pending after the typing pause expires.
+        assert!(writes.recv_timeout(Duration::from_millis(200)).is_err());
+        assert!(attention.has_pending_prompts());
+        input
+            .submit_dialog_response(b"no", Duration::ZERO, None)
+            .unwrap();
+        for expected in [b"no".as_slice(), b"\r"] {
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                expected
+            );
+        }
+        assert!(writes.recv_timeout(Duration::from_millis(50)).is_err());
+        terminal.feed_with_replies("\x1b[2J\x1b[H❯ ".as_bytes());
+        for expected in [b"first".as_slice(), b"\r", b"second", b"\r"] {
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                expected
+            );
+        }
+        drop(input);
+        task.join().unwrap();
+        assert!(!attention.has_pending_prompts());
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn typing_pause_does_not_answer_a_changed_dialog_with_a_stale_force_response() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("claude_code".into()));
+        let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
+        input.set_typing_idle_delay(Duration::from_secs(60));
+        input.write_user_input(b"draft").unwrap();
+        writes.recv().unwrap();
+        terminal.feed_with_replies(b"Allow this command?\r\n1. Yes\r\n2. No\r\nEnter to confirm");
+        input
+            .submit_dialog_response(b"yes", Duration::ZERO, None)
+            .unwrap();
+        terminal.feed_with_replies(
+            b"\x1b[2J\x1b[HAllow this tool?\r\n1. Yes\r\n2. No\r\nEnter to confirm",
+        );
+        input.set_typing_idle_delay(Duration::ZERO);
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::StaleDialogResponse
+        );
+        drop(input);
+        task.join().unwrap();
+        assert!(writes.try_recv().is_err());
+    }
+
+    #[test]
+    fn typing_pause_distinguishes_withheld_enter_from_skipped_retry() {
+        for retry in [false, true] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(Some("claude_code".into()));
+            let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
+            input.set_typing_idle_delay(Duration::from_millis(50));
+            input
+                .submit_input_verified(
+                    b"wake",
+                    Duration::from_millis(200),
+                    PtySubmissionVerification {
+                        timeout: Duration::from_millis(200),
+                        max_attempts: 2,
+                        mode: PtySubmissionVerificationMode::TurnStart,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                b"wake"
+            );
+            if retry {
+                assert_eq!(
+                    writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                    b"\r"
+                );
+            }
+            input.write_user_input(b"typing").unwrap();
+            writes.recv().unwrap();
+            terminal.feed_with_replies(
+                b"Do you want to proceed?\r\n1. Yes\r\n2. No\r\nEnter to confirm",
+            );
+            let expected = if retry {
+                PtySubmissionEventKind::RetryBlockedByDialog
+            } else {
+                PtySubmissionEventKind::EnterBlockedByDialog
+            };
+            loop {
+                let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
+                if event.kind != PtySubmissionEventKind::Retried {
+                    assert_eq!(event.kind, expected);
+                    break;
+                }
+            }
+            drop(input);
+            task.join().unwrap();
+            assert!(writes.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn force_response_echo_does_not_block_enter_without_new_typing() {
+        for (delay_ms, held) in [(0, false), (50, false), (50, true)] {
+            let terminal = TerminalOutput::new(24, 80, 100);
+            let attention = AttentionTracker::new(None);
+            let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
+            input.set_typing_idle_delay(Duration::from_millis(delay_ms));
+            terminal.feed_with_replies(
+                b"Choose a mode:\r\n1. Safe\r\n2. Quit\r\nPress enter to continue",
+            );
+            if held {
+                input.write_user_input(b"draft").unwrap();
+                writes.recv().unwrap();
+            }
+            input
+                .submit_dialog_response(
+                    b"1",
+                    Duration::from_millis(100),
+                    Some(PtySubmissionVerification {
+                        timeout: Duration::from_millis(50),
+                        max_attempts: 1,
+                        mode: PtySubmissionVerificationMode::TurnStart,
+                    }),
+                )
+                .unwrap();
+            assert_eq!(writes.recv_timeout(Duration::from_secs(2)).unwrap().0, b"1");
+            // The TUI echoes the answer before Enter, changing the captured viewport.
+            terminal.feed_with_replies(b"1");
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                b"\r"
+            );
+            drop(input);
+            task.join().unwrap();
+            assert!(
+                events
+                    .try_iter()
+                    .all(|event| event.kind == PtySubmissionEventKind::Unverified)
+            );
+        }
+    }
+
+    #[test]
+    fn force_without_a_captured_dialog_reports_stale_instead_of_holding() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(None);
+        let (input, writes, task, events) =
+            submission_fixture_for(terminal.clone(), attention.clone());
+        input.set_typing_idle_delay(Duration::from_secs(60));
+        input.write_user_input(b"draft").unwrap();
+        writes.recv().unwrap();
+        input
+            .submit_dialog_response(b"1", Duration::ZERO, None)
+            .unwrap();
+        terminal
+            .feed_with_replies(b"Choose a mode:\r\n1. Safe\r\n2. Quit\r\nPress enter to continue");
+        input.set_typing_idle_delay(Duration::from_millis(50));
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::StaleDialogResponse
+        );
+        drop(input);
+        task.join().unwrap();
+        assert!(writes.try_recv().is_err());
+        assert!(!attention.has_pending_prompts());
+    }
+
+    #[test]
+    fn force_response_withholds_enter_when_typing_resumes_during_body_redraw() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(None);
+        let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
+        input.set_typing_idle_delay(Duration::from_millis(50));
+        terminal
+            .feed_with_replies(b"Choose a mode:\r\n1. Safe\r\n2. Quit\r\nPress enter to continue");
+        input
+            .submit_dialog_response(b"1", Duration::from_millis(200), None)
+            .unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(2)).unwrap().0, b"1");
+        input.write_user_input(b"2").unwrap();
+        writes.recv().unwrap();
+        terminal.feed_with_replies(b"2");
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::EnterBlockedByDialog
+        );
+        drop(input);
+        task.join().unwrap();
+        assert!(writes.try_recv().is_err());
+    }
+
+    #[test]
+    fn force_response_skips_retry_if_new_typing_changes_the_dialog() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(None);
+        let (input, writes, task, events) = submission_fixture_for(terminal.clone(), attention);
+        input.set_typing_idle_delay(Duration::from_millis(50));
+        terminal
+            .feed_with_replies(b"Choose a mode:\r\n1. Safe\r\n2. Quit\r\nPress enter to continue");
+        input
+            .submit_dialog_response(
+                b"1",
+                Duration::ZERO,
+                Some(PtySubmissionVerification {
+                    timeout: Duration::from_millis(200),
+                    max_attempts: 2,
+                    mode: PtySubmissionVerificationMode::TurnStart,
+                }),
+            )
+            .unwrap();
+        for expected in [b"1".as_slice(), b"\r"] {
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+                expected
+            );
+        }
+        input.write_user_input(b"typing").unwrap();
+        writes.recv().unwrap();
+        terminal.feed_with_replies(
+            b"\x1b[2J\x1b[HChoose another mode:\r\n1. Unsafe\r\n2. Quit\r\nPress enter to continue",
+        );
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::Retried
+        );
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::RetryBlockedByDialog
+        );
+        drop(input);
+        task.join().unwrap();
+        assert!(writes.try_recv().is_err());
+    }
+
+    #[test]
+    fn typing_pause_does_not_classify_composer_text_as_a_dialog() {
+        for marker in ["❯", "›"] {
+            let terminal = TerminalOutput::new(24, 40, 100);
+            let attention = AttentionTracker::new(Some(
+                if marker == "❯" {
+                    "claude_code"
+                } else {
+                    "codex"
+                }
+                .into(),
+            ));
+            terminal.feed_with_replies(
+                format!("{marker} Worker asks (y/n) or Do you want to proceed? Enter to confirm")
+                    .as_bytes(),
+            );
+            assert!(current_submission_dialog(&attention, &terminal).is_none());
+        }
+    }
+
     #[test]
     fn failed_or_discarded_submissions_release_pending_prompts() {
         let attention = AttentionTracker::new(None);
         let (submission_tx, submission_rx) = mpsc::channel();
         let input = PtyInputHandle {
             writer: Arc::new(Mutex::new(Box::new(io::sink()))),
+            typing_activity: Arc::new(TypingActivity::default()),
+            terminal_output: TerminalOutput::new(24, 80, 100),
             submission_tx,
             attention: attention.clone(),
         };
@@ -2151,6 +2892,23 @@ mod tests {
         assert!(!attention.has_pending_prompts());
         assert!(input.submit_input(b"closed", Duration::ZERO).is_err());
         assert!(!attention.has_pending_prompts());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_colors_are_available_before_any_viewer_attaches() {
+        let expected = b"\x1b]10;rgb:d7d7/d9d9/d5d5\x1b\\\x1b]11;rgb:2020/2323/2626\x1b\\";
+        let command = format!(
+            "stty raw -echo; printf '\\033]10;?\\033\\\\\\033]11;?\\033\\\\'; dd bs=1 count={} 2>/dev/null",
+            expected.len()
+        );
+        let mut process = PtyProcess::spawn(PtySpawnOptions::new(88, "test-token", command)).unwrap();
+        let output = wait_for_output(&process, expected);
+        assert_eq!(
+            output, expected,
+            "queries must not be replayed to later viewers"
+        );
+        process.terminate(Duration::from_millis(50)).unwrap();
     }
 
     #[cfg(unix)]

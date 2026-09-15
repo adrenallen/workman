@@ -464,6 +464,7 @@ enum BridgeCommand {
 struct TerminalInput {
     process_id: i64,
     data: Vec<u8>,
+    user_initiated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -652,6 +653,7 @@ fn daemon_send(message: String, state: State<'_, BridgeState>) -> Result<(), Str
 fn daemon_send_input(
     process_id: i64,
     data: Vec<u8>,
+    user_initiated: Option<bool>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
     if data.len() > 1024 * 1024 {
@@ -659,7 +661,11 @@ fn daemon_send_input(
     }
     state
         .input_sender
-        .try_send(TerminalInput { process_id, data })
+        .try_send(TerminalInput {
+            process_id,
+            data,
+            user_initiated: user_initiated.unwrap_or(false),
+        })
         .map_err(|error| format!("daemon input bridge is not accepting messages: {error}"))
 }
 
@@ -2172,7 +2178,11 @@ fn parse_terminal_frame(bytes: &[u8]) -> Option<TerminalFrame> {
 
 fn encode_terminal_input(input: &TerminalInput) -> Vec<u8> {
     let mut frame = Vec::with_capacity(TERMINAL_INPUT_HEADER_LEN + input.data.len());
-    frame.extend_from_slice(TERMINAL_INPUT_MAGIC);
+    frame.extend_from_slice(if input.user_initiated {
+        b"WRU1"
+    } else {
+        TERMINAL_INPUT_MAGIC
+    });
     frame.extend_from_slice(&input.process_id.to_be_bytes());
     frame.extend_from_slice(&input.data);
     frame
@@ -3492,12 +3502,19 @@ mod tests {
         let input = TerminalInput {
             process_id: 42,
             data: b"raw\x00input".to_vec(),
+            user_initiated: false,
         };
         let frame = encode_terminal_input(&input);
 
         assert_eq!(&frame[..4], TERMINAL_INPUT_MAGIC);
         assert_eq!(i64::from_be_bytes(frame[4..12].try_into().unwrap()), 42);
         assert_eq!(&frame[TERMINAL_INPUT_HEADER_LEN..], b"raw\x00input");
+        let user_frame = encode_terminal_input(&TerminalInput {
+            user_initiated: true,
+            ..input
+        });
+        assert_eq!(&user_frame[..4], b"WRU1");
+        assert_eq!(&user_frame[4..], &frame[4..]);
     }
 
     #[test]

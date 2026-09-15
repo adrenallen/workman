@@ -305,6 +305,16 @@ impl DaemonServer {
         )
         .map_err(registry_io_error)?;
         let input_router = process_registry.input_router();
+        input_router.terminal_colors.set(
+            settings::load_terminal_colors(&config.data_dir).unwrap_or_else(|error| {
+                eprintln!("workman daemon: could not load terminal-colors.json: {error}; using Graphite colors");
+                Default::default()
+            }),
+        );
+        input_router.set_typing_pause(settings::TypingPauseSettings::load(&config.data_dir).unwrap_or_else(|error| {
+            eprintln!("workman daemon: could not load typing-pause.json: {error}; using the default typing pause");
+            settings::TypingPauseSettings::default()
+        }));
         let registry = Arc::new(Mutex::new(process_registry));
         // Build the HTTP update client before publishing discovery so readiness never advertises
         // a listener that is still loading platform TLS state.
@@ -696,8 +706,8 @@ async fn control_session(
                         }
                     }
                     Message::Binary(bytes) => {
-                        if let Some((process_id, data)) = decode_terminal_input_frame(&bytes) {
-                            match input_router.send_input(process_id, data) {
+                        if let Some((process_id, data, user_initiated)) = decode_terminal_input_frame(&bytes) {
+                            match input_router.send_terminal_input(process_id, data, user_initiated) {
                                 Ok(_) => continue,
                                 Err(error) => Message::Text(
                                     json!({
@@ -1497,12 +1507,21 @@ fn encode_terminal_frame(
     frame
 }
 
-fn decode_terminal_input_frame(bytes: &[u8]) -> Option<(workman_core::ProcessId, &[u8])> {
-    if bytes.len() < TERMINAL_INPUT_HEADER_LEN || &bytes[..4] != TERMINAL_INPUT_MAGIC {
+fn decode_terminal_input_frame(bytes: &[u8]) -> Option<(workman_core::ProcessId, &[u8], bool)> {
+    if bytes.len() < TERMINAL_INPUT_HEADER_LEN {
         return None;
     }
+    let user_initiated = match &bytes[..4] {
+        b"WRU1" => true,
+        magic if magic == TERMINAL_INPUT_MAGIC => false,
+        _ => return None,
+    };
     let process_id = i64::from_be_bytes(bytes[4..12].try_into().ok()?);
-    Some((process_id, &bytes[TERMINAL_INPUT_HEADER_LEN..]))
+    Some((
+        process_id,
+        &bytes[TERMINAL_INPUT_HEADER_LEN..],
+        user_initiated,
+    ))
 }
 
 async fn authorize_local_request(
@@ -2183,9 +2202,16 @@ mod tests {
         frame.extend_from_slice(&42_i64.to_be_bytes());
         frame.extend_from_slice(b"raw\x00input");
 
-        let (process_id, data) = decode_terminal_input_frame(&frame).unwrap();
+        let (process_id, data, user_initiated) = decode_terminal_input_frame(&frame).unwrap();
+        assert!(!user_initiated);
         assert_eq!(process_id, 42);
         assert_eq!(data, b"raw\x00input");
+        frame[..4].copy_from_slice(b"WRU1");
+        let (process_id, data, user_initiated) = decode_terminal_input_frame(&frame).unwrap();
+        assert_eq!(process_id, 42);
+        assert_eq!(data, b"raw\x00input");
+        assert!(user_initiated);
+        assert!(decode_terminal_input_frame(b"WRU1").is_none());
         assert!(decode_terminal_input_frame(b"not-terminal-input").is_none());
     }
 
@@ -2210,6 +2236,195 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(response["id"], id);
         response
+    }
+
+    #[tokio::test]
+    async fn typing_pause_invalid_preferences_do_not_prevent_startup() {
+        for contents in [
+            "{broken",
+            r#"{"enabled":true,"delay_ms":500}"#,
+            r#"{"enabled":false,"delay_ms":20000,"future":true}"#,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("typing-pause.json"), contents).unwrap();
+            let server = bind_test_daemon(DaemonConfig {
+                data_dir: temp.path().into(),
+                port: 0,
+            })
+            .await
+            .unwrap();
+            let preference = server.registry().lock().await.input_router().typing_pause();
+            if contents.contains("future") {
+                assert_eq!(
+                    preference,
+                    settings::TypingPauseSettings {
+                        enabled: false,
+                        delay_ms: 20_000
+                    }
+                );
+            } else {
+                assert_eq!(preference, settings::TypingPauseSettings::default());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typing_pause_json_input_defers_submissions_until_disabled() {
+        let server = TestServer::start().await;
+        server
+            .registry
+            .lock()
+            .await
+            .store()
+            .put_project(&workman_core::Project {
+                id: 1,
+                path: "/tmp/workman-typing-json".into(),
+                name: "typing-json".into(),
+                display_name: None,
+                icon: None,
+                selected: true,
+                sort_order: 0,
+            })
+            .unwrap();
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        rpc(
+            &mut socket,
+            1,
+            "process.create",
+            process_params(
+                101,
+                "terminal",
+                "typing-json",
+                "while IFS= read -r line; do printf 'received:[%s]\\n' \"$line\"; done",
+            ),
+        )
+        .await;
+        assert_eq!(
+            rpc(&mut socket, 2, "process.start", json!({"process_id":101})).await["ok"],
+            true
+        );
+        // This is the path used by wrk attach. An empty frame also represents IME activity.
+        assert_eq!(
+            rpc(
+                &mut socket,
+                3,
+                "process.send_input",
+                json!({"process_id":101,"data":"","user_initiated":true})
+            )
+            .await["ok"],
+            true
+        );
+        assert_eq!(
+            rpc(
+                &mut socket,
+                4,
+                "process.send_input",
+                json!({"process_id":101,"data":"d2FrZQ==","submit":true})
+            )
+            .await["ok"],
+            true
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let before = server
+            .registry
+            .lock()
+            .await
+            .raw_output(101, None, usize::MAX)
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&before.data).contains("wake"));
+        rpc(
+            &mut socket,
+            5,
+            "settings.typing_pause_update",
+            json!({"enabled":false,"delay_ms":10000}),
+        )
+        .await;
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let output = server
+                    .registry
+                    .lock()
+                    .await
+                    .raw_output(101, None, usize::MAX)
+                    .unwrap();
+                if String::from_utf8_lossy(&output.data).contains("received:[wake]") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        socket.close(None).await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn typing_pause_settings_validate_and_survive_daemon_restart() {
+        let server = TestServer::start().await;
+        let (mut socket, _) = connect_async(server.request()).await.unwrap();
+        let response = rpc(&mut socket, 1, "settings.typing_pause_get", json!({})).await;
+        assert_eq!(
+            response["result"],
+            json!({"enabled": true, "delay_ms": 10_000})
+        );
+        for delay in [0, 999, 1_500, 3_600_001] {
+            let response = rpc(
+                &mut socket,
+                2,
+                "settings.typing_pause_update",
+                json!({"enabled": true, "delay_ms": delay}),
+            )
+            .await;
+            assert_eq!(response["ok"], false);
+        }
+        let saved = json!({"enabled": false, "delay_ms": 25_000});
+        let response = rpc(
+            &mut socket,
+            3,
+            "settings.typing_pause_update",
+            saved.clone(),
+        )
+        .await;
+        assert_eq!(response["result"], saved);
+        let response = rpc(&mut socket, 4, "settings.typing_pause_get", json!({})).await;
+        assert_eq!(response["result"], saved);
+        assert!(
+            !server
+                .registry
+                .lock()
+                .await
+                .input_router()
+                .typing_pause()
+                .enabled
+        );
+        socket.close(None).await.unwrap();
+        let TestServer {
+            data_dir,
+            shutdown,
+            task,
+            _temp,
+            ..
+        } = server;
+        shutdown.unwrap().send(()).unwrap();
+        task.await.unwrap().unwrap();
+        let restarted = bind_test_daemon(DaemonConfig { data_dir, port: 0 })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                restarted
+                    .registry()
+                    .lock()
+                    .await
+                    .input_router()
+                    .typing_pause()
+            )
+            .unwrap(),
+            saved
+        );
+        drop(restarted);
+        drop(_temp);
     }
 
     #[tokio::test]

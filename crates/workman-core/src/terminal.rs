@@ -340,9 +340,10 @@ pub struct RenderedSearchMatch {
 
 /// Stateful Alacritty parser and terminal grid for one process.
 pub struct TerminalEmulator {
-    // Deliberately rendering-only: xterm is the sole live authority for terminal query
-    // replies (except the Windows-only ConPTY cursor probe in `feed_with_replies`).
-    // A listener here would emit a second DA/DSR/color response into the same PTY.
+    // Deliberately rendering-only: xterm owns DA/DSR and other viewer queries.
+    // PTY capture separately handles default-color queries before a viewer attaches,
+    // and `feed_with_replies` handles keyboard negotiation and the ConPTY probe.
+    // A listener here would emit duplicate responses into the same PTY.
     terminal: Term<VoidListener>,
     parser: ansi::Processor,
     keyboard_protocol: KeyboardProtocolTracker,

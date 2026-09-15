@@ -1,0 +1,63 @@
+- region "Settings controls" [ref=e4]:
+  - generic [ref=e5]:
+    - heading "Settings" [level=1] [ref=e6]
+    - generic "Settings status" [ref=e7]:
+      - generic "Daemon 0.1.14" [ref=e8]:
+        - status "Daemon connected · port unknown" [ref=e9]
+        - text: Daemon 0.1.14
+  - generic [ref=e11]:
+    - navigation "Settings sections" [ref=e12]:
+      - tablist "Settings sections" [ref=e15]:
+        - generic [ref=e16]: Workspace
+        - tab "Appearance" [ref=e17]
+        - tab "Terminal" [ref=e19]
+        - tab "Sidebar" [ref=e21]
+        - tab "Hotkeys" [ref=e23]
+        - tab "Notifications" [ref=e25]
+        - tab "Feedback" [ref=e27]
+        - generic [ref=e29]: Agents
+        - tab "Templates" [selected] [ref=e30]
+        - tab "Agents" [ref=e32]
+        - tab "Quick prompts" [ref=e34]
+        - generic [ref=e36]: Application
+        - tab "Profiles" [ref=e37]
+        - tab "Tools" [ref=e39]
+        - tab "MCP" [ref=e41]
+        - tab "Daemon" [ref=e43]
+        - tab "About" [ref=e45]
+    - tabpanel "Templates" [ref=e50]:
+      - region [ref=e51]:
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - text: Active profile
+            - heading "Agent templates" [level=2] [ref=e54]
+            - paragraph [ref=e55]: Pair a default agent with launch arguments and a reusable prompt.
+          - button "New template" [ref=e56]
+        - generic [ref=e57]:
+          - article [ref=e58]:
+            - img "Anthropic" [ref=e59]
+            - generic [ref=e62]:
+              - generic [ref=e63]:
+                - strong [ref=e64]: Orchestrator Agent
+                - generic [ref=e65]: Claude
+              - paragraph [ref=e66]: opus
+              - paragraph [ref=e67]: Plan the work, coordinate focused tasks, and review the result before reporting back.
+            - generic "Reorder Orchestrator Agent" [ref=e68]:
+              - button "Move Orchestrator Agent up" [disabled]
+              - button "Move Orchestrator Agent down" [ref=e69]
+            - generic [ref=e70]:
+              - button "Edit Orchestrator Agent" [ref=e71]
+              - button "Delete Orchestrator Agent" [ref=e72]
+          - article [ref=e73]:
+            - img "OpenAI" [ref=e74]
+            - generic [ref=e77]:
+              - generic [ref=e78]:
+                - strong [ref=e79]: General Agent
+                - generic [ref=e80]: Codex
+              - paragraph [ref=e81]: Investigate the task, implement a focused solution, and verify the behavior.
+            - generic "Reorder General Agent" [ref=e82]:
+              - button "Move General Agent up" [ref=e83]
+              - button "Move General Agent down" [disabled]
+            - generic [ref=e84]:
+              - button "Edit General Agent" [ref=e85]
+              - button "Delete General Agent" [ref=e86]

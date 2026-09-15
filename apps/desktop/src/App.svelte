@@ -11,6 +11,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount, tick } from 'svelte';
+  import { appearance } from './lib/appearance';
 
   import AddCommandDialog from './lib/AddCommandDialog.svelte';
   import AddProjectDialog from './lib/AddProjectDialog.svelte';
@@ -225,7 +226,7 @@
     refreshNativeNotificationPermission,
     syncDockUnreadBadge
   } from './lib/nativeNotifications';
-  import { isAgentNotificationViewed } from './lib/notificationAttention';
+  import { isAgentNotificationViewed, notificationMatchesPreferences } from './lib/notificationAttention';
   import { createAgentReadDwell, isWorkmanWindowFocused } from './lib/windowAttention';
   import {
     sidebarIdentityColorValue,
@@ -1137,6 +1138,14 @@
     };
   });
 
+  $effect(() => {
+    // Keep background/headless launches and existing PTYs on the current palette.
+    const palette = $appearance.terminalTheme.palette;
+    if (palette && connection.status === 'connected') {
+      void client.syncTerminalColors().catch(reportError);
+    }
+  });
+
   function applyConnectionStatus(status: ConnectionStatus): void {
     const previous = connection;
     const reconnected = connection.status !== 'connected' && status.status === 'connected';
@@ -1855,10 +1864,17 @@
       // Reading is handled by the focus dwell. A selected tab can still have unread output.
       if (alreadyViewing) continue;
       if (notifiedUnreadProcessIds.has(process.id)) continue;
+      // Scope applies when the completion arrives. Broadening it later should not replay
+      // previously suppressed completions as a backlog of new pop-ups.
       notifiedUnreadProcessIds.add(process.id);
       const kind: AgentDoneNotice['kind'] = process.agent_state.needs_input
         ? 'needs_input'
         : 'agent_done';
+      if (!notificationMatchesPreferences(
+        { type: kind, process_id: process.id, project_id: process.project_id },
+        next,
+        $nativeNotificationPreferences
+      )) continue;
       agentDoneNotices = [
         ...agentDoneNotices,
         {
@@ -6261,6 +6277,7 @@
 
 <AgentDoneToasts
   notices={agentDoneNotices}
+  processes={profileProcesses}
   onOpen={openAgentDoneNotice}
   onDismiss={(id) => (agentDoneNotices = agentDoneNotices.filter((notice) => notice.id !== id))}
 />

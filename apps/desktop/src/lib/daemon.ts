@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { currentAppearance } from './appearance';
+import { terminalDefaultColors } from './terminalColors';
 
 import type {
   CoordinationClient,
@@ -203,6 +205,7 @@ export function isUnsupportedControlMethod(cause: unknown): boolean {
 }
 
 export interface ProcessView {
+  events?: { at: number; kind: string; message: string }[];
   notify_on_idle?: boolean;
   id: number;
   project_id: number;
@@ -344,6 +347,7 @@ interface PendingRequest {
 interface QueuedTerminalInput {
   processId: number;
   data: number[];
+  userInitiated: boolean;
 }
 
 export class DaemonClient
@@ -791,7 +795,16 @@ export class DaemonClient
     );
   }
 
-  startProcess(processId: number): Promise<ProcessView> {
+  syncTerminalColors(): Promise<unknown> {
+    return this.requestOptional(
+      'settings.terminal_colors',
+      terminalDefaultColors(currentAppearance().terminalTheme.palette),
+      null
+    );
+  }
+
+  async startProcess(processId: number): Promise<ProcessView> {
+    await this.syncTerminalColors();
     return this.request('process.start', { process_id: processId });
   }
 
@@ -822,11 +835,13 @@ export class DaemonClient
     return this.request('projects.mark_read', { project_id: projectId });
   }
 
-  restartProcess(processId: number): Promise<ProcessView> {
+  async restartProcess(processId: number): Promise<ProcessView> {
+    await this.syncTerminalColors();
     return this.request('process.restart', { process_id: processId });
   }
 
-  spawnTerminal(projectId: number): Promise<ProcessView> {
+  async spawnTerminal(projectId: number): Promise<ProcessView> {
+    await this.syncTerminalColors();
     return this.request('process.spawn_terminal', { project_id: projectId });
   }
 
@@ -999,7 +1014,8 @@ export class DaemonClient
     });
   }
 
-  spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {
+  async spawnAgent(input: SpawnAgentInput): Promise<SpawnAgentResult> {
+    await this.syncTerminalColors();
     return this.request('agents.spawn', { ...input });
   }
 
@@ -1049,8 +1065,8 @@ export class DaemonClient
     return this.request('terminal.detach');
   }
 
-  sendInput(processId: number, data: Uint8Array): Promise<void> {
-    this.inputQueue.push({ processId, data: Array.from(data) });
+  sendInput(processId: number, data: Uint8Array, userInitiated = false): Promise<void> {
+    this.inputQueue.push({ processId, data: Array.from(data), userInitiated });
     this.flushInputQueue();
     return Promise.resolve();
   }
@@ -1244,7 +1260,8 @@ export class DaemonClient
           const input = this.inputQueue[0];
           await invoke('daemon_send_input', {
             processId: input.processId,
-            data: input.data
+            data: input.data,
+            userInitiated: input.userInitiated
           });
           this.inputQueue.shift();
         } catch {

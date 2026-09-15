@@ -16,6 +16,7 @@ pub mod scratchpads;
 pub mod shell;
 pub mod store;
 pub mod terminal;
+pub mod terminal_queries;
 pub mod todo_claims;
 pub mod todos;
 /// Authenticated release checks and verified atomic self-updates.

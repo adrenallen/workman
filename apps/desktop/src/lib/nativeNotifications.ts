@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { get, writable } from 'svelte/store';
 
 import type { Notification, ProcessView } from './daemon';
-import { isProjectReady, isTopLevelAgentNotification } from './notificationAttention.ts';
+import { notificationMatchesPreferences } from './notificationAttention.ts';
 import { isWorkmanWindowFocused } from './windowAttention.ts';
 
 export const NATIVE_NOTIFICATION_ACTION_EVENT = 'notification://action';
@@ -97,13 +97,7 @@ export function setNotificationSoundEnabled(soundEnabled: boolean): void {
 
 function notificationAllowed(notification: Notification, processes: ProcessView[]): boolean {
   const preferences = get(nativeNotificationPreferences);
-  if (!preferences.enabled) return false;
-  if (notification.type === 'project_ready') {
-    return preferences.mode === 'project_ready' && isProjectReady(notification.project_id, processes);
-  }
-  if (preferences.mode === 'project_ready' && (notification.type === 'agent_done' || notification.type === 'needs_input')) return false;
-  if (notification.type === 'needs_input' && !preferences.needsInput) return false;
-  return preferences.mode !== 'top_level' || isTopLevelAgentNotification(notification, processes);
+  return preferences.enabled && notificationMatchesPreferences(notification, processes, preferences);
 }
 
 export async function refreshNativeNotificationPermission(): Promise<NativeNotificationPermission> {

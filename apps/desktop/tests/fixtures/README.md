@@ -52,10 +52,14 @@ Settings and first-project welcome:
 ```sh
 playwright-cli -s=settings open http://127.0.0.1:1432/tests/fixtures/settings.html --browser webkit
 playwright-cli -s=settings run-code --filename=apps/desktop/tests/fixtures/settings-interactions.js
+playwright-cli -s=settings run-code --filename=apps/desktop/tests/fixtures/typing-pause-interactions.js
+playwright-cli -s=settings run-code --filename=apps/desktop/tests/fixtures/notification-scope-interactions.js
 ```
 
 This fixture uses an in-memory client. It exercises template editing, keyboard and compact
 section navigation, welcome actions, both themes, and narrow layouts at 90–120% text scale.
+The typing-pause script checks the default delay, off/on, duration validation, failed saves, and responsive layout.
+The notification-scope script checks live parent/child toast filtering, all three modes, and input alerts with computer notifications off.
 
 For project removal, start Vite on port 1434 and open
 `/tests/fixtures/worktree-removal.html`, then run `worktree-removal-interactions.js`

@@ -2,12 +2,53 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::Instant;
 
 use crate::{Discovery, RuntimeIdentity};
 use crate::{UpdateStatus, updates::UpdateService};
+
+pub(crate) fn load_terminal_colors(
+    data_dir: &Path,
+) -> std::io::Result<workman_core::terminal_queries::TerminalColors> {
+    match std::fs::read(data_dir.join("terminal-colors.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn save_terminal_colors(
+    data_dir: &Path,
+    colors: workman_core::terminal_queries::TerminalColors,
+) -> std::io::Result<()> {
+    crate::user_config::write_private_atomic(
+        &data_dir.join("terminal-colors.json"),
+        &serde_json::to_vec_pretty(&colors)?,
+    )
+}
+
+#[cfg(test)]
+mod terminal_color_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_colors_survive_restart_and_reject_invalid_channels() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut colors = load_terminal_colors(directory.path()).unwrap();
+        assert_eq!(colors, Default::default());
+        colors.background = [241, 239, 232];
+        save_terminal_colors(directory.path(), colors).unwrap();
+        assert_eq!(load_terminal_colors(directory.path()).unwrap(), colors);
+        std::fs::write(
+            directory.path().join("terminal-colors.json"),
+            br#"{"foreground":[1,2,3],"background":[256,0,0],"cursor":[1,2,3]}"#,
+        )
+        .unwrap();
+        assert!(load_terminal_colors(directory.path()).is_err());
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct McpConnectionInfo {
@@ -416,5 +457,58 @@ mod tests {
             serde_json::from_str(&info.setup(McpClient::Opencode).unwrap().fields[0].value)
                 .unwrap();
         assert_eq!(opencode["mcp"]["workman-dev"]["url"], info.endpoint);
+    }
+}
+
+/// Daemon-wide preference; disabled keeps the chosen duration for the next time it is enabled.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct TypingPauseSettings {
+    pub enabled: bool,
+    pub delay_ms: u64,
+}
+
+impl Default for TypingPauseSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            delay_ms: 10_000,
+        }
+    }
+}
+
+impl TypingPauseSettings {
+    pub(crate) fn delay(self) -> std::time::Duration {
+        std::time::Duration::from_millis(if self.enabled { self.delay_ms } else { 0 })
+    }
+
+    pub(crate) fn validate(self) -> Result<(), String> {
+        if !(1_000..=3_600_000).contains(&self.delay_ms) || self.delay_ms % 1_000 != 0 {
+            return Err("Typing pause must be a whole number from 1 to 3600 seconds.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn load(data_dir: &Path) -> std::io::Result<Self> {
+        let bytes = match std::fs::read(data_dir.join("typing-pause.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let settings: Self = serde_json::from_slice(&bytes)?;
+        settings
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(settings)
+    }
+
+    pub(crate) fn save(self, data_dir: &Path) -> std::io::Result<()> {
+        self.validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        crate::user_config::write_private_atomic(
+            &data_dir.join("typing-pause.json"),
+            &serde_json::to_vec_pretty(&self)?,
+        )
     }
 }

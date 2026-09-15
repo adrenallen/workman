@@ -98,6 +98,17 @@ availability checks, and is saved with the active profile. You can also set
 `terminal.agent_shell_mode` in your user YAML config to `auto`, `login`, `interactive`, or
 `interactive_login`.
 
+Queued messages (including timers and idle wakeups) pause while you type in their target
+terminal. By default, delivery resumes 10 seconds after your last keystroke or paste. In
+**Settings > Terminal > Pause automatic messages while typing**, turn this off or choose a
+1–3600 second delay. The preference applies immediately and survives daemon restarts. This
+protects active typing only: after the delay, delivery can submit unfinished text left in the input.
+If a permission dialog appears during the pause, queued wakeups wait for it to be resolved.
+
+The notification mode in **Settings > Notifications** applies to in-app completion and input
+pop-ups as well as computer alerts. With **Only top-level agents**, child activity remains in
+notification history without showing a completion or input toast.
+
 ### Terminals and commands
 
 A terminal is a normal shell connected to the selected project. Commands are saved development

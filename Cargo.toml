@@ -15,6 +15,12 @@ rust-version = "1.90"
 [workspace.dependencies]
 workman-core = { path = "crates/workman-core" }
 
+# Rust's debug-info stripping can misalign proc-macro dylibs on macOS 27,
+# surfacing as E0463 even though the crate exists. Keep build-time crates intact.
+# https://github.com/rust-lang/rust/issues/157750
+[profile.release.build-override]
+strip = "none"
+
 # Shipping builds use a separate, cache-friendly profile without changing local --release builds.
 [profile.dist]
 inherits = "release"

@@ -317,6 +317,10 @@ ensure_linux_tools() {
 
 build_macos() {
   local started=$SECONDS
+  # Match the SDK to the active Xcode toolchain without affecting Linux cross-builds.
+  local SDKROOT=${SDKROOT:-}
+  SDKROOT=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
+  export SDKROOT
   log "macOS arm64 binaries and desktop"
   npm --prefix apps/desktop ci
   npm --prefix apps/desktop run build

@@ -1,4 +1,10 @@
+<script module lang="ts">
+  // Terminals remount when switching tabs; a retained event should only alert once.
+  const reportedDeliveryIssues = new Set<string>();
+</script>
+
 <script lang="ts">
+  import { TerminalCompositionInput, TerminalInputBatch } from './terminalTyping';
   import BotIcon from '@lucide/svelte/icons/bot';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
@@ -85,6 +91,18 @@
     onAppShortcut?: (event: KeyboardEvent) => boolean;
   } = $props();
 
+  $effect(() => {
+    const event = process.events?.filter(event => [
+      'submit_stale_dialog_response', 'submit_enter_blocked_by_dialog', 'submit_retry_blocked_by_dialog'
+    ].includes(event.kind)).at(-1);
+    if (!event) return;
+    const key = `${process.id}:${event.at}:${event.kind}`;
+    if (!reportedDeliveryIssues.has(key)) {
+      reportedDeliveryIssues.add(key);
+      onError(`${process.name}: ${event.message}`);
+    }
+  });
+
   let host: HTMLDivElement;
   let frame: HTMLElement;
   let terminal = $state<Terminal | null>(null);
@@ -118,8 +136,8 @@
   let searchInput = $state<HTMLInputElement | null>(null);
   let resizeFrame = 0;
   let inputTimer: ReturnType<typeof setTimeout> | null = null;
-  let inputProcessId: number | null = null;
-  let inputBytes: number[] = [];
+  const inputBatch = new TerminalInputBatch();
+  const compositionInput = new TerminalCompositionInput(() => queueInput(new Uint8Array(), true));
   let nextUserKeyToken = 0;
   let pendingUserKeyTokens: number[] = [];
   let attachedProcessId: number | null = null;
@@ -314,6 +332,7 @@
       }
       let userKeyToken: number | null = null;
       if (event.type === 'keydown') {
+        compositionInput.keyDown(event);
         userKeyToken = ++nextUserKeyToken;
         pendingUserKeyTokens.push(userKeyToken);
         setTimeout(() => removePendingUserKeyToken(userKeyToken), 0);
@@ -328,6 +347,18 @@
       }
       return true;
     });
+    const compositionStart = () => compositionInput.start();
+    const compositionUpdate = () => compositionInput.update();
+    const compositionEnd = () => compositionInput.end();
+    const textInput = (event: Event) => {
+      const input = event as InputEvent;
+      if (input.data !== null || input.inputType?.startsWith('delete')) compositionInput.textInput();
+    };
+    const textarea = instance.textarea;
+    textarea?.addEventListener('compositionstart', compositionStart, true);
+    textarea?.addEventListener('compositionupdate', compositionUpdate, true);
+    textarea?.addEventListener('compositionend', compositionEnd, true);
+    textarea?.addEventListener('input', textInput, true);
     const dataDisposable = instance.onData((data) => {
       queueInput(encoder.encode(data), consumePendingUserKeyToken());
     });
@@ -368,6 +399,11 @@
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       resizeObserver.disconnect();
       removeTerminalListener();
+      compositionInput.dispose();
+      textarea?.removeEventListener('compositionstart', compositionStart, true);
+      textarea?.removeEventListener('compositionupdate', compositionUpdate, true);
+      textarea?.removeEventListener('compositionend', compositionEnd, true);
+      textarea?.removeEventListener('input', textInput, true);
       dataDisposable.dispose();
       binaryDisposable.dispose();
       window.removeEventListener(FOCUS_TERMINAL_EVENT, focusRequested);
@@ -666,9 +702,8 @@
     if (!shouldForwardTerminalInput(inputEnabled, userInitiated) || process.status !== 'running') {
       return;
     }
-    if (inputProcessId !== null && inputProcessId !== process.id) flushInput();
-    inputProcessId = process.id;
-    for (const byte of bytes) inputBytes.push(byte);
+    if (inputBatch.processId !== null && inputBatch.processId !== process.id) flushInput();
+    inputBatch.push(process.id, bytes, userInitiated);
     if (!inputTimer) inputTimer = setTimeout(flushInput, 4);
   }
 
@@ -718,7 +753,7 @@
   }
 
   function consumePendingUserKeyToken(): boolean {
-    return pendingUserKeyTokens.shift() !== undefined;
+    return pendingUserKeyTokens.shift() !== undefined || compositionInput.isUserInput();
   }
 
   function removePendingUserKeyToken(token: number | null): void {
@@ -730,13 +765,10 @@
   function flushInput(): void {
     if (inputTimer) clearTimeout(inputTimer);
     inputTimer = null;
-    const processId = inputProcessId;
-    const bytes = Uint8Array.from(inputBytes);
-    inputBytes = [];
-    inputProcessId = null;
-    if (processId === null || bytes.length === 0) return;
+    const packet = inputBatch.drain();
+    if (!packet) return;
     void client
-      .sendInput(processId, bytes)
+      .sendInput(packet.processId, packet.data, packet.userInitiated)
       .catch((cause) => onError(cause instanceof Error ? cause.message : String(cause)));
   }
 
@@ -909,7 +941,7 @@
       if (!state.focusRequested || !allowAutoFocus) return;
       if (alreadyFocused && state.focusReporting) {
         // Replay enabled mode 1004 after the DOM focus event, so xterm has no new event to report.
-        queueInput(encoder.encode('\x1b[I'), true);
+        queueInput(encoder.encode('\x1b[I'));
       } else {
         terminal?.focus();
       }

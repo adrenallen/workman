@@ -553,7 +553,11 @@ impl WorkmanMcp {
         };
         let sent = if input.submit {
             let mut registry = self.registry.lock().await;
-            registry.submit_input(process_id, &input.data)
+            if args.force {
+                registry.submit_dialog_response(process_id, &input.data)
+            } else {
+                registry.submit_input(process_id, &input.data)
+            }
         } else {
             self.input_router.send_input(process_id, &input.data)
         };

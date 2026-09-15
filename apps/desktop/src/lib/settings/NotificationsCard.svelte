@@ -137,7 +137,6 @@
       id="notification-mode"
       class="h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
       value={$nativeNotificationPreferences.mode}
-      disabled={!$nativeNotificationPreferences.enabled}
       aria-describedby="notification-mode-description"
       onchange={(event) => setNativeNotificationMode(event.currentTarget.value as NativeNotificationMode)}
     >
@@ -147,12 +146,16 @@
     </select>
     <p id="notification-mode-description" class="text-xs leading-5 text-muted-foreground">
       {#if $nativeNotificationPreferences.mode === 'project_ready'}
-        One alert per project after every agent, including children, is idle, waiting, or stopped.
+        One computer alert per project after every agent, including children, is idle, waiting, or stopped.
         A short pause avoids alerts during handoffs.
+        In-app updates stay in notification history; individual agent pop-ups are hidden.
       {:else if $nativeNotificationPreferences.mode === 'top_level'}
-        Completion and input alerts for top-level agents. Child-agent activity stays in Workman.
+        Completion and input alerts for top-level agents. Child-agent activity stays in notification history.
       {:else}
         Completion and input alerts for every agent, including child agents.
+      {/if}
+      {#if $nativeNotificationPreferences.mode !== 'project_ready'}
+        This mode also applies to pop-up alerts inside Workman.
       {/if}
       Crash, timer, and task alerts still notify you in every mode.
     </p>
@@ -167,7 +170,6 @@
           id="needs-input-notifications-enabled"
           size="sm"
           checked={$nativeNotificationPreferences.needsInput}
-          disabled={!$nativeNotificationPreferences.enabled}
           onCheckedChange={(checked) => setNeedsInputNotificationsEnabled(checked === true)}
         />
         <label for="needs-input-notifications-enabled" class="min-w-0">

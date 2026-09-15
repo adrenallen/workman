@@ -391,7 +391,9 @@ test('recorded feedback is wired through preflight, durable events, review, and 
   assert.match(devInstall, /tccutil reset ScreenCapture "\$bundle_id"/);
   assert.match(devInstall, /tccutil reset Microphone "\$bundle_id"/);
   assert.match(devInstall, /"\$lsregister" -f "\$app_path"/);
-  assert.match(devInstall, /"\$install_dir\/wrk-dev" app/);
+  assert.match(devInstall, /workman_dev_relaunch "\$relaunch" "\$install_dir"/);
+  const relaunchHelper = await readFile(new URL('../../../scripts/lib/dev-install-relaunch.sh', import.meta.url), 'utf8');
+  assert.match(relaunchHelper, /"\$install_dir\/wrk-dev" app/);
   const signSource = devInstall.indexOf('--entitlements "$repo_root/apps/desktop/src-tauri/Entitlements.plist" "$source_app"');
   const copySource = devInstall.indexOf('ditto "$source_app" "$app_stage"');
   assert.ok(signSource >= 0 && copySource > signSource,

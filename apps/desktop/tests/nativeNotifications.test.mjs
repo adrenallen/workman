@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, afterEach, test } from 'node:test';
 import { mockIPC, mockWindows, clearMocks } from '@tauri-apps/api/mocks';
 import { get } from 'svelte/store';
-import { isAgentNotificationViewed, isTopLevelAgentNotification } from '../src/lib/notificationAttention.ts';
+import { isAgentNotificationViewed, isTopLevelAgentNotification, notificationMatchesPreferences } from '../src/lib/notificationAttention.ts';
 import {
   deliverNativeNotification, deliverNativeSystemNotification, dismissNativeNotifications, nativeNotificationPreferences,
   nativeNotificationRuntime, openNativeNotificationSettings, setNativeNotificationsEnabled, setNativeNotificationMode, syncDockUnreadBadge, keepNotificationDeliveryActive,
@@ -79,6 +79,22 @@ test('three exclusive modes select all agents, roots only, or ready projects', a
     ];
     assert.deepEqual(actual, expected, mode);
     assert.equal(await deliverNativeNotification(notification(++id, 'process_crashed'), family), true, 'urgent failures still alert');
+  }
+});
+
+test('in-app alert scope follows modes and input preference independently of computer delivery', () => {
+  for (const enabled of [false, true]) {
+    for (const [mode, expected] of [['all', [true, true]], ['top_level', [true, false]], ['project_ready', [false, false]]]) {
+      const preferences = { enabled, mode, needsInput: true };
+      for (const type of ['agent_done', 'needs_input']) {
+        assert.deepEqual([
+          notificationMatchesPreferences(notification(1, type), [root], preferences),
+          notificationMatchesPreferences(notification(2, type), family, preferences)
+        ], expected, `${enabled}/${mode}/${type}`);
+      }
+      assert.equal(notificationMatchesPreferences(notification(3, 'needs_input'), [root], { ...preferences, needsInput: false }), false);
+      assert.equal(notificationMatchesPreferences(notification(4, 'process_crashed'), family, preferences), true);
+    }
   }
 });
 

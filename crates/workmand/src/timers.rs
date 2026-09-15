@@ -1424,6 +1424,75 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn typing_pause_holds_due_and_already_satisfied_wakeups_on_a_real_pty() {
+        for immediate in [false, true] {
+            let mut registry = test_registry(false);
+            registry
+                .create(process(
+                    PASTE_TUI_ID,
+                    "typing-agent",
+                    paste_sensitive_tui(),
+                    Some(90),
+                ))
+                .unwrap();
+            registry.start(PASTE_TUI_ID).unwrap();
+            wait_for_state(&mut registry, PASTE_TUI_ID, AttentionState::Idle);
+            let router = registry.input_router();
+            router.set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: true,
+                delay_ms: 60_000,
+            });
+            router
+                .send_terminal_input(PASTE_TUI_ID, b"partial ", true)
+                .unwrap();
+            wait_for_output(&mut registry, PASTE_TUI_ID, "DRAFT:partial");
+            if immediate {
+                let outcome = TimerService::new(&mut registry)
+                    .set_idle(
+                        "typing-test".into(),
+                        PASTE_TUI_ID,
+                        "WAKEUP".into(),
+                        TimerKind::IdleAll,
+                        vec![PASTE_TUI_ID],
+                        10_000,
+                        1_000,
+                    )
+                    .unwrap();
+                assert!(matches!(outcome, IdleTimerOutcome::AlreadySatisfied { .. }));
+            } else {
+                TimerService::new(&mut registry)
+                    .set_delay(
+                        "typing-test".into(),
+                        PASTE_TUI_ID,
+                        "WAKEUP".into(),
+                        0,
+                        false,
+                        None,
+                        1_000,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    TimerService::new(&mut registry).tick(1_000).unwrap().len(),
+                    1
+                );
+            }
+            assert!(registry.has_pending_prompts(PASTE_TUI_ID));
+            std::thread::sleep(Duration::from_millis(50));
+            let output = registry.raw_output(PASTE_TUI_ID, None, usize::MAX).unwrap();
+            assert!(!String::from_utf8_lossy(&output.data).contains("WAKEUP"));
+            // The preference applies to already queued delivery, without restarting the PTY.
+            router.set_typing_pause(crate::settings::TypingPauseSettings {
+                enabled: false,
+                delay_ms: 60_000,
+            });
+            wait_for_output(&mut registry, PASTE_TUI_ID, "SUBMITTED");
+            let output = registry.raw_output(PASTE_TUI_ID, None, usize::MAX).unwrap();
+            assert!(String::from_utf8_lossy(&output.data).contains("WAKEUP"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn short_timer_body_submits_outside_the_paste_burst_on_a_real_pty() {
         let mut registry = test_registry(false);
         registry

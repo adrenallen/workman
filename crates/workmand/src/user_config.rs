@@ -806,7 +806,7 @@ fn validate_user_agent_tools(configured: &[UserAgentTool]) -> Result<(), UserCon
     sync_user_agent_tools(&scratch, configured).map(|_| ())
 }
 
-fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent"))?;

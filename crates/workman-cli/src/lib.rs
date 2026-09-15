@@ -2125,6 +2125,7 @@ async fn attach(client: &mut Client, process_id: i64) -> Result<()> {
                         json!({
                             "process_id": process_id,
                             "data": BASE64.encode(&input[..count]),
+                            "user_initiated": true,
                         }),
                     ).await?;
                 }

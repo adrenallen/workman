@@ -385,6 +385,8 @@ struct InputParams {
     data: String,
     #[serde(default)]
     submit: bool,
+    #[serde(default)]
+    user_initiated: bool,
     /// Bypass the rendered-dialog guard for an intentional text response.
     #[serde(default)]
     force: bool,
@@ -617,7 +619,7 @@ async fn dispatch(
                     .decode(params.data)
                     .map_err(|error| ("invalid_params", error.to_string()))?;
                 return input_router
-                    .send_input(params.process_id, &data)
+                    .send_terminal_input(params.process_id, &data, params.user_initiated)
                     .map(json_value)
                     .map_err(registry_error);
             }
@@ -919,6 +921,30 @@ async fn dispatch(
                 .await
                 .map_err(|error| ("terminal_theme_import_error", error.to_string()))?;
             return Ok(json_value(report));
+        }
+        "settings.terminal_colors" => {
+            let colors: workman_core::terminal_queries::TerminalColors = params_as(params)?;
+            let _registry = registry.lock().await;
+            if input_router.terminal_colors.get() != colors {
+                crate::settings::save_terminal_colors(data_dir, colors)
+                    .map_err(|error| ("settings_error", error.to_string()))?;
+                input_router.terminal_colors.set(colors);
+            }
+            return Ok(json_value(colors));
+        }
+        "settings.typing_pause_get" => return Ok(json_value(input_router.typing_pause())),
+        "settings.typing_pause_update" => {
+            let settings: crate::settings::TypingPauseSettings = params_as(params)?;
+            settings
+                .validate()
+                .map_err(|error| ("invalid_params", error))?;
+            // Serialize persistence and live updates with the other settings mutations.
+            let _registry = registry.lock().await;
+            settings
+                .save(data_dir)
+                .map_err(|error| ("settings_error", error.to_string()))?;
+            input_router.set_typing_pause(settings);
+            return Ok(json_value(settings));
         }
         "settings.agent_shell_mode" => {
             let params: AgentShellModeParams = params_as(params)?;
@@ -1417,10 +1443,16 @@ async fn dispatch(
                     ),
                 ));
             }
-            return (if params.submit {
+            return (if params.submit && params.force {
+                registry.submit_dialog_response(params.process_id, &data)
+            } else if params.submit {
                 registry.submit_input(params.process_id, &data)
             } else {
-                registry.send_input(params.process_id, &data)
+                registry.input_router().send_terminal_input(
+                    params.process_id,
+                    &data,
+                    params.user_initiated,
+                )
             })
             .map(json_value)
             .map_err(registry_error);

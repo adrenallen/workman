@@ -581,6 +581,19 @@ impl AttentionTracker {
         self.lock().snapshot(now_ms)
     }
 
+    /// Classify the latest rendered viewport without waiting for the attention renderer.
+    pub(crate) fn dialog_in_viewport(
+        &self,
+        rendered: &str,
+        alternate_screen: bool,
+    ) -> Option<PendingDialog> {
+        let flags = self.lock().adapter.inspect(AdapterObservation {
+            rendered,
+            alternate_screen,
+        });
+        pending_dialog(rendered, flags.classification.as_deref())
+    }
+
     /// Return the next Unix-millisecond time-only state edge, if no activity arrives.
     pub fn next_transition_at(&self, now_ms: i64) -> Option<i64> {
         self.lock().next_transition_at(now_ms)
@@ -1012,7 +1025,7 @@ fn last_grok_resting_prompt(rendered: &str) -> Option<usize> {
         })
 }
 
-fn is_claude_dialog_choice(text: &str) -> bool {
+pub(crate) fn is_claude_dialog_choice(text: &str) -> bool {
     let Some((number, choice)) = text.split_once('.') else {
         return false;
     };

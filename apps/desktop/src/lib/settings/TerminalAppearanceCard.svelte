@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { Switch } from '$lib/components/ui/switch';
 
   import {
     DEFAULT_APPEARANCE,
@@ -32,6 +33,50 @@
   let shellError = $state<string | null>(null);
   let savingAgentMode = $state(false);
   let agentModeError = $state<string | null>(null);
+  let typingPause = $state<{ enabled: boolean; delay_ms: number } | null>(null);
+  let typingPauseSeconds = $state<number | undefined>(10);
+  let typingPauseEnabled = $state(true);
+  let savingTypingPause = $state(false);
+  let typingPauseError = $state<string | null>(null);
+
+  $effect(() => {
+    if (!connected) { typingPause = null; return; }
+    let cancelled = false;
+    void client.control<{ enabled: boolean; delay_ms: number }>('settings.typing_pause_get')
+      .then((settings) => {
+        if (cancelled) return;
+        typingPause = settings;
+        typingPauseEnabled = settings.enabled;
+        typingPauseSeconds = settings.delay_ms / 1000;
+        typingPauseError = null;
+      })
+      .catch((cause) => {
+        if (!cancelled) typingPauseError = cause instanceof Error ? cause.message : String(cause);
+      });
+    return () => { cancelled = true; };
+  });
+
+  async function saveTypingPause(enabled: boolean): Promise<void> {
+    if (!connected || !typingPause || savingTypingPause) return;
+    if (enabled && (!Number.isInteger(typingPauseSeconds) || typingPauseSeconds! < 1 || typingPauseSeconds! > 3600)) {
+      typingPauseError = 'Enter a whole number from 1 to 3600 seconds.';
+      return;
+    }
+    savingTypingPause = true;
+    typingPauseError = null;
+    try {
+      typingPause = await client.control('settings.typing_pause_update', {
+        enabled,
+        delay_ms: enabled ? typingPauseSeconds! * 1000 : typingPause.delay_ms
+      });
+      typingPauseSeconds = typingPause!.delay_ms / 1000;
+    } catch (cause) {
+      typingPauseError = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      typingPauseEnabled = typingPause?.enabled ?? true;
+      savingTypingPause = false;
+    }
+  }
   let terminalPreviewStyle = $derived(terminalProfileXtermOptions(
     $appearance.terminalProfileStyle,
     terminalFontCss($appearance.terminalFont, $appearance.terminalProfileStyle),
@@ -186,6 +231,36 @@
     </div>
   {/if}
 
+  <div class="setting-row shell-row">
+    <div class="setting-copy">
+      <strong id="typing-pause-title">Pause automatic messages while typing</strong>
+      <small>Timers, idle wakeups, and queued messages wait until you stop typing in that terminal. Applies immediately to all terminals.</small>
+    </div>
+    <div class="shell-control">
+      <div class="shell-fields">
+        <Switch
+          aria-labelledby="typing-pause-title"
+          bind:checked={typingPauseEnabled}
+          disabled={!connected || !typingPause || savingTypingPause}
+          onCheckedChange={(enabled) => void saveTypingPause(enabled)}
+        />
+        <label class="typing-delay">
+          Wait
+          <input type="number" min="1" max="3600" step="1" aria-label="Typing idle delay in seconds"
+            bind:value={typingPauseSeconds}
+            disabled={!connected || !typingPause?.enabled || savingTypingPause}
+            onkeydown={(event) => { if (event.key === 'Enter') void saveTypingPause(true); }} />
+          seconds
+        </label>
+        <button class="apply-shell" type="button"
+          disabled={!connected || !typingPause?.enabled || savingTypingPause || typingPauseSeconds === typingPause.delay_ms / 1000}
+          onclick={() => void saveTypingPause(true)}>{savingTypingPause ? 'Saving…' : 'Apply'}</button>
+      </div>
+      <p class="shell-summary">Each keystroke or paste restarts the wait. After the delay, messages may submit any unfinished text still in the input.</p>
+      {#if typingPauseError}<p class="shell-warning" role="status">{typingPauseError}</p>{/if}
+    </div>
+  </div>
+
   <label class="setting-row">
     <span class="setting-copy"><strong>Font family</strong><small>Bundled or installed monospace faces.</small></span>
     <span class="select-wrap">
@@ -277,6 +352,10 @@
   .shell-summary small { grid-column: 1 / -1; overflow: hidden; font-size: inherit; text-overflow: ellipsis; white-space: nowrap; }
   .shell-summary.unavailable { display: block; }
   .shell-warning { margin: 5px 0 0; border-left: 2px solid var(--warning-token); padding-left: 7px; color: var(--text-soft); font-size: var(--font-size-xs); line-height: 1.35; }
+
+  .typing-delay { display: flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: var(--font-size-sm); }
+  .typing-delay input { width: 72px; min-height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; padding: 3px 6px; background: var(--background); color: var(--foreground); }
+  .typing-delay input:disabled { opacity: .45; }
 
   .size-control { display: grid; grid-template-columns: 28px minmax(110px, 1fr) 42px 28px; align-items: center; gap: 6px; }
   .size-control button { width: 28px; height: 28px; border: 1px solid var(--border-strong); border-radius: 3px; background: var(--surface-raised); color: var(--text-soft); font-size: 13px; cursor: pointer; }

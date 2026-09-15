@@ -4,6 +4,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import { emit } from '@tauri-apps/api/event';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import { appearance, currentAppearance } from '../src/lib/appearance.ts';
 
 import {
   clearRecoveredDaemonTimeout,
@@ -51,6 +52,33 @@ async function startClient(t) {
 function reply(response) {
   return emit('daemon://message', { kind: 'text', data: JSON.stringify(response) });
 }
+
+test('fresh, resumed, restarted and shell launches publish their colors before starting the PTY', async (t) => {
+  const { client, sent } = await startClient(t);
+  const original = currentAppearance();
+  t.after(() => appearance.set(original));
+  appearance.set({ ...original, terminalTheme: {
+    ...original.terminalTheme,
+    palette: { ...original.terminalTheme.palette, background: '#f1efe8' }
+  } });
+  for (const [launch, method] of [
+    [() => client.spawnAgent({ project_id: 6, agent_tool_id: 2, extra_args: [] }), 'agents.spawn'],
+    [() => client.startProcess(1), 'process.start'],
+    [() => client.restartProcess(1), 'process.restart'],
+    [() => client.spawnTerminal(6), 'process.spawn_terminal']
+  ]) {
+    sent.length = 0;
+    const pending = launch();
+    assert.equal(sent.length, 1, 'launch must wait for the palette acknowledgment');
+    assert.equal(sent[0].method, 'settings.terminal_colors');
+    assert.deepEqual(sent[0].params.background, [241, 239, 232]);
+    await reply({ id: sent[0].id, ok: true, result: sent[0].params });
+    await new Promise(setImmediate);
+    assert.equal(sent[1].method, method);
+    await reply({ id: sent[1].id, ok: true, result: {} });
+    await pending;
+  }
+});
 
 test('a late daemon reply clears a flattened timeout without retrying the request or clearing other errors', async (t) => {
   const { client, sent } = await startClient(t);
