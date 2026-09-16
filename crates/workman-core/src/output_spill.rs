@@ -30,6 +30,9 @@ struct Shared {
     capacity: usize,
     state: Mutex<State>,
     wake: Condvar,
+    checkpoint: Option<
+        Arc<dyn Fn() -> Option<crate::terminal_checkpoint::TerminalCheckpoint> + Send + Sync>,
+    >,
     #[cfg(test)]
     snapshot_writes: AtomicUsize,
 }
@@ -47,11 +50,27 @@ struct State {
 }
 
 impl OutputSpill {
+    #[cfg(test)]
     pub(crate) fn start(path: PathBuf, capacity: usize) -> io::Result<Self> {
+        Self::start_with_checkpoint(path, capacity, None)
+    }
+
+    pub(crate) fn start_with_checkpoint(
+        path: PathBuf,
+        capacity: usize,
+        checkpoint: Option<
+            Arc<dyn Fn() -> Option<crate::terminal_checkpoint::TerminalCheckpoint> + Send + Sync>,
+        >,
+    ) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         write_snapshot(&path, &VecDeque::new())?;
+        match fs::remove_file(path.with_extension("screen")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
 
         let shared = Arc::new(Shared {
             path,
@@ -68,6 +87,7 @@ impl OutputSpill {
                 error: None,
             }),
             wake: Condvar::new(),
+            checkpoint,
             #[cfg(test)]
             snapshot_writes: AtomicUsize::new(0),
         });
@@ -236,7 +256,24 @@ fn writer_loop(shared: Arc<Shared>) {
             retained.drain(..overflow);
         }
 
-        let result = write_snapshot(&shared.path, &retained);
+        let result = write_snapshot(&shared.path, &retained).and_then(|()| {
+            if let Some(provider) = &shared.checkpoint
+                && shared.capacity > 0
+            {
+                if let Some(checkpoint) = provider() {
+                    let bytes = serde_json::to_vec(&checkpoint).map_err(io::Error::other)?;
+                    write_snapshot(&shared.path.with_extension("screen"), &bytes.into())?;
+                } else {
+                    // Never restore a stale primary screen over a newer alternate-screen TUI.
+                    match fs::remove_file(shared.path.with_extension("screen")) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Ok(())
+        });
         #[cfg(test)]
         shared.snapshot_writes.fetch_add(1, Ordering::Relaxed);
         next_periodic_flush = None;

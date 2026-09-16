@@ -303,6 +303,7 @@ export interface TerminalFrame {
   process_id: number;
   start_offset: number;
   gap: boolean;
+  checkpoint?: boolean;
   kitty_keyboard_flags: number;
   modify_other_keys: number;
   data: number[];
@@ -1052,13 +1053,14 @@ export class DaemonClient
     offset: number;
     replay_start_offset: number;
     replay_end_offset: number;
+    screen_checkpoint?: boolean;
     focus_reporting: boolean;
     keyboard_protocol: {
       kitty_flags: number;
       modify_other_keys: number;
     };
   }> {
-    return this.request('terminal.attach', { process_id: processId, offset, ...geometry });
+    return this.request('terminal.attach', { process_id: processId, offset, screen_checkpoint: true, ...geometry });
   }
 
   detachTerminal(): Promise<{ process_id: null }> {

@@ -149,6 +149,37 @@ async fn daemon_restart_replays_output_for_ui_control_and_mcp() -> Result<(), Bo
     socket
         .send(Message::Text(
             json!({
+                "id": "ui-checkpoint", "method": "terminal.attach",
+                "params": { "process_id": PROCESS_ID, "offset": 0, "screen_checkpoint": true }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let attached = receive_response(&mut socket, "ui-checkpoint").await?;
+    assert_eq!(attached["result"]["screen_checkpoint"], true);
+    let checkpoint: workman_core::terminal_checkpoint::TerminalCheckpoint =
+        serde_json::from_slice(&receive_terminal_frame(&mut socket).await?)?;
+    assert_eq!(
+        checkpoint.offset,
+        attached["result"]["replay_start_offset"].as_u64().unwrap()
+    );
+    let restored = workman_core::terminal::TerminalOutput::from_replay(
+        checkpoint.rows,
+        checkpoint.columns,
+        100,
+        checkpoint.ansi.as_bytes(),
+    );
+    assert!(
+        restored
+            .read_rows(0..usize::MAX)
+            .text()
+            .contains(DISTINCTIVE)
+    );
+
+    socket
+        .send(Message::Text(
+            json!({
                 "id": "cli-rendered",
                 "method": "process.rendered_output",
                 "params": { "process_id": PROCESS_ID }

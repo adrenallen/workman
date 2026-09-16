@@ -378,6 +378,24 @@ fn recorded_tool_completions_emit_exactly_one_persisted_event_and_os_candidate()
 }
 
 #[test]
+fn animated_codex_completion_emits_once_while_the_pty_keeps_redrawing() {
+    let frames = [
+        include_str!("../../workman-core/tests/fixtures/attention/codex_animated_resting_a.txt"),
+        include_str!("../../workman-core/tests/fixtures/attention/codex_animated_resting_b.txt"),
+    ];
+    let mut pipeline = ScriptedPipeline::new(Some("codex"));
+    pipeline.terminal = TerminalEmulator::new(24, 300, 100);
+    start_recorded_turn(&mut pipeline, CODEX_WORKING);
+    for (index, at) in (2_000..=20_000).step_by(100).enumerate() {
+        pipeline.frame_at(at, &frames[index % 2].replace('\n', "\r\n"));
+        let state = pipeline.observe_at(at);
+        assert_eq!(state.idle, at >= 7_000, "at {at}");
+        assert_eq!(pipeline.notifications().len(), usize::from(at >= 7_000));
+        assert_eq!(pipeline.native_emissions.len(), usize::from(at >= 7_000));
+    }
+}
+
+#[test]
 fn garrett_click_in_click_out_selection_resize_replay_and_focus_reports_are_attention_neutral() {
     let mut pipeline = ScriptedPipeline::new(Some("claude_code"));
     pipeline.frame_at(1_000, CLAUDE_RESTING);

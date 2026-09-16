@@ -863,6 +863,8 @@ struct TerminalSubscription {
     terminal_output: Option<workman_core::terminal::TerminalOutput>,
     offset: u64,
     replay_end_offset: u64,
+    pending_checkpoint: Option<workman_core::terminal_checkpoint::TerminalCheckpoint>,
+    accept_checkpoints: bool,
 }
 
 impl TerminalSubscription {
@@ -872,12 +874,18 @@ impl TerminalSubscription {
         self.terminal_output = None;
         self.offset = 0;
         self.replay_end_offset = 0;
+        self.pending_checkpoint = None;
+        self.accept_checkpoints = false;
     }
 
     fn output_ready(&self) -> impl Future<Output = ()> + Send + 'static {
         let output = self.output.clone();
         let offset = self.offset;
+        let has_checkpoint = self.pending_checkpoint.is_some();
         async move {
+            if has_checkpoint {
+                return;
+            }
             let Some(output) = output else {
                 pending::<()>().await;
                 return;
@@ -1258,7 +1266,7 @@ async fn handle_session_control(
         let _ = registry.resize(process_id, rows, cols, pixel_width, pixel_height);
     }
 
-    let (process, output, terminal_output, replay_start_offset, replay_end_offset) =
+    let (process, output, terminal_output, mut replay_start_offset, mut replay_end_offset) =
         match input_router.terminal_attachment(process_id, offset) {
             Ok(attachment) => {
                 // Selection is ephemeral UI bookkeeping. Keep it best-effort rather than allowing
@@ -1350,6 +1358,24 @@ async fn handle_session_control(
             }
         };
     let project_id = process.project_id;
+    terminal.accept_checkpoints = params
+        .get("screen_checkpoint")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    terminal.pending_checkpoint =
+        if terminal.accept_checkpoints && (offset == 0 || replay_start_offset > offset) {
+            terminal_output
+                .as_ref()
+                .zip(output.as_ref())
+                .and_then(|(screen, raw)| screen.checkpoint(raw))
+        } else {
+            None
+        };
+    if let Some(checkpoint) = &terminal.pending_checkpoint {
+        replay_start_offset = checkpoint.offset;
+        replay_end_offset = replay_end_offset.max(checkpoint.offset);
+    }
+    let checkpoint_pending = terminal.pending_checkpoint.is_some();
     let focus_reporting = terminal_output
         .as_ref()
         .is_some_and(|output| output.is_focus_reporting());
@@ -1375,6 +1401,7 @@ async fn handle_session_control(
                 "offset": offset,
                 "replay_start_offset": replay_start_offset,
                 "replay_end_offset": replay_end_offset,
+                "screen_checkpoint": checkpoint_pending,
                 "focus_reporting": focus_reporting,
                 "keyboard_protocol": {
                     "kitty_flags": keyboard_protocol.kitty_flags,
@@ -1447,6 +1474,29 @@ fn terminal_output_frames(terminal: &mut TerminalSubscription) -> RegistryResult
         .as_ref()
         .ok_or(RegistryError::NotRunning(process_id))?;
     let mut frames = Vec::new();
+    if terminal.pending_checkpoint.is_none()
+        && terminal.accept_checkpoints
+        && output.read(Some(terminal.offset), 0).start_offset > terminal.offset
+    {
+        terminal.pending_checkpoint = terminal
+            .terminal_output
+            .as_ref()
+            .and_then(|screen| screen.checkpoint(output));
+    }
+    if let Some(checkpoint) = terminal.pending_checkpoint.take() {
+        let keyboard = terminal
+            .terminal_output
+            .as_ref()
+            .map(|screen| screen.keyboard_protocol())
+            .unwrap_or_default();
+        terminal.offset = checkpoint.offset;
+        let data = serde_json::to_vec(&checkpoint).expect("terminal checkpoint is serializable");
+        let mut frame =
+            encode_terminal_frame(process_id, checkpoint.offset, false, keyboard, &data);
+        frame[20] |= 16; // Checkpoint bytes replace the screen; they do not advance the raw offset.
+        frames.push(frame);
+        return Ok(frames);
+    }
     for _ in 0..TERMINAL_STREAM_CHUNKS_PER_TICK {
         let requested_offset = terminal.offset;
         let replay_bytes_remaining = terminal.replay_end_offset.saturating_sub(requested_offset);
@@ -2125,6 +2175,7 @@ mod tests {
             terminal_output: None,
             offset: 0,
             replay_end_offset: output.total_bytes_seen(),
+            ..TerminalSubscription::default()
         };
 
         timeout(Duration::from_secs(1), terminal.output_ready())
@@ -2137,6 +2188,59 @@ mod tests {
                 .is_err(),
             "a caught-up quiet subscription must remain parked"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_checkpoint_repairs_a_gap_then_continues_at_the_raw_offset() {
+        use workman_core::{
+            pty::RawOutput, terminal::TerminalOutput, terminal_checkpoint::TerminalCheckpoint,
+        };
+
+        let mut bytes = b"retained answer\r\n".to_vec();
+        for _ in 0..100 {
+            bytes.extend_from_slice(b"\x1b[3;12H.\x1b[4;3H");
+        }
+        // Leave a CSI split across the snapshot boundary. The checkpoint must
+        // replay those bytes next, without counting its synthetic ANSI as output.
+        bytes.extend_from_slice(b"\x1b[2;");
+        let raw = RawOutput::from_replay(128, &bytes);
+        let screen = TerminalOutput::from_replay(8, 40, 100, &bytes);
+        let mut terminal = TerminalSubscription {
+            process_id: Some(7),
+            output: Some(raw.clone()),
+            terminal_output: Some(screen),
+            offset: 1,
+            replay_end_offset: raw.total_bytes_seen(),
+            accept_checkpoints: true,
+            ..TerminalSubscription::default()
+        };
+        let frames = terminal_output_frames(&mut terminal).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0][20] & 17, 16);
+        let checkpoint: TerminalCheckpoint =
+            serde_json::from_slice(&frames[0][TERMINAL_FRAME_HEADER_LEN..]).unwrap();
+        assert!(checkpoint.ansi.contains("retained answer"));
+        assert_eq!((checkpoint.rows, checkpoint.columns), (8, 40));
+        assert_eq!(terminal.offset, bytes.len() as u64 - 4);
+        assert_eq!(checkpoint.offset, terminal.offset);
+
+        let continuation = terminal_output_frames(&mut terminal).unwrap();
+        assert_eq!(continuation.len(), 1);
+        assert_eq!(continuation[0][20] & 17, 0);
+        assert_eq!(&continuation[0][TERMINAL_FRAME_HEADER_LEN..], b"\x1b[2;");
+        assert_eq!(terminal.offset, raw.total_bytes_seen());
+        assert!(
+            timeout(Duration::from_millis(25), terminal.output_ready())
+                .await
+                .is_err()
+        );
+
+        // CLI and older desktop clients retain the original raw-frame contract.
+        terminal.accept_checkpoints = false;
+        terminal.offset = 1;
+        let legacy = terminal_output_frames(&mut terminal).unwrap();
+        assert_eq!(legacy[0][20] & 17, 1);
+        assert_eq!(&legacy[0][TERMINAL_FRAME_HEADER_LEN..], raw.snapshot());
     }
 
     struct TestServer {

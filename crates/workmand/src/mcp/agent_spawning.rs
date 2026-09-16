@@ -3184,6 +3184,141 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn animated_composer_accepts_template_and_idle_timer_followup() {
+        use crate::timers::{IdleTimerOutcome, TimerFireReason, TimerService};
+        use workman_core::TimerKind;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let project = Project {
+            id: 1,
+            path: temp.path().to_string_lossy().into_owned(),
+            name: "animated-composer-fixture".into(),
+            display_name: None,
+            icon: None,
+            selected: true,
+            sort_order: 0,
+        };
+        store.put_project(&project).unwrap();
+        // Exercise the real PTY reader, attention renderer, prompt scheduler, and
+        // submission worker while a mock Codex composer redraws every 100 ms.
+        store.put_agent_tool(&AgentTool {
+            id: 91,
+            name: "Animated Codex fixture".into(),
+            command: r#"stty raw -echo; exec perl -MIO::Select -MTime::HiRes=time -e '
+                $| = 1;
+                my $input = IO::Select->new(\*STDIN);
+                my ($draft, $received, $busy_until, $frame) = ("", "", 0, 0);
+                while (1) {
+                    if ($input->can_read(0.1)) {
+                        my $n = sysread(STDIN, my $chunk, 4096);
+                        last unless defined($n) && $n > 0;
+                        $draft .= $chunk;
+                        while ($draft =~ s/^(.*?)\r//s) {
+                            $received = $1;
+                            $received =~ s/\n/|/g;
+                            $busy_until = time + 0.4;
+                        }
+                    }
+                    my $status = time < $busy_until
+                        ? "• Working (0s • esc to interrupt)"
+                        : length($received) ? "received:$received" : "Ready";
+                    my $particles = $frame++ % 2 ? "⠁ ⠂ ⠄" : " ⡀ ⠈ ⢀";
+                    my $visible_draft = $draft;
+                    $visible_draft =~ s/\n/ /g;
+                    print "\e[2J\e[H$status\r\n$particles\r\n› $visible_draft  $particles\r\n$particles\r\n";
+                }
+            ' --"#.into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        }).unwrap();
+        store
+            .put_agent_template(&AgentTemplate {
+                id: 92,
+                profile_id: 1,
+                name: "Template fixture".into(),
+                agent_tool_id: 91,
+                extra_args: Vec::new(),
+                prompt: "template instructions".into(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        let registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+            ProcessRegistry::new_for_test(store).unwrap(),
+        ));
+        let spawned = spawn_registered_agent(
+            registry.clone(),
+            project,
+            None,
+            Some(92),
+            None,
+            Vec::new(),
+            None,
+            Some("caller instructions".into()),
+            Vec::new(),
+            false,
+            AttachmentSourceScope::McpProject,
+            "http://127.0.0.1:1/mcp",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        {
+            let mut locked = registry.lock().await;
+            assert!(locked.has_pending_prompts(spawned.process_id));
+            let outcome = TimerService::new(&mut locked)
+                .set_idle(
+                    "fixture-owner".into(),
+                    spawned.process_id,
+                    "follow-up".into(),
+                    TimerKind::IdleAll,
+                    vec![spawned.process_id],
+                    100_000,
+                    0,
+                )
+                .unwrap();
+            assert!(matches!(outcome, IdleTimerOutcome::Created(_)));
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut saw_template = false;
+        let mut fired = false;
+        loop {
+            let mut locked = registry.lock().await;
+            let output = locked.rendered_output(spawned.process_id).unwrap().text;
+            saw_template |= output.contains("received:template instructions||caller instructions");
+            let fires = TimerService::new(&mut locked).tick(1).unwrap();
+            if !fires.is_empty() {
+                assert!(
+                    saw_template,
+                    "idle watch fired before the initial turn completed"
+                );
+                assert!(!fired);
+                assert_eq!(fires.len(), 1);
+                assert_eq!(fires[0].reason, TimerFireReason::IdleTransition);
+                fired = true;
+            }
+            if output.contains("received:follow-up") {
+                assert!(saw_template && fired);
+                locked.close(spawned.process_id).unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "template/follow-up delivery stalled: {output:?}"
+            );
+            drop(locked);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     #[test]
     fn dialog_acknowledgment_defaults_on_and_can_be_disabled() {
         let defaulted: SpawnAgentArgs = serde_json::from_value(json!({

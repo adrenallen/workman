@@ -2362,12 +2362,31 @@ impl ProcessRegistry {
                 Err(error) => return Err(output_error(process.id, error)),
             };
             let raw = RawOutput::from_replay(persistence.capacity, &bytes);
-            let terminal = TerminalOutput::from_replay(
-                DEFAULT_PTY_SIZE.rows,
-                DEFAULT_PTY_SIZE.cols,
-                DEFAULT_SCROLLBACK_LINES,
-                &bytes,
-            );
+            let checkpoint =
+                std::fs::read(output_path(&persistence, process.id).with_extension("screen"))
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<
+                            workman_core::terminal_checkpoint::TerminalCheckpoint,
+                        >(&bytes)
+                        .ok()
+                    })
+                    .filter(|checkpoint| checkpoint.rows > 0 && checkpoint.columns > 0);
+            let terminal = if let Some(checkpoint) = checkpoint {
+                TerminalOutput::from_replay(
+                    checkpoint.rows,
+                    checkpoint.columns,
+                    DEFAULT_SCROLLBACK_LINES,
+                    checkpoint.ansi.as_bytes(),
+                )
+            } else {
+                TerminalOutput::from_replay(
+                    DEFAULT_PTY_SIZE.rows,
+                    DEFAULT_PTY_SIZE.cols,
+                    DEFAULT_SCROLLBACK_LINES,
+                    &bytes,
+                )
+            };
             let attention = AttentionTracker::new(self.tool_type_for(&process)?);
             attention.mark_exited();
             self.outputs.insert(
@@ -2388,6 +2407,11 @@ impl ProcessRegistry {
             return Ok(());
         };
         let path = output_path(persistence, process_id);
+        match std::fs::remove_file(path.with_extension("screen")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(output_error(process_id, error)),
+        }
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -4079,6 +4103,78 @@ mod tests {
     }
 
     #[test]
+    fn screen_checkpoint_survives_raw_rollover_and_registry_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("workman.sqlite3");
+        let output_dir = temp.path().join(OUTPUT_DIRECTORY);
+        let project_path = temp.path().to_string_lossy().into_owned();
+        let expected;
+        {
+            let store = Store::open(&database).unwrap();
+            store
+                .put_project(&Project {
+                    id: 1,
+                    path: project_path.clone(),
+                    name: "checkpoint".into(),
+                    display_name: None,
+                    icon: None,
+                    selected: true,
+                    sort_order: 0,
+                })
+                .unwrap();
+            let mut registry =
+                ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 256).unwrap();
+            let mut process = output_test_process(&project_path);
+            process.command = Some(r"printf '\033[32mPERSISTED-OUTPUT-313\033[0m\n\033[48;2;52;56;64m\033[K\ncomposer\033[K\n\033[K\033[0m'; i=0; while [ $i -lt 100 ]; do printf '\033[3;90H.\033[4;3H'; i=$((i+1)); done; printf '\033[8;1Hredraw-finished'; sleep 30".into());
+            registry.create(process).unwrap();
+            registry.resize(31, 12, 96, 0, 0).unwrap();
+            registry.start(31).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !registry
+                .rendered_output(31)
+                .unwrap()
+                .text
+                .contains("redraw-finished")
+            {
+                assert!(Instant::now() < deadline, "redraws did not finish");
+                thread::sleep(Duration::from_millis(10));
+            }
+            registry.stop(31).unwrap();
+            expected = registry
+                .terminal_output_source(31)
+                .unwrap()
+                .unwrap()
+                .read_rows(0..usize::MAX);
+        }
+        let spill_path = output_dir.join("31.raw");
+        let raw = std::fs::read(&spill_path).unwrap();
+        assert!(raw.len() <= 256);
+        assert!(!String::from_utf8_lossy(&raw).contains("PERSISTED-OUTPUT-313"));
+        assert!(spill_path.with_extension("screen").exists());
+        let store = Store::open(&database).unwrap();
+        let mut registry =
+            ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 256).unwrap();
+        assert_eq!(
+            registry
+                .terminal_output_source(31)
+                .unwrap()
+                .unwrap()
+                .read_rows(0..usize::MAX),
+            expected
+        );
+        assert!(
+            registry
+                .rendered_output(31)
+                .unwrap()
+                .text
+                .contains("PERSISTED-OUTPUT-313")
+        );
+        registry.clear_output(31).unwrap();
+        assert!(!spill_path.exists());
+        assert!(!spill_path.with_extension("screen").exists());
+    }
+
+    #[test]
     fn output_reloads_after_registry_restart_and_is_removed_on_clear_and_close() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("project");
@@ -4146,6 +4242,7 @@ mod tests {
             assert!(spill_path.exists());
             registry.close(31).unwrap();
             assert!(!spill_path.exists(), "close left the spill behind");
+            assert!(!spill_path.with_extension("screen").exists());
         }
     }
 

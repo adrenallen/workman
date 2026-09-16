@@ -282,7 +282,7 @@ impl RawOutput {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn push(&self, bytes: &[u8]) {
+    pub(crate) fn push(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -774,7 +774,15 @@ impl PtyProcess {
         let attention = AttentionTracker::new(options.tool_type);
         let output_spill = match options
             .output_spill
-            .map(|spill| OutputSpill::start(spill.path, spill.capacity))
+            .map(|spill| {
+                let screen = terminal_output.clone();
+                let raw = raw_output.clone();
+                OutputSpill::start_with_checkpoint(
+                    spill.path,
+                    spill.capacity,
+                    Some(Arc::new(move || screen.checkpoint(&raw))),
+                )
+            })
             .transpose()
         {
             Ok(spill) => spill,
@@ -1630,14 +1638,17 @@ fn capture_output(
                     .parsed_bytes
                     .fetch_add(count as u64, Ordering::Relaxed);
                 let (recorded, mut replies) = color_queries.filter(&chunk[..count]);
-                replies.extend(terminal_output.feed_with_replies(&chunk[..count]));
                 #[cfg(windows)]
                 let recorded = probe_filter.filter(&recorded);
                 let recorded = recorded.as_slice();
                 // Publish raw bytes only after their terminal modes have been parsed. The daemon
                 // attaches the current keyboard mode to each raw-output frame, so exposing the
                 // bytes first could strand the frontend on the previous mode until more output.
-                raw_output.push(recorded);
+                replies.extend(terminal_output.feed_and_record(
+                    &chunk[..count],
+                    recorded,
+                    &raw_output,
+                ));
                 if let Some(spill) = &output_spill {
                     spill.push(recorded);
                 }

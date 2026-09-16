@@ -4,6 +4,39 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.17 - 2026-09-15
+
+### Agent input and terminal recovery
+
+- Pause queued automatic messages while you type in an agent terminal. The default typing
+  idle delay is 10 seconds; adjust it or turn it off in Settings → Terminal. Physical typing,
+  paste, and IME composition count as activity, including when using `wrk attach`.
+- Recheck permission dialogs before delivering queued messages or submitting Enter. Preserve
+  ordinary queued messages while a dialog is open and reject stale forced answers.
+- Keep fresh and resumed agents on the selected terminal colors, including Codex's shaded
+  input area, even when the agent starts before its terminal view opens.
+- Restore styled terminal history and input areas after frequent redraws overwrite the raw
+  output buffer. Preserve screen geometry, colors, and retained output across reconnects and
+  daemon restarts.
+- Ignore decorative Codex composer animation when detecting readiness and idle state, while
+  recognizing an active turn above the composer. Templates and idle-timer follow-ups can reach
+  agents whose input area redraws continuously.
+- Improve initial prompt delivery, timer debouncing, and recovery from delayed daemon replies.
+
+### Notifications and worktrees
+
+- Apply notification scope and input-alert preferences to in-app toasts as well as computer
+  notifications. Parent-only mode suppresses child-agent toasts, and scope controls remain
+  available when computer notifications are off.
+- Show worktree removal consequences before deletion and keep removal state recoverable.
+  Improve branch selection, worktree cleanup checks, and handling of existing local changes.
+
+### Development builds
+
+- Offer build-artifact cleanup and opening Workman Dev after a successful development install.
+  Use `--cleanup` / `--no-cleanup` and `--relaunch` / `--no-relaunch` to control the prompts.
+- Fix macOS build-tool compatibility and keep installed binaries available after cleanup.
+
 ## 0.1.16 - 2026-09-13
 
 - Restore custom agent aliases and functions from zsh, Bash, and Fish startup files in both

@@ -7,6 +7,7 @@ These rendered screens come from isolated real Workman PTY sessions on macOS. AN
 - `claude_permission_dialog.txt`: manual mode requesting approval for a harmless `touch` command; the command was denied and never executed.
 - `codex_working.txt`: Codex 0.146.1 during a turn, captured in Todo 422's isolated `com.workman.todo422` session.
 - `codex_resting.txt`: the same Codex session at its resting composer after the Shift+Enter acceptance probe.
+- `codex_animated_resting_a.txt` / `codex_animated_resting_b.txt`: two composer-background frames from the user-identified idle `codex--390` on 2026-09-15. The single-dot Braille particles kept resetting idle confirmation. Transcript and model/path details are replaced; composer geometry and particles are preserved.
 - `plain_terminal_working.txt`: ordinary shell output before its prompt returned.
 - `plain_terminal_prompt.txt`: the same shell after its prompt returned.
 

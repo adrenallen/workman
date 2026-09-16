@@ -1,11 +1,11 @@
 //! Process attention signals and tool-aware state classification.
 
-use std::fmt;
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{borrow::Cow, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ pub const DEFAULT_QUIESCENCE: Duration = Duration::from_millis(500);
 /// Conservative idle fallback when no adapter recognizes the terminal contents.
 pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(5);
 
-/// Stable silence required before a resting prompt becomes orchestration-idle.
+/// Stable content required before a resting prompt becomes orchestration-idle.
 ///
 /// This deliberately matches the established conservative fallback window. A
 /// prompt-shaped frame is useful evidence, but interactive agents can briefly
@@ -103,7 +103,13 @@ pub struct AdapterObservation<'a> {
 pub trait ToolAttentionAdapter: Send + Sync {
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags;
 
-    /// Sustained no-output window required before this adapter's idle evidence
+    /// Text used to distinguish meaningful output from a cosmetic redraw.
+    /// Adapters may remove known decorations while preserving transcript and draft text.
+    fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(rendered)
+    }
+
+    /// Sustained no-activity window required before this adapter's idle evidence
     /// is published to notifications, timers, and other consumers.
     fn idle_confirmation(&self) -> Duration {
         DEFAULT_IDLE_CONFIRMATION
@@ -293,6 +299,9 @@ impl AttentionEngine {
             rendered,
             alternate_screen,
         });
+        let activity_text = self.adapter.activity_text(rendered);
+        let content_changed =
+            activity_text != self.last_rendered || alternate_screen != self.last_alternate_screen;
         let explicit_attention = flags.busy || flags.needs_input;
         if explicit_attention {
             self.idle_prompt_latched = false;
@@ -300,13 +309,19 @@ impl AttentionEngine {
         let attention_neutral = self
             .attention_neutral_until
             .is_some_and(|until| now_ms <= until)
-            || (self.idle_prompt_latched && !explicit_attention);
+            || (self.idle_prompt_latched && !explicit_attention)
+            // Resting composers can repaint continuously before the first idle
+            // snapshot. These frames must not keep restarting its confirmation.
+            || (flags.resting_prompt
+                && self.flags.resting_prompt
+                && !explicit_attention
+                && !content_changed);
         if !attention_neutral {
             self.last_output_at = Some(now_ms);
         }
-        if rendered != self.last_rendered || alternate_screen != self.last_alternate_screen {
+        if content_changed {
             self.last_rendered.clear();
-            self.last_rendered.push_str(rendered);
+            self.last_rendered.push_str(&activity_text);
             self.last_alternate_screen = alternate_screen;
             if !attention_neutral {
                 self.last_content_change_at = Some(now_ms);
@@ -353,9 +368,9 @@ impl AttentionEngine {
             return AttentionState::Working;
         }
 
-        // Treat idle as a stable state, not a single prompt-shaped frame. PTY
-        // output, rendered state changes, and input all reset the same candidate
-        // window so every downstream consumer sees one debounced stream.
+        // Treat idle as a stable state, not a single prompt-shaped frame.
+        // Meaningful output, rendered state changes, and input reset the same
+        // candidate window so every downstream consumer sees one debounced stream.
         let stable_since = latest_activity_at(
             self.started_at,
             self.last_output_at,
@@ -753,8 +768,13 @@ impl ToolAttentionAdapter for ClaudeCodeAdapter {
 pub struct CodexAdapter;
 
 impl ToolAttentionAdapter for CodexAdapter {
+    fn activity_text<'a>(&self, rendered: &'a str) -> Cow<'a, str> {
+        codex_activity_text(rendered)
+    }
+
     fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
-        let rendered = observation.rendered;
+        let activity_text = self.activity_text(observation.rendered);
+        let rendered = activity_text.as_ref();
         let lowercase = rendered.to_lowercase();
         let permission_at = last_pattern(
             &lowercase,
@@ -771,9 +791,23 @@ impl ToolAttentionAdapter for CodexAdapter {
             &["esc to interrupt", "working (", "thinking (", "running ("],
         );
         let resting_at = last_codex_resting_prompt(rendered);
+        // Codex also renders its active status immediately above the composer.
+        // The composer staying visible does not mean that turn has finished.
+        let active_status_at = resting_at.and_then(|at| {
+            nonempty_lines(&rendered[..at])
+                .last()
+                .filter(|(_, line)| {
+                    line.starts_with("• ")
+                        && line.contains("esc to interrupt")
+                        && line.ends_with(')')
+                })
+                .map(|(offset, _)| *offset)
+        });
 
         let needs_input = is_latest(permission_at, &[busy_at, resting_at]);
-        let busy = !needs_input && is_latest(busy_at, &[permission_at, resting_at]);
+        let busy = !needs_input
+            && (is_latest(busy_at, &[permission_at, resting_at])
+                || is_latest(active_status_at, &[permission_at]));
         let resting_prompt = !needs_input && !busy && resting_at.is_some();
         let thinking = busy && lowercase.contains("thinking");
         let planning = busy && lowercase.contains("planning");
@@ -1009,6 +1043,36 @@ fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
         .rev()
         .take(8)
         .find_map(|(offset, line)| line.starts_with('›').then_some(offset))
+}
+
+fn codex_activity_text(rendered: &str) -> Cow<'_, str> {
+    let Some(composer_at) = last_codex_resting_prompt(rendered) else {
+        return Cow::Borrowed(rendered);
+    };
+    // Codex animates single-dot Braille particles in the composer background,
+    // including its otherwise blank top/bottom padding. Normalize those cells
+    // to spaces without stripping Braille from responses or other output.
+    let particle = |character| matches!(character, '⠁' | '⠂' | '⠄' | '⡀' | '⠈' | '⠐' | '⠠' | '⢀');
+    let mut normalized = String::with_capacity(rendered.len());
+    let mut offset = 0;
+    for line in rendered.split_inclusive('\n') {
+        let next_offset = offset + line.len();
+        let padding = (next_offset == composer_at || offset > composer_at)
+            && line
+                .chars()
+                .all(|character| character.is_whitespace() || particle(character));
+        if offset == composer_at || padding {
+            let text = line.replace(particle, " ");
+            normalized.push_str(text.trim_end());
+            if line.ends_with('\n') {
+                normalized.push('\n');
+            }
+        } else {
+            normalized.push_str(line);
+        }
+        offset = next_offset;
+    }
+    Cow::Owned(normalized)
 }
 
 fn last_grok_resting_prompt(rendered: &str) -> Option<usize> {
@@ -1407,6 +1471,97 @@ mod tests {
         let working = session.tracker.snapshot_at(401_000);
         assert_eq!(working.state, AttentionState::Working);
         assert_eq!(working.last_output_at, Some(401_000));
+    }
+
+    #[test]
+    fn unchanged_prompt_redraws_allow_initial_readiness_and_idle() {
+        let mut session = ScriptedSession::claude();
+        session.emit(2_000, "Ready\r\n❯ ".as_bytes());
+        for at in (2_100..=7_000).step_by(100) {
+            session.emit(at, b"\x1b[?25h\x1b[?2026h\x1b[?2026l");
+            if at == 2_700 {
+                assert_eq!(session.tracker.next_transition_at(at), Some(2_750));
+            }
+            let state = session.tracker.snapshot_at(at);
+            assert_eq!(state.composer_input_ready, at >= 2_750, "at {at}");
+            assert_eq!(state.idle, at >= 7_000, "at {at}");
+        }
+    }
+
+    #[test]
+    fn codex_animated_composer_reaches_idle_without_a_silent_pty() {
+        let mut session = ScriptedSession::codex();
+        for at in (2_000..=7_000).step_by(100) {
+            let particles = if at % 200 == 0 {
+                "⠁ ⠠  ⢀"
+            } else {
+                " ⠂ ⡀⠈ "
+            };
+            session.emit(at, format!(
+                "\x1b[2J\x1b[HDone\r\n{particles}\r\n› Ask Codex to do anything  {particles}\r\n{particles}\r\n  model · /tmp\r\n"
+            ).as_bytes());
+            let state = session.tracker.snapshot_at(at);
+            assert_eq!(state.composer_input_ready, at >= 2_750, "at {at}");
+            assert_eq!(state.idle, at >= 7_000, "at {at}");
+        }
+        let state = session.tracker.snapshot_at(7_000);
+        assert_eq!(state.last_output_at, Some(2_000));
+        assert_eq!(state.last_content_change_at, Some(2_000));
+    }
+
+    #[test]
+    fn codex_activity_above_the_composer_blocks_idle_and_input() {
+        let mut session = ScriptedSession::codex();
+        session.emit(2_000, "\x1b[2J\x1b[H• Working (1m 43s • esc to interrupt)\r\n\r\n  ⠁   ⡀\r\n› Ask Codex to do anything ⢀\r\n ⠂\r\n  model · /tmp".as_bytes());
+        let state = session.tracker.snapshot_at(60_000);
+        assert_eq!(state.state, AttentionState::Working);
+        assert_eq!(state.classification.as_deref(), Some("busy_spinner"));
+        assert!(!state.composer_input_ready);
+    }
+
+    #[test]
+    fn meaningful_output_during_composer_animation_restarts_idle_confirmation() {
+        let mut session = ScriptedSession::codex();
+        session.emit(
+            2_000,
+            "\x1b[2J\x1b[HAnswer: ⠁\r\n ⠂\r\n› Prompt ⡀\r\n ⠈".as_bytes(),
+        );
+        session.emit(
+            6_000,
+            "\x1b[2J\x1b[HAnswer: ⠂\r\n ⠄\r\n› Prompt ⠠\r\n ⢀".as_bytes(),
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(7_000).state,
+            AttentionState::Working
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(7_000).last_content_change_at,
+            Some(6_000)
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(11_000).state,
+            AttentionState::Idle
+        );
+
+        session.tracker.observe_input_at(11_100);
+        session.emit(
+            11_200,
+            "\x1b[2J\x1b[HAnswer: ⠂\r\n ⢀\r\n› Prompt ⡀\r\n ⠄".as_bytes(),
+        );
+        assert!(!session.tracker.snapshot_at(12_000).composer_input_ready);
+        session.emit(
+            12_100,
+            "\x1b[2J\x1b[H• Working (0s • esc to interrupt)\r\n ⢀\r\n› Prompt ⡀\r\n ⠄".as_bytes(),
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(60_000).state,
+            AttentionState::Working
+        );
+        session.emit(60_100, "\x1b[2J\x1b[H• Working (0s • esc to interrupt)\r\nFinal answer\r\n ⢀\r\n› Prompt ⡀\r\n ⠄".as_bytes());
+        assert_eq!(
+            session.tracker.snapshot_at(65_100).state,
+            AttentionState::Idle
+        );
     }
 
     #[test]

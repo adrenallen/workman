@@ -12,6 +12,10 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, LineLength};
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi;
+use alacritty_terminal::vte::ansi::Timeout;
+
+use crate::pty::RawOutput;
+use crate::terminal_checkpoint::{ReplayBoundary, TerminalCheckpoint, primary_checkpoint};
 
 /// Colors and flags retained for rendered terminal cells.
 pub use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -346,6 +350,7 @@ pub struct TerminalEmulator {
     // A listener here would emit duplicate responses into the same PTY.
     terminal: Term<VoidListener>,
     parser: ansi::Processor,
+    replay_boundary: ReplayBoundary,
     keyboard_protocol: KeyboardProtocolTracker,
     scrollback_lines: usize,
 }
@@ -361,6 +366,7 @@ impl TerminalEmulator {
         Self {
             terminal: Term::new(config, &size, VoidListener),
             parser: ansi::Processor::new(),
+            replay_boundary: ReplayBoundary::default(),
             keyboard_protocol: KeyboardProtocolTracker::default(),
             scrollback_lines,
         }
@@ -372,6 +378,11 @@ impl TerminalEmulator {
     }
 
     fn feed_with_replies(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.replay_boundary.feed(bytes);
+        self.feed_parsed_with_replies(bytes)
+    }
+
+    fn feed_parsed_with_replies(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let replies = self.keyboard_protocol.feed(bytes);
         #[cfg(windows)]
         let mut replies = replies;
@@ -397,6 +408,7 @@ impl TerminalEmulator {
     /// Resize the active and inactive grids, reflowing primary-screen content.
     pub fn resize(&mut self, rows: u16, columns: u16) {
         self.terminal.resize(EmulatorSize::new(rows, columns));
+        self.replay_boundary.resized();
     }
 
     /// Read a clamped range of physical rows across scrollback and viewport.
@@ -560,8 +572,42 @@ impl TerminalOutput {
         (terminal.read_rows(viewport_start..usize::MAX), replies)
     }
 
+    #[cfg(test)]
     pub(crate) fn feed_with_replies(&self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.lock().feed_with_replies(bytes)
+    }
+
+    /// Publish the parsed screen and raw bytes under the same terminal lock so
+    /// a replay checkpoint cannot skip or duplicate a concurrent PTY update.
+    pub(crate) fn feed_and_record(
+        &self,
+        bytes: &[u8],
+        recorded: &[u8],
+        raw: &RawOutput,
+    ) -> Vec<Vec<u8>> {
+        let mut terminal = self.lock();
+        terminal.replay_boundary.feed(recorded);
+        let replies = terminal.feed_parsed_with_replies(bytes);
+        raw.push(recorded);
+        replies
+    }
+
+    pub fn checkpoint(&self, raw: &RawOutput) -> Option<TerminalCheckpoint> {
+        let terminal = self.lock();
+        if raw.total_bytes_seen() == 0 {
+            return None;
+        }
+        let syncing = terminal.parser.sync_timeout().pending_timeout();
+        let trailing = terminal.replay_boundary.trailing_bytes(syncing);
+        let offset = raw.total_bytes_seen().saturating_sub(trailing);
+        if raw.read(Some(offset), 0).start_offset != offset {
+            return None;
+        }
+        primary_checkpoint(
+            &terminal.terminal,
+            offset,
+            terminal.replay_boundary.scroll_region(syncing),
+        )
     }
 
     pub(crate) fn read_viewport(&self) -> RenderedRows {

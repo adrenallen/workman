@@ -629,6 +629,7 @@ struct TerminalFrame {
     process_id: i64,
     start_offset: u64,
     gap: bool,
+    checkpoint: bool,
     kitty_keyboard_flags: u8,
     modify_other_keys: u8,
     data: Vec<u8>,
@@ -2170,6 +2171,7 @@ fn parse_terminal_frame(bytes: &[u8]) -> Option<TerminalFrame> {
         process_id,
         start_offset,
         gap: flags & 1 == 1,
+        checkpoint: flags & 16 != 0,
         kitty_keyboard_flags: (flags >> 1) & 1,
         modify_other_keys: (flags >> 2) & 3,
         data: bytes[TERMINAL_FRAME_HEADER_LEN..].to_vec(),
@@ -3491,9 +3493,15 @@ mod tests {
         assert_eq!(frame.process_id, 42);
         assert_eq!(frame.start_offset, 8192);
         assert!(frame.gap);
+        assert!(!frame.checkpoint);
         assert_eq!(frame.kitty_keyboard_flags, 1);
         assert_eq!(frame.modify_other_keys, 2);
         assert_eq!(frame.data, b"\x1b[31mraw\x00bytes");
+        bytes[20] |= 16;
+        let checkpoint = parse_terminal_frame(&bytes).unwrap();
+        assert!(checkpoint.checkpoint);
+        assert_eq!(checkpoint.data, frame.data);
+        assert_eq!(checkpoint.start_offset, frame.start_offset);
         assert!(parse_terminal_frame(b"not-a-terminal-frame").is_none());
     }
 

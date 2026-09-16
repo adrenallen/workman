@@ -5,6 +5,7 @@
 
 <script lang="ts">
   import { TerminalCompositionInput, TerminalInputBatch } from './terminalTyping';
+  import { terminalFrameContent } from './terminalCheckpoint';
   import BotIcon from '@lucide/svelte/icons/bot';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
   import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
@@ -148,6 +149,7 @@
   let attachedToDaemon = false;
   let attachmentGeneration = 0;
   let terminalOffset = 0;
+  let pendingCheckpointWrites = 0;
   let inputEnabled = false;
   let replayState: TerminalReplayState | null = null;
   let kittyKeyboardFlags = 0;
@@ -180,6 +182,8 @@
     finishing: boolean;
     focusRequested: boolean;
     gapDetected: boolean;
+    checkpointRequired: boolean;
+    checkpointParsed: boolean;
   }
 
   /** Insert through xterm so bracketed-paste mode and replay-safe input ordering are preserved. */
@@ -593,7 +597,9 @@
       modifyOtherKeys: 0,
       finishing: false,
       focusRequested: processStatus === 'running',
-      gapDetected: false
+      gapDetected: false,
+      checkpointRequired: false,
+      checkpointParsed: false
     };
     replayState = state;
     if (processStatus === 'running' && allowAutoFocus) instance.focus();
@@ -613,10 +619,11 @@
       if (!result || replayState !== state) return;
       const { attached, requestedOffset } = result;
       attachedToDaemon = true;
+      state.checkpointRequired = attached.screen_checkpoint === true;
       // If lifecycle work held the registry during the fast attach, this ordinary resize applies
       // the same geometry later without holding up replay or keyboard readiness.
       scheduleFit();
-      state.gapDetected = requestedOffset > 0
+      state.gapDetected = !state.checkpointRequired && requestedOffset > 0
         && rawReplayHasGap(requestedOffset, attached.replay_start_offset);
       state.replayEndOffset = attached.replay_end_offset;
       state.parsedThrough = Math.max(state.parsedThrough, attached.replay_start_offset);
@@ -655,21 +662,34 @@
       state.gapDetected = true;
     }
     setKeyboardProtocol(frame.kitty_keyboard_flags, frame.modify_other_keys);
-    terminal.write(Uint8Array.from(frame.data), () => {
+    const { data, endOffset, geometry } = terminalFrameContent(frame);
+    if (geometry) {
+      pendingCheckpointWrites += 1;
+      terminal.resize(geometry.columns, geometry.rows);
+    }
+    terminal.write(data, () => {
+      if (geometry) {
+        pendingCheckpointWrites -= 1;
+        scheduleFit();
+      }
       if (
         frame.data.length > 0
         && generation === attachmentGeneration
         && frame.process_id === process.id
       ) {
         hasOutput = true;
-        terminalOffset = Math.max(terminalOffset, frame.start_offset + frame.data.length);
+        terminalOffset = Math.max(terminalOffset, endOffset);
         retainedSnapshotOnly = false;
         replayPreviewAllowed = false;
       }
       if (!state || replayState !== state || frame.process_id !== state.processId) return;
+      if (frame.checkpoint) {
+        state.checkpointParsed = true;
+        state.gapDetected = false;
+      }
       state.parsedThrough = Math.max(
         state.parsedThrough,
-        frame.start_offset + frame.data.length
+        endOffset
       );
       armReplayWatchdog(state);
       finishReplayIfReady(state);
@@ -864,6 +884,9 @@
 
   function fitTerminal(): Terminal | null {
     const instance = terminal;
+    // A large checkpoint can span several parser turns. Keep its recorded
+    // geometry until its write callback, then fit the fully restored screen.
+    if (pendingCheckpointWrites > 0) return null;
     if (!instance || !fitAddon || host.clientWidth === 0 || host.clientHeight === 0) return null;
     fitAddon.fit();
     const screenHeight = instance.element
@@ -920,6 +943,7 @@
       || state.finishing
       || state.replayEndOffset === null
       || state.parsedThrough < state.replayEndOffset
+      || (state.checkpointRequired && !state.checkpointParsed)
       || !terminal
     ) {
       return;
