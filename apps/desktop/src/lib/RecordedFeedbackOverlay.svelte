@@ -3,6 +3,7 @@
   import { emit, listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
+  import type { NativeFeedbackSession } from './recordedFeedback';
 
   type Tool = 'pointer' | 'pen' | 'arrow' | 'rectangle' | 'ellipse';
   type Point = { x: number; y: number };
@@ -26,6 +27,8 @@
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('keydown', handleKeydown);
+    let mounted = true;
+    let regionEvents = 0;
     const unlisteners = Promise.all([
       listen<{ tool: Tool; color: string; width: number }>('feedback://tool', (event) => {
         tool = event.payload.tool;
@@ -33,6 +36,7 @@
         width = event.payload.width;
       }),
       listen<{ selecting: boolean }>('feedback://region', (event) => {
+        regionEvents += 1;
         selecting = event.payload.selecting;
         selectionStart = null;
         selectionEnd = null;
@@ -46,7 +50,19 @@
         if (event.payload.display_index === displayIndex) confirmCapture();
       })
     ]);
+    // A newly mounted overlay can miss the begin event while its webview loads.
+    // Read the current backend state after the listeners are ready. Ignore a
+    // response if a newer region event arrived while the request was in flight.
+    void unlisteners.then(async () => {
+      const before = regionEvents;
+      const session = await invoke<NativeFeedbackSession | null>('feedback_status');
+      if (mounted && regionEvents === before) {
+        selecting = session?.selecting_region ?? false;
+        paint();
+      }
+    }).catch(() => undefined);
     return () => {
+      mounted = false;
       window.removeEventListener('resize', resizeCanvas);
       window.removeEventListener('keydown', handleKeydown);
       if (captureConfirmationTimer) clearTimeout(captureConfirmationTimer);
@@ -115,6 +131,24 @@
       }
     }
     paint();
+  }
+
+  function pointerCancel(event: PointerEvent): void {
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    if (selecting && selectionStart) {
+      void cancelRegion();
+    } else if (draft) {
+      draft = null;
+      paint();
+    }
+  }
+
+  function lostPointerCapture(): void {
+    if (selecting && selectionStart) void cancelRegion();
+    else if (draft) {
+      draft = null;
+      paint();
+    }
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -255,7 +289,8 @@
   onpointerdown={pointerDown}
   onpointermove={pointerMove}
   onpointerup={(event) => void pointerUp(event)}
-  onpointercancel={(event) => void pointerUp(event)}
+  onpointercancel={pointerCancel}
+  onlostpointercapture={lostPointerCapture}
 ></canvas>
 
 {#if captureConfirmed}

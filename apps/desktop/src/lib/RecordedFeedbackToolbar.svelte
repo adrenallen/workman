@@ -164,6 +164,10 @@
   async function selectTool(next: Tool): Promise<void> {
     error = null;
     try {
+      if (selecting) {
+        await invoke('feedback_cancel_region');
+        selecting = false;
+      }
       session = await invoke<NativeFeedbackSession>('feedback_set_tool', {
         tool: next,
         color,
@@ -210,8 +214,16 @@
     snapMode = mode;
     try { localStorage.setItem('workman.feedback.snap-mode.v1', mode); } catch { /* optional */ }
     try {
-      if (mode === 'region') await invoke('feedback_begin_region');
-      else await invoke('feedback_capture_snapshot', { displayIndex: null, region: null });
+      if (selecting && mode === 'full') {
+        await invoke('feedback_cancel_region');
+        selecting = false;
+      }
+      if (mode === 'region') {
+        await invoke('feedback_begin_region');
+        selecting = true;
+      } else {
+        await invoke('feedback_capture_snapshot', { displayIndex: null, region: null });
+      }
       await refreshStatus();
     } catch (cause) {
       error = messageFor(cause);

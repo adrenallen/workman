@@ -53,6 +53,7 @@ const EVENT_TOOL: &str = "feedback://tool";
 const EVENT_REGION: &str = "feedback://region";
 const EVENT_ANNOTATIONS: &str = "feedback://annotations";
 const EVENT_SHORTCUT: &str = "feedback://shortcut";
+const REGION_SELECTION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(target_os = "macos")]
 const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
@@ -78,6 +79,17 @@ tauri_panel! {
     panel!(FeedbackPanel {
         config: {
             can_become_key_window: false,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
+
+    // A nonactivating panel must be allowed to become key to handle a drag
+    // without AppKit activating the owning application. The toolbar remains
+    // non-key so its ordinary click behavior is unchanged.
+    panel!(FeedbackOverlayPanel {
+        config: {
+            can_become_key_window: true,
             can_become_main_window: false,
             is_floating_panel: true
         }
@@ -144,6 +156,29 @@ struct FeedbackSession {
     shortcut_notice: Option<String>,
     display_ids: Vec<u32>,
     capture_in_progress: bool,
+    region_selection: RegionSelection,
+}
+
+#[derive(Default)]
+struct RegionSelection {
+    generation: u64,
+    active: bool,
+}
+
+impl RegionSelection {
+    fn begin(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.active = true;
+        self.generation
+    }
+
+    fn finish(&mut self) {
+        self.active = false;
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.active && self.generation == generation
+    }
 }
 
 #[derive(Default)]
@@ -217,6 +252,7 @@ pub(crate) struct SessionView {
     audio_samples: u64,
     sample_rate: u32,
     snapshot_count: usize,
+    selecting_region: bool,
     paused: bool,
     muted: bool,
     input_device_id: String,
@@ -520,6 +556,7 @@ pub(crate) fn feedback_start(
         }),
         display_ids,
         capture_in_progress: false,
+        region_selection: RegionSelection::default(),
     };
     let view = session_view(&session, "recording", None);
     *active = Some(session);
@@ -575,6 +612,12 @@ pub(crate) fn feedback_toggle_pause(
     let session = active.as_mut().ok_or("No feedback recording is active.")?;
     if session.capture_in_progress {
         return Err("Wait for the current snapshot to finish saving.".into());
+    }
+    if session.region_selection.active {
+        session.region_selection.finish();
+        let _ = set_overlays_interactive(&app, false);
+        reset_region_tool(&app, session);
+        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
     }
     let now = Instant::now();
     let paused = if let Some(paused_at) = session.paused_at.take() {
@@ -765,6 +808,11 @@ pub(crate) fn feedback_set_tool(
         .lock()
         .map_err(|_| "feedback state is unavailable")?;
     let session = active.as_mut().ok_or("No feedback recording is active.")?;
+    if session.region_selection.active {
+        session.region_selection.finish();
+        let _ = set_overlays_interactive(&app, false);
+        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+    }
     session.tool = tool;
     session.color = color.clone();
     session.width = width;
@@ -827,17 +875,32 @@ pub(crate) fn feedback_begin_region(
     app: AppHandle,
     state: State<'_, FeedbackState>,
 ) -> Result<SessionView, String> {
-    let active = state
+    let mut active = state
         .session
         .lock()
         .map_err(|_| "feedback state is unavailable")?;
-    let session = active.as_ref().ok_or("No feedback recording is active.")?;
+    let session = active.as_mut().ok_or("No feedback recording is active.")?;
     if session.paused_at.is_some() {
         return Err("Resume feedback before selecting a snapshot region.".into());
     }
-    set_overlays_interactive(&app, true)?;
+    if let Err(error) = set_overlays_interactive(&app, true) {
+        let _ = set_overlays_interactive(&app, false);
+        return Err(error);
+    }
+    let generation = session.region_selection.begin();
+    let feedback_id = session.feedback_id;
+    let view = session_view(session, "recording", None);
+    drop(active);
     let _ = app.emit(EVENT_REGION, json!({ "selecting": true }));
-    Ok(session_view(session, "recording", None))
+    let timeout_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REGION_SELECTION_TIMEOUT).await;
+        let on_main = timeout_app.clone();
+        let _ = timeout_app.run_on_main_thread(move || {
+            expire_region_selection(&on_main, feedback_id, generation);
+        });
+    });
+    Ok(view)
 }
 
 #[tauri::command]
@@ -845,14 +908,23 @@ pub(crate) fn feedback_cancel_region(
     app: AppHandle,
     state: State<'_, FeedbackState>,
 ) -> Result<SessionView, String> {
-    let active = state
-        .session
-        .lock()
-        .map_err(|_| "feedback state is unavailable")?;
-    let session = active.as_ref().ok_or("No feedback recording is active.")?;
-    set_overlays_interactive(&app, session.tool != AnnotationTool::Pointer)?;
+    let mut active = match state.session.lock() {
+        Ok(active) => active,
+        Err(_) => {
+            let _ = set_overlays_interactive(&app, false);
+            let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+            return Err("feedback state is unavailable".into());
+        }
+    };
+    let session = active.as_mut().ok_or("No feedback recording is active.")?;
+    session.region_selection.finish();
+    let result = set_overlays_interactive(&app, false);
+    reset_region_tool(&app, session);
+    let view = session_view(session, "recording", None);
+    drop(active);
     let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
-    Ok(session_view(session, "recording", None))
+    result?;
+    Ok(view)
 }
 
 #[tauri::command]
@@ -862,6 +934,11 @@ pub(crate) async fn feedback_capture_snapshot(
     app: AppHandle,
 ) -> Result<SnapshotView, String> {
     let selecting_region = region.is_some();
+    #[cfg(target_os = "macos")]
+    if selecting_region && let Err(error) = prepare_region_capture(&app).await {
+        let _ = complete_region_capture(&app, false).await;
+        return Err(error);
+    }
     let capture_app = app.clone();
     let result = match tauri::async_runtime::spawn_blocking(move || {
         capture_snapshot(display_index, region, &capture_app)
@@ -874,12 +951,13 @@ pub(crate) async fn feedback_capture_snapshot(
             Err(format!("Snapshot worker stopped: {error}"))
         }
     };
-    if selecting_region {
-        let restore_app = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            let _ = restore_overlay_interaction(&restore_app);
+    if selecting_region
+        && let Err(cleanup_error) = complete_region_capture(&app, result.is_ok()).await
+    {
+        return Err(match result {
+            Ok(_) => format!("The snapshot was saved, but region cleanup failed: {cleanup_error}"),
+            Err(error) => format!("{error}; region cleanup failed: {cleanup_error}"),
         });
-        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
     }
     result
 }
@@ -901,6 +979,9 @@ fn capture_snapshot(
         }
         if session.capture_in_progress {
             return Err("A snapshot is already being saved.".into());
+        }
+        if region.is_some() && !session.region_selection.active {
+            return Err("The snapshot region selection has ended.".into());
         }
         session.capture_in_progress = true;
         SnapshotCapture {
@@ -1080,14 +1161,98 @@ fn active_toolbar_display_id(app: &AppHandle, monitors: &[Monitor]) -> Option<u3
         .and_then(|monitor| monitor.id().ok())
 }
 
-fn restore_overlay_interaction(app: &AppHandle) -> Result<(), String> {
+#[cfg(target_os = "macos")]
+async fn prepare_region_capture(app: &AppHandle) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let on_main = app.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            let state = on_main.state::<FeedbackState>();
+            let active = state
+                .session
+                .lock()
+                .map_err(|_| "feedback state is unavailable")?;
+            let session = active.as_ref().ok_or("No feedback recording is active.")?;
+            if !session.region_selection.active {
+                return Err("The snapshot region selection has ended.".into());
+            }
+            set_overlays_interactive(&on_main, false)?;
+            drop(active);
+            let _ = on_main.emit(EVENT_REGION, json!({ "selecting": false }));
+            Ok(())
+        })();
+        let _ = send.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    receive.await.map_err(|error| error.to_string())?
+}
+
+async fn complete_region_capture(app: &AppHandle, success: bool) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let on_main = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = send.send(finish_region_capture(&on_main, success));
+    })
+    .map_err(|error| error.to_string())?;
+    receive.await.map_err(|error| error.to_string())?
+}
+
+fn finish_region_capture(app: &AppHandle, success: bool) -> Result<(), String> {
     let state = app.state::<FeedbackState>();
-    let active = state
-        .session
-        .lock()
-        .map_err(|_| "feedback state is unavailable")?;
-    let session = active.as_ref().ok_or("No feedback recording is active.")?;
-    set_overlays_interactive(app, session.tool != AnnotationTool::Pointer)
+    let mut active = match state.session.lock() {
+        Ok(active) => active,
+        Err(_) => {
+            let _ = set_overlays_interactive(app, false);
+            let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+            return Err("feedback state is unavailable".into());
+        }
+    };
+    let Some(session) = active.as_mut() else {
+        let _ = set_overlays_interactive(app, false);
+        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+        return Ok(());
+    };
+    session.region_selection.finish();
+    if !success {
+        reset_region_tool(app, session);
+    }
+    let interactive = success && session.tool != AnnotationTool::Pointer;
+    let result = set_overlays_interactive(app, interactive);
+    drop(active);
+    let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+    result
+}
+
+fn expire_region_selection(app: &AppHandle, feedback_id: i64, generation: u64) {
+    let state = app.state::<FeedbackState>();
+    let Ok(mut active) = state.session.lock() else {
+        let _ = set_overlays_interactive(app, false);
+        let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+        return;
+    };
+    let Some(session) = active.as_mut() else {
+        return;
+    };
+    if session.feedback_id != feedback_id || !session.region_selection.is_current(generation) {
+        return;
+    }
+    session.region_selection.finish();
+    reset_region_tool(app, session);
+    let _ = set_overlays_interactive(app, false);
+    drop(active);
+    let _ = app.emit(EVENT_REGION, json!({ "selecting": false }));
+}
+
+fn reset_region_tool(app: &AppHandle, session: &mut FeedbackSession) {
+    if session.tool != AnnotationTool::Pointer {
+        session.tool = AnnotationTool::Pointer;
+        let _ = app.emit(
+            EVENT_TOOL,
+            json!({
+                "tool": session.tool, "color": session.color, "width": session.width
+            }),
+        );
+    }
 }
 
 #[tauri::command]
@@ -1565,7 +1730,7 @@ fn build_overlay_window(
     position: LogicalPosition<f64>,
     size: LogicalSize<f64>,
 ) -> Result<(), String> {
-    let overlay = PanelBuilder::<_, FeedbackPanel>::new(app, label)
+    let overlay = PanelBuilder::<_, FeedbackOverlayPanel>::new(app, label)
         .url(WebviewUrl::App("index.html".into()))
         .position(Position::Logical(position))
         .size(Size::Logical(size))
@@ -1591,7 +1756,7 @@ fn build_overlay_window(
                 .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
-                .focusable(false)
+                .focusable(true)
                 .content_protected(true)
         })
         .build()
@@ -1766,34 +1931,40 @@ fn close_feedback_window(app: &AppHandle, label: &str) {
 
 #[cfg(target_os = "macos")]
 fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), String> {
-    for (label, _) in app.webview_windows() {
+    let mut first_error = None;
+    for (label, window) in app.webview_windows() {
         if label.starts_with("feedback-overlay-") {
-            let panel = app
-                .get_webview_panel(&label)
-                .map_err(|error| format!("{error:?}"))?;
-            panel.set_ignores_mouse_events(!interactive);
+            match app.get_webview_panel(&label) {
+                Ok(panel) => panel.set_ignores_mouse_events(!interactive),
+                Err(error) => {
+                    if let Err(fallback) = window.set_ignore_cursor_events(!interactive) {
+                        first_error.get_or_insert_with(|| {
+                            format!("Could not update {label}: {error:?}; {fallback}")
+                        });
+                    }
+                }
+            }
         }
     }
-    let toolbar = app
-        .get_webview_panel("feedback-toolbar")
-        .map_err(|error| format!("{error:?}"))?;
-    toolbar.set_level(PanelLevel::Custom(1001).value());
-    toolbar.order_front_regardless();
-    Ok(())
+    // The toolbar already has a higher level than the overlays. Reordering it
+    // here can change the window stack during region selection or capture.
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Annotation needs the overlays to accept the cursor; every other moment they
 /// must let clicks reach the app being recorded.
 #[cfg(windows)]
 fn set_overlays_interactive(app: &AppHandle, interactive: bool) -> Result<(), String> {
+    let mut first_error = None;
     for (label, window) in app.webview_windows() {
         if label.starts_with("feedback-overlay-") {
-            window
-                .set_ignore_cursor_events(!interactive)
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = window.set_ignore_cursor_events(!interactive) {
+                first_error.get_or_insert_with(|| error.to_string());
+            }
         }
     }
-    raise_toolbar(app)
+    let toolbar_result = raise_toolbar(app);
+    first_error.map_or(toolbar_result, Err)
 }
 
 /// Registers what the platform will give us and reports the rest.
@@ -2229,6 +2400,7 @@ fn session_view(
         audio_samples: session.audio_samples.load(Ordering::Relaxed),
         sample_rate: session.sample_rate,
         snapshot_count: session.snapshot_count,
+        selecting_region: session.region_selection.active,
         paused: session.paused_at.is_some(),
         muted: session.audio_controls.muted.load(Ordering::Acquire),
         input_device_id: session.input_device_id.clone(),
@@ -2266,6 +2438,18 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_region_deadline_cannot_cancel_a_new_selection() {
+        let mut selection = RegionSelection::default();
+        let first = selection.begin();
+        selection.finish();
+        let second = selection.begin();
+        assert!(!selection.is_current(first));
+        assert!(selection.is_current(second));
+        selection.finish();
+        assert!(!selection.is_current(second));
+    }
 
     #[test]
     fn paused_time_is_removed_from_the_feedback_timeline() {
