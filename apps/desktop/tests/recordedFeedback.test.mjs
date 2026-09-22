@@ -474,3 +474,34 @@ test('the capture module keeps a windows implementation beside every macos one',
     }
   }
 });
+
+test('region selection can exit on cancel, lost capture, error, and timeout', async () => {
+  const [capture, overlay] = await Promise.all([
+    readFile(new URL('../src-tauri/src/recorded_feedback/capture.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/RecordedFeedbackOverlay.svelte', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(capture, /panel!\(FeedbackOverlayPanel\s*\{[\s\S]*?can_become_key_window: true/);
+  assert.match(capture, /PanelBuilder::<_, FeedbackOverlayPanel>::new\(app, label\)/);
+  assert.match(capture, /\.nonactivating_panel\(\)/);
+  assert.match(capture, /REGION_SELECTION_TIMEOUT: Duration = Duration::from_secs\(20\)/);
+  assert.match(capture, /expire_region_selection\(&on_main, feedback_id, generation\)/);
+  assert.match(capture, /if let Err\(error\) = set_overlays_interactive\(&app, true\)\s*\{\s*let _ = set_overlays_interactive\(&app, false\)/);
+  assert.match(capture, /if !success\s*\{\s*reset_region_tool\(app, session\)/);
+  assert.match(capture, /let interactive = success && session\.tool != AnnotationTool::Pointer/);
+  const regionCommand = capture.slice(
+    capture.indexOf('pub(crate) async fn feedback_capture_snapshot'),
+    capture.indexOf('fn capture_snapshot(')
+  );
+  assert.ok(regionCommand.indexOf('prepare_region_capture(&app).await') < regionCommand.indexOf('spawn_blocking(move ||'),
+    'macOS overlays must become click-through before the screen capture starts');
+  const macInteractivity = capture.slice(
+    capture.indexOf('#[cfg(target_os = "macos")]\nfn set_overlays_interactive'),
+    capture.indexOf('#[cfg(windows)]\nfn set_overlays_interactive')
+  );
+  assert.doesNotMatch(macInteractivity, /order_front_regardless|set_level/,
+    'entering region mode must not reorder the toolbar');
+  assert.match(overlay, /onpointercancel=\{pointerCancel\}/);
+  assert.match(overlay, /onlostpointercapture=\{lostPointerCapture\}/);
+  assert.doesNotMatch(overlay, /onpointercancel=\{\(event\) => void pointerUp\(event\)\}/);
+});

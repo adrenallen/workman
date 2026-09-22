@@ -134,6 +134,7 @@ export interface NativeFeedbackSession {
   audio_samples: number;
   sample_rate: number;
   snapshot_count: number;
+  selecting_region?: boolean;
   paused: boolean;
   muted: boolean;
   input_device_id: string;
