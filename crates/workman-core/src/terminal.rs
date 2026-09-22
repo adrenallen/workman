@@ -15,7 +15,9 @@ use alacritty_terminal::vte::ansi;
 use alacritty_terminal::vte::ansi::Timeout;
 
 use crate::pty::RawOutput;
-use crate::terminal_checkpoint::{ReplayBoundary, TerminalCheckpoint, primary_checkpoint};
+use crate::terminal_checkpoint::{
+    ReplayBoundary, TerminalCheckpoint, alternate_checkpoint, primary_checkpoint,
+};
 
 /// Colors and flags retained for rendered terminal cells.
 pub use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -351,6 +353,9 @@ pub struct TerminalEmulator {
     terminal: Term<VoidListener>,
     parser: ansi::Processor,
     replay_boundary: ReplayBoundary,
+    alt_boundary: ReplayBoundary,
+    primary_before_alt: Option<TerminalCheckpoint>,
+    pending_primary_alt: Option<TerminalCheckpoint>,
     keyboard_protocol: KeyboardProtocolTracker,
     scrollback_lines: usize,
 }
@@ -367,6 +372,9 @@ impl TerminalEmulator {
             terminal: Term::new(config, &size, VoidListener),
             parser: ansi::Processor::new(),
             replay_boundary: ReplayBoundary::default(),
+            alt_boundary: ReplayBoundary::default(),
+            primary_before_alt: None,
+            pending_primary_alt: None,
             keyboard_protocol: KeyboardProtocolTracker::default(),
             scrollback_lines,
         }
@@ -386,7 +394,45 @@ impl TerminalEmulator {
         let replies = self.keyboard_protocol.feed(bytes);
         #[cfg(windows)]
         let mut replies = replies;
-        self.parser.advance(&mut self.terminal, bytes);
+        let switches = self.alt_boundary.feed(bytes);
+        let was_alt = self.terminal.mode().contains(TermMode::ALT_SCREEN);
+        let mut start = 0;
+        for switch in switches {
+            self.parser
+                .advance(&mut self.terminal, &bytes[start..switch.end - 1]);
+            let before_mode = self.terminal.mode().contains(TermMode::ALT_SCREEN);
+            let primary = if switch.enter && !before_mode {
+                primary_checkpoint(&self.terminal, 0, switch.scroll_region.as_deref())
+            } else {
+                None
+            };
+            self.parser
+                .advance(&mut self.terminal, &bytes[switch.end - 1..switch.end]);
+            let after_mode = self.terminal.mode().contains(TermMode::ALT_SCREEN);
+            if !before_mode && after_mode {
+                self.primary_before_alt = primary;
+                self.pending_primary_alt = None;
+            } else if before_mode && !after_mode {
+                self.primary_before_alt = None;
+                self.pending_primary_alt = None;
+            } else if switch.enter && !before_mode {
+                // Synchronized updates delay Alacritty's mode change until ESU.
+                self.pending_primary_alt = primary;
+            } else if !switch.enter && !before_mode {
+                self.pending_primary_alt = None;
+            }
+            start = switch.end;
+        }
+        self.parser.advance(&mut self.terminal, &bytes[start..]);
+        let is_alt = self.terminal.mode().contains(TermMode::ALT_SCREEN);
+        if !was_alt && is_alt && self.primary_before_alt.is_none() {
+            self.primary_before_alt = self.pending_primary_alt.take();
+        } else if was_alt && !is_alt {
+            self.primary_before_alt = None;
+        }
+        if !self.parser.sync_timeout().pending_timeout() {
+            self.pending_primary_alt = None;
+        }
         // ConPTY withholds all child output until its startup `CSI 6 n` probe is
         // answered, and a headless daemon PTY has no live xterm frontend to answer
         // it, so on Windows the daemon is the hosting terminal and must reply.
@@ -407,8 +453,21 @@ impl TerminalEmulator {
 
     /// Resize the active and inactive grids, reflowing primary-screen content.
     pub fn resize(&mut self, rows: u16, columns: u16) {
+        if let Some(saved) = &mut self.primary_before_alt {
+            // Alacritty reflows its inactive primary grid while the alternate
+            // grid is active. Reflow the bounded entry snapshot the same way;
+            // otherwise a later checkpoint would restore it at stale geometry.
+            let mut primary =
+                TerminalEmulator::new(saved.rows, saved.columns, self.scrollback_lines);
+            primary.feed(saved.ansi.as_bytes());
+            primary.feed(b"\x1b[?1049h\x1b[?1049l");
+            primary.resize(rows, columns);
+            *saved = primary_checkpoint(&primary.terminal, 0, None)
+                .expect("resized primary replay remains on the primary screen");
+        }
         self.terminal.resize(EmulatorSize::new(rows, columns));
         self.replay_boundary.resized();
+        self.alt_boundary.resized();
     }
 
     /// Read a clamped range of physical rows across scrollback and viewport.
@@ -603,11 +662,23 @@ impl TerminalOutput {
         if raw.read(Some(offset), 0).start_offset != offset {
             return None;
         }
-        primary_checkpoint(
-            &terminal.terminal,
-            offset,
-            terminal.replay_boundary.scroll_region(syncing),
-        )
+        if terminal.terminal.mode().contains(TermMode::ALT_SCREEN) {
+            alternate_checkpoint(
+                &terminal.terminal,
+                offset,
+                terminal.replay_boundary.scroll_region(syncing),
+                terminal
+                    .primary_before_alt
+                    .as_ref()
+                    .map(|saved| saved.ansi.as_str()),
+            )
+        } else {
+            primary_checkpoint(
+                &terminal.terminal,
+                offset,
+                terminal.replay_boundary.scroll_region(syncing),
+            )
+        }
     }
 
     pub(crate) fn read_viewport(&self) -> RenderedRows {
@@ -722,6 +793,52 @@ fn render_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alternate_checkpoint_without_saved_primary_restores_alt_grid_and_modes() {
+        let screen = TerminalOutput::new(6, 40, 100);
+        let raw = RawOutput::from_replay(128, b"");
+        let first =
+            b"\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[1;1HOpenCode\x1b[2;1HStatic sidebar";
+        screen.feed_and_record(first, first, &raw);
+        for _ in 0..100 {
+            let diff = b"\x1b[5;2H.";
+            screen.feed_and_record(diff, diff, &raw);
+        }
+        assert!(!String::from_utf8_lossy(&raw.snapshot()).contains("Static sidebar"));
+        {
+            let mut emulator = screen.lock();
+            assert!(emulator.is_alternate_screen());
+            // Simulate restoring an older spill or an already active TUI whose
+            // primary entry snapshot is unavailable to this daemon.
+            emulator.primary_before_alt = None;
+        }
+
+        let checkpoint = screen
+            .checkpoint(&raw)
+            .expect("alt grid needs a checkpoint");
+        assert!(checkpoint.ansi.starts_with("\x1b[?2026l\x1bc\x1b[?1049h"));
+        for expected in [
+            "OpenCode",
+            "Static sidebar",
+            "\x1b[?1002h",
+            "\x1b[?1006h",
+            "\x1b[?2004h",
+        ] {
+            assert!(checkpoint.ansi.contains(expected), "missing {expected:?}");
+        }
+        let restored = TerminalOutput::from_replay(
+            checkpoint.rows,
+            checkpoint.columns,
+            100,
+            checkpoint.ansi.as_bytes(),
+        );
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+        assert!(restored.is_bracketed_paste());
+    }
 
     #[test]
     fn scrollback_is_bounded_and_ranges_are_clamped() {
