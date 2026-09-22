@@ -1,4 +1,4 @@
-//! Self-contained ANSI checkpoints for primary-screen terminal replay.
+//! Self-contained ANSI checkpoints for terminal replay.
 
 use std::fmt::Write;
 
@@ -29,16 +29,44 @@ pub(crate) fn primary_checkpoint(
     offset: u64,
     scroll_region: Option<&str>,
 ) -> Option<TerminalCheckpoint> {
-    // Alternate-screen programs still use their original byte replay. A primary
-    // checkpoint must never discard the saved main screen of an active TUI.
-    if term
-        .mode()
-        .intersects(TermMode::ALT_SCREEN | TermMode::ORIGIN)
-    {
+    // The saved primary grid is private inside Alacritty while a TUI is active.
+    if term.mode().contains(TermMode::ALT_SCREEN) {
         return None;
     }
+    Some(screen_checkpoint(term, offset, scroll_region, None))
+}
+
+/// Rebuild both buffers in the same order a terminal created them. `primary` is
+/// captured before Alacritty swaps away its private primary grid.
+pub(crate) fn alternate_checkpoint(
+    term: &Term<VoidListener>,
+    offset: u64,
+    scroll_region: Option<&str>,
+    primary: &str,
+) -> Option<TerminalCheckpoint> {
+    if !term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    Some(screen_checkpoint(
+        term,
+        offset,
+        scroll_region,
+        Some(primary),
+    ))
+}
+
+fn screen_checkpoint(
+    term: &Term<VoidListener>,
+    offset: u64,
+    scroll_region: Option<&str>,
+    primary: Option<&str>,
+) -> TerminalCheckpoint {
     let grid = term.grid();
-    let mut ansi = String::from("\x1b[?2026l\x1bc\x1b[?25l");
+    let mut ansi = if let Some(primary) = primary {
+        format!("{primary}\x1b[?1049h\x1b[?6l\x1b[r\x1b[?25l\x1b[H")
+    } else {
+        String::from("\x1b[?2026l\x1bc\x1b[?25l")
+    };
     for index in 0..=NamedColor::Cursor as usize {
         if let Some(rgb) = term.colors()[index] {
             let command = if index < 256 {
@@ -136,9 +164,20 @@ pub(crate) fn primary_checkpoint(
     if let Some(region) = scroll_region {
         ansi.push_str(region);
     }
-    write_cursor(&mut ansi, &grid.saved_cursor, grid);
+    let origin_top = if term.mode().contains(TermMode::ORIGIN) {
+        ansi.push_str("\x1b[?6h");
+        scroll_region
+            .and_then(|region| region.strip_prefix("\x1b["))
+            .and_then(|region| region.trim_end_matches('r').split(';').next())
+            .and_then(|top| top.parse::<i32>().ok())
+            .unwrap_or(1)
+            - 1
+    } else {
+        0
+    };
+    write_cursor(&mut ansi, &grid.saved_cursor, grid, origin_top);
     ansi.push_str("\x1b7");
-    write_cursor(&mut ansi, &grid.cursor, grid);
+    write_cursor(&mut ansi, &grid.cursor, grid, origin_top);
     for (mode, number) in [
         (TermMode::SHOW_CURSOR, 25),
         (TermMode::APP_CURSOR, 1),
@@ -163,12 +202,12 @@ pub(crate) fn primary_checkpoint(
     } else {
         "\x1b>"
     });
-    Some(TerminalCheckpoint {
+    TerminalCheckpoint {
         rows: grid.screen_lines() as u16,
         columns: grid.columns() as u16,
         offset,
         ansi,
-    })
+    }
 }
 
 const STYLE_FLAGS: Flags = Flags::from_bits_retain(
@@ -243,11 +282,12 @@ fn write_cursor(
     output: &mut String,
     cursor: &alacritty_terminal::grid::Cursor<Cell>,
     grid: &alacritty_terminal::Grid<Cell>,
+    origin_top: i32,
 ) {
     let _ = write!(
         output,
         "\x1b[{};{}H",
-        cursor.point.line.0 + 1,
+        (cursor.point.line.0 - origin_top + 1).max(1),
         cursor.point.column.0 + 1
     );
     write_style(output, &cursor.template);
@@ -257,7 +297,12 @@ fn write_cursor(
             point.column.0 = point.column.0.saturating_sub(1);
         }
         let cell = &grid[point];
-        let _ = write!(output, "\x1b[{};{}H", point.line.0 + 1, point.column.0 + 1);
+        let _ = write!(
+            output,
+            "\x1b[{};{}H",
+            (point.line.0 - origin_top + 1).max(1),
+            point.column.0 + 1
+        );
         write_style(output, cell);
         output.push(cell.c);
         output.extend(cell.zerowidth().unwrap_or_default());
@@ -277,6 +322,13 @@ pub(crate) struct ReplayBoundary {
     before_sync_scroll_region: Option<String>,
 }
 
+pub(crate) struct AltScreenSwitch {
+    /// Exclusive byte index of the completed mode sequence in this feed.
+    pub end: usize,
+    pub enter: bool,
+    pub scroll_region: Option<String>,
+}
+
 #[derive(Default)]
 enum BoundaryState {
     #[default]
@@ -291,8 +343,9 @@ enum BoundaryState {
 }
 
 impl ReplayBoundary {
-    pub(crate) fn feed(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<AltScreenSwitch> {
+        let mut switches = Vec::new();
+        for (index, &byte) in bytes.iter().enumerate() {
             self.total += 1;
             self.pending_len += 1;
             if self.pending.len() < 64 {
@@ -339,6 +392,18 @@ impl ReplayBoundary {
                     if self.pending == b"\x1b[?2026l" {
                         self.sync_start = None;
                     }
+                    if matches!(byte, b'h' | b'l')
+                        && self.pending.starts_with(b"\x1b[?")
+                        && self.pending[3..self.pending.len() - 1]
+                            .split(|part| *part == b';')
+                            .any(|number| matches!(number, b"47" | b"1047" | b"1049"))
+                    {
+                        switches.push(AltScreenSwitch {
+                            end: index + 1,
+                            enter: byte == b'h',
+                            scroll_region: self.scroll_region.clone(),
+                        });
+                    }
                     BoundaryState::Ground
                 }
                 BoundaryState::Csi => BoundaryState::Csi,
@@ -362,6 +427,7 @@ impl ReplayBoundary {
                 self.pending_len = 0;
             }
         }
+        switches
     }
 
     pub(crate) fn offset(&self, syncing: bool) -> u64 {
@@ -432,6 +498,139 @@ mod tests {
         );
         assert!(restored.is_bracketed_paste());
         assert!(restored.is_focus_reporting());
+    }
+
+    #[test]
+    fn alternate_checkpoint_restores_static_tui_modes_and_underlying_primary_after_ring_wrap() {
+        const RING_CAPACITY: usize = 8 * 1024 * 1024;
+        let screen = TerminalOutput::from_replay(8, 40, 100, b"");
+        let raw = RawOutput::from_replay(RING_CAPACITY, b"");
+        append(&screen, &raw, b"shell history\r\nready> ");
+        // A mode sequence can arrive across separate PTY reads.
+        append(&screen, &raw, b"\x1b[?10");
+        append(
+            &screen,
+            &raw,
+            b"49h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?1h\x1b=",
+        );
+        append(
+            &screen,
+            &raw,
+            b"\x1b[1;1HOpenCode\x1b[2;1H388,535 tokens / 39% / $22\x1b[3;1HStatic sidebar\x1b[4;1H\x1b[48;2;52;56;64m\x1b[40X\x1b[0m",
+        );
+        let diff = b"\x1b[?2026h\x1b[6;2H.\x1b[?2026l";
+        let mut chunk = Vec::new();
+        while chunk.len() < 64 * 1024 {
+            chunk.extend_from_slice(diff);
+        }
+        let mut sent = 0;
+        while sent <= RING_CAPACITY {
+            append(&screen, &raw, &chunk);
+            sent += chunk.len();
+        }
+        assert!(!String::from_utf8_lossy(&raw.snapshot()).contains("Static sidebar"));
+        assert!(!String::from_utf8_lossy(&raw.snapshot()).contains("\x1b[?1049h"));
+
+        let checkpoint = screen.checkpoint(&raw).unwrap();
+        for expected in [
+            "shell history",
+            "\x1b[?1049h",
+            "OpenCode",
+            "388,535 tokens / 39% / $22",
+            "Static sidebar",
+            "\x1b[?1002h",
+            "\x1b[?1006h",
+            "\x1b[?2004h",
+            "\x1b[?1004h",
+            "\x1b[?1h",
+            "\x1b=",
+        ] {
+            assert!(checkpoint.ansi.contains(expected), "missing {expected:?}");
+        }
+        let restored = restore(&screen, &raw);
+        let actual = screen.read_rows(0..usize::MAX);
+        let replayed = restored.read_rows(0..usize::MAX);
+        assert_eq!(actual.text(), replayed.text());
+        assert_eq!(actual.cursor, replayed.cursor);
+        for (index, (left, right)) in actual.rows.iter().zip(&replayed.rows).enumerate() {
+            assert_eq!(left, right, "row {index}");
+        }
+        assert!(restored.read_rows(0..usize::MAX).alternate_screen);
+        assert!(restored.is_bracketed_paste());
+        assert!(restored.is_focus_reporting());
+
+        append(&screen, &raw, b"\x1b[?1049l\r\nreturned to shell");
+        restored.feed_with_replies(b"\x1b[?1049l\r\nreturned to shell");
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+        assert!(!restored.read_rows(0..usize::MAX).alternate_screen);
+        assert!(
+            restored
+                .read_rows(0..usize::MAX)
+                .text()
+                .contains("shell history")
+        );
+    }
+
+    #[test]
+    fn alternate_checkpoint_preserves_origin_mode_and_scroll_region() {
+        let screen = TerminalOutput::from_replay(8, 20, 100, b"");
+        let raw = RawOutput::from_replay(512, b"");
+        append(&screen, &raw, b"\x1b[2;6r\x1b[?6h\x1b[2;2Hprimary");
+        append(&screen, &raw, b"\x1b[?1049h\x1b[2;3Halt text");
+        for _ in 0..100 {
+            append(&screen, &raw, b"\x1b[3;4H.");
+        }
+        let restored = restore(&screen, &raw);
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+        append(&screen, &raw, b"\x1b[?1049l");
+        restored.feed_with_replies(b"\x1b[?1049l");
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+    }
+
+    #[test]
+    fn alternate_checkpoint_preserves_primary_after_resize_while_tui_is_active() {
+        let screen = TerminalOutput::from_replay(5, 20, 100, b"");
+        let raw = RawOutput::from_replay(512, b"");
+        append(&screen, &raw, b"a fairly long primary line\r\nready> ");
+        append(&screen, &raw, b"\x1b[?1049h\x1b[1;1HStatic TUI");
+        screen.lock().resize(6, 12);
+        append(&screen, &raw, b"\x1b[2;2H.");
+        let restored = restore(&screen, &raw);
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+        append(&screen, &raw, b"\x1b[?1049l");
+        restored.feed_with_replies(b"\x1b[?1049l");
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+    }
+
+    #[test]
+    fn alternate_entry_inside_synchronized_update_keeps_primary() {
+        let screen = TerminalOutput::from_replay(5, 20, 100, b"");
+        let raw = RawOutput::from_replay(256, b"");
+        append(&screen, &raw, b"shell before TUI");
+        append(&screen, &raw, b"\x1b[?2026h\x1b[?1049h\x1b[1;1HTUI label\x1b[?2026l");
+        for _ in 0..100 {
+            append(&screen, &raw, b"\x1b[4;2H.");
+        }
+        let restored = restore(&screen, &raw);
+        assert_eq!(screen.read_rows(0..usize::MAX), restored.read_rows(0..usize::MAX));
+        append(&screen, &raw, b"\x1b[?1049l");
+        restored.feed_with_replies(b"\x1b[?1049l");
+        assert_eq!(screen.read_rows(0..usize::MAX), restored.read_rows(0..usize::MAX));
     }
 
     #[test]

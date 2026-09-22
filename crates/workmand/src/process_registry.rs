@@ -4175,6 +4175,90 @@ mod tests {
     }
 
     #[test]
+    fn alternate_screen_checkpoint_survives_registry_restart_with_primary_underneath() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("workman.sqlite3");
+        let output_dir = temp.path().join(OUTPUT_DIRECTORY);
+        let project_path = temp.path().to_string_lossy().into_owned();
+        let expected;
+        {
+            let store = Store::open(&database).unwrap();
+            store
+                .put_project(&Project {
+                    id: 1,
+                    path: project_path.clone(),
+                    name: "alt checkpoint".into(),
+                    display_name: None,
+                    icon: None,
+                    selected: true,
+                    sort_order: 0,
+                })
+                .unwrap();
+            let mut registry =
+                ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 256).unwrap();
+            let mut process = output_test_process(&project_path);
+            process.command = Some(r"printf 'primary prompt\033[?1049h\033[?1002h\033[?1006h\033[?2004h\033[1;1HOpenCode\033[2;1HStatic sidebar'; i=0; while [ $i -lt 100 ]; do printf '\033[6;2H.'; i=$((i+1)); done; printf '\033[7;1Hredraw-finished'; sleep 30".into());
+            registry.create(process).unwrap();
+            registry.resize(31, 8, 40, 0, 0).unwrap();
+            registry.start(31).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !registry
+                .rendered_output(31)
+                .unwrap()
+                .text
+                .contains("redraw-finished")
+            {
+                assert!(Instant::now() < deadline, "redraws did not finish");
+                thread::sleep(Duration::from_millis(10));
+            }
+            registry.stop(31).unwrap();
+            expected = registry
+                .terminal_output_source(31)
+                .unwrap()
+                .unwrap()
+                .read_rows(0..usize::MAX);
+            assert!(expected.alternate_screen);
+            assert!(expected.text().contains("Static sidebar"));
+        }
+        let spill_path = output_dir.join("31.raw");
+        let raw = std::fs::read(&spill_path).unwrap();
+        assert!(raw.len() <= 256);
+        assert!(!String::from_utf8_lossy(&raw).contains("Static sidebar"));
+        let checkpoint: workman_core::terminal_checkpoint::TerminalCheckpoint =
+            serde_json::from_slice(&std::fs::read(spill_path.with_extension("screen")).unwrap())
+                .unwrap();
+        assert!(checkpoint.ansi.contains("primary prompt"));
+        assert!(checkpoint.ansi.contains("Static sidebar"));
+        assert!(checkpoint.ansi.contains("\x1b[?1049h"));
+        assert!(checkpoint.ansi.contains("\x1b[?1002h"));
+        assert!(checkpoint.ansi.contains("\x1b[?1006h"));
+        assert!(checkpoint.ansi.contains("\x1b[?2004h"));
+        let store = Store::open(&database).unwrap();
+        let mut registry =
+            ProcessRegistry::with_output_persistence_for_test(store, &output_dir, 256).unwrap();
+        assert_eq!(
+            registry
+                .terminal_output_source(31)
+                .unwrap()
+                .unwrap()
+                .read_rows(0..usize::MAX),
+            expected
+        );
+        let after_exit = workman_core::terminal::TerminalOutput::from_replay(
+            checkpoint.rows,
+            checkpoint.columns,
+            100,
+            &[checkpoint.ansi.as_bytes(), b"\x1b[?1049l"].concat(),
+        );
+        assert!(
+            after_exit
+                .read_rows(0..usize::MAX)
+                .text()
+                .contains("primary prompt")
+        );
+    }
+
+    #[test]
     fn output_reloads_after_registry_restart_and_is_removed_on_clear_and_close() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("project");

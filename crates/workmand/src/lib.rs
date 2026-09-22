@@ -2243,6 +2243,50 @@ mod tests {
         assert_eq!(&legacy[0][TERMINAL_FRAME_HEADER_LEN..], raw.snapshot());
     }
 
+    #[test]
+    fn alternate_screen_checkpoint_serves_initial_attach_and_reconnect_gap() {
+        use workman_core::{
+            pty::RawOutput, terminal::TerminalOutput, terminal_checkpoint::TerminalCheckpoint,
+        };
+
+        let mut bytes = b"primary prompt\r\n\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[1;1HOpenCode\x1b[2;1HStatic sidebar".to_vec();
+        for _ in 0..100 {
+            bytes.extend_from_slice(b"\x1b[6;2H.");
+        }
+        let raw = RawOutput::from_replay(128, &bytes);
+        let screen = TerminalOutput::from_replay(8, 40, 100, &bytes);
+        assert!(!String::from_utf8_lossy(&raw.snapshot()).contains("Static sidebar"));
+        for offset in [0, 1] {
+            let mut terminal = TerminalSubscription {
+                process_id: Some(7),
+                output: Some(raw.clone()),
+                terminal_output: Some(screen.clone()),
+                offset,
+                replay_end_offset: raw.total_bytes_seen(),
+                accept_checkpoints: true,
+                pending_checkpoint: (offset == 0).then(|| screen.checkpoint(&raw)).flatten(),
+            };
+            let frames = terminal_output_frames(&mut terminal).unwrap();
+            assert_eq!(frames.len(), 1);
+            assert_ne!(frames[0][20] & 16, 0);
+            let checkpoint: TerminalCheckpoint =
+                serde_json::from_slice(&frames[0][TERMINAL_FRAME_HEADER_LEN..]).unwrap();
+            for expected in [
+                "primary prompt",
+                "\x1b[?1049h",
+                "OpenCode",
+                "Static sidebar",
+                "\x1b[?1002h",
+                "\x1b[?1006h",
+                "\x1b[?2004h",
+            ] {
+                assert!(checkpoint.ansi.contains(expected), "missing {expected:?}");
+            }
+            assert_eq!(terminal.offset, checkpoint.offset);
+            assert_eq!(terminal.offset, raw.total_bytes_seen());
+        }
+    }
+
     struct TestServer {
         discovery: Discovery,
         data_dir: PathBuf,
