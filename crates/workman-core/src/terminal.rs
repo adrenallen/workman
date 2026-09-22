@@ -667,7 +667,10 @@ impl TerminalOutput {
                 &terminal.terminal,
                 offset,
                 terminal.replay_boundary.scroll_region(syncing),
-                &terminal.primary_before_alt.as_ref()?.ansi,
+                terminal
+                    .primary_before_alt
+                    .as_ref()
+                    .map(|saved| saved.ansi.as_str()),
             )
         } else {
             primary_checkpoint(
@@ -790,6 +793,52 @@ fn render_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alternate_checkpoint_without_saved_primary_restores_alt_grid_and_modes() {
+        let screen = TerminalOutput::new(6, 40, 100);
+        let raw = RawOutput::from_replay(128, b"");
+        let first =
+            b"\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[1;1HOpenCode\x1b[2;1HStatic sidebar";
+        screen.feed_and_record(first, first, &raw);
+        for _ in 0..100 {
+            let diff = b"\x1b[5;2H.";
+            screen.feed_and_record(diff, diff, &raw);
+        }
+        assert!(!String::from_utf8_lossy(&raw.snapshot()).contains("Static sidebar"));
+        {
+            let mut emulator = screen.lock();
+            assert!(emulator.is_alternate_screen());
+            // Simulate restoring an older spill or an already active TUI whose
+            // primary entry snapshot is unavailable to this daemon.
+            emulator.primary_before_alt = None;
+        }
+
+        let checkpoint = screen
+            .checkpoint(&raw)
+            .expect("alt grid needs a checkpoint");
+        assert!(checkpoint.ansi.starts_with("\x1b[?2026l\x1bc\x1b[?1049h"));
+        for expected in [
+            "OpenCode",
+            "Static sidebar",
+            "\x1b[?1002h",
+            "\x1b[?1006h",
+            "\x1b[?2004h",
+        ] {
+            assert!(checkpoint.ansi.contains(expected), "missing {expected:?}");
+        }
+        let restored = TerminalOutput::from_replay(
+            checkpoint.rows,
+            checkpoint.columns,
+            100,
+            checkpoint.ansi.as_bytes(),
+        );
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
+        assert!(restored.is_bracketed_paste());
+    }
 
     #[test]
     fn scrollback_is_bounded_and_ranges_are_clamped() {

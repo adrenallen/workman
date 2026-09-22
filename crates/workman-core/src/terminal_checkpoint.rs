@@ -37,12 +37,13 @@ pub(crate) fn primary_checkpoint(
 }
 
 /// Rebuild both buffers in the same order a terminal created them. `primary` is
-/// captured before Alacritty swaps away its private primary grid.
+/// captured before Alacritty swaps away its private primary grid. If that
+/// snapshot is unavailable, a blank primary still permits a complete alt grid.
 pub(crate) fn alternate_checkpoint(
     term: &Term<VoidListener>,
     offset: u64,
     scroll_region: Option<&str>,
-    primary: &str,
+    primary: Option<&str>,
 ) -> Option<TerminalCheckpoint> {
     if !term.mode().contains(TermMode::ALT_SCREEN) {
         return None;
@@ -51,7 +52,7 @@ pub(crate) fn alternate_checkpoint(
         term,
         offset,
         scroll_region,
-        Some(primary),
+        Some(primary.unwrap_or("\x1b[?2026l\x1bc")),
     ))
 }
 
@@ -622,15 +623,25 @@ mod tests {
         let screen = TerminalOutput::from_replay(5, 20, 100, b"");
         let raw = RawOutput::from_replay(256, b"");
         append(&screen, &raw, b"shell before TUI");
-        append(&screen, &raw, b"\x1b[?2026h\x1b[?1049h\x1b[1;1HTUI label\x1b[?2026l");
+        append(
+            &screen,
+            &raw,
+            b"\x1b[?2026h\x1b[?1049h\x1b[1;1HTUI label\x1b[?2026l",
+        );
         for _ in 0..100 {
             append(&screen, &raw, b"\x1b[4;2H.");
         }
         let restored = restore(&screen, &raw);
-        assert_eq!(screen.read_rows(0..usize::MAX), restored.read_rows(0..usize::MAX));
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
         append(&screen, &raw, b"\x1b[?1049l");
         restored.feed_with_replies(b"\x1b[?1049l");
-        assert_eq!(screen.read_rows(0..usize::MAX), restored.read_rows(0..usize::MAX));
+        assert_eq!(
+            screen.read_rows(0..usize::MAX),
+            restored.read_rows(0..usize::MAX)
+        );
     }
 
     #[test]
