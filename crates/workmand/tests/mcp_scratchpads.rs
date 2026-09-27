@@ -262,9 +262,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "scratchpad_remove_tags",
         "scratchpad_tags_list",
         "scratchpad_archive",
-        "scratchpad_clear",
         "scratchpad_delete",
-        "scratchpad_transfer",
         "scratchpad_save_to_file",
         "scratchpad_load_from_file",
         "scratchpad_comment_create",
@@ -824,22 +822,13 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let listed = call(&first, "scratchpad_list", json!({})).await;
     assert_eq!(listed["total_count"], 1, "archived scratchpad is hidden");
 
-    let transferred = invoke(
-        &first,
-        "scratchpad_transfer",
-        json!({
-            "scratchpad_id": imported_id,
-            "target_project_id": 2,
-            "expected_revision": 1
-        }),
-    )
-    .await;
-    assert_error_code(&transferred, "project_scope_error");
     let cleared = call(
         &first,
-        "scratchpad_clear",
+        "scratchpad_write",
         json!({
             "scratchpad_id": imported_id,
+            "name": "Imported Title",
+            "content": "",
             "expected_revision": 1
         }),
     )

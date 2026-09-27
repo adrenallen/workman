@@ -618,7 +618,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     let terminal_id = terminal["process_id"].as_i64().unwrap();
     assert_eq!(terminal["kind"], "terminal");
     assert!(terminal["name"].as_str().unwrap().starts_with("terminal--"));
-    assert_eq!(terminal["agent_instructions"], Value::Null);
+    assert!(terminal.get("agent_instructions").is_none());
     assert_eq!(
         call(
             &parent,
@@ -641,13 +641,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
     )
     .await;
     let process_id = spawned["process_id"].as_i64().unwrap();
-    let instructions = spawned["agent_instructions"].as_str().unwrap();
-    assert!(instructions.contains(&format!("WORKMAN_PROCESS_ID={process_id}")));
-    assert!(instructions.contains(&format!("WORKMAN_MCP_URL={endpoint}")));
-    assert!(instructions.contains("${WORKMAN_MCP_TOKEN}"));
-    assert!(instructions.contains("This runtime is not auto-wired"));
-    assert!(instructions.contains("no registered per-launch Workman MCP adapter"));
-    assert!(instructions.contains("Workman MCP identity check is unavailable"));
+    assert!(spawned.get("agent_instructions").is_none());
 
     let (injected_process_id, injected_token, injected_url) =
         wait_for_fake_agent_context(&context_file).await?;

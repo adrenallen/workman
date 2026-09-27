@@ -199,13 +199,7 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
             "spawn_agent",
             json!({ "project_id": 2, "agent_tool_id": 999 }),
         ),
-        ("identify_session", json!({ "process_id": 20 })),
-        ("select_project", json!({ "project_id": 2 })),
         ("get_project", json!({ "project_id": 2 })),
-        (
-            "create_project",
-            json!({ "path": two_path, "name": "duplicate-foreign" }),
-        ),
         (
             "todo_create",
             json!({ "project_id": 2, "title": "foreign todo" }),
@@ -222,14 +216,6 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
         (
             "lock_acquire",
             json!({ "project_id": 2, "lock_key": "foreign", "lease_ttl_seconds": 60 }),
-        ),
-        (
-            "worktree_create",
-            json!({ "project_id": 1, "branch": "would-create-another-project" }),
-        ),
-        (
-            "agent_tool_configure_preview",
-            json!({ "agent_tool_id": 999 }),
         ),
         ("send_input", json!({ "process_id": 20, "input": "no" })),
         (
@@ -256,37 +242,6 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
     )
     .await;
     assert_jailed(&watch_error, 1);
-
-    let todo = call(
-        &client,
-        "todo_create",
-        json!({ "title": "own todo", "response_mode": "rich" }),
-    )
-    .await;
-    let todo_transfer = rejected(
-        &client,
-        "todo_transfer",
-        json!({ "todo_id": todo["id"], "target_project_id": 2 }),
-    )
-    .await;
-    assert_jailed(&todo_transfer, 1);
-    let scratchpad = call(
-        &client,
-        "scratchpad_write",
-        json!({ "name": "own", "content": "safe" }),
-    )
-    .await;
-    let scratchpad_transfer = rejected(
-        &client,
-        "scratchpad_transfer",
-        json!({
-            "scratchpad_id": scratchpad["scratchpad_id"],
-            "target_project_id": 2,
-            "expected_revision": scratchpad["revision"]
-        }),
-    )
-    .await;
-    assert_jailed(&scratchpad_transfer, 1);
 
     let bearer = ClientInfo::default()
         .serve(StreamableHttpClientTransport::from_config(

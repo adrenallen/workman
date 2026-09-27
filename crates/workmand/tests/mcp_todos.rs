@@ -170,7 +170,6 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
         "todo_lock",
         "todo_unlock",
         "todo_complete",
-        "todo_transfer",
     ] {
         assert!(
             tool_names.iter().any(|candidate| candidate == name),
@@ -395,18 +394,6 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     .await;
     assert_eq!(listed["total_count"], 1);
     assert_eq!(listed["has_more"], false);
-
-    let transfer = invoke(
-        &first,
-        "todo_transfer",
-        json!({ "todo_id": todo_id, "target_project_id": 2 }),
-    )
-    .await;
-    assert_eq!(transfer.is_error, Some(true));
-    assert_eq!(
-        transfer.structured_content.unwrap()["code"],
-        "project_scope_error"
-    );
 
     call(
         &first,

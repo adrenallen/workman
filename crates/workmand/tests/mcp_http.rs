@@ -87,6 +87,35 @@ fn arguments(value: Value) -> Map<String, Value> {
         .clone()
 }
 
+fn assert_schema_hygiene(value: &Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                assert_schema_hygiene(value);
+            }
+        }
+        Value::Object(object) => {
+            assert!(!object.contains_key("$schema"));
+            assert_ne!(object.get("default"), Some(&Value::Null));
+            if let Some(Value::Object(properties)) = object.get("properties") {
+                assert!(!properties.contains_key("project_id"));
+            }
+            if let Some(Value::Array(types)) = object.get("type") {
+                assert!(!types.iter().any(Value::is_null));
+                assert!(!types.iter().any(|value| value == "null"));
+            }
+            if object.get("type") == Some(&Value::String("integer".into())) {
+                assert!(!object.contains_key("format"));
+                assert_ne!(object.get("minimum").and_then(Value::as_i64), Some(0));
+            }
+            for value in object.values() {
+                assert_schema_hygiene(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn call(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
     name: &'static str,
@@ -108,10 +137,8 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let temp = tempfile::tempdir()?;
     let project_one_dir = temp.path().join("one");
     let project_two_dir = temp.path().join("two");
-    let project_three_dir = temp.path().join("three");
     std::fs::create_dir_all(&project_one_dir)?;
     std::fs::create_dir_all(&project_two_dir)?;
-    std::fs::create_dir_all(&project_three_dir)?;
 
     let server = DaemonServer::bind(DaemonConfig {
         data_dir: temp.path().join("state"),
@@ -263,31 +290,19 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         .peer_info()
         .and_then(|info| info.instructions.clone())
         .expect("Workman advertises MCP server instructions");
-    assert!(server_instructions.contains("timer delivers back to you"));
-    assert!(server_instructions.contains("idle process with an unreported completion"));
-    assert!(
-        server_instructions
-            .contains("a process you never prompted always requires a fresh transition")
-    );
-    assert!(server_instructions.contains("timer_fire_when_idle_all counts processes already idle"));
-    assert!(server_instructions.contains("already_idle and satisfied_by diagnostics"));
-    assert!(
-        server_instructions.contains("Do not loop on timer_list or process status while waiting")
-    );
-    assert!(
-        server_instructions.contains("inspect the watched processes before assuming they finished")
-    );
-    assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
-    assert!(server_instructions.contains("notify_spawner_on_idle=true"));
-    assert!(server_instructions.contains("coalescing children"));
-    assert!(server_instructions.contains("human's unsent draft"));
-    assert!(server_instructions.contains("explicit pending idle timer wins"));
-    assert!(server_instructions.contains("delay timer when a hung-child deadline matters"));
-    assert!(server_instructions.contains("parked Waiting on its own timer"));
+    assert!(server_instructions.len() <= 800);
+    assert!(server_instructions.starts_with("Need human input"));
+    assert!(server_instructions.contains("todo_assign(assignee=\"user\")"));
+    assert!(server_instructions.contains("mention @user"));
+    assert!(server_instructions.contains("Call whoami first"));
+    assert!(server_instructions.contains("Use help for detailed guidance"));
 
-    let tool_names: Vec<_> = process_client
-        .list_all_tools()
-        .await?
+    let tools = process_client.list_all_tools().await?;
+    for tool in &tools {
+        assert_schema_hygiene(&Value::Object((*tool.input_schema).clone()));
+    }
+    let tool_names: Vec<_> = tools
+        .into_iter()
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
@@ -295,36 +310,35 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         "whoami",
         "help",
         "mcp_tools_summary",
-        "mcp_smoke_test",
         "list_projects",
-        "select_project",
         "get_project",
         "get_project_status",
         "get_project_stats",
-        "create_project",
         "rename_project",
-        "delete_project",
     ] {
         assert!(
             tool_names.iter().any(|name| name == required),
             "missing {required}"
         );
     }
+    for removed in [
+        "identify_session",
+        "mcp_smoke_test",
+        "select_project",
+        "create_project",
+        "delete_project",
+        "agent_tool_configure_preview",
+        "agent_tool_configure",
+    ] {
+        assert!(
+            !tool_names.iter().any(|name| name == removed),
+            "unexpected {removed}"
+        );
+    }
 
     let identity = call(&process_client, "whoami", json!({})).await;
     assert_eq!(identity["process_id"], 42);
     assert_eq!(identity["effective_project_id"], 1);
-    let identity_cannot_be_retargeted = process_client
-        .call_tool(
-            CallToolRequestParams::new("identify_session")
-                .with_arguments(arguments(json!({ "process_id": 999 }))),
-        )
-        .await?;
-    assert_eq!(identity_cannot_be_retargeted.is_error, Some(true));
-    assert_eq!(
-        identity_cannot_be_retargeted.structured_content.unwrap()["code"],
-        "identity_scope_error"
-    );
     assert_eq!(
         call(&process_client, "help", json!({ "topic": "scoping" })).await["topic"],
         "scoping"
@@ -424,17 +438,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
 
     let own_project = call(&process_client, "get_project", json!({})).await;
     assert_eq!(own_project["id"], 1);
-    let cross_select = process_client
-        .call_tool(
-            CallToolRequestParams::new("select_project")
-                .with_arguments(arguments(json!({ "project_id": 2 }))),
-        )
-        .await?;
-    assert_eq!(cross_select.is_error, Some(true));
-    assert_eq!(
-        cross_select.structured_content.unwrap()["code"],
-        "project_scope_error"
-    );
     let selected_project = call(&process_client, "get_project", json!({})).await;
     assert_eq!(selected_project["id"], 1);
     let explicit_project = call(&process_client, "get_project", json!({ "project_id": 1 })).await;
@@ -450,19 +453,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     .await;
     assert_eq!(stats["process_count"], 1);
 
-    let create_denied = process_client
-        .call_tool(
-            CallToolRequestParams::new("create_project").with_arguments(arguments(json!({
-                "path": project_three_dir,
-                "name": "three"
-            }))),
-        )
-        .await?;
-    assert_eq!(create_denied.is_error, Some(true));
-    assert_eq!(
-        create_denied.structured_content.unwrap()["code"],
-        "project_scope_error"
-    );
     let renamed = call(
         &process_client,
         "rename_project",
@@ -471,9 +461,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     .await;
     assert_eq!(renamed["name"], "one");
     assert_eq!(renamed["display_name"], "renamed");
-
-    let smoke = call(&process_client, "mcp_smoke_test", json!({})).await;
-    assert_eq!(smoke["ok"], true);
 
     let created_todo = call(
         &process_client,
@@ -525,6 +512,22 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     };
     let unidentified = call(&fallback_client, "whoami", json!({})).await;
     assert_eq!(unidentified["process_id"], Value::Null);
+    let fallback_tool_names = fallback_client
+        .list_all_tools()
+        .await?
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        fallback_tool_names
+            .iter()
+            .any(|name| name == "agent_tool_configure_preview")
+    );
+    assert!(
+        fallback_tool_names
+            .iter()
+            .any(|name| name == "agent_tool_configure")
+    );
     assert_eq!(
         call(&fallback_client, "list_projects", json!({})).await["projects"]
             .as_array()
@@ -544,17 +547,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .as_str()
             .unwrap()
             .contains("authenticated process identity")
-    );
-    let claim_denied = fallback_client
-        .call_tool(
-            CallToolRequestParams::new("identify_session")
-                .with_arguments(arguments(json!({ "process_id": 42 }))),
-        )
-        .await?;
-    assert_eq!(claim_denied.is_error, Some(true));
-    assert_eq!(
-        claim_denied.structured_content.unwrap()["code"],
-        "identity_authentication_required"
     );
     assert_eq!(
         call(&fallback_client, "whoami", json!({})).await["process_id"],

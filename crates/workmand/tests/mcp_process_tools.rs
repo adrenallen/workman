@@ -218,7 +218,6 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
         "restart_process",
         "close_process",
         "rename_process",
-        "select_process",
         "start_all_commands",
         "stop_all_commands",
         "restart_all_commands",
@@ -398,8 +397,6 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     .await;
     assert!(!raw_matches["matches"].as_array().unwrap().is_empty());
 
-    let selected = call(&client, "select_process", json!({ "process_id": 2 })).await;
-    assert_eq!(selected["selected_process_id"], 2);
     let renamed = call(
         &client,
         "rename_process",

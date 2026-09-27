@@ -25,10 +25,7 @@ use workman_core::{
     pty::{is_kimi_tool_type, kimi_session_started},
 };
 
-use super::{
-    IDLE_TIMER_LAUNCH_GUIDANCE, SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp,
-    ensure_actor, failure, process_project_id, scoped_project, success,
-};
+use super::{WorkmanMcp, ensure_actor, failure, process_project_id, scoped_project, success};
 use crate::{
     ProcessRegistry,
     completion_ledger::CompletionLedger,
@@ -199,8 +196,6 @@ pub(crate) struct SpawnResult {
     project_id: ProjectId,
     name: String,
     kind: ProcessKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_instructions: Option<String>,
     deferred_initial_prompt: Option<String>,
     deferred_attachments: Vec<String>,
     notify_spawner_on_idle: bool,
@@ -541,7 +536,6 @@ impl WorkmanMcp {
                         ProcessKind::Terminal,
                         name,
                         shell,
-                        None,
                         None,
                         BTreeMap::new(),
                         spawned_by_process_id,
@@ -1808,7 +1802,6 @@ async fn spawn_registered_agent_for(
             name,
             prepared.launch.command,
             Some(prepared.tool.id),
-            Some(tool_type.clone()),
             prepared.launch.env,
             spawned_by_process_id,
             notify_spawner_on_idle,
@@ -2145,7 +2138,6 @@ fn spawn(
     name: String,
     command: String,
     agent_tool_id: Option<AgentToolId>,
-    agent_tool_type: Option<String>,
     env: BTreeMap<String, String>,
     spawned_by_process_id: Option<ProcessId>,
     notify_spawner_on_idle: bool,
@@ -2191,23 +2183,11 @@ fn spawn(
             return Err(error.to_string());
         }
     };
-    let agent_instructions = (kind == ProcessKind::Agent).then(|| {
-        agent_instructions(
-            &running,
-            project,
-            running
-                .env
-                .get(WORKMAN_MCP_URL_ENV)
-                .expect("agent spawn always records its MCP URL"),
-            agent_tool_type.as_deref().unwrap_or("unknown"),
-        )
-    });
     Ok(SpawnResult {
         process_id: running.id,
         project_id: running.project_id,
         name: running.name,
         kind: running.kind,
-        agent_instructions,
         deferred_initial_prompt: None,
         deferred_attachments: Vec::new(),
         notify_spawner_on_idle,
@@ -3067,58 +3047,6 @@ fn shell_quote(argument: &str) -> String {
     }
     #[cfg(not(unix))]
     format!("'{}'", argument.replace('\'', "'\"'\"'"))
-}
-
-fn agent_instructions(
-    process: &Process,
-    project: &Project,
-    mcp_url: &str,
-    tool_type: &str,
-) -> String {
-    let capability = mcp_launch_capability(tool_type);
-    let client_wiring = if capability.supported {
-        format!(
-            "This launch already has the server named workman wired through {}.",
-            capability.mechanism
-        )
-    } else {
-        format!(
-            "This runtime is not auto-wired: {} Do not claim Workman MCP access unless the client exposes it.",
-            capability.note
-        )
-    };
-    let identity_guidance = if capability.supported {
-        format!(
-            "Call whoami() through workman first. It must identify you as process {}. Never call identify_session to claim or change identity; if whoami is unidentified or names any other process, stop and report a launch-wiring error.",
-            process.id
-        )
-    } else {
-        "The Workman MCP identity check is unavailable for this launch.".to_owned()
-    };
-    format!(
-        "[workman context] You are Workman process ID {process_id} ({process_name}), in project \
-         {project_id} ({project_name}, repo {project_path}). Workman set \
-         WORKMAN_PROCESS_ID={process_id}, WORKMAN_MCP_URL={mcp_url}, and the secret \
-         WORKMAN_MCP_TOKEN environment variable. {client_wiring} The connector must use the exact \
-         URL in ${{WORKMAN_MCP_URL}} ({mcp_url}) and send the x-workman-mcp-token header from \
-         ${{WORKMAN_MCP_TOKEN}}. Use the MCP server named workman, never a globally configured Solo \
-         or unrelated workman server. {identity_guidance} \
-         {worktree_agent_guidance} \
-         {idle_timer_wait_guidance} \
-         {scratchpad_handoff_guidance} \
-         [END WORKMAN CONTEXT]",
-        process_id = process.id,
-        process_name = process.name,
-        project_id = project.id,
-        project_name = project.name,
-        project_path = project.path,
-        client_wiring = client_wiring,
-        identity_guidance = identity_guidance,
-        idle_timer_wait_guidance = IDLE_TIMER_LAUNCH_GUIDANCE,
-        mcp_url = mcp_url,
-        scratchpad_handoff_guidance = SCRATCHPAD_HANDOFF_GUIDANCE,
-        worktree_agent_guidance = WORKTREE_AGENT_GUIDANCE,
-    )
 }
 
 #[cfg(test)]
@@ -4382,69 +4310,5 @@ mod tests {
             "private per-launch KIMI_CODE_HOME config"
         );
         fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn preamble_carries_identity_project_and_mcp_hints_without_the_secret() {
-        let project = Project {
-            id: 7,
-            path: "/tmp/workspace".into(),
-            name: "demo".into(),
-            display_name: None,
-            icon: None,
-            selected: false,
-            sort_order: 0,
-        };
-        let process = Process {
-            id: 41,
-            project_id: project.id,
-            kind: ProcessKind::Agent,
-            name: "worker".into(),
-            command: Some("claude".into()),
-            working_dir: project.path.clone(),
-            env: BTreeMap::new(),
-            auto_start: false,
-            auto_restart: false,
-            restart_when_changed: Vec::new(),
-            source: ProcessSource::Local,
-            trust_hash: None,
-            status: ProcessStatus::Running,
-            pid: Some(123),
-            exit_code: None,
-            exit_signal: None,
-            exited_at: None,
-            agent_tool_id: Some(1),
-            spawned_by_process_id: None,
-            sort_order: 0,
-        };
-        let preamble = agent_instructions(
-            &process,
-            &project,
-            "http://127.0.0.1:43126/mcp",
-            "claude_code",
-        );
-        assert!(preamble.contains("process ID 41 (worker)"));
-        assert!(preamble.contains("project 7 (demo, repo /tmp/workspace)"));
-        assert!(preamble.contains("WORKMAN_PROCESS_ID=41"));
-        assert!(preamble.contains("WORKMAN_MCP_URL=http://127.0.0.1:43126/mcp"));
-        assert!(preamble.contains("${WORKMAN_MCP_TOKEN}"));
-        assert!(preamble.contains("server named workman"));
-        assert!(preamble.contains("never a globally configured Solo"));
-        assert!(preamble.contains("Call whoami() through workman first"));
-        assert!(preamble.contains("Never call identify_session to claim or change identity"));
-        assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
-        assert!(preamble.contains(IDLE_TIMER_LAUNCH_GUIDANCE));
-        assert!(preamble.contains("finish your response and end the turn after arming it"));
-        assert!(preamble.contains("help(topic=\"timers\")"));
-        assert!(preamble.contains(
-            "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with \
-             scratchpad_write so they are visible in the app and verifiable; do not create \
-             ad-hoc repo files for them."
-        ));
-        assert!(preamble.contains(
-            "After creating a scratchpad or todo, read it back with scratchpad_read or todo_get \
-             and reference its ID in every hand-off message."
-        ));
-        assert!(!preamble.contains("secret-token"));
     }
 }

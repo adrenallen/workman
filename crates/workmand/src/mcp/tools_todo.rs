@@ -18,12 +18,76 @@ use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 300;
 const MAX_LEASE_TTL_SECONDS: i64 = 86_400;
 
+/// Controls response detail: `slim` returns a compact receipt and `rich` returns the full record.
 #[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum ResponseMode {
     #[default]
     Slim,
     Rich,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TodoPriorityArg {
+    High,
+    Medium,
+    Low,
+}
+
+impl From<TodoPriorityArg> for TodoPriority {
+    fn from(priority: TodoPriorityArg) -> Self {
+        match priority {
+            TodoPriorityArg::High => Self::High,
+            TodoPriorityArg::Medium => Self::Medium,
+            TodoPriorityArg::Low => Self::Low,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TodoStatusArg {
+    Open,
+    InProgress,
+    Backlog,
+    Completed,
+}
+
+impl From<TodoStatusArg> for TodoStatus {
+    fn from(status: TodoStatusArg) -> Self {
+        match status {
+            TodoStatusArg::Open => Self::Open,
+            TodoStatusArg::InProgress => Self::InProgress,
+            TodoStatusArg::Backlog => Self::Backlog,
+            TodoStatusArg::Completed => Self::Completed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TodoSortArg {
+    #[default]
+    Priority,
+    Newest,
+    Oldest,
+    TitleAsc,
+    TitleDesc,
+    Status,
+}
+
+impl From<TodoSortArg> for TodoSort {
+    fn from(sort: TodoSortArg) -> Self {
+        match sort {
+            TodoSortArg::Priority => Self::Priority,
+            TodoSortArg::Newest => Self::Newest,
+            TodoSortArg::Oldest => Self::Oldest,
+            TodoSortArg::TitleAsc => Self::TitleAsc,
+            TodoSortArg::TitleDesc => Self::TitleDesc,
+            TodoSortArg::Status => Self::Status,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -34,13 +98,14 @@ struct TodoCreateArgs {
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
-    priority: Option<String>,
+    priority: Option<TodoPriorityArg>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     /// Assign the new todo to the human with `user`; omit for no assignment.
     #[serde(default)]
     assignee: Option<String>,
     #[serde(default)]
+    /// `slim` returns a compact receipt; `rich` returns the full todo.
     response_mode: Option<ResponseMode>,
 }
 
@@ -63,15 +128,16 @@ struct TodoUpdateArgs {
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
-    priority: Option<String>,
+    priority: Option<TodoPriorityArg>,
     #[serde(default)]
-    status: Option<String>,
+    status: Option<TodoStatusArg>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     /// Assign to the human with `user`, or clear with `none`; omit to preserve.
     #[serde(default)]
     assignee: Option<String>,
     #[serde(default)]
+    /// `slim` returns a compact receipt; `rich` returns the full todo.
     response_mode: Option<ResponseMode>,
 }
 
@@ -87,13 +153,13 @@ struct TodoListArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     #[serde(default)]
-    status: Option<String>,
+    status: Option<TodoStatusArg>,
     #[serde(default)]
     completed: Option<bool>,
     #[serde(default)]
     is_blocked: Option<bool>,
     #[serde(default)]
-    priority: Option<String>,
+    priority: Option<TodoPriorityArg>,
     /// Filter to todos assigned to the human with `user`.
     #[serde(default)]
     assignee: Option<String>,
@@ -102,7 +168,7 @@ struct TodoListArgs {
     #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
-    sort: Option<String>,
+    sort: Option<TodoSortArg>,
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
@@ -222,16 +288,6 @@ struct TodoCompleteArgs {
     response_mode: Option<ResponseMode>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct TodoTransferArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    todo_id: TodoId,
-    target_project_id: ProjectId,
-    #[serde(default)]
-    response_mode: Option<ResponseMode>,
-}
-
 #[derive(Debug, Serialize)]
 struct TodoReceipt {
     project_id: ProjectId,
@@ -248,10 +304,7 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<TodoCreateArgs>,
     ) -> CallToolResult {
-        let priority = match parse_priority(args.priority.as_deref().unwrap_or("medium")) {
-            Ok(priority) => priority,
-            Err(error) => return todo_failure(error),
-        };
+        let priority = args.priority.unwrap_or(TodoPriorityArg::Medium).into();
         let mut registry = self.registry.lock().await;
         let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
@@ -359,14 +412,8 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<TodoUpdateArgs>,
     ) -> CallToolResult {
-        let priority = match args.priority.as_deref().map(parse_priority).transpose() {
-            Ok(priority) => priority,
-            Err(error) => return todo_failure(error),
-        };
-        let status = match args.status.as_deref().map(parse_status).transpose() {
-            Ok(status) => status,
-            Err(error) => return todo_failure(error),
-        };
+        let priority = args.priority.map(Into::into);
+        let status = args.status.map(Into::into);
         let mut registry = self.registry.lock().await;
         let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
@@ -433,22 +480,13 @@ impl WorkmanMcp {
         Extension(parts): Extension<Parts>,
         Parameters(args): Parameters<TodoListArgs>,
     ) -> CallToolResult {
-        let status = match args.status.as_deref().map(parse_status).transpose() {
-            Ok(status) => status,
-            Err(error) => return todo_failure(error),
-        };
-        let priority = match args.priority.as_deref().map(parse_priority).transpose() {
-            Ok(priority) => priority,
-            Err(error) => return todo_failure(error),
-        };
+        let status = args.status.map(Into::into);
+        let priority = args.priority.map(Into::into);
         let assignee = match args.assignee.as_deref().map(parse_assignee).transpose() {
             Ok(assignee) => assignee,
             Err(error) => return todo_failure(error),
         };
-        let sort = match parse_sort(args.sort.as_deref()) {
-            Ok(sort) => sort,
-            Err(error) => return todo_failure(error),
-        };
+        let sort = args.sort.unwrap_or_default().into();
         let mut registry = self.registry.lock().await;
         let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
@@ -746,42 +784,6 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(
-        description = "Move a todo to another project while preserving comments and completion (cross-project transfer is unavailable to agent identities)"
-    )]
-    async fn todo_transfer(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<TodoTransferArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        if let Err(error) = super::enforce_project_access(&registry, &actor, args.target_project_id)
-        {
-            return failure("project_scope_error", error);
-        }
-        match TodoService::new(registry.store()).transfer(
-            project.id,
-            args.todo_id,
-            args.target_project_id,
-            now_millis(),
-        ) {
-            Ok((todo, _)) if matches!(args.response_mode, Some(ResponseMode::Rich)) => {
-                success(todo)
-            }
-            Ok((_, affected_todo_ids)) => success(json!({
-                "project_id": project.id,
-                "todo_id": args.todo_id,
-                "target_project_id": args.target_project_id,
-                "affected_todo_ids": affected_todo_ids,
-            })),
-            Err(error) => todo_failure(error),
-        }
-    }
-
     async fn todo_tag_change(&self, parts: Parts, args: TodoTagArgs, add: bool) -> CallToolResult {
         let mut registry = self.registry.lock().await;
         let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
@@ -840,20 +842,6 @@ fn todo_response(todo: TodoView, response_mode: Option<ResponseMode>) -> CallToo
     }
 }
 
-fn parse_priority(value: &str) -> Result<TodoPriority, TodoServiceError> {
-    value.parse().map_err(|_| {
-        TodoServiceError::InvalidInput("priority must be one of high, medium, or low".into())
-    })
-}
-
-fn parse_status(value: &str) -> Result<TodoStatus, TodoServiceError> {
-    value.parse().map_err(|_| {
-        TodoServiceError::InvalidInput(
-            "status must be one of open, in_progress, backlog, or completed".into(),
-        )
-    })
-}
-
 fn parse_assignee(value: &str) -> Result<String, TodoServiceError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "user" | "@user" | "me" | "you" => Ok(USER_ASSIGNEE.into()),
@@ -865,21 +853,6 @@ fn parse_assignee(value: &str) -> Result<String, TodoServiceError> {
 
 fn actor_label(store: &Store, actor: &Actor) -> String {
     store.actor_display_label(&actor.id)
-}
-
-fn parse_sort(value: Option<&str>) -> Result<TodoSort, TodoServiceError> {
-    match value.unwrap_or("priority") {
-        "priority" | "priority_desc" => Ok(TodoSort::Priority),
-        "newest" | "created_at_desc" | "updated_at_desc" => Ok(TodoSort::Newest),
-        "oldest" | "created_at_asc" | "updated_at_asc" => Ok(TodoSort::Oldest),
-        "title" | "title_asc" => Ok(TodoSort::TitleAsc),
-        "title_desc" => Ok(TodoSort::TitleDesc),
-        "status" | "status_asc" => Ok(TodoSort::Status),
-        _ => Err(TodoServiceError::InvalidInput(
-            "unsupported todo sort; use priority, newest, oldest, title_asc, title_desc, or status"
-                .into(),
-        )),
-    }
 }
 
 fn todo_failure(error: TodoServiceError) -> CallToolResult {

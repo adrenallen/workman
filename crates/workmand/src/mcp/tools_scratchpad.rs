@@ -292,15 +292,6 @@ struct ScratchpadRevisionArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadTransferArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    target_project_id: ProjectId,
-    expected_revision: i64,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ScratchpadFileArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
@@ -771,28 +762,6 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Clear scratchpad content at an expected revision")]
-    async fn scratchpad_clear(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadRevisionArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).clear(
-            project.id,
-            args.scratchpad_id,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => revision_receipt(&scratchpad),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
     #[tool(description = "Delete a scratchpad at an expected revision")]
     async fn scratchpad_delete(
         &self,
@@ -813,40 +782,6 @@ impl WorkmanMcp {
                 "project_id": project.id,
                 "scratchpad_id": args.scratchpad_id,
                 "deleted": true,
-            })),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(
-        description = "Move a scratchpad to another project at an expected revision (cross-project transfer is unavailable to agent identities)"
-    )]
-    async fn scratchpad_transfer(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadTransferArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        if let Err(error) = super::enforce_project_access(&registry, &actor, args.target_project_id)
-        {
-            return failure("project_scope_error", error);
-        }
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).transfer(
-            project.id,
-            args.scratchpad_id,
-            args.target_project_id,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => success(json!({
-                "project_id": project.id,
-                "target_project_id": scratchpad.project_id,
-                "scratchpad_id": scratchpad.id,
-                "revision": scratchpad.revision,
             })),
             Err(error) => scratchpad_failure(error),
         }

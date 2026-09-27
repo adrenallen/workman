@@ -359,26 +359,6 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Select one process as the project's focused terminal")]
-    async fn select_process(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProcessTargetArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (process, _) = match resolve_process(&mut registry, &parts, target(&args)) {
-            Ok(resolved) => resolved,
-            Err(error) => return target_failure(error),
-        };
-        match registry.select(process.id) {
-            Ok(process) => success(json!({
-                "selected_process_id": process.id,
-                "process": process,
-            })),
-            Err(error) => registry_failure(error),
-        }
-    }
-
     #[tool(description = "Start all command processes in the effective project")]
     async fn start_all_commands(
         &self,
