@@ -23,6 +23,7 @@ use workman_core::{
 use crate::{
     ProcessRegistry, RegistryResult, SharedProcessRegistry,
     completion_ledger::{Completion, CompletionLedger},
+    process_registry::NotificationTimerContext,
     status_invalidation::StatusInvalidationHub,
     timers::now_millis,
 };
@@ -149,8 +150,7 @@ impl SpawnerNotificationService {
                 registry,
                 setting,
                 now_ms,
-                &timer_context.owned_idle_watches,
-                &timer_context.waiting_processes,
+                &timer_context,
                 &mut eligible_children,
                 &mut poll_again,
             ) {
@@ -184,8 +184,7 @@ impl SpawnerNotificationService {
         registry: &mut ProcessRegistry,
         setting: SpawnerIdleNotificationSetting,
         now_ms: i64,
-        owned_idle_watches: &HashSet<(ProcessId, ProcessId)>,
-        waiting_processes: &HashSet<ProcessId>,
+        timer_context: &NotificationTimerContext,
         eligible_children: &mut BTreeMap<ProcessId, BTreeMap<ProcessId, EligibleChild>>,
         poll_again: &mut bool,
     ) -> RegistryResult<()> {
@@ -250,14 +249,16 @@ impl SpawnerNotificationService {
         }
 
         let attention = registry.agent_attention_snapshot(child.id)?;
-        let waiting =
-            attention.state == AttentionState::Idle && waiting_processes.contains(&child.id);
+        let waiting = attention.state == AttentionState::Idle
+            && timer_context.waiting_processes.contains(&child.id);
         let observed_state = if waiting {
             AttentionState::Waiting
         } else {
             attention.state
         };
-        let explicit_idle_timer = owned_idle_watches.contains(&(spawner_id, child.id));
+        let explicit_idle_timer = timer_context
+            .owned_idle_watches
+            .contains(&(spawner_id, child.id));
         let has_pending_prompts = registry.has_pending_prompts(child.id);
         let observation = ObservationKey {
             state: observed_state,
@@ -459,13 +460,13 @@ impl SpawnerNotificationService {
                 {
                     pending.completion = Some(completion);
                 }
-                if attention_state != AttentionState::NeedsInput {
-                    if !matches!(
+                if attention_state != AttentionState::NeedsInput
+                    && !matches!(
                         pending.reason,
                         ChildNotificationReason::Exited | ChildNotificationReason::Crashed
-                    ) {
-                        pending.reason = ChildNotificationReason::Finished;
-                    }
+                    )
+                {
+                    pending.reason = ChildNotificationReason::Finished;
                 }
             })
             .or_insert_with(|| PendingChildNotification {
