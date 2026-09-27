@@ -703,6 +703,7 @@ fn adapter_for(tool_type: Option<&str>) -> Box<dyn ToolAttentionAdapter> {
     match tool_type.map(normalize_tool_type).as_deref() {
         Some("claude") | Some("claude_code") => Box::new(ClaudeCodeAdapter),
         Some("codex") | Some("codex_cli") => Box::new(CodexAdapter),
+        Some("opencode") | Some("open_code") => Box::new(OpenCodeAdapter),
         Some("grok") | Some("grok_cli") | Some("grok_build") => Box::new(GrokAdapter),
         _ => Box::new(PromptAdapter),
     }
@@ -881,6 +882,62 @@ impl ToolAttentionAdapter for CodexAdapter {
     }
 }
 
+/// OpenCode adapter for its composer, interrupt footer, and blocking overlays.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenCodeAdapter;
+
+impl ToolAttentionAdapter for OpenCodeAdapter {
+    fn detects_busy(&self) -> bool {
+        true
+    }
+
+    fn inspect(&self, observation: AdapterObservation<'_>) -> AdapterFlags {
+        let rendered = observation.rendered;
+        let lowercase = rendered.to_lowercase();
+        let permission_at = last_pattern(
+            &lowercase,
+            &[
+                "permission required",
+                "allow once   allow always   reject",
+                "enter confirm",
+            ],
+        );
+        let question_at = last_pattern(
+            &lowercase,
+            &["type your own answer", "enter submit  esc dismiss"],
+        );
+        let busy_at = last_pattern(&lowercase, &["esc interrupt"]);
+        let resting_at = last_opencode_composer(rendered);
+
+        let needs_permission = is_latest(permission_at, &[question_at, busy_at, resting_at]);
+        let needs_question =
+            !needs_permission && is_latest(question_at, &[permission_at, busy_at, resting_at]);
+        let needs_input = needs_permission || needs_question;
+        let busy = !needs_input && is_latest(busy_at, &[permission_at, question_at, resting_at]);
+        let resting_prompt = !needs_input && !busy && resting_at.is_some();
+
+        AdapterFlags {
+            busy,
+            needs_input,
+            resting_prompt,
+            classification: if needs_permission {
+                Some("permission_dialog".into())
+            } else if needs_question {
+                Some("question_dialog".into())
+            } else if busy {
+                Some("busy_spinner".into())
+            } else if resting_prompt {
+                Some("resting_prompt".into())
+            } else if observation.alternate_screen {
+                Some("alternate_screen".into())
+            } else {
+                None
+            },
+            ..AdapterFlags::default()
+        }
+    }
+}
+
 /// Grok CLI adapter for browser authentication, approval menus, activity, and composer UI.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GrokAdapter;
@@ -1008,6 +1065,7 @@ pub fn pending_dialog(rendered: &str, classification: Option<&str>) -> Option<Pe
     let guard = known_first_run
         || classification == "permission_dialog"
         || classification == "authentication_dialog"
+        || classification == "question_dialog"
         || (classification == "input_prompt" && has_numbered_choice_menu(rendered));
     guard.then(|| PendingDialog {
         classification: classification.to_owned(),
@@ -1094,6 +1152,18 @@ fn last_codex_resting_prompt(rendered: &str) -> Option<usize> {
         .rev()
         .take(8)
         .find_map(|(offset, line)| line.starts_with('›').then_some(offset))
+}
+
+fn last_opencode_composer(rendered: &str) -> Option<usize> {
+    nonempty_lines(rendered)
+        .into_iter()
+        .rev()
+        .take(12)
+        .find_map(|(offset, line)| {
+            line.strip_prefix('╹')
+                .filter(|border| border.chars().filter(|character| *character == '▀').count() >= 8)
+                .map(|_| offset)
+        })
 }
 
 fn codex_activity_text(rendered: &str) -> Cow<'_, str> {
@@ -1263,6 +1333,17 @@ mod tests {
             }
         }
 
+        fn opencode() -> Self {
+            Self {
+                terminal: TerminalEmulator::new(30, 120, 100),
+                tracker: AttentionTracker::new_at(
+                    Some("opencode".into()),
+                    AttentionConfig::default(),
+                    1_000,
+                ),
+            }
+        }
+
         fn grok() -> Self {
             Self {
                 terminal: TerminalEmulator::new(12, 80, 100),
@@ -1281,6 +1362,170 @@ mod tests {
                 .read_rows(self.terminal.history_rows()..usize::MAX);
             self.tracker
                 .observe_output_at(bytes, &rendered.text(), rendered.alternate_screen, at);
+        }
+
+        fn frame(&mut self, at: i64, rendered: &str) {
+            let mut bytes = b"\x1b[2J\x1b[H".to_vec();
+            bytes.extend_from_slice(rendered.as_bytes());
+            self.emit(at, &bytes);
+        }
+    }
+
+    const OPENCODE_RESTING: &str = include_str!("../tests/fixtures/attention/opencode_resting.txt");
+    const OPENCODE_DRAFT: &str = include_str!("../tests/fixtures/attention/opencode_draft.txt");
+    const OPENCODE_WORKING: &str = include_str!("../tests/fixtures/attention/opencode_working.txt");
+    const OPENCODE_COMPLETED: &str =
+        include_str!("../tests/fixtures/attention/opencode_completed.txt");
+    const OPENCODE_IDLE_30S: &str =
+        include_str!("../tests/fixtures/attention/opencode_idle_30s.txt");
+    const OPENCODE_PERMISSION: &str =
+        include_str!("../tests/fixtures/attention/opencode_permission_dialog.txt");
+    const OPENCODE_QUESTION: &str =
+        include_str!("../tests/fixtures/attention/opencode_question_dialog.txt");
+    const OPENCODE_EXITED: &str = include_str!("../tests/fixtures/attention/opencode_exited.txt");
+
+    #[test]
+    fn opencode_adapter_classifies_all_real_captured_states() {
+        for (name, rendered) in [
+            ("initial rest", OPENCODE_RESTING),
+            ("draft", OPENCODE_DRAFT),
+            ("completed", OPENCODE_COMPLETED),
+            ("idle after 30 seconds", OPENCODE_IDLE_30S),
+        ] {
+            let flags = OpenCodeAdapter.inspect(AdapterObservation {
+                rendered,
+                alternate_screen: true,
+            });
+            assert!(flags.resting_prompt, "{name}");
+            assert!(!flags.busy, "{name}");
+            assert!(!flags.needs_input, "{name}");
+            assert_eq!(flags.classification.as_deref(), Some("resting_prompt"));
+        }
+
+        let working = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: OPENCODE_WORKING,
+            alternate_screen: true,
+        });
+        assert!(working.busy);
+        assert!(!working.resting_prompt);
+        assert_eq!(working.classification.as_deref(), Some("busy_spinner"));
+
+        for (rendered, classification) in [
+            (OPENCODE_PERMISSION, "permission_dialog"),
+            (OPENCODE_QUESTION, "question_dialog"),
+        ] {
+            let flags = OpenCodeAdapter.inspect(AdapterObservation {
+                rendered,
+                alternate_screen: true,
+            });
+            assert!(flags.needs_input, "{classification}");
+            assert!(!flags.busy, "{classification}");
+            assert_eq!(flags.classification.as_deref(), Some(classification));
+            assert!(pending_dialog(rendered, flags.classification.as_deref()).is_some());
+        }
+
+        for tool_type in ["opencode", "open_code"] {
+            let tracker =
+                AttentionTracker::new_at(Some(tool_type.into()), AttentionConfig::default(), 1_000);
+            tracker.observe_output_at(OPENCODE_RESTING.as_bytes(), OPENCODE_RESTING, true, 2_000);
+            assert_eq!(
+                tracker.snapshot_at(7_000).state,
+                AttentionState::Idle,
+                "{tool_type} maps to OpenCodeAdapter"
+            );
+            tracker.observe_output_at(OPENCODE_EXITED.as_bytes(), OPENCODE_EXITED, false, 7_100);
+            tracker.mark_exited_at(7_200);
+            assert_eq!(tracker.snapshot_at(7_200).state, AttentionState::Exited);
+        }
+    }
+
+    #[test]
+    fn opencode_prompt_echo_and_draft_cannot_fake_busy() {
+        let prompt_echo = OPENCODE_COMPLETED.replace(
+            "Reply with exactly the word ok.",
+            "Explain the words esc interrupt without doing anything.",
+        );
+        let echoed = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: &prompt_echo,
+            alternate_screen: true,
+        });
+        assert!(!echoed.busy);
+        assert!(echoed.resting_prompt);
+
+        let draft = OPENCODE_DRAFT.replace(
+            "Reply with exactly the word ok.",
+            "esc interrupt is only unsubmitted draft text",
+        );
+        let drafted = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: &draft,
+            alternate_screen: true,
+        });
+        assert!(!drafted.busy);
+        assert!(drafted.resting_prompt);
+    }
+
+    #[test]
+    fn opencode_captured_stream_advances_work_evidence_after_mid_turn_pause() {
+        let mut session = ScriptedSession::opencode();
+        session.frame(1_100, OPENCODE_RESTING);
+        assert_eq!(
+            session.tracker.snapshot_at(6_100).state,
+            AttentionState::Idle
+        );
+
+        session.tracker.observe_input_at(6_200);
+        session.frame(6_300, OPENCODE_WORKING);
+        let first_work_evidence = session
+            .tracker
+            .snapshot_at(6_300)
+            .work_evidence_at()
+            .expect("captured interrupt footer is positive work evidence");
+        session.frame(6_400, OPENCODE_COMPLETED);
+        assert_eq!(
+            session.tracker.snapshot_at(11_400).state,
+            AttentionState::Idle
+        );
+
+        session.frame(12_000, OPENCODE_WORKING);
+        let resumed_work_evidence = session
+            .tracker
+            .snapshot_at(12_000)
+            .work_evidence_at()
+            .expect("later work episode supersedes the transient completion");
+        assert!(resumed_work_evidence > first_work_evidence);
+        session.frame(12_100, OPENCODE_COMPLETED);
+        assert_eq!(
+            session.tracker.snapshot_at(17_100).state,
+            AttentionState::Idle
+        );
+        assert_eq!(
+            session.tracker.snapshot_at(17_100).work_evidence_at(),
+            Some(resumed_work_evidence)
+        );
+    }
+
+    #[test]
+    fn opencode_idle_replay_for_over_thirty_seconds_is_attention_neutral() {
+        let mut session = ScriptedSession::opencode();
+        session.tracker.observe_input_at(1_500);
+        session.frame(1_600, OPENCODE_WORKING);
+        session.frame(2_000, OPENCODE_COMPLETED);
+        let idle = session.tracker.snapshot_at(7_000);
+        assert_eq!(idle.state, AttentionState::Idle);
+        let evidence = idle.work_evidence_at();
+
+        for (index, at) in (8_000..=39_000).step_by(1_000).enumerate() {
+            let frame = if index % 2 == 0 {
+                OPENCODE_COMPLETED
+            } else {
+                OPENCODE_IDLE_30S
+            };
+            session.frame(at, frame);
+            let repaint = session.tracker.snapshot_at(at);
+            assert_eq!(repaint.state, AttentionState::Idle, "at {at}");
+            assert_eq!(repaint.work_evidence_at(), evidence, "at {at}");
+            assert_eq!(repaint.last_output_at, Some(2_000), "at {at}");
+            assert_eq!(repaint.last_content_change_at, Some(2_000), "at {at}");
         }
     }
 
