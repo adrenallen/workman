@@ -565,6 +565,7 @@ impl WorkmanMcp {
             Ok(input) => input,
             Err(error) => return failure("invalid_input", error),
         };
+        let submits_prompt = input.submits_prompt();
         let bytes_sent = input.data.len() + usize::from(input.submit);
         let (process_id, process_name, cursor, owner_process_id) = {
             let mut registry = self.registry.lock().await;
@@ -611,14 +612,18 @@ impl WorkmanMcp {
         if let Err(error) = sent {
             return registry_failure(error);
         }
-        if let Some(owner_process_id) = owner_process_id {
+        if submits_prompt && let Some(owner_process_id) = owner_process_id {
             let registry = self.registry.lock().await;
             if let Err(error) = CompletionLedger::new(registry.store()).record_input(
                 owner_process_id,
                 process_id,
                 now_millis(),
             ) {
-                return failure("completion_ledger_error", error.to_string());
+                // The PTY side effect already succeeded. A ledger failure must not make a
+                // retrying MCP client send the same input twice.
+                eprintln!(
+                    "send_input ledger attribution failed for owner {owner_process_id}, process {process_id}: {error}"
+                );
             }
         }
 
@@ -899,6 +904,12 @@ struct PreparedInput {
     submit: bool,
 }
 
+impl PreparedInput {
+    fn submits_prompt(&self) -> bool {
+        self.submit || self.data.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+    }
+}
+
 fn prepared_input(args: &SendInputArgs) -> Result<PreparedInput, String> {
     if let Some(bytes) = &args.bytes {
         return Ok(PreparedInput {
@@ -943,7 +954,7 @@ fn tail_lines(text: &str, lines: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendInputArgs, prepared_input};
+    use super::{PreparedInput, SendInputArgs, prepared_input};
 
     #[test]
     fn submitted_text_preserves_multiline_content_and_ends_with_carriage_return() {
@@ -977,5 +988,37 @@ mod tests {
         let text = prepared_input(&text).unwrap();
         assert_eq!(text.data, b"partial\ntext");
         assert!(!text.submit);
+    }
+
+    #[test]
+    fn only_real_line_submissions_advance_the_completion_baseline() {
+        assert!(
+            PreparedInput {
+                data: b"prompt".to_vec(),
+                submit: true,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            PreparedInput {
+                data: b"raw prompt\r".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            !PreparedInput {
+                data: b"partial draft".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            !PreparedInput {
+                data: b"\x1b[A".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
     }
 }

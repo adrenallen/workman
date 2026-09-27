@@ -75,7 +75,7 @@ struct PendingChildNotification {
 struct ObservationKey {
     state: AttentionState,
     last_input_at: Option<i64>,
-    last_output_at: Option<i64>,
+    work_evidence_at: Option<i64>,
     pending_prompt: bool,
 }
 
@@ -232,18 +232,20 @@ impl SpawnerNotificationService {
         }
 
         let attention = registry.agent_attention_snapshot(child.id)?;
+        let has_pending_prompts = registry.has_pending_prompts(child.id);
         let observation = ObservationKey {
             state: attention.state,
             last_input_at: attention.last_input_at,
-            last_output_at: attention.last_output_at,
-            pending_prompt: registry.has_pending_prompts(child.id),
+            work_evidence_at: attention.work_evidence_at(),
+            pending_prompt: has_pending_prompts,
         };
         if self.observations.get(&child.id) != Some(&observation) {
             CompletionLedger::new(registry.store()).observe_process(
                 child.id,
                 attention.state,
                 attention.last_input_at,
-                attention.last_output_at,
+                attention.work_evidence_at(),
+                has_pending_prompts,
                 now_ms,
             )?;
             self.observations.insert(child.id, observation);

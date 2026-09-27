@@ -381,14 +381,27 @@ impl<'a> TimerService<'a> {
                 .submit_input(delivery_process_id, body.as_bytes())?;
             if let Some(owner_process_id) = owner_process_id {
                 let ledger = CompletionLedger::new(self.registry.store());
-                ledger.record_input(owner_process_id, delivery_process_id, now_ms)?;
-                ledger.mark_completions_reported(
+                if owner_process_id != delivery_process_id
+                    && let Err(error) =
+                        ledger.record_input(owner_process_id, delivery_process_id, now_ms)
+                {
+                    eprintln!(
+                        "idle timer immediate delivery ledger input failed for process {delivery_process_id}: {error}"
+                    );
+                }
+                // submit_input only guarantees that delivery is queued. There is no cheap
+                // callback from the PTY worker's eventual write, so report bookkeeping is
+                // intentionally enqueue-time and best-effort. A daemon crash in between can
+                // lose both this wake and its re-arm safety net.
+                if let Err(error) = ledger.mark_completions_reported(
                     owner_process_id,
                     unseen_by_process
                         .values()
                         .filter(|completion| idle_by_process[&completion.process_id])
                         .copied(),
-                )?;
+                ) {
+                    eprintln!("idle timer immediate delivery ledger report failed: {error}");
+                }
             }
             return Ok(IdleTimerOutcome::AlreadySatisfied {
                 watch_process_ids,
@@ -701,141 +714,179 @@ impl<'a> TimerService<'a> {
         let timer_ids = self.pending_timer_ids()?;
         let mut fired = Vec::new();
         for timer_id in timer_ids {
-            let Some(mut timer) = self.registry.store().get_timer(timer_id)? else {
-                continue;
-            };
-            if timer.paused || timer.fired {
-                continue;
-            }
-            match self.validate_agent_targets(
-                &timer.owner_actor,
-                timer.owner_process_id,
-                timer.delivery_process_id,
-                &timer.watch_process_ids,
-            ) {
-                Ok(()) => {}
-                Err(error @ TimerError::CrossProjectTarget { .. }) => {
-                    timer.fired = true;
-                    timer.fired_at = Some(now_ms);
-                    self.registry.store().put_timer(&timer)?;
-                    eprintln!("quarantined invalid timer {}: {error}", timer.id);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            let mut runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
-            let mut reason = None;
-            let mut transitioned_process_ids = Vec::new();
-
-            match timer.kind {
-                TimerKind::Delay => {
-                    if now_ms >= runtime.due_at {
-                        reason = Some(TimerFireReason::Delay);
-                    }
-                }
-                TimerKind::IdleAny | TimerKind::IdleAll => {
-                    let advanced = self.advance_idle_state(&timer, &mut runtime, now_ms)?;
-                    transitioned_process_ids = advanced.transitioned_process_ids;
-                    if idle_condition_satisfied(&timer, &runtime) {
-                        reason = Some(TimerFireReason::IdleTransition);
-                        runtime.diagnostics.fire_reason = Some(
-                            runtime
-                                .diagnostics
-                                .satisfied_by
-                                .iter()
-                                .rev()
-                                .find_map(|satisfaction| match satisfaction.reason {
-                                    TimerSatisfactionReason::UnseenCompletion
-                                    | TimerSatisfactionReason::FreshTransition => {
-                                        Some(satisfaction.reason)
-                                    }
-                                    TimerSatisfactionReason::Deadline => None,
-                                })
-                                .unwrap_or(TimerSatisfactionReason::FreshTransition),
-                        );
-                    } else if now_ms >= runtime.due_at {
-                        reason = Some(TimerFireReason::MaxWait);
-                        runtime.diagnostics.record_deadline();
-                    }
-                    if advanced.changed && reason.is_none() {
-                        self.put_runtime(timer.id, &runtime)?;
-                    }
+            match self.tick_one(timer_id, now_ms) {
+                Ok(Some(fire)) => fired.push(fire),
+                Ok(None) => {}
+                Err(error) => {
+                    // A corrupt/deleted target or one timer's persistence failure must not
+                    // prevent unrelated timers later in the due-order from being evaluated.
+                    eprintln!("timer {timer_id} tick failed: {error}");
                 }
             }
-
-            let Some(reason) = reason else { continue };
-            if self
-                .registry
-                .submit_input(timer.delivery_process_id, timer.body.as_bytes())
-                .is_err()
-            {
-                // Delivery is at-least-once. Keep the timer pending and retry after
-                // the target process is started again.
-                continue;
-            }
-
-            if let Some(owner_process_id) = timer.owner_process_id {
-                let ledger = CompletionLedger::new(self.registry.store());
-                ledger.record_input(owner_process_id, timer.delivery_process_id, now_ms)?;
-                if reason == TimerFireReason::IdleTransition {
-                    let completions =
-                        runtime
-                            .watch_state
-                            .iter()
-                            .filter_map(|(process_id, progress)| {
-                                progress.completion_id.map(|id| Completion {
-                                    id,
-                                    process_id: *process_id,
-                                    completed_at_ms: runtime
-                                        .diagnostics
-                                        .satisfied_by
-                                        .iter()
-                                        .rev()
-                                        .find(|satisfaction| {
-                                            satisfaction.process_id == Some(*process_id)
-                                        })
-                                        .and_then(|satisfaction| satisfaction.completed_at_ms)
-                                        .unwrap_or(now_ms),
-                                })
-                            });
-                    ledger.mark_completions_reported(owner_process_id, completions)?;
-                }
-            }
-
-            // Pending timers suppress directly. Once an idle-transition timer
-            // is consumed, preserve that transition's watch state across the
-            // debounced done-check. Max-wait expiry is only a wake about a
-            // still-busy process and deliberately records no marker.
-            if reason == TimerFireReason::IdleTransition {
-                for process_id in transitioned_process_ids {
-                    self.registry
-                        .store()
-                        .record_consumed_idle_watch(process_id, timer.id, now_ms)?;
-                }
-            }
-
-            timer.fired_at = Some(now_ms);
-            if timer.kind == TimerKind::Delay && timer.repeating {
-                let repeat_every_ms = timer.interval_ms.unwrap_or(1).max(1);
-                runtime.due_at = now_ms.saturating_add(repeat_every_ms);
-                runtime.paused_at = None;
-                timer.max_wait_deadline = Some(runtime.due_at);
-                timer.fired = false;
-            } else {
-                timer.fired = true;
-            }
-            self.update(&timer, &runtime)?;
-            let project_id = self.registry.get(timer.delivery_process_id)?.project_id;
-            fired.push(TimerFire {
-                timer_id: timer.id,
-                project_id,
-                delivery_process_id: timer.delivery_process_id,
-                reason,
-                fired_at: now_ms,
-                timer: self.view(timer, runtime)?,
-            });
         }
         Ok(fired)
+    }
+
+    fn tick_one(&mut self, timer_id: TimerId, now_ms: i64) -> TimerResult<Option<TimerFire>> {
+        let Some(mut timer) = self.registry.store().get_timer(timer_id)? else {
+            return Ok(None);
+        };
+        if timer.paused || timer.fired {
+            return Ok(None);
+        }
+        match self.validate_agent_targets(
+            &timer.owner_actor,
+            timer.owner_process_id,
+            timer.delivery_process_id,
+            &timer.watch_process_ids,
+        ) {
+            Ok(()) => {}
+            Err(error @ TimerError::CrossProjectTarget { .. }) => {
+                timer.fired = true;
+                timer.fired_at = Some(now_ms);
+                self.registry.store().put_timer(&timer)?;
+                eprintln!("quarantined invalid timer {}: {error}", timer.id);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+        let mut runtime = self.runtime_or_reconstruct(&timer, now_ms)?;
+        let mut reason = None;
+        let mut transitioned_process_ids = Vec::new();
+
+        match timer.kind {
+            TimerKind::Delay => {
+                if now_ms >= runtime.due_at {
+                    reason = Some(TimerFireReason::Delay);
+                }
+            }
+            TimerKind::IdleAny | TimerKind::IdleAll => {
+                let advanced = self.advance_idle_state(&timer, &mut runtime, now_ms)?;
+                transitioned_process_ids = advanced.transitioned_process_ids;
+                if idle_condition_satisfied(&timer, &runtime) {
+                    reason = Some(TimerFireReason::IdleTransition);
+                    runtime.diagnostics.fire_reason = Some(
+                        runtime
+                            .diagnostics
+                            .satisfied_by
+                            .iter()
+                            .rev()
+                            .find_map(|satisfaction| match satisfaction.reason {
+                                TimerSatisfactionReason::UnseenCompletion
+                                | TimerSatisfactionReason::FreshTransition => {
+                                    Some(satisfaction.reason)
+                                }
+                                TimerSatisfactionReason::Deadline => None,
+                            })
+                            .unwrap_or(TimerSatisfactionReason::FreshTransition),
+                    );
+                } else if now_ms >= runtime.due_at {
+                    reason = Some(TimerFireReason::MaxWait);
+                    runtime.diagnostics.record_deadline();
+                }
+                if advanced.changed && reason.is_none() {
+                    self.put_runtime(timer.id, &runtime)?;
+                }
+            }
+        }
+
+        let Some(reason) = reason else {
+            return Ok(None);
+        };
+        let project_id = self.registry.get(timer.delivery_process_id)?.project_id;
+        if self
+            .registry
+            .submit_input(timer.delivery_process_id, timer.body.as_bytes())
+            .is_err()
+        {
+            // Delivery is at-least-once. Keep the timer pending and retry after
+            // the target process is started again.
+            return Ok(None);
+        }
+
+        // Persist the consumed/rescheduled timer immediately after the externally visible
+        // submit_input side effect. No fallible ledger operation may leave it pending and
+        // cause the body to be queued again on the next scheduler tick.
+        timer.fired_at = Some(now_ms);
+        if timer.kind == TimerKind::Delay && timer.repeating {
+            let repeat_every_ms = timer.interval_ms.unwrap_or(1).max(1);
+            runtime.due_at = now_ms.saturating_add(repeat_every_ms);
+            runtime.paused_at = None;
+            timer.max_wait_deadline = Some(runtime.due_at);
+            timer.fired = false;
+        } else {
+            timer.fired = true;
+        }
+        self.update(&timer, &runtime)?;
+
+        if let Some(owner_process_id) = timer.owner_process_id {
+            let ledger = CompletionLedger::new(self.registry.store());
+            if owner_process_id != timer.delivery_process_id
+                && let Err(error) =
+                    ledger.record_input(owner_process_id, timer.delivery_process_id, now_ms)
+            {
+                eprintln!(
+                    "timer {} delivery ledger input failed for process {}: {error}",
+                    timer.id, timer.delivery_process_id
+                );
+            }
+            if reason == TimerFireReason::IdleTransition {
+                let completions =
+                    runtime
+                        .watch_state
+                        .iter()
+                        .filter_map(|(process_id, progress)| {
+                            progress.completion_id.map(|id| Completion {
+                                id,
+                                process_id: *process_id,
+                                completed_at_ms: runtime
+                                    .diagnostics
+                                    .satisfied_by
+                                    .iter()
+                                    .rev()
+                                    .find(|satisfaction| {
+                                        satisfaction.process_id == Some(*process_id)
+                                    })
+                                    .and_then(|satisfaction| satisfaction.completed_at_ms)
+                                    .unwrap_or(now_ms),
+                            })
+                        });
+                // See set_idle's immediate path: queue acceptance is the best delivery hook
+                // available today, so reporting is enqueue-time and deliberately best-effort.
+                if let Err(error) = ledger.mark_completions_reported(owner_process_id, completions)
+                {
+                    eprintln!("timer {} ledger report failed: {error}", timer.id);
+                }
+            }
+        }
+
+        // Pending timers suppress directly. Once an idle-transition timer
+        // is consumed, preserve that transition's watch state across the
+        // debounced done-check. Max-wait expiry is only a wake about a
+        // still-busy process and deliberately records no marker.
+        if reason == TimerFireReason::IdleTransition {
+            for process_id in transitioned_process_ids {
+                if let Err(error) = self
+                    .registry
+                    .store()
+                    .record_consumed_idle_watch(process_id, timer.id, now_ms)
+                {
+                    eprintln!(
+                        "timer {} consumed-idle marker failed for process {process_id}: {error}",
+                        timer.id
+                    );
+                }
+            }
+        }
+
+        Ok(Some(TimerFire {
+            timer_id: timer.id,
+            project_id,
+            delivery_process_id: timer.delivery_process_id,
+            reason,
+            fired_at: now_ms,
+            timer: self.view(timer, runtime)?,
+        }))
     }
 
     fn owned_timer(
@@ -1161,8 +1212,9 @@ impl<'a> TimerService<'a> {
             advance_watch_progress(progress, idle);
             changed |= *progress != before;
             if !before.satisfied && progress.satisfied {
-                let completion =
-                    CompletionLedger::new(self.registry.store()).latest_completion(*process_id)?;
+                let completion = CompletionLedger::new(self.registry.store())
+                    .latest_completion(*process_id)?
+                    .filter(|completion| completion.completed_at_ms >= timer.created_at);
                 progress.completion_id = completion.map(|completion| completion.id);
                 runtime.diagnostics.record_satisfaction(TimerSatisfaction {
                     process_id: Some(*process_id),
@@ -1404,6 +1456,18 @@ mod tests {
                 continue_args: None,
             })
             .unwrap();
+        store
+            .put_agent_tool(&AgentTool {
+                id: 91,
+                name: "Scripted Timer Kimi".into(),
+                command: "scripted-timer-kimi".into(),
+                tool_type: "kimi".into(),
+                enabled: true,
+                source: workman_core::AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
         let mut registry =
             ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100)).unwrap();
         registry
@@ -1453,12 +1517,26 @@ mod tests {
         }
     }
 
+    fn put_actor(registry: &ProcessRegistry, actor_id: &str, process_id: ProcessId) {
+        registry
+            .store()
+            .put_actor(&Actor {
+                id: actor_id.into(),
+                session_id: format!("{actor_id}-session"),
+                process_id: Some(process_id),
+                selected_project_id: Some(PROJECT_ID),
+                created_at: 1_000,
+                last_seen_at: 1_000,
+            })
+            .unwrap();
+    }
+
     fn wait_for_state(
         registry: &mut ProcessRegistry,
         process_id: ProcessId,
         expected: AttentionState,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(7);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let state = registry.get_status(process_id).unwrap().agent_state.state;
             if state == expected {
@@ -1474,7 +1552,7 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_output(registry: &mut ProcessRegistry, process_id: ProcessId, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let output = registry.rendered_output(process_id).unwrap().text;
             if output.contains(needle) {
@@ -2281,8 +2359,9 @@ mod tests {
         CompletionLedger::new(registry.store())
             .record_input(DELIVERY_ID, WORKER_ID, now_millis())
             .unwrap();
-        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
-        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        // Do not inspect status while the turn runs. Work evidence must be captured
+        // eagerly from PTY output so the send -> work -> idle -> arm race is durable.
+        thread::sleep(Duration::from_millis(6_500));
 
         let outcome = TimerService::new(&mut registry)
             .set_idle(
@@ -2379,6 +2458,364 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn echo_only_prompt_never_creates_a_durable_completion() {
+        const ECHO_ID: ProcessId = 15;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                ECHO_ID,
+                "echo-only",
+                r#"printf '❯\n'; while IFS= read -r line; do printf '> %s\n❯\n' "$line"; done"#,
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(ECHO_ID).unwrap();
+        put_actor(&registry, "echo-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, ECHO_ID, AttentionState::Idle);
+
+        registry.submit_input(ECHO_ID, b"noop").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, ECHO_ID, now_millis())
+            .unwrap();
+        wait_for_output(&mut registry, ECHO_ID, "> noop");
+        wait_for_state(&mut registry, ECHO_ID, AttentionState::Idle);
+
+        assert!(
+            CompletionLedger::new(registry.store())
+                .latest_completion(ECHO_ID)
+                .unwrap()
+                .is_none(),
+            "prompt echo and composer redraw are not work evidence"
+        );
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "echo-owner".into(),
+                    DELIVERY_ID,
+                    "must wait".into(),
+                    TimerKind::IdleAny,
+                    vec![ECHO_ID],
+                    10_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::Created(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_adapter_uses_output_after_recent_input_grace_as_work_evidence() {
+        const KIMI_ID: ProcessId = 16;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                KIMI_ID,
+                "kimi-style",
+                r#"printf '❯\n'; while IFS= read -r line; do sleep 2.2; printf 'answer:%s\n❯\n' "$line"; done"#,
+                Some(91),
+            ))
+            .unwrap();
+        registry.start(KIMI_ID).unwrap();
+        put_actor(&registry, "kimi-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, KIMI_ID, AttentionState::Idle);
+
+        registry.submit_input(KIMI_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, KIMI_ID, now_millis())
+            .unwrap();
+        wait_for_output(&mut registry, KIMI_ID, "answer:go");
+        wait_for_state(&mut registry, KIMI_ID, AttentionState::Idle);
+
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "kimi-owner".into(),
+                DELIVERY_ID,
+                "kimi finished".into(),
+                TimerKind::IdleAny,
+                vec![KIMI_ID],
+                10_000,
+                now_millis(),
+            )
+            .unwrap();
+        assert!(matches!(outcome, IdleTimerOutcome::AlreadySatisfied { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn later_work_supersedes_a_mid_turn_idle_completion() {
+        const BURSTY_ID: ProcessId = 17;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                BURSTY_ID,
+                "mid-turn-composer",
+                r#"printf '❯\n'; while IFS= read -r line; do printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'partial\n❯\n'; sleep 7; printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'final\n❯\n'; done"#,
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(BURSTY_ID).unwrap();
+        put_actor(&registry, "bursty-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+
+        registry.submit_input(BURSTY_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, BURSTY_ID, now_millis())
+            .unwrap();
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Working);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+        let early = CompletionLedger::new(registry.store())
+            .latest_completion(BURSTY_ID)
+            .unwrap()
+            .expect("first work episode records the transient idle");
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "bursty-owner".into(),
+                    DELIVERY_ID,
+                    "early wake".into(),
+                    TimerKind::IdleAny,
+                    vec![BURSTY_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Working);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+        let final_completion = CompletionLedger::new(registry.store())
+            .latest_completion(BURSTY_ID)
+            .unwrap()
+            .expect("the resumed work episode records the real turn end");
+        assert!(final_completion.id > early.id);
+        let final_wake = TimerService::new(&mut registry)
+            .set_idle(
+                "bursty-owner".into(),
+                DELIVERY_ID,
+                "final wake".into(),
+                TimerKind::IdleAny,
+                vec![BURSTY_ID],
+                20_000,
+                now_millis(),
+            )
+            .unwrap();
+        assert!(matches!(
+            final_wake,
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+        let self_delivery_inputs: i64 = registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM process_completion_inputs
+                 WHERE owner_process_id = ?1 AND process_id = ?1",
+                [DELIVERY_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(self_delivery_inputs, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_all_fires_once_when_a_satisfied_process_is_closed() {
+        const SLOW_ID: ProcessId = 18;
+
+        let mut registry = test_registry(true);
+        registry
+            .create(process(
+                SLOW_ID,
+                "slow-worker",
+                "printf '❯\\n'; while IFS= read -r line; do printf 'thinking...\\nesc to interrupt\\n'; sleep 1.5; printf '❯\\n'; done",
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(SLOW_ID).unwrap();
+        put_actor(&registry, "storm-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        wait_for_state(&mut registry, SLOW_ID, AttentionState::Idle);
+
+        registry.submit_input(WORKER_ID, b"go").unwrap();
+        registry.submit_input(SLOW_ID, b"go").unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        wait_for_state(&mut registry, SLOW_ID, AttentionState::Working);
+        let timer_id = match TimerService::new(&mut registry)
+            .set_idle(
+                "storm-owner".into(),
+                DELIVERY_ID,
+                "all done".into(),
+                TimerKind::IdleAll,
+                vec![WORKER_ID, SLOW_ID],
+                30_000,
+                now_millis(),
+            )
+            .unwrap()
+        {
+            IdleTimerOutcome::Created(timer) => timer.timer.id,
+            IdleTimerOutcome::AlreadySatisfied { .. } => panic!("workers were still active"),
+        };
+
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(now_millis())
+                .unwrap()
+                .is_empty()
+        );
+        registry.close(WORKER_ID).unwrap();
+        wait_for_state(&mut registry, SLOW_ID, AttentionState::Idle);
+        let fires = TimerService::new(&mut registry).tick(now_millis()).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].timer_id, timer_id);
+        wait_for_output(&mut registry, DELIVERY_ID, "received:[all done]");
+
+        for _ in 0..8 {
+            assert!(
+                TimerService::new(&mut registry)
+                    .tick(now_millis())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+        let output = registry.rendered_output(DELIVERY_ID).unwrap().text;
+        assert_eq!(output.matches("received:[all done]").count(), 1);
+        assert!(registry.store().get_timer(timer_id).unwrap().unwrap().fired);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_bad_timer_does_not_block_later_due_timers() {
+        let mut registry = test_registry(false);
+        let bad_id = TimerService::new(&mut registry)
+            .set_delay(
+                "bad-timer".into(),
+                DELIVERY_ID,
+                "must not deliver".into(),
+                0,
+                false,
+                None,
+                1_000,
+            )
+            .unwrap()
+            .timer
+            .id;
+        let good_id = TimerService::new(&mut registry)
+            .set_delay(
+                "good-timer".into(),
+                DELIVERY_ID,
+                "later timer delivered".into(),
+                0,
+                false,
+                None,
+                1_000,
+            )
+            .unwrap()
+            .timer
+            .id;
+        registry
+            .store()
+            .connection()
+            .execute(
+                "UPDATE timer_runtime
+                 SET diagnostics = '{\"already_idle\":\"not-an-array\"}'
+                 WHERE timer_id = ?1",
+                [bad_id],
+            )
+            .unwrap();
+
+        let fires = TimerService::new(&mut registry).tick(1_000).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].timer_id, good_id);
+        wait_for_output(
+            &mut registry,
+            DELIVERY_ID,
+            "received:[later timer delivered]",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_transition_does_not_attach_or_report_an_old_completion() {
+        let mut registry = test_registry(true);
+        put_actor(&registry, "fresh-diagnostics-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let old_completion = CompletionLedger::new(registry.store())
+            .observe_process(
+                WORKER_ID,
+                AttentionState::Idle,
+                Some(50),
+                Some(60),
+                false,
+                100,
+            )
+            .unwrap()
+            .unwrap();
+        let created_at = now_millis();
+        let timer_id = match TimerService::new(&mut registry)
+            .set_idle(
+                "fresh-diagnostics-owner".into(),
+                DELIVERY_ID,
+                "fresh only".into(),
+                TimerKind::IdleAny,
+                vec![WORKER_ID],
+                20_000,
+                created_at,
+            )
+            .unwrap()
+        {
+            IdleTimerOutcome::Created(timer) => timer.timer.id,
+            IdleTimerOutcome::AlreadySatisfied { .. } => {
+                panic!("an owner with no recorded input keeps transition-only behavior")
+            }
+        };
+
+        registry.send_input(WORKER_ID, b"noop\r").unwrap();
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Working);
+        assert!(
+            TimerService::new(&mut registry)
+                .tick(now_millis())
+                .unwrap()
+                .is_empty()
+        );
+        wait_for_state(&mut registry, WORKER_ID, AttentionState::Idle);
+        let fire = TimerService::new(&mut registry)
+            .tick(now_millis())
+            .unwrap()
+            .into_iter()
+            .find(|fire| fire.timer_id == timer_id)
+            .expect("fresh transition fires");
+        let satisfaction = fire
+            .timer
+            .satisfied_by
+            .iter()
+            .find(|satisfaction| satisfaction.process_id == Some(WORKER_ID))
+            .unwrap();
+        assert_eq!(
+            satisfaction.reason,
+            TimerSatisfactionReason::FreshTransition
+        );
+        assert!(satisfaction.completed_at_ms.unwrap() >= created_at);
+        let reports: i64 = registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM process_completion_reports
+                 WHERE owner_process_id = ?1 AND completion_id = ?2",
+                (DELIVERY_ID, old_completion.id),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reports, 0);
+    }
+
     #[test]
     fn prompted_but_not_started_and_deadline_do_not_consume_completions() {
         const STALLED_ID: ProcessId = 12;
@@ -2420,7 +2857,14 @@ mod tests {
         let ledger = CompletionLedger::new(registry.store());
         ledger.record_input(DELIVERY_ID, STALLED_ID, 300).unwrap();
         let completion = ledger
-            .observe_process(STALLED_ID, AttentionState::Idle, Some(301), Some(302), 400)
+            .observe_process(
+                STALLED_ID,
+                AttentionState::Idle,
+                Some(301),
+                Some(302),
+                false,
+                400,
+            )
             .unwrap()
             .unwrap();
         let timer_id = match TimerService::new(&mut registry)

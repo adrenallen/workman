@@ -1553,14 +1553,18 @@ fn schedule_initial_prompt(
                             registry.submit_input(process_id, prompt.as_bytes())
                         }
                         .map_err(|error| error.to_string());
-                        let result = result.and_then(|process| {
-                            if let Some(owner_process_id) = owner_process_id {
-                                CompletionLedger::new(registry.store())
-                                    .record_input(owner_process_id, process_id, now_millis())
-                                    .map_err(|error| error.to_string())?;
-                            }
-                            Ok(process)
-                        });
+                        if result.is_ok()
+                            && let Some(owner_process_id) = owner_process_id
+                            && let Err(error) = CompletionLedger::new(registry.store())
+                                .record_input(owner_process_id, process_id, now_millis())
+                        {
+                            // The initial prompt is already queued. Keep the successful
+                            // delivery result (and Kimi confirmation path) even if durable
+                            // owner attribution is temporarily unavailable.
+                            eprintln!(
+                                "process {process_id}: initial prompt ledger attribution failed: {error}"
+                            );
+                        }
                         match &result {
                             Ok(_) if verify_kimi_submission => {
                                 let _ = registry.record_process_event(

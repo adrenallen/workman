@@ -954,11 +954,13 @@ impl ProcessRegistry {
                 now_millis(),
             )?;
         if process.kind == ProcessKind::Agent {
+            let has_pending_prompts = self.has_pending_prompts(process.id);
             CompletionLedger::new(&self.store).observe_process(
                 process.id,
                 agent_state.state,
                 agent_state.last_input_at,
-                agent_state.last_output_at,
+                agent_state.work_evidence_at(),
+                has_pending_prompts,
                 observed_at,
             )?;
             let waiting_on = self.waiting_reasons(process.id)?;
