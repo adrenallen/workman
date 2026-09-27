@@ -384,7 +384,11 @@ mod tests {
     use std::{collections::BTreeMap, thread, time::Instant};
 
     use super::*;
-    use workman_core::{AgentTool, AgentToolSource, ProcessKind, ProcessSource, Project, Store};
+    use workman_core::{
+        Actor, AgentTool, AgentToolSource, ProcessKind, ProcessSource, Project, Store, TimerKind,
+    };
+
+    use crate::timers::{IdleTimerOutcome, TimerSatisfactionReason, TimerService, now_millis};
 
     fn child(id: ProcessId, name: &str) -> Process {
         Process {
@@ -649,7 +653,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opted_in_completion_delivers_once_and_marks_only_that_child_reported() {
+    fn opted_in_completion_is_reported_but_unnotified_child_still_satisfies_idle_any() {
         let mut registry = registry();
         registry
             .create(process(
@@ -700,6 +704,44 @@ mod tests {
                 .map(|completion| completion.process_id)
                 .collect::<Vec<_>>(),
             vec![3]
+        );
+
+        registry
+            .store()
+            .put_actor(&Actor {
+                id: "parent-owner".into(),
+                session_id: "parent-owner-session".into(),
+                process_id: Some(1),
+                selected_project_id: Some(1),
+                created_at: 1_000,
+                last_seen_at: 1_000,
+            })
+            .unwrap();
+        let outcome = TimerService::new(&mut registry)
+            .set_idle(
+                "parent-owner".into(),
+                1,
+                "unnotified sibling completion".into(),
+                TimerKind::IdleAny,
+                vec![2, 3],
+                10_000,
+                now_millis(),
+            )
+            .unwrap();
+        let IdleTimerOutcome::AlreadySatisfied { satisfied_by, .. } = outcome else {
+            panic!("the unnotified child's completion did not satisfy idle_any");
+        };
+        assert_eq!(satisfied_by.len(), 1);
+        assert_eq!(satisfied_by[0].process_id, Some(3));
+        assert_eq!(
+            satisfied_by[0].reason,
+            TimerSatisfactionReason::UnseenCompletion
+        );
+        assert!(
+            CompletionLedger::new(registry.store())
+                .unreported_completions(1, &[2, 3])
+                .unwrap()
+                .is_empty()
         );
 
         registry.stop(1).unwrap();
