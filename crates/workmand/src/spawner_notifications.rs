@@ -15,7 +15,7 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 use workman_core::{
-    Process, ProcessId, ProcessStatus, SpawnerReportedState, attention::AttentionState,
+    Process, ProcessId, ProcessStatus, ProjectId, SpawnerReportedState, attention::AttentionState,
 };
 
 use crate::{
@@ -57,7 +57,7 @@ impl ChildNotificationReason {
 struct PendingChildNotification {
     child_process_id: ProcessId,
     child_name: String,
-    child_project_id: i64,
+    child_project_id: ProjectId,
     reason: ChildNotificationReason,
     completion: Option<Completion>,
 }
@@ -242,6 +242,9 @@ impl SpawnerNotificationService {
             }
             let status = registry.get_status(spawner_id)?;
             if registry.has_pending_prompts(spawner_id)
+                || registry
+                    .input_router()
+                    .automatic_submission_held(spawner_id)?
                 || !matches!(
                     status.agent_state.state,
                     AttentionState::Idle | AttentionState::Waiting

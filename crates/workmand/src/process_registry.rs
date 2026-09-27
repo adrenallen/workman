@@ -100,6 +100,7 @@ pub enum RegistryError {
         requester_process_id: ProcessId,
         child_process_id: ProcessId,
     },
+    SpawnerNotificationRequiresAgent(ProcessId),
 }
 
 impl RegistryError {
@@ -120,6 +121,7 @@ impl RegistryError {
             Self::OutputPersistence { .. } => "output_persistence_error",
             Self::AttachmentStorage { .. } => "attachment_storage_error",
             Self::NotProcessSpawner { .. } => "not_process_spawner",
+            Self::SpawnerNotificationRequiresAgent(_) => "spawner_notification_requires_agent",
         }
     }
 }
@@ -176,6 +178,10 @@ impl fmt::Display for RegistryError {
             } => write!(
                 formatter,
                 "process {requester_process_id} did not spawn process {child_process_id}"
+            ),
+            Self::SpawnerNotificationRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only spawned agents support notify_spawner_on_idle"
             ),
         }
     }
@@ -397,6 +403,10 @@ impl ProcessInputRouter {
             .typing_pause
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn automatic_submission_held(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.automatic_submission_held())
     }
 
     pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
@@ -1003,6 +1013,11 @@ impl ProcessRegistry {
     ) -> RegistryResult<ProcessStatusView> {
         let child = self.get(child_process_id)?;
         let requester = self.get(requester_process_id)?;
+        if child.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequiresAgent(
+                child_process_id,
+            ));
+        }
         if child.spawned_by_process_id != Some(requester_process_id)
             || child.project_id != requester.project_id
         {

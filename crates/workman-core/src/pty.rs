@@ -609,6 +609,11 @@ impl PtyInputHandle {
         );
     }
 
+    /// Whether an automatic submission would currently wait for the typing-pause window.
+    pub fn automatic_submission_held(&self) -> bool {
+        !self.typing_activity.remaining().is_zero()
+    }
+
     /// Queue content followed by Enter as one ordered process-local submission.
     pub fn submit_input(&self, content: &[u8], key_delay: Duration) -> io::Result<()> {
         self.queue_submission(content, key_delay, None, false)
