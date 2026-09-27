@@ -509,7 +509,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Send text or raw bytes to a running process; guarded dialogs require force=true for text, while raw bytes bypass the guard; wait_ms returns a fresh tail"
+        description = "Send text or raw bytes to a running process; guarded dialogs require force=true for text, while raw bytes bypass the guard; OpenCode question options require raw bytes for number, arrow, or Enter keys; wait_ms returns a fresh tail"
     )]
     async fn send_input(
         &self,
@@ -536,9 +536,10 @@ impl WorkmanMcp {
             if args.bytes.is_none() && !args.force {
                 match registry.pending_dialog(process.id) {
                     Ok(Some(dialog)) => {
+                        let message = dialog_pending_message(&dialog.classification);
                         return CallToolResult::structured_error(json!({
                             "code": "dialog_pending",
-                            "message": "process is awaiting a recognized dialog response; pass force=true to answer it intentionally, or send raw bytes",
+                            "message": message,
                             "process_id": process.id,
                             "classification": dialog.classification,
                             "dialog": dialog.rendered,
@@ -881,6 +882,14 @@ fn prepared_input(args: &SendInputArgs) -> Result<PreparedInput, String> {
     })
 }
 
+fn dialog_pending_message(classification: &str) -> &'static str {
+    if classification == "question_dialog" {
+        "process is awaiting an OpenCode question response; choose an option with raw bytes for a number, arrow key, or Enter; do not use force=true text"
+    } else {
+        "process is awaiting a recognized dialog response; pass force=true to answer it intentionally, or send raw bytes"
+    }
+}
+
 fn rendered_tail(
     registry: &mut ProcessRegistry,
     process_id: ProcessId,
@@ -909,7 +918,15 @@ fn tail_lines(text: &str, lines: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreparedInput, SendInputArgs, prepared_input};
+    use super::{PreparedInput, SendInputArgs, dialog_pending_message, prepared_input};
+
+    #[test]
+    fn question_dialog_guidance_requires_raw_selection_bytes() {
+        let guidance = dialog_pending_message("question_dialog");
+        assert!(guidance.contains("raw bytes"));
+        assert!(guidance.contains("number, arrow key, or Enter"));
+        assert!(guidance.contains("do not use force=true text"));
+    }
 
     #[test]
     fn submitted_text_preserves_multiline_content_and_ends_with_carriage_return() {

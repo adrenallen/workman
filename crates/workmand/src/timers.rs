@@ -3062,6 +3062,84 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn later_work_supersedes_a_mid_turn_idle_completion() {
+        const BURSTY_ID: ProcessId = 17;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                BURSTY_ID,
+                "mid-turn-composer",
+                r#"printf '❯\n'; while IFS= read -r line; do printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'partial\n❯\n'; sleep 7; printf 'thinking...\nesc to interrupt\n'; sleep 0.2; printf 'final\n❯\n'; done"#,
+                Some(90),
+            ))
+            .unwrap();
+        registry.start(BURSTY_ID).unwrap();
+        put_actor(&registry, "bursty-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+
+        registry.submit_input(BURSTY_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, BURSTY_ID, now_millis())
+            .unwrap();
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Working);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+        let early = CompletionLedger::new(registry.store())
+            .latest_completion(BURSTY_ID)
+            .unwrap()
+            .expect("first work episode records the transient idle");
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "bursty-owner".into(),
+                    DELIVERY_ID,
+                    "early wake".into(),
+                    TimerKind::IdleAny,
+                    vec![BURSTY_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Working);
+        wait_for_state(&mut registry, BURSTY_ID, AttentionState::Idle);
+        let final_completion = CompletionLedger::new(registry.store())
+            .latest_completion(BURSTY_ID)
+            .unwrap()
+            .expect("the resumed work episode records the real turn end");
+        assert!(final_completion.id > early.id);
+        let final_wake = TimerService::new(&mut registry)
+            .set_idle(
+                "bursty-owner".into(),
+                DELIVERY_ID,
+                "final wake".into(),
+                TimerKind::IdleAny,
+                vec![BURSTY_ID],
+                20_000,
+                now_millis(),
+            )
+            .unwrap();
+        assert!(matches!(
+            final_wake,
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+        let self_delivery_inputs: i64 = registry
+            .store()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM process_completion_inputs
+                 WHERE owner_process_id = ?1 AND process_id = ?1",
+                [DELIVERY_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(self_delivery_inputs, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn opencode_later_work_supersedes_a_mid_turn_idle_completion() {
         const BURSTY_ID: ProcessId = 17;
 

@@ -904,9 +904,13 @@ impl ToolAttentionAdapter for OpenCodeAdapter {
         );
         let question_at = last_pattern(
             &lowercase,
-            &["type your own answer", "enter submit  esc dismiss"],
+            &[
+                "type your own answer",
+                "enter submit  esc dismiss",
+                "esc dismiss",
+            ],
         );
-        let busy_at = last_pattern(&lowercase, &["esc interrupt"]);
+        let busy_at = last_pattern(&lowercase, &["esc interrupt", "esc again to interrupt"]);
         let resting_at = last_opencode_composer(rendered);
 
         let needs_permission = is_latest(permission_at, &[question_at, busy_at, resting_at]);
@@ -1462,6 +1466,48 @@ mod tests {
         });
         assert!(!drafted.busy);
         assert!(drafted.resting_prompt);
+    }
+
+    #[test]
+    fn opencode_second_escape_footer_remains_busy() {
+        let rendered = OPENCODE_WORKING.replace("esc interrupt", "esc again to interrupt");
+        let flags = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: &rendered,
+            alternate_screen: true,
+        });
+
+        assert!(flags.busy);
+        assert!(!flags.resting_prompt);
+        assert_eq!(flags.classification.as_deref(), Some("busy_spinner"));
+    }
+
+    #[test]
+    fn opencode_multi_select_question_without_custom_answer_needs_input() {
+        let rendered = OPENCODE_QUESTION
+            .lines()
+            .filter(|line| !line.contains("Type your own answer"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("enter submit", "enter toggle");
+        let flags = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: &rendered,
+            alternate_screen: true,
+        });
+
+        assert!(flags.needs_input);
+        assert_eq!(flags.classification.as_deref(), Some("question_dialog"));
+        assert!(pending_dialog(&rendered, flags.classification.as_deref()).is_some());
+
+        let completed = OPENCODE_COMPLETED.replace(
+            "     ok",
+            "     The old question hint said esc dismiss, but the turn is complete.",
+        );
+        let completed_flags = OpenCodeAdapter.inspect(AdapterObservation {
+            rendered: &completed,
+            alternate_screen: true,
+        });
+        assert!(!completed_flags.needs_input);
+        assert!(completed_flags.resting_prompt);
     }
 
     #[test]
