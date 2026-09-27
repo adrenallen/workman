@@ -1280,9 +1280,13 @@ fn process_submissions(
                 Err(_) => return,
             };
             queue_was_held |= gate.held;
-            // Queueing may precede Enter by seconds; start the input grace period
-            // at the actual keypress as well as when the daemon accepted the prompt.
-            attention.observe_input();
+            if attempt == 1 {
+                // Queueing may precede Enter by seconds; start the input grace period
+                // at the first actual keypress as well as when the daemon accepted the
+                // prompt. Verification retries are the same logical submission and must
+                // not move its baseline or discard work evidence already observed for it.
+                attention.observe_input();
+            }
             let Some(verification) = submission.verification else {
                 break;
             };
@@ -2578,6 +2582,55 @@ mod tests {
             assert_eq!(bytes, b"\r");
             assert!(enter_at.duration_since(typed_at) >= delay - Duration::from_millis(5));
         }
+        drop(input);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn turn_start_retry_preserves_the_logical_input_and_work_evidence() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("claude_code".into()));
+        let observed_attention = attention.clone();
+        let (input, writes, task, events) = submission_fixture_for(terminal, attention);
+        input
+            .submit_input_verified(
+                b"wake",
+                Duration::ZERO,
+                PtySubmissionVerification {
+                    timeout: Duration::from_millis(100),
+                    max_attempts: 2,
+                    mode: PtySubmissionVerificationMode::TurnStart,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"wake"
+        );
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"\r"
+        );
+
+        observed_attention.observe_output(b"thinking...", "thinking...\nesc to interrupt", false);
+        let before_retry = observed_attention.snapshot();
+        assert!(before_retry.work_evidence_at().is_some());
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap().kind,
+            PtySubmissionEventKind::Retried
+        );
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap().0,
+            b"\r"
+        );
+        thread::sleep(Duration::from_millis(10));
+
+        let after_retry = observed_attention.snapshot();
+        assert_eq!(after_retry.last_input_at, before_retry.last_input_at);
+        assert_eq!(
+            after_retry.work_evidence_at(),
+            before_retry.work_evidence_at()
+        );
         drop(input);
         task.join().unwrap();
     }
