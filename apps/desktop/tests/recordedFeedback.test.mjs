@@ -264,7 +264,7 @@ test('scratchpads recognize recorded-feedback images as local embeds', () => {
   const line = 'Before ![Menu open](</Users/example/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png>) after';
   assert.deepEqual(scratchpadMarkdownImages(line), [{
     from: 7,
-    to: 114,
+      to: 120,
     alt: 'Menu open',
     source: '/Users/example/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
   }]);

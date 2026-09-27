@@ -167,7 +167,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         registry.store().put_agent_tool(&AgentTool {
             id: 104,
             name: "Portable Codex agent".into(),
-            command: "true".into(),
+            command: "true --model portable-default".into(),
             tool_type: "codex".into(),
             enabled: true,
             source: AgentToolSource::Local,
@@ -316,9 +316,10 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .description
             .as_deref()
             .is_some_and(|description| {
-                description.contains("model only within the same agent type")
+                description.contains("template model only within the same agent type")
                     && description.contains("never carry command defaults")
-                    && description.contains("only caller model")
+                    && description.contains("supersedes the registered command model")
+                    && description.contains("explicit caller model also replaces")
                     && description.contains("resolved reports")
                     && !description.contains("preferred")
             })
@@ -626,12 +627,52 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         .process
         .command
         .unwrap();
+    assert_eq!(portable_command.matches("--model").count(), 1);
     assert!(portable_command.contains("--model template-model"));
+    assert!(!portable_command.contains("portable-default"));
     assert!(portable_command.contains("model_reasoning_effort"));
     call(
         &parent,
         "close_process",
         json!({ "project_id": 7, "process_id": portable_process_id }),
+    )
+    .await;
+
+    let own_tool_model_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 302,
+            "name": "template-model-on-own-tool"
+        }),
+    )
+    .await;
+    assert_eq!(
+        own_tool_model_spawn["resolved"],
+        json!({
+            "agent_tool_id": 102,
+            "agent_tool_name": "Model capture agent",
+            "model": "template-model",
+            "effort": "high",
+            "template_args_skipped": []
+        })
+    );
+    let own_tool_model_process_id = own_tool_model_spawn["process_id"].as_i64().unwrap();
+    let own_tool_model_command = registry
+        .lock()
+        .await
+        .get_status(own_tool_model_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert_eq!(own_tool_model_command.matches("--model").count(), 1);
+    assert!(own_tool_model_command.contains("--model template-model"));
+    assert!(!own_tool_model_command.contains("command-default"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": own_tool_model_process_id }),
     )
     .await;
 
