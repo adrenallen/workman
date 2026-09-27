@@ -579,6 +579,13 @@ pub struct ProcessEvent {
     pub message: String,
 }
 
+/// Read-only pending-timer relationships used by child notification delivery.
+#[derive(Default)]
+pub(crate) struct NotificationTimerContext {
+    pub(crate) owned_idle_watches: HashSet<(ProcessId, ProcessId)>,
+    pub(crate) waiting_processes: HashSet<ProcessId>,
+}
+
 /// Owns persisted process records and live PTY handles.
 pub struct ProcessRegistry {
     store: Store,
@@ -1192,6 +1199,60 @@ impl ProcessRegistry {
             });
         }
         Ok(reasons)
+    }
+
+    /// Read the pending-timer relationships needed by child-to-spawner notification delivery.
+    ///
+    /// The first set contains `(owner process, watched process)` pairs for explicit idle timers;
+    /// the second contains processes whose idle state is refined to Waiting by any pending timer.
+    /// This intentionally mirrors `waiting_reasons` without observing status or writing rows.
+    pub(crate) fn notification_timer_context(&self) -> RegistryResult<NotificationTimerContext> {
+        let mut statement = self
+            .store
+            .connection()
+            .prepare(
+                "SELECT timer.kind,
+                        timer.delivery_process_id,
+                        timer.watch_list,
+                        actor.process_id
+                 FROM timers AS timer
+                 LEFT JOIN actors AS actor ON actor.id = timer.owner_actor
+                 WHERE timer.fired = 0",
+            )
+            .map_err(StoreError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, TimerKind>(0)?,
+                    row.get::<_, ProcessId>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<ProcessId>>(3)?,
+                ))
+            })
+            .map_err(StoreError::from)?;
+        let mut owned_idle_watches = HashSet::new();
+        let mut waiting_processes = HashSet::new();
+        for row in rows {
+            let (kind, delivery_process_id, watch_list, owner_process_id) =
+                row.map_err(StoreError::from)?;
+            waiting_processes.insert(delivery_process_id);
+            if matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll)
+                && let Some(owner_process_id) = owner_process_id
+            {
+                waiting_processes.insert(owner_process_id);
+                let watched: Vec<ProcessId> =
+                    serde_json::from_str(&watch_list).map_err(StoreError::from)?;
+                owned_idle_watches.extend(
+                    watched
+                        .into_iter()
+                        .map(|watched_process_id| (owner_process_id, watched_process_id)),
+                );
+            }
+        }
+        Ok(NotificationTimerContext {
+            owned_idle_watches,
+            waiting_processes,
+        })
     }
 
     fn process_is_watched(&self, process_id: ProcessId) -> RegistryResult<bool> {

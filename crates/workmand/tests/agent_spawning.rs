@@ -287,6 +287,8 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         "delivery waits behind human drafts",
         "explicit pending idle timer wins",
         "unless a deadline matters",
+        "spawner's submitted input",
+        "parked Waiting",
     ] {
         assert!(
             spawn_tool
@@ -312,7 +314,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         toggle_tool
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("direct spawner"))
+            .is_some_and(|description| {
+                description.contains("direct spawner") && description.contains("parked Waiting")
+            })
     );
 
     let tools = call(&parent, "list_agent_tools", json!({})).await;

@@ -283,6 +283,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     assert!(server_instructions.contains("human's unsent draft"));
     assert!(server_instructions.contains("explicit pending idle timer wins"));
     assert!(server_instructions.contains("delay timer when a hung-child deadline matters"));
+    assert!(server_instructions.contains("parked Waiting on its own timer"));
 
     let tool_names: Vec<_> = process_client
         .list_all_tools()
@@ -388,10 +389,11 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     );
     for guidance in [
         "opt-in is prospective",
-        "input attributed to that spawner",
+        "spawner's last submitted input",
         "explicit pending idle timer wins",
         "human's unsent draft",
         "delay timer when a hung-child deadline matters",
+        "parked Waiting on its own timer is not reported finished",
     ] {
         assert!(
             timer_help["text"].as_str().unwrap().contains(guidance),
