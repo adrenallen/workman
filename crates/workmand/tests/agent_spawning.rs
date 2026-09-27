@@ -282,6 +282,20 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .as_deref()
             .is_some_and(|description| description.contains("no idle timer is needed"))
     );
+    for guidance in [
+        "prospective",
+        "delivery waits behind human drafts",
+        "explicit pending idle timer wins",
+        "unless a deadline matters",
+    ] {
+        assert!(
+            spawn_tool
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains(guidance)),
+            "spawn_agent description omitted {guidance:?}"
+        );
+    }
     assert!(
         spawn_tool.input_schema["properties"]["notify_spawner_on_idle"]["description"]
             .as_str()

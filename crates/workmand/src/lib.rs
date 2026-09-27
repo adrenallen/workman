@@ -445,6 +445,7 @@ impl DaemonServer {
         );
         let spawner_notification_task = spawner_notifications::spawn_spawner_notification_scheduler(
             self.registry.clone(),
+            status_invalidations.clone(),
             shutdown_rx.clone(),
         );
         let maintenance_task = maintenance::spawn_storage_maintenance(

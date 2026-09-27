@@ -13,6 +13,7 @@ use crate::{ProcessId, Store, StoreResult};
 pub struct SpawnerIdleNotificationSetting {
     pub process_id: ProcessId,
     pub enabled_at: i64,
+    pub baseline_completion_id: i64,
     pub last_reported_state: SpawnerReportedState,
 }
 
@@ -66,14 +67,15 @@ impl Store {
         process_id: ProcessId,
         enabled: bool,
         now: i64,
+        baseline_completion_id: i64,
     ) -> StoreResult<()> {
         if enabled {
             // Repeated enable calls preserve the original arm boundary and delivered state.
             self.connection().execute(
                 "INSERT OR IGNORE INTO process_spawner_idle_notifications
-                    (process_id, enabled_at, last_reported_state)
-                 VALUES (?1, ?2, 'neutral')",
-                params![process_id, now],
+                    (process_id, enabled_at, baseline_completion_id, last_reported_state)
+                 VALUES (?1, ?2, ?3, 'neutral')",
+                params![process_id, now, baseline_completion_id],
             )?;
         } else {
             self.connection().execute(
@@ -88,15 +90,16 @@ impl Store {
         &self,
     ) -> StoreResult<Vec<SpawnerIdleNotificationSetting>> {
         let mut statement = self.connection().prepare(
-            "SELECT process_id, enabled_at, last_reported_state
+            "SELECT process_id, enabled_at, baseline_completion_id, last_reported_state
              FROM process_spawner_idle_notifications
              ORDER BY process_id",
         )?;
         let rows = statement.query_map([], |row| {
-            let state = row.get::<_, String>(2)?;
+            let state = row.get::<_, String>(3)?;
             Ok(SpawnerIdleNotificationSetting {
                 process_id: row.get(0)?,
                 enabled_at: row.get(1)?,
+                baseline_completion_id: row.get(2)?,
                 last_reported_state: SpawnerReportedState::parse(&state)?,
             })
         })?;
@@ -123,15 +126,16 @@ impl Store {
         Ok(self
             .connection()
             .query_row(
-                "SELECT process_id, enabled_at, last_reported_state
+                "SELECT process_id, enabled_at, baseline_completion_id, last_reported_state
                  FROM process_spawner_idle_notifications
                  WHERE process_id = ?1",
                 [process_id],
                 |row| {
-                    let state = row.get::<_, String>(2)?;
+                    let state = row.get::<_, String>(3)?;
                     Ok(SpawnerIdleNotificationSetting {
                         process_id: row.get(0)?,
                         enabled_at: row.get(1)?,
+                        baseline_completion_id: row.get(2)?,
                         last_reported_state: SpawnerReportedState::parse(&state)?,
                     })
                 },
@@ -161,10 +165,15 @@ mod tests {
     #[test]
     fn setting_is_durable_idempotent_and_removed_with_process() {
         let store = fixture();
-        store.set_spawner_idle_notification(2, true, 10).unwrap();
-        store.set_spawner_idle_notification(2, true, 20).unwrap();
+        store
+            .set_spawner_idle_notification(2, true, 10, 41)
+            .unwrap();
+        store
+            .set_spawner_idle_notification(2, true, 20, 99)
+            .unwrap();
         let setting = store.spawner_idle_notification_setting(2).unwrap().unwrap();
         assert_eq!(setting.enabled_at, 10);
+        assert_eq!(setting.baseline_completion_id, 41);
         assert_eq!(setting.last_reported_state, SpawnerReportedState::Neutral);
 
         assert!(
@@ -199,7 +208,9 @@ mod tests {
                             (2, 1, 'agent', 'Child', '/tmp/spawner-reopen', 'local', 'running', 1);",
                 )
                 .unwrap();
-            store.set_spawner_idle_notification(2, true, 10).unwrap();
+            store
+                .set_spawner_idle_notification(2, true, 10, 41)
+                .unwrap();
         }
         let reopened = Store::open(&database).unwrap();
         assert!(reopened.spawner_idle_notification_enabled(2).unwrap());
@@ -210,6 +221,14 @@ mod tests {
                 .unwrap()
                 .enabled_at,
             10
+        );
+        assert_eq!(
+            reopened
+                .spawner_idle_notification_setting(2)
+                .unwrap()
+                .unwrap()
+                .baseline_completion_id,
+            41
         );
     }
 }

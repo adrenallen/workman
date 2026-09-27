@@ -542,6 +542,7 @@ pub struct PtyInputHandle {
 struct TypingActivity {
     last_input: Mutex<Option<Instant>>,
     delay_ms: AtomicU64,
+    unsent_human_draft: AtomicBool,
 }
 
 impl TypingActivity {
@@ -597,6 +598,18 @@ impl PtyInputHandle {
             .last_input
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        if bytes
+            .iter()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15))
+        {
+            self.typing_activity
+                .unsent_human_draft
+                .store(false, Ordering::Release);
+        } else if bytes.iter().any(|byte| !byte.is_ascii_control()) || bytes.is_empty() {
+            self.typing_activity
+                .unsent_human_draft
+                .store(true, Ordering::Release);
+        }
         writer.write_all(bytes)?;
         writer.flush()
     }
@@ -612,6 +625,41 @@ impl PtyInputHandle {
     /// Whether an automatic submission would currently wait for the typing-pause window.
     pub fn automatic_submission_held(&self) -> bool {
         !self.typing_activity.remaining().is_zero()
+    }
+
+    /// Whether user-originated text is still present in an interactive agent composer.
+    ///
+    /// This is intentionally separate from the finite typing pause. Unsolicited automation may
+    /// use it to wait indefinitely for a human to submit or clear a draft without changing the
+    /// established timer submission behavior.
+    pub fn has_unsent_human_draft(&self) -> bool {
+        if !self
+            .typing_activity
+            .unsent_human_draft
+            .load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let viewport = self.terminal_output.read_viewport();
+        match composer_draft_state(&viewport.rows) {
+            ComposerDraftState::NonEmpty | ComposerDraftState::Unknown => true,
+            ComposerDraftState::Empty => {
+                let typing_is_settling = self
+                    .typing_activity
+                    .last_input
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some_and(|last| last.elapsed() < Duration::from_millis(500));
+                if typing_is_settling {
+                    true
+                } else {
+                    self.typing_activity
+                        .unsent_human_draft
+                        .store(false, Ordering::Release);
+                    false
+                }
+            }
+        }
     }
 
     /// Queue content followed by Enter as one ordered process-local submission.
@@ -1343,6 +1391,49 @@ fn current_submission_dialog(
         rendered.push('\n');
     }
     attention.dialog_in_viewport(&rendered, viewport.alternate_screen)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComposerDraftState {
+    Empty,
+    NonEmpty,
+    Unknown,
+}
+
+fn composer_draft_state(rows: &[crate::terminal::RenderedRow]) -> ComposerDraftState {
+    for (index, row) in rows.iter().enumerate().rev() {
+        let line = row.text.trim_start();
+        let Some((marker, draft)) = line
+            .strip_prefix('❯')
+            .map(|draft| ('❯', draft))
+            .or_else(|| line.strip_prefix('›').map(|draft| ('›', draft)))
+        else {
+            continue;
+        };
+        if marker == '❯' && crate::attention::is_claude_dialog_choice(draft.trim()) {
+            return ComposerDraftState::Unknown;
+        }
+        let placeholder = marker == '›'
+            && matches!(
+                draft.trim(),
+                "Ask Codex to do anything" | "Ask Codex anything" | "Ask anything"
+            );
+        if !draft.trim().is_empty() && !placeholder {
+            return ComposerDraftState::NonEmpty;
+        }
+        let mut wrapped = row.wrapped;
+        let mut continuation = index + 1;
+        while wrapped && continuation < rows.len() {
+            let next = &rows[continuation];
+            if !next.text.trim().is_empty() {
+                return ComposerDraftState::NonEmpty;
+            }
+            wrapped = next.wrapped;
+            continuation += 1;
+        }
+        return ComposerDraftState::Empty;
+    }
+    ComposerDraftState::Unknown
 }
 
 fn framed_submission_content(content: &[u8], bracketed_paste: bool) -> Vec<u8> {
@@ -2615,6 +2706,36 @@ mod tests {
         input.write_user_input(b"").unwrap();
         assert!(input.typing_activity.last_input.lock().unwrap().unwrap() >= typed_at.unwrap());
         drop(input);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn unsent_human_draft_guard_is_indefinite_and_does_not_change_automatic_submissions() {
+        let terminal = TerminalOutput::new(24, 80, 100);
+        let attention = AttentionTracker::new(Some("claude_code".into()));
+        let (input, writes, task, _) = submission_fixture_for(terminal.clone(), attention.clone());
+        input.set_typing_idle_delay(Duration::ZERO);
+
+        // A composer-shaped automatic body is not human typing and must not affect timers or
+        // other established submission users.
+        terminal.feed_with_replies("\x1b[2J\x1b[H❯ automatic body".as_bytes());
+        assert!(!input.has_unsent_human_draft());
+
+        input.write_user_input(b"human draft").unwrap();
+        assert_eq!(writes.recv().unwrap().0, b"human draft");
+        terminal.feed_with_replies("\x1b[2J\x1b[H❯ human draft".as_bytes());
+        assert!(input.has_unsent_human_draft());
+        assert!(!input.automatic_submission_held());
+
+        input.write_user_input(b"\x15").unwrap();
+        assert_eq!(writes.recv().unwrap().0, b"\x15");
+        assert!(!input.has_unsent_human_draft());
+
+        input.write_user_input(b"submitted\r").unwrap();
+        assert_eq!(writes.recv().unwrap().0, b"submitted\r");
+        assert!(!input.has_unsent_human_draft());
+        drop(input);
+        attention.mark_exited();
         task.join().unwrap();
     }
 

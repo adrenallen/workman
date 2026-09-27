@@ -173,7 +173,7 @@ struct SetNotifySpawnerOnIdleArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Whether the child should deliver coalesced idle/attention turns to its spawner.
+    /// Prospectively deliver coalesced idle/attention turns to this child's direct agent spawner.
     enabled: bool,
 }
 
@@ -216,7 +216,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Enable or disable coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner. Only the process that spawned this child may change the setting; project jail rules still apply."
+        description = "Prospectively enable or disable coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner, which must be an agent. Finished turns require work after that spawner's attributed input; human drafts hold delivery, and an explicit pending idle timer wins. Only the process that spawned this child may change the setting; project jail rules still apply."
     )]
     async fn set_notify_spawner_on_idle(
         &self,

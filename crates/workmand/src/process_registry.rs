@@ -101,6 +101,7 @@ pub enum RegistryError {
         child_process_id: ProcessId,
     },
     SpawnerNotificationRequiresAgent(ProcessId),
+    SpawnerNotificationRequesterRequiresAgent(ProcessId),
 }
 
 impl RegistryError {
@@ -122,6 +123,9 @@ impl RegistryError {
             Self::AttachmentStorage { .. } => "attachment_storage_error",
             Self::NotProcessSpawner { .. } => "not_process_spawner",
             Self::SpawnerNotificationRequiresAgent(_) => "spawner_notification_requires_agent",
+            Self::SpawnerNotificationRequesterRequiresAgent(_) => {
+                "spawner_notification_requires_agent"
+            }
         }
     }
 }
@@ -182,6 +186,10 @@ impl fmt::Display for RegistryError {
             Self::SpawnerNotificationRequiresAgent(process_id) => write!(
                 formatter,
                 "process {process_id} is not an agent; only spawned agents support notify_spawner_on_idle"
+            ),
+            Self::SpawnerNotificationRequesterRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only an agent spawner may enable notify_spawner_on_idle"
             ),
         }
     }
@@ -407,6 +415,11 @@ impl ProcessInputRouter {
 
     pub(crate) fn automatic_submission_held(&self, process_id: ProcessId) -> RegistryResult<bool> {
         Ok(self.target(process_id)?.input.automatic_submission_held())
+    }
+
+    /// Hold unsolicited automation while a human has unsubmitted composer text.
+    pub(crate) fn has_unsent_human_draft(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.has_unsent_human_draft())
     }
 
     pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
@@ -1018,6 +1031,11 @@ impl ProcessRegistry {
                 child_process_id,
             ));
         }
+        if requester.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequesterRequiresAgent(
+                requester_process_id,
+            ));
+        }
         if child.spawned_by_process_id != Some(requester_process_id)
             || child.project_id != requester.project_id
         {
@@ -1026,6 +1044,7 @@ impl ProcessRegistry {
                 child_process_id,
             });
         }
+        let mut baseline_completion_id = 0;
         if enabled
             && !self
                 .store
@@ -1034,9 +1053,16 @@ impl ProcessRegistry {
             // Establish a ledger baseline before the prospective arm boundary. An existing idle
             // child must not report work that finished while this option was disabled.
             let _ = self.status_view(child.clone())?;
+            baseline_completion_id = CompletionLedger::new(&self.store)
+                .latest_completion(child_process_id)?
+                .map_or(0, |completion| completion.id);
         }
-        self.store
-            .set_spawner_idle_notification(child_process_id, enabled, now_millis())?;
+        self.store.set_spawner_idle_notification(
+            child_process_id,
+            enabled,
+            now_millis(),
+            baseline_completion_id,
+        )?;
         self.status_invalidations.invalidate();
         self.status_view(child)
     }
@@ -2273,7 +2299,7 @@ impl ProcessRegistry {
         result
     }
 
-    fn refresh_exits(&mut self) -> RegistryResult<()> {
+    pub(crate) fn refresh_exits(&mut self) -> RegistryResult<()> {
         self.drain_submission_events();
         self.refresh_agent_session_ids(false)?;
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();

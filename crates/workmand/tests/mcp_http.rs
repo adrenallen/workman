@@ -280,6 +280,9 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
     assert!(server_instructions.contains("notify_spawner_on_idle=true"));
     assert!(server_instructions.contains("coalescing children"));
+    assert!(server_instructions.contains("human's unsent draft"));
+    assert!(server_instructions.contains("explicit pending idle timer wins"));
+    assert!(server_instructions.contains("delay timer when a hung-child deadline matters"));
 
     let tool_names: Vec<_> = process_client
         .list_all_tools()
@@ -383,6 +386,18 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("no timer is necessary")
     );
+    for guidance in [
+        "opt-in is prospective",
+        "input attributed to that spawner",
+        "explicit pending idle timer wins",
+        "human's unsent draft",
+        "delay timer when a hung-child deadline matters",
+    ] {
+        assert!(
+            timer_help["text"].as_str().unwrap().contains(guidance),
+            "timer help omitted {guidance:?}"
+        );
+    }
     let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
     assert!(tools_summary["count"].as_u64().unwrap() >= 13);
     assert!(

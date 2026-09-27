@@ -156,8 +156,9 @@ struct SpawnAgentArgs {
     /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
-    /// Deliver one coalesced Workman turn to this process when the child finishes, needs input,
-    /// exits, or crashes. This is durable, defaults to false, and requires a process identity.
+    /// Prospectively deliver one coalesced Workman turn to this direct agent spawner when the
+    /// child finishes work attributed to it, needs input, exits, or crashes. Delivery waits behind
+    /// unsent human drafts; it defaults to false and requires a process identity.
     #[serde(default)]
     notify_spawner_on_idle: bool,
 }
@@ -581,7 +582,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names one or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. Set notify_spawner_on_idle=true for one coalesced, paste-safe turn to this direct spawner when the child finishes, needs input, exits, or crashes; no idle timer is needed for that child. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names one or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. Set notify_spawner_on_idle=true for prospective, coalesced, paste-safe turns to this direct agent spawner when the child finishes attributed work, needs input, exits, or crashes; delivery waits behind human drafts, and no idle timer is needed unless a deadline matters. An explicit pending idle timer wins for the same child. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,
