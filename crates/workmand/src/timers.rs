@@ -2881,6 +2881,97 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn generic_promptless_status_repaints_record_one_completion_per_input() {
+        const PROMPTLESS_ID: ProcessId = 20;
+
+        let mut registry = test_registry(false);
+        registry
+            .create(process(
+                PROMPTLESS_ID,
+                "kimi-promptless-repaint",
+                r#"printf '❯\n'; IFS= read -r line; sleep 2.5; printf '\033[?1049h\033[Hanswer:%s\nstatus:ready' "$line"; sleep 6; n=0; while :; do sleep 1.2; n=$((n + 1)); printf '\033[2;1H\033[2Kstatus:%s' "$n"; done"#,
+                Some(91),
+            ))
+            .unwrap();
+        registry.start(PROMPTLESS_ID).unwrap();
+        put_actor(&registry, "promptless-owner", DELIVERY_ID);
+        wait_for_state(&mut registry, PROMPTLESS_ID, AttentionState::Idle);
+
+        registry.submit_input(PROMPTLESS_ID, b"go").unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(DELIVERY_ID, PROMPTLESS_ID, now_millis())
+            .unwrap();
+        wait_for_output(&mut registry, PROMPTLESS_ID, "answer:go");
+        wait_for_state(&mut registry, PROMPTLESS_ID, AttentionState::Idle);
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "promptless-owner".into(),
+                    DELIVERY_ID,
+                    "first promptless wake".into(),
+                    TimerKind::IdleAny,
+                    vec![PROMPTLESS_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::AlreadySatisfied { .. }
+        ));
+        let first_evidence = registry
+            .get_status(PROMPTLESS_ID)
+            .unwrap()
+            .agent_state
+            .work_evidence_at()
+            .expect("the answered generic turn has work evidence");
+        let completion_count = |registry: &ProcessRegistry| -> i64 {
+            registry
+                .store()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM process_completions WHERE process_id = ?1",
+                    [PROMPTLESS_ID],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(completion_count(&registry), 1);
+
+        let poll_until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < poll_until {
+            assert_eq!(
+                registry
+                    .get_status(PROMPTLESS_ID)
+                    .unwrap()
+                    .agent_state
+                    .work_evidence_at(),
+                Some(first_evidence),
+                "generic status repaints must not advance work evidence"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            completion_count(&registry),
+            1,
+            "a generic adapter records at most one completion per input"
+        );
+        assert!(matches!(
+            TimerService::new(&mut registry)
+                .set_idle(
+                    "promptless-owner".into(),
+                    DELIVERY_ID,
+                    "must wait for another input".into(),
+                    TimerKind::IdleAny,
+                    vec![PROMPTLESS_ID],
+                    20_000,
+                    now_millis(),
+                )
+                .unwrap(),
+            IdleTimerOutcome::Created(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn later_work_supersedes_a_mid_turn_idle_completion() {
         const BURSTY_ID: ProcessId = 17;
 

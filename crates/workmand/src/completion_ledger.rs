@@ -80,9 +80,9 @@ impl<'a> CompletionLedger<'a> {
     /// A completion requires an idle snapshot with no queued prompt plus eager evidence of work
     /// after the submitted input. Evidence is either an adapter-recognized busy state or, for an
     /// adapter without busy detection, non-cosmetic PTY output observed after the recent-input
-    /// grace period.
-    /// A newer work-evidence timestamp permits a later completion for the same input, so a real
-    /// turn end supersedes a transient mid-turn idle observation.
+    /// grace period. Busy-detecting adapters may advance evidence so a real turn end supersedes a
+    /// transient mid-turn idle observation. Generic adapters retain their first evidence and
+    /// therefore record at most one completion per input.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_process(
         &self,
