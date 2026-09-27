@@ -186,6 +186,35 @@ fn reanchor_uses_utf16_offsets_context_and_orphans_missing_quotes() -> Result<()
 }
 
 #[test]
+fn table_formatting_reanchors_only_a_unique_tolerant_context() {
+    let before = "| Item      | Count |\n| --- | --- |\n| target | 1 |";
+    let start = before.find("target").unwrap();
+    let prefix = &before[..start];
+    let suffix = &before[start + "target".len()..];
+    let after = "| Item   | Count |\n| ------ | ----- |\n| target | 1     |";
+    let resolved = resolve_scratchpad_anchor(
+        after,
+        Some("target"),
+        Some(start),
+        Some(start + "target".len()),
+        Some(prefix),
+        Some(suffix),
+    );
+    assert_eq!(resolved.anchor_state, ScratchpadAnchorState::Anchored);
+    assert_eq!(resolved.current_start, after.find("target"));
+
+    let ambiguous = resolve_scratchpad_anchor(
+        "| ----- |\n| target   |\n\n| -------- |\n| target |\n",
+        Some("target"),
+        None,
+        None,
+        Some("| --- |\n| "),
+        Some(" |\n"),
+    );
+    assert_eq!(ambiguous.anchor_state, ScratchpadAnchorState::Orphaned);
+}
+
+#[test]
 fn comment_permissions_revision_guards_and_mutation_signal_are_enforced()
 -> Result<(), Box<dyn Error>> {
     let store = seeded_store()?;

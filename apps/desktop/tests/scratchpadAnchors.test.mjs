@@ -104,3 +104,28 @@ test('maps a live anchor through CodeMirror changes', () => {
   assert.equal(mapped.anchor_start, 12);
   assert.equal(mapped.anchor_end, 18);
 });
+
+test('reanchors a stored table selection after whitespace and delimiter alignment', () => {
+  const before = '| Item      | Count |\n| --- | --- |\n| target | 1 |';
+  const start = before.indexOf('target');
+  const anchor = selectionAnchor(before, start, start + 'target'.length);
+  const after = '| Item   | Count |\n| ------ | ----- |\n| target | 1     |';
+  const resolved = resolveScratchpadAnchor(after, anchor);
+  assert.equal(resolved.anchor_state, 'anchored');
+  assert.equal(resolved.current_start, after.indexOf('target'));
+  assert.equal(after.slice(resolved.current_start, resolved.current_end), 'target');
+});
+
+test('orphans tolerant table matches when normalized context is ambiguous', () => {
+  const resolved = resolveScratchpadAnchor(
+    '| ----- |\n| target   |\n\n| -------- |\n| target |\n',
+    {
+      quote: 'target',
+      anchor_start: null,
+      anchor_end: null,
+      anchor_prefix: '| --- |\n| ',
+      anchor_suffix: ' |\n'
+    }
+  );
+  assert.equal(resolved.anchor_state, 'orphaned');
+});

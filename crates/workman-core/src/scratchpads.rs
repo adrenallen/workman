@@ -1569,7 +1569,7 @@ pub fn resolve_scratchpad_anchor(
     if let (Some(start), Some(end)) = (anchor_start, anchor_end)
         && utf16_slice(content, start, end) == Some(quote)
     {
-        return anchored_resolution(content, quote, start, end);
+        return anchored_resolution(content, start, end);
     }
 
     let candidates = exact_quote_ranges_utf16(content, quote);
@@ -1604,24 +1604,101 @@ pub fn resolve_scratchpad_anchor(
             _ => None,
         }
     };
-    match resolved {
-        Some((start, end)) => anchored_resolution(content, quote, start, end),
-        None => ScratchpadAnchorResolution {
-            anchor_state: ScratchpadAnchorState::Orphaned,
-            current_start: None,
-            current_end: None,
-            current_start_line: None,
-            current_end_line: None,
-        },
+    if let Some((start, end)) = resolved {
+        return anchored_resolution(content, start, end);
+    }
+    if let Some((start, end)) = tolerant_anchor_range(content, quote, anchor_prefix, anchor_suffix)
+    {
+        return anchored_resolution(content, start, end);
+    }
+    ScratchpadAnchorResolution {
+        anchor_state: ScratchpadAnchorState::Orphaned,
+        current_start: None,
+        current_end: None,
+        current_start_line: None,
+        current_end_line: None,
     }
 }
 
-fn anchored_resolution(
+struct TolerantText {
+    text: String,
+    utf16_ranges: Vec<(usize, usize)>,
+}
+
+fn tolerant_text(source: &str) -> TolerantText {
+    let mut text = String::with_capacity(source.len());
+    let mut utf16_ranges = Vec::with_capacity(source.chars().count());
+    let mut characters = source.chars().peekable();
+    let mut utf16_offset = 0;
+    while let Some(character) = characters.next() {
+        let start = utf16_offset;
+        utf16_offset += character.len_utf16();
+        if character.is_whitespace() || character == '-' {
+            let collapse_whitespace = character.is_whitespace();
+            while characters.peek().is_some_and(|next| {
+                if collapse_whitespace {
+                    next.is_whitespace()
+                } else {
+                    *next == '-'
+                }
+            }) {
+                utf16_offset += characters.next().unwrap().len_utf16();
+            }
+            text.push(if collapse_whitespace { ' ' } else { '-' });
+        } else {
+            text.push(character);
+        }
+        utf16_ranges.push((start, utf16_offset));
+    }
+    TolerantText { text, utf16_ranges }
+}
+
+fn tolerant_anchor_range(
     content: &str,
     quote: &str,
-    start: usize,
-    end: usize,
-) -> ScratchpadAnchorResolution {
+    anchor_prefix: Option<&str>,
+    anchor_suffix: Option<&str>,
+) -> Option<(usize, usize)> {
+    let content = tolerant_text(content);
+    let quote = tolerant_text(quote).text;
+    if quote.is_empty() {
+        return None;
+    }
+    let prefix = anchor_prefix
+        .filter(|value| !value.is_empty())
+        .map(tolerant_text);
+    let suffix = anchor_suffix
+        .filter(|value| !value.is_empty())
+        .map(tolerant_text);
+    let mut matches = Vec::new();
+    for (start_byte, _) in content.text.match_indices(&quote) {
+        let end_byte = start_byte + quote.len();
+        if prefix
+            .as_ref()
+            .is_some_and(|value| !content.text[..start_byte].ends_with(&value.text))
+            || suffix
+                .as_ref()
+                .is_some_and(|value| !content.text[end_byte..].starts_with(&value.text))
+        {
+            continue;
+        }
+        let start_index = content.text[..start_byte].chars().count();
+        let end_index = start_index + quote.chars().count();
+        let Some((start, _)) = content.utf16_ranges.get(start_index) else {
+            continue;
+        };
+        let Some((_, end)) = content.utf16_ranges.get(end_index.saturating_sub(1)) else {
+            continue;
+        };
+        matches.push((*start, *end));
+    }
+    match matches.as_slice() {
+        [range] => Some(*range),
+        _ => None,
+    }
+}
+
+fn anchored_resolution(content: &str, start: usize, end: usize) -> ScratchpadAnchorResolution {
     let start_line = utf16_to_byte(content, start).map(|byte| {
         content[..byte]
             .bytes()
@@ -1634,8 +1711,13 @@ fn anchored_resolution(
         current_start: Some(start),
         current_end: Some(end),
         current_start_line: start_line,
-        current_end_line: start_line
-            .map(|line| line + quote.bytes().filter(|byte| *byte == b'\n').count()),
+        current_end_line: start_line.map(|line| {
+            line + utf16_slice(content, start, end)
+                .unwrap_or_default()
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+        }),
     }
 }
 
@@ -1655,7 +1737,7 @@ fn comment_anchor_resolution(
             (Some(quote), Some(start), Some(end))
                 if utf16_slice(&scratchpad.content, start, end) == Some(quote) =>
             {
-                anchored_resolution(&scratchpad.content, quote, start, end)
+                anchored_resolution(&scratchpad.content, start, end)
             }
             _ => ScratchpadAnchorResolution {
                 anchor_state: ScratchpadAnchorState::Orphaned,
