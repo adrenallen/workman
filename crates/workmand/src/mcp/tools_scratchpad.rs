@@ -11,7 +11,7 @@ use serde_json::json;
 use workman_core::{
     NewScratchpadComment, ProjectId, ScratchpadCommentId, ScratchpadEditTarget,
     ScratchpadFindQuery, ScratchpadFindScope, ScratchpadId, ScratchpadListQuery,
-    ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
+    ScratchpadMetadataUpdate, ScratchpadReadMode, ScratchpadService, ScratchpadServiceError,
 };
 
 use super::{WorkmanMcp, failure, now_millis, scoped_project, success};
@@ -26,6 +26,7 @@ enum ReadMode {
     Section,
     #[serde(alias = "lines")]
     LineSlice,
+    Tail,
 }
 
 impl From<ReadMode> for ScratchpadReadMode {
@@ -36,6 +37,7 @@ impl From<ReadMode> for ScratchpadReadMode {
             ReadMode::Headings => Self::Headings,
             ReadMode::Section => Self::Section,
             ReadMode::LineSlice => Self::Content,
+            ReadMode::Tail => Self::Content,
         }
     }
 }
@@ -104,12 +106,19 @@ struct ScratchpadReadArgs {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Lines to return when mode=tail. Defaults to 10.
+    #[serde(default)]
+    lines: Option<usize>,
     /// Include unresolved anchored, orphaned, and whole-document comments.
     #[serde(default)]
     include_comments: bool,
     /// Include resolved comments when include_comments=true.
     #[serde(default)]
     include_resolved: bool,
+    #[serde(default)]
+    comments_offset: Option<usize>,
+    #[serde(default)]
+    comments_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -141,33 +150,14 @@ struct ScratchpadCommentCreateArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadCommentListArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    #[serde(default)]
-    include_resolved: bool,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ScratchpadCommentUpdateArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     comment_id: ScratchpadCommentId,
-    body: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadCommentResolveArgs {
     #[serde(default)]
-    project_id: Option<ProjectId>,
-    comment_id: ScratchpadCommentId,
-    #[serde(default = "default_true")]
-    resolved: bool,
+    body: Option<String>,
+    #[serde(default)]
+    resolved: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -183,17 +173,10 @@ struct ScratchpadAppendArgs {
     project_id: Option<ProjectId>,
     scratchpad_id: ScratchpadId,
     content: String,
+    /// Append beneath this heading instead of at the document end.
     #[serde(default)]
-    expected_revision: Option<i64>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadAppendSectionArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    heading: String,
-    content: String,
+    heading: Option<String>,
+    /// Create a missing heading when heading is set.
     #[serde(default)]
     create_heading: bool,
     #[serde(default)]
@@ -226,15 +209,6 @@ struct ScratchpadFindArgs {
     context_lines: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadTailArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    #[serde(default)]
-    lines: Option<usize>,
-}
-
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct ScratchpadListArgs {
     #[serde(default)]
@@ -247,40 +221,28 @@ struct ScratchpadListArgs {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Include distinct active scratchpad tags beside the page.
+    #[serde(default)]
+    include_tags: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadRenameArgs {
+struct ScratchpadUpdateArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     scratchpad_id: ScratchpadId,
-    name: String,
-    expected_revision: i64,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadTagsArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    tags: Vec<String>,
-    expected_revision: i64,
-}
-
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ProjectScopeArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadArchiveArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    /// Optional guard for compatibility with safe, non-clobbering archive calls.
+    /// Required for a rename; optional for tags-only or archive updates.
     #[serde(default)]
     expected_revision: Option<i64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    add_tags: Option<Vec<String>>,
+    #[serde(default)]
+    remove_tags: Option<Vec<String>>,
+    /// Set true to archive the scratchpad.
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -288,15 +250,6 @@ struct ScratchpadRevisionArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     scratchpad_id: ScratchpadId,
-    expected_revision: i64,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ScratchpadTransferArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    scratchpad_id: ScratchpadId,
-    target_project_id: ProjectId,
     expected_revision: i64,
 }
 
@@ -323,7 +276,7 @@ struct ScratchpadLoadArgs {
 #[tool_router(router = scratchpad_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "Create or replace full scratchpad content and tags at an expected revision. A leading Markdown H1 becomes the canonical scratchpad name and is removed from stored body content; title-section reads, heading outlines, and file export reconstruct it"
+        description = "Create or replace scratchpad content and tags at an expected revision; a leading H1 becomes the name"
     )]
     async fn scratchpad_write(
         &self,
@@ -355,7 +308,9 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Read full content, a heading outline, one section, or a line slice")]
+    #[tool(
+        description = "Read scratchpad content, outline, section, line slice, tail, or comments"
+    )]
     async fn scratchpad_read(
         &self,
         Extension(parts): Extension<Parts>,
@@ -367,46 +322,54 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let service = ScratchpadService::attributed(registry.store(), actor.id);
-        match service.read(
-            project.id,
-            args.scratchpad_id,
-            args.mode.into(),
-            args.section_heading.as_deref(),
-            args.offset.unwrap_or(0),
-            args.limit,
-        ) {
-            Ok(read) => {
-                let mut response = json!({
+        let mut response = match args.mode {
+            ReadMode::Tail => match service.tail(project.id, args.scratchpad_id, args.lines) {
+                Ok(tail) => serde_json::to_value(tail).expect("scratchpad tail serializes"),
+                Err(error) => return scratchpad_failure(error),
+            },
+            mode => match service.read(
+                project.id,
+                args.scratchpad_id,
+                mode.into(),
+                args.section_heading.as_deref(),
+                args.offset.unwrap_or(0),
+                args.limit,
+            ) {
+                Ok(read) => json!({
                     "found": true,
                     "scratchpad": read.scratchpad,
                     "total_lines": read.total_lines,
                     "offset": read.offset,
                     "returned_lines": read.returned_lines,
                     "has_more": read.has_more,
-                });
-                if args.include_comments {
-                    let comments = match service.comment_list(
-                        project.id,
-                        args.scratchpad_id,
-                        args.include_resolved,
-                    ) {
-                        Ok(comments) => comments,
-                        Err(error) => return scratchpad_failure(error),
-                    };
-                    response["comments"] = json!(comments.comments);
-                    response["comment_total_count"] = json!(comments.total_count);
-                    response["unresolved_comment_count"] = json!(comments.unresolved_count);
-                    response["comments_revision"] = json!(comments.comments_revision);
-                }
-                success(response)
-            }
-            Err(error) => scratchpad_failure(error),
+                }),
+                Err(error) => return scratchpad_failure(error),
+            },
+        };
+        if args.include_comments {
+            let comments = match service.comment_list_page(
+                project.id,
+                args.scratchpad_id,
+                args.include_resolved,
+                args.comments_offset.unwrap_or(0),
+                args.comments_limit,
+            ) {
+                Ok(comments) => comments,
+                Err(error) => return scratchpad_failure(error),
+            };
+            response["comments"] = json!(comments.comments);
+            response["comment_total_count"] = json!(comments.total_count);
+            response["unresolved_comment_count"] = json!(comments.unresolved_count);
+            response["comments_revision"] = json!(comments.comments_revision);
+            response["comments_offset"] = json!(comments.offset);
+            response["comments_limit"] = json!(comments.limit);
+            response["comments_has_more"] = json!(comments.has_more);
+            response["comments_next_offset"] = json!(comments.next_offset);
         }
+        success(response)
     }
 
-    #[tool(
-        description = "Create a scratchpad comment owned by the calling agent. Omit quote for a whole-document comment; quotes are limited to 4096 characters, quote-only anchors must match uniquely, explicit offsets use UTF-16 code units, and expected_revision guards stale selections"
-    )]
+    #[tool(description = "Create an owned scratchpad comment with an optional text anchor")]
     async fn scratchpad_comment_create(
         &self,
         Extension(parts): Extension<Parts>,
@@ -437,32 +400,7 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(
-        description = "List a page of scratchpad comments with actor, mutation capabilities, body, quote, current UTF-16 offsets, line range, and anchor state"
-    )]
-    async fn scratchpad_comment_list(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadCommentListArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        match ScratchpadService::attributed(registry.store(), actor.id).comment_list_page(
-            project.id,
-            args.scratchpad_id,
-            args.include_resolved,
-            args.offset.unwrap_or(0),
-            Some(args.limit.unwrap_or(50)),
-        ) {
-            Ok(comments) => success(comments),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(description = "Update the body of a scratchpad comment authored by the calling agent")]
+    #[tool(description = "Update or resolve a scratchpad comment authored by the calling agent")]
     async fn scratchpad_comment_update(
         &self,
         Extension(parts): Extension<Parts>,
@@ -473,31 +411,13 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::attributed(registry.store(), actor.id).comment_update(
+        if args.body.is_none() && args.resolved.is_none() {
+            return failure("invalid_params", "set body, resolved, or both");
+        }
+        match ScratchpadService::attributed(registry.store(), actor.id).comment_update_merged(
             project.id,
             args.comment_id,
             args.body,
-            now_millis(),
-        ) {
-            Ok(comment) => success(comment),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(description = "Resolve or reopen a scratchpad comment authored by the calling agent")]
-    async fn scratchpad_comment_resolve(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadCommentResolveArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        match ScratchpadService::attributed(registry.store(), actor.id).comment_set_resolved(
-            project.id,
-            args.comment_id,
             args.resolved,
             now_millis(),
         ) {
@@ -530,7 +450,7 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Append content without replacing existing scratchpad text")]
+    #[tool(description = "Append content at the end or beneath a markdown heading")]
     async fn scratchpad_append(
         &self,
         Extension(parts): Extension<Parts>,
@@ -542,40 +462,25 @@ impl WorkmanMcp {
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).append(
-            project.id,
-            args.scratchpad_id,
-            args.content,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => revision_receipt(&scratchpad),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(
-        description = "Append under a normalized, case-insensitive markdown heading. Missing headings stay an error unless create_heading=true, which creates the section at the document end; revision-guarded"
-    )]
-    async fn scratchpad_append_section(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadAppendSectionArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label)
-            .append_section_with_create(
+        let service = ScratchpadService::attributed(registry.store(), actor_label);
+        let result = if let Some(heading) = args.heading {
+            service.append_section_with_create(
                 project.id,
                 args.scratchpad_id,
-                &args.heading,
+                &heading,
                 args.content,
                 args.create_heading,
                 args.expected_revision,
-            ) {
+            )
+        } else {
+            service.append(
+                project.id,
+                args.scratchpad_id,
+                args.content,
+                args.expected_revision,
+            )
+        };
+        match result {
             Ok(scratchpad) => revision_receipt(&scratchpad),
             Err(error) => scratchpad_failure(error),
         }
@@ -632,27 +537,6 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Return the last N scratchpad lines with revision metadata")]
-    async fn scratchpad_tail(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadTailArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        match ScratchpadService::new(registry.store()).tail(
-            project.id,
-            args.scratchpad_id,
-            args.lines,
-        ) {
-            Ok(result) => success(result),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
     #[tool(
         description = "List scratchpad metadata with query/tag filters, matched fields, and snippets"
     )]
@@ -666,7 +550,8 @@ impl WorkmanMcp {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
-        match ScratchpadService::new(registry.store()).list(
+        let service = ScratchpadService::new(registry.store());
+        let page = match service.list(
             project.id,
             ScratchpadListQuery {
                 query: args.query,
@@ -676,119 +561,66 @@ impl WorkmanMcp {
                 limit: args.limit,
             },
         ) {
-            Ok(page) => success(page),
-            Err(error) => scratchpad_failure(error),
+            Ok(page) => page,
+            Err(error) => return scratchpad_failure(error),
+        };
+        if args.include_tags {
+            match service.tags_list(project.id) {
+                Ok(tags) => {
+                    let mut result =
+                        serde_json::to_value(page).expect("scratchpad page serializes");
+                    result
+                        .as_object_mut()
+                        .expect("scratchpad page is an object")
+                        .insert("tags".into(), json!(tags));
+                    success(result)
+                }
+                Err(error) => scratchpad_failure(error),
+            }
+        } else {
+            success(page)
         }
     }
 
-    #[tool(description = "Rename a scratchpad at an expected revision")]
-    async fn scratchpad_rename(
+    #[tool(
+        description = "Update scratchpad name, tags, or archive state; expected_revision is required only for rename"
+    )]
+    async fn scratchpad_update(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadRenameArgs>,
+        Parameters(args): Parameters<ScratchpadUpdateArgs>,
     ) -> CallToolResult {
+        if args.name.is_none()
+            && args.add_tags.is_none()
+            && args.remove_tags.is_none()
+            && args.archived.is_none()
+        {
+            return failure(
+                "invalid_params",
+                "set name, add_tags, remove_tags, or archived",
+            );
+        }
+        if args.archived == Some(false) {
+            return failure("invalid_params", "archived currently accepts only true");
+        }
         let mut registry = self.registry.lock().await;
         let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
             Ok(scoped) => scoped,
             Err(error) => return failure("project_scope_error", error),
         };
         let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).rename(
+        match ScratchpadService::attributed(registry.store(), actor_label).update_metadata(
             project.id,
             args.scratchpad_id,
-            args.name,
+            ScratchpadMetadataUpdate {
+                name: args.name,
+                add_tags: args.add_tags.unwrap_or_default(),
+                remove_tags: args.remove_tags.unwrap_or_default(),
+                archived: args.archived,
+            },
             args.expected_revision,
         ) {
-            Ok(scratchpad) => success(json!({
-                "project_id": scratchpad.project_id,
-                "scratchpad_id": scratchpad.id,
-                "revision": scratchpad.revision,
-                "name": scratchpad.name,
-            })),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(description = "Add multiple normalized tags in one revision bump")]
-    async fn scratchpad_add_tags(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadTagsArgs>,
-    ) -> CallToolResult {
-        self.scratchpad_tag_change(parts, args, true).await
-    }
-
-    #[tool(description = "Remove multiple normalized tags in one revision bump")]
-    async fn scratchpad_remove_tags(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadTagsArgs>,
-    ) -> CallToolResult {
-        self.scratchpad_tag_change(parts, args, false).await
-    }
-
-    #[tool(description = "List distinct tags from active scratchpads in a project")]
-    async fn scratchpad_tags_list(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        match ScratchpadService::new(registry.store()).tags_list(project.id) {
-            Ok(tags) => success(json!({ "project_id": project.id, "tags": tags })),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(description = "Archive a scratchpad so normal lists hide it")]
-    async fn scratchpad_archive(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadArchiveArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).archive(
-            project.id,
-            args.scratchpad_id,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => success(json!({
-                "project_id": scratchpad.project_id,
-                "scratchpad_id": scratchpad.id,
-                "revision": scratchpad.revision,
-                "archived": scratchpad.archived,
-            })),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(description = "Clear scratchpad content at an expected revision")]
-    async fn scratchpad_clear(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadRevisionArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).clear(
-            project.id,
-            args.scratchpad_id,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => revision_receipt(&scratchpad),
+            Ok(scratchpad) => success(scratchpad),
             Err(error) => scratchpad_failure(error),
         }
     }
@@ -813,40 +645,6 @@ impl WorkmanMcp {
                 "project_id": project.id,
                 "scratchpad_id": args.scratchpad_id,
                 "deleted": true,
-            })),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
-
-    #[tool(
-        description = "Move a scratchpad to another project at an expected revision (cross-project transfer is unavailable to agent identities)"
-    )]
-    async fn scratchpad_transfer(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ScratchpadTransferArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        if let Err(error) = super::enforce_project_access(&registry, &actor, args.target_project_id)
-        {
-            return failure("project_scope_error", error);
-        }
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        match ScratchpadService::attributed(registry.store(), actor_label).transfer(
-            project.id,
-            args.scratchpad_id,
-            args.target_project_id,
-            args.expected_revision,
-        ) {
-            Ok(scratchpad) => success(json!({
-                "project_id": project.id,
-                "target_project_id": scratchpad.project_id,
-                "scratchpad_id": scratchpad.id,
-                "revision": scratchpad.revision,
             })),
             Err(error) => scratchpad_failure(error),
         }
@@ -879,9 +677,7 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(
-        description = "Load UTF-8 text from a project-relative path. A leading Markdown H1 becomes the canonical scratchpad name and is removed from stored body content; title-section reads, heading outlines, and file export reconstruct it"
-    )]
+    #[tool(description = "Load a scratchpad from a project-relative UTF-8 file")]
     async fn scratchpad_load_from_file(
         &self,
         Extension(parts): Extension<Parts>,
@@ -911,40 +707,6 @@ impl WorkmanMcp {
             Err(error) => scratchpad_failure(error),
         }
     }
-
-    async fn scratchpad_tag_change(
-        &self,
-        parts: Parts,
-        args: ScratchpadTagsArgs,
-        add: bool,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, actor) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let actor_label = registry.store().actor_display_label(&actor.id);
-        let service = ScratchpadService::attributed(registry.store(), actor_label);
-        let result = if add {
-            service.add_tags(
-                project.id,
-                args.scratchpad_id,
-                args.tags,
-                args.expected_revision,
-            )
-        } else {
-            service.remove_tags(
-                project.id,
-                args.scratchpad_id,
-                args.tags,
-                args.expected_revision,
-            )
-        };
-        match result {
-            Ok(scratchpad) => revision_receipt(&scratchpad),
-            Err(error) => scratchpad_failure(error),
-        }
-    }
 }
 
 fn revision_receipt(scratchpad: &workman_core::Scratchpad) -> CallToolResult {
@@ -957,8 +719,4 @@ fn revision_receipt(scratchpad: &workman_core::Scratchpad) -> CallToolResult {
 
 fn scratchpad_failure(error: ScratchpadServiceError) -> CallToolResult {
     failure(error.code(), error.to_string())
-}
-
-const fn default_true() -> bool {
-    true
 }

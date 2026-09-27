@@ -234,7 +234,8 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         .expect("timer_set tool is present");
     let timer_set_description = timer_set_tool.description.as_deref().unwrap_or_default();
     assert!(timer_set_description.contains("one-shot or repeating"));
-    assert!(timer_set_description.contains("delivers to you"));
+    assert!(timer_set_description.contains("to an agent (default: the caller)"));
+    assert!(!timer_set_description.contains("to the user"));
     assert!(timer_set_description.contains("do not poll while waiting"));
     assert!(
         timer_set_tool.input_schema["properties"]["body"]["description"]
@@ -244,33 +245,25 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
                     && description.contains("Keep it on one line")
             })
     );
-    for name in ["timer_fire_when_idle_any", "timer_fire_when_idle_all"] {
-        let tool = advertised_tools
-            .iter()
-            .find(|tool| tool.name == name)
-            .unwrap_or_else(|| panic!("{name} tool is present"));
-        let description = tool.description.as_deref().unwrap_or_default();
-        assert!(description.contains("no-poll wake-up"));
-        assert!(description.contains("end the current turn"));
-        assert!(description.contains("fresh user turn"));
-        assert!(description.contains("only when this timer delivers back to you"));
-        assert!(description.contains("do not poll while waiting"));
-        if name == "timer_fire_when_idle_any" {
-            assert!(description.contains("fresh non-idle-to-idle transition"));
-        } else {
-            assert!(description.contains("idle at arm time or later reaches idle"));
-        }
-        assert!(
-            tool.input_schema["properties"]["body"]["description"]
-                .as_str()
-                .is_some_and(|description| {
-                    description.contains("fresh user turn")
-                        && description.contains("submitted unmodified")
-                        && description.contains("Keep it on one line")
-                        && description.contains("instead of polling")
-                })
-        );
-    }
+    let idle_tool = advertised_tools
+        .iter()
+        .find(|tool| tool.name == "timer_fire_when_idle")
+        .expect("timer_fire_when_idle tool is present");
+    assert!(idle_tool.description.as_deref().is_some_and(|description| {
+        description.contains("unreported completion since the caller's last input")
+            && description.contains("fresh busy-to-idle transition")
+            && description.contains("counting agents already idle")
+            && description.contains("fresh user turn")
+            && description.contains("end the turn and do not poll")
+    }));
+    assert!(
+        idle_tool.input_schema["properties"]["wait_for"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("first agent with an unreported completion")
+                    && description.contains("counts ones already idle")
+            })
+    );
 
     let delayed = call(
         &owner,
@@ -292,10 +285,20 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
     )
     .await;
     let paused_id = paused["timer"]["id"].as_i64().unwrap();
-    call(&owner, "timer_pause", json!({ "timer_id": paused_id })).await;
+    call(
+        &owner,
+        "timer_pause",
+        json!({ "timer_id": paused_id, "paused": true }),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(230)).await;
     assert!(!output_contains(&registry, DELIVERY_ID, "pause-resume wake").await?);
-    call(&owner, "timer_resume", json!({ "timer_id": paused_id })).await;
+    call(
+        &owner,
+        "timer_pause",
+        json!({ "timer_id": paused_id, "paused": false }),
+    )
+    .await;
     wait_for_output(&registry, DELIVERY_ID, "received:[pause-resume wake]").await?;
 
     let cancelled = call(
@@ -311,11 +314,12 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
 
     let already = call(
         &owner,
-        "timer_fire_when_idle_all",
+        "timer_fire_when_idle",
         json!({
             "processes": ["worker"],
             "max_wait_ms": 2_000,
             "body": "already idle",
+            "wait_for": "all",
         }),
     )
     .await;
@@ -331,11 +335,12 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
 
     let any = call(
         &owner,
-        "timer_fire_when_idle_any",
+        "timer_fire_when_idle",
         json!({
             "processes": [{ "process_name": "worker" }],
             "max_wait_ms": 15_000,
             "body": "fresh idle wake",
+            "wait_for": "any",
         }),
     )
     .await;
@@ -388,18 +393,68 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
 
     call(
         &owner,
-        "timer_fire_when_idle_any",
+        "send_input",
+        json!({ "process_id": WORKER_ID, "input": "go" }),
+    )
+    .await;
+    wait_for_state(&registry, WORKER_ID, AttentionState::Working).await?;
+    wait_for_state(&registry, WORKER_ID, AttentionState::Idle).await?;
+    let raced_completion = call(
+        &owner,
+        "timer_fire_when_idle",
+        json!({
+            "processes": [WORKER_ID],
+            "max_wait_ms": 15_000,
+            "body": "unseen completion wake",
+            "wait_for": "any",
+        }),
+    )
+    .await;
+    assert_eq!(raced_completion["already_satisfied"], true);
+    assert_eq!(raced_completion["delivered_immediately"], true);
+    assert_eq!(raced_completion["already_idle"], json!([WORKER_ID]));
+    assert_eq!(raced_completion["satisfied_by"][0]["process_id"], WORKER_ID);
+    assert_eq!(
+        raced_completion["satisfied_by"][0]["reason"],
+        "unseen_completion"
+    );
+    assert!(
+        raced_completion["satisfied_by"][0]["completed_at_ms"]
+            .as_i64()
+            .is_some()
+    );
+    wait_for_output(&registry, DELIVERY_ID, "received:[unseen completion wake]").await?;
+
+    let timeout = call(
+        &owner,
+        "timer_fire_when_idle",
         json!({
             "processes": [STALLED_ID],
             "max_wait_ms": 60,
             "body": "timeout wake",
+            "wait_for": "any",
         }),
     )
     .await;
+    let timeout_timer_id = timeout["timer"]["id"].as_i64().unwrap();
     wait_for_output(&registry, DELIVERY_ID, "received:[timeout wake]").await?;
 
     let owner_timers = call(&owner, "timer_list", json!({ "limit": 100 })).await;
     assert!(owner_timers["timers"].as_array().unwrap().len() >= 4);
+    let timeout_view = owner_timers["timers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|timer| timer["id"] == timeout_timer_id)
+        .expect("deadline timer remains visible");
+    assert_eq!(timeout_view["fire_reason"], "deadline");
+    assert!(
+        timeout_view["satisfied_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|satisfaction| satisfaction["reason"] == "deadline")
+    );
 
     let reconnect_timer = call(
         &owner,

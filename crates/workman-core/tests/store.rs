@@ -16,6 +16,7 @@ use workman_core::{
 fn fresh_database_migrates_to_current_schema() {
     let mut store = Store::open_in_memory().expect("open store");
 
+    assert_eq!(LATEST_SCHEMA_VERSION, 43);
     assert_eq!(
         store.schema_version().expect("read schema version"),
         LATEST_SCHEMA_VERSION
@@ -57,8 +58,13 @@ fn fresh_database_migrates_to_current_schema() {
             "locks",
             "notifications",
             "process_agent_sessions",
+            "process_completion_inputs",
+            "process_completion_observations",
+            "process_completion_reports",
+            "process_completions",
             "process_idle_watches",
             "process_mcp_tokens",
+            "process_spawner_idle_notifications",
             "processes",
             "profile_projects",
             "profiles",
@@ -87,6 +93,19 @@ fn fresh_database_migrates_to_current_schema() {
         ]
     );
     drop(statement);
+    for table in ["agent_tools", "agent_templates", "processes"] {
+        let profile_columns: i64 = store
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'mcp_tools_profile'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect migrated columns");
+        assert_eq!(profile_columns, 0, "{table} retained the profile column");
+    }
 
     // Applying migrations more than once is a no-op.
     store.migrate().expect("re-run migrations");

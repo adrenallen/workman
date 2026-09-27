@@ -13,7 +13,7 @@ use std::{
 use axum::http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, ClientInfo},
+    model::{CallToolRequestParams, CallToolResult, ClientInfo},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -45,6 +45,21 @@ async fn call(
     result
         .structured_content
         .unwrap_or_else(|| panic!("{name} returned no structured content"))
+}
+
+async fn rejected(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    name: &'static str,
+    arguments_value: Value,
+) -> Value {
+    let result: CallToolResult = client
+        .call_tool(CallToolRequestParams::new(name).with_arguments(arguments(arguments_value)))
+        .await
+        .unwrap_or_else(|error| panic!("{name} failed: {error}"));
+    assert_eq!(result.is_error, Some(true), "{name} unexpectedly succeeded");
+    result
+        .structured_content
+        .expect("structured MCP error response")
 }
 
 async fn wait_for_context(path: &Path) -> Result<(i64, String), Box<dyn Error>> {
@@ -183,10 +198,12 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
             "agent_tool_id": 99,
             "name": "first-child",
             "extra_args": [first_child_context],
+            "notify_spawner_on_idle": true,
         }),
     )
     .await;
     let first_child_id = first_child_spawn["process_id"].as_i64().unwrap();
+    assert_eq!(first_child_spawn["notify_spawner_on_idle"], true);
     let (injected_child_id, first_child_token) = wait_for_context(&first_child_context).await?;
     assert_eq!(injected_child_id, first_child_id);
 
@@ -199,6 +216,28 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
             .custom_headers(first_child_headers),
     );
     let first_child = ClientInfo::default().serve(first_child_transport).await?;
+
+    let first_child_status = call(
+        &parent,
+        "get_process_status",
+        json!({ "process_id": first_child_id }),
+    )
+    .await;
+    assert_eq!(first_child_status["notify_spawner_on_idle"], true);
+    let toggled_off = call(
+        &parent,
+        "update_process",
+        json!({ "process_id": first_child_id, "notify_spawner_on_idle": false }),
+    )
+    .await;
+    assert_eq!(toggled_off["notify_spawner_on_idle"], false);
+    let toggled_on = call(
+        &parent,
+        "update_process",
+        json!({ "process_id": first_child_id, "notify_spawner_on_idle": true }),
+    )
+    .await;
+    assert_eq!(toggled_on["notify_spawner_on_idle"], true);
 
     let grandchild_context = temp.path().join("grandchild-context.txt");
     let grandchild_spawn = call(
@@ -225,11 +264,29 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     )
     .await;
     let second_child_id = second_child_spawn["process_id"].as_i64().unwrap();
+    let error = rejected(
+        &first_child,
+        "update_process",
+        json!({
+            "process_id": second_child_id,
+            "new_name": "must-not-be-renamed",
+            "notify_spawner_on_idle": true
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "not_process_spawner");
+    let unchanged = call(
+        &parent,
+        "get_process_status",
+        json!({ "process_id": second_child_id }),
+    )
+    .await;
+    assert_eq!(unchanged["name"], "second-child");
 
     let terminal_spawn = call(
         &parent,
-        "spawn_process",
-        json!({ "kind": "terminal", "name": "child-terminal" }),
+        "spawn_terminal",
+        json!({ "name": "child-terminal" }),
     )
     .await;
     let terminal_id = terminal_spawn["process_id"].as_i64().unwrap();
@@ -302,6 +359,8 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
         .unwrap();
     assert_eq!(parent_view["spawned_by_process_id"], 1);
     assert_eq!(first_child_view["spawned_by_process_id"], parent_id);
+    assert_eq!(first_child_view["notify_spawner_on_idle"], true);
+    assert_eq!(second_child_view["notify_spawner_on_idle"], false);
     assert_eq!(second_child_view["spawned_by_process_id"], parent_id);
     assert_eq!(grandchild_view["spawned_by_process_id"], first_child_id);
     assert_eq!(terminal_view["spawned_by_process_id"], parent_id);
@@ -325,8 +384,8 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     // The legacy false field is deliberately ignored: cascade is the only behavior.
     call(
         &root,
-        "stop_process",
-        json!({ "project_id": 7, "process_id": parent_id, "cascade": false }),
+        "process_control",
+        json!({ "project_id": 7, "process_id": parent_id, "action": "stop" }),
     )
     .await;
     let after_cascade = call(&root, "list_processes", json!({ "project_id": 7 })).await;
@@ -385,8 +444,8 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
     ] {
         call(
             &root,
-            "start_process",
-            json!({ "project_id": 7, "process_id": process_id }),
+            "process_control",
+            json!({ "project_id": 7, "process_id": process_id, "action": "start" }),
         )
         .await;
     }

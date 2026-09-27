@@ -252,7 +252,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
             .auth_header(discovery.token.clone()),
     );
     let mcp = ClientInfo::default().serve(transport).await?;
-    let mcp_health = mcp_call(&mcp, "agent_tools_health", json!({})).await;
+    let mcp_health = mcp_call(&mcp, "agent_tool_check", json!({})).await;
     assert_eq!(mcp_health["summary"], "7 of 8 agent tools are MCP-ready");
     assert!(mcp_health["tools"][0]["found_on_path"].is_boolean());
     assert!(mcp_health["tools"][0]["config_path"].is_string());

@@ -14,6 +14,7 @@ pub mod recorded_feedback;
 /// Revision-guarded project scratchpads.
 pub mod scratchpads;
 pub mod shell;
+mod spawner_idle_notifications;
 pub mod store;
 pub mod terminal;
 pub mod terminal_checkpoint;
@@ -33,6 +34,7 @@ pub use paths::*;
 pub use project_folders::*;
 pub use recorded_feedback::*;
 pub use scratchpads::*;
+pub use spawner_idle_notifications::*;
 pub use store::{LATEST_SCHEMA_VERSION, Store, StoreError, StoreResult};
 pub use todo_claims::*;
 pub use todos::*;

@@ -177,8 +177,8 @@ The CLI exposes the same policy through `wrk project remove`; `wrk worktree remo
 compatibility alias. Use `--delete-local` for disk deletion. Dirty or unpublished Git state and a
 primary checkout with dependent linked worktrees require `--force --confirm TEXT`. Linked worktrees
 use local `git worktree remove` and metadata pruning while preserving their local branch. Removal
-never pushes, fetches, prunes remote refs, or deletes a remote branch. MCP callers use
-`delete_project` with `delete_from_disk`, `force_dirty`, and `confirm_branch` for the same behavior.
+never pushes, fetches, prunes remote refs, or deletes a remote branch. Project and worktree
+removal is unavailable through MCP; use the authenticated desktop or CLI control path.
 
 ## Scratchpad Markdown titles
 

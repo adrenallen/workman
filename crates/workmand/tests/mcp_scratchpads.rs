@@ -195,19 +195,12 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let cross_project = connect(endpoint, "scratchpad-cross-project-token".into()).await?;
 
     let tools = first.list_all_tools().await?;
-    let append_section_tool = tools
+    let append_tool = tools
         .iter()
-        .find(|tool| tool.name == "scratchpad_append_section")
-        .expect("scratchpad_append_section tool is registered");
+        .find(|tool| tool.name == "scratchpad_append")
+        .expect("scratchpad_append tool is registered");
     assert!(
-        append_section_tool
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("create_heading=true")
-    );
-    assert!(
-        append_section_tool
+        append_tool
             .input_schema
             .get("properties")
             .and_then(Value::as_object)
@@ -252,25 +245,15 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
         "scratchpad_write",
         "scratchpad_read",
         "scratchpad_append",
-        "scratchpad_append_section",
         "scratchpad_edit",
         "scratchpad_find",
-        "scratchpad_tail",
         "scratchpad_list",
-        "scratchpad_rename",
-        "scratchpad_add_tags",
-        "scratchpad_remove_tags",
-        "scratchpad_tags_list",
-        "scratchpad_archive",
-        "scratchpad_clear",
+        "scratchpad_update",
         "scratchpad_delete",
-        "scratchpad_transfer",
         "scratchpad_save_to_file",
         "scratchpad_load_from_file",
         "scratchpad_comment_create",
-        "scratchpad_comment_list",
         "scratchpad_comment_update",
-        "scratchpad_comment_resolve",
         "scratchpad_comment_delete",
     ] {
         assert!(
@@ -286,7 +269,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             "name": "ignored by H1",
             "content": "# Shared Plan\n\nIntro\n\n## Next   Steps\n\nAlpha\nBeta\n\n### Detail\n\nGamma",
             "tags": ["Planning", "MCP", "planning"],
-            "actor": "Garrett"
+            "actor": "forged-user-label"
         }),
     )
     .await;
@@ -328,8 +311,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             json!({ "comment_id": user_comment_id, "body": "agent rewrite" }),
         ),
         (
-            "scratchpad_comment_resolve",
-            json!({ "comment_id": user_comment_id }),
+            "scratchpad_comment_update",
+            json!({ "comment_id": user_comment_id, "resolved": true }),
         ),
         (
             "scratchpad_comment_delete",
@@ -362,8 +345,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             json!({ "comment_id": comment_id, "body": "not mine" }),
         ),
         (
-            "scratchpad_comment_resolve",
-            json!({ "comment_id": comment_id }),
+            "scratchpad_comment_update",
+            json!({ "comment_id": comment_id, "resolved": true }),
         ),
         (
             "scratchpad_comment_delete",
@@ -379,8 +362,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
             json!({ "comment_id": comment_id, "body": "cross project" }),
         ),
         (
-            "scratchpad_comment_resolve",
-            json!({ "comment_id": comment_id }),
+            "scratchpad_comment_update",
+            json!({ "comment_id": comment_id, "resolved": true }),
         ),
         (
             "scratchpad_comment_delete",
@@ -418,8 +401,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_eq!(updated_comment["body"], "Concrete now.");
     let resolved_comment = call(
         &first,
-        "scratchpad_comment_resolve",
-        json!({ "comment_id": comment_id }),
+        "scratchpad_comment_update",
+        json!({ "comment_id": comment_id, "resolved": true }),
     )
     .await;
     assert_eq!(resolved_comment["resolved"], true);
@@ -452,20 +435,20 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     );
     let unresolved_comments = call(
         &first,
-        "scratchpad_comment_list",
-        json!({ "scratchpad_id": scratchpad_id }),
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id, "include_comments": true }),
     )
     .await;
     assert_eq!(unresolved_comments["comments"].as_array().unwrap().len(), 1);
     let all_comments = call(
         &first,
-        "scratchpad_comment_list",
-        json!({ "scratchpad_id": scratchpad_id, "include_resolved": true }),
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id, "include_comments": true, "include_resolved": true }),
     )
     .await;
     assert_eq!(all_comments["comments"].as_array().unwrap().len(), 2);
-    assert_eq!(all_comments["offset"], 0);
-    assert_eq!(all_comments["has_more"], false);
+    assert_eq!(all_comments["comments_offset"], 0);
+    assert_eq!(all_comments["comments_has_more"], false);
     let missing_quote = invoke(
         &first,
         "scratchpad_comment_create",
@@ -600,7 +583,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
 
     let appended = call(
         &first,
-        "scratchpad_append_section",
+        "scratchpad_append",
         json!({
             "scratchpad_id": scratchpad_id,
             "heading": " WORK ",
@@ -661,8 +644,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_eq!(found["matches"][0]["kind"], "content");
     let tail = call(
         &first,
-        "scratchpad_tail",
-        json!({ "scratchpad_id": scratchpad_id, "lines": 2 }),
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id, "mode": "tail", "lines": 2 }),
     )
     .await;
     assert_eq!(tail["requested_lines"], 2);
@@ -686,7 +669,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
 
     let renamed = call(
         &first,
-        "scratchpad_rename",
+        "scratchpad_update",
         json!({
             "scratchpad_id": scratchpad_id,
             "name": "Delivery Plan",
@@ -697,32 +680,54 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_eq!(renamed["revision"], 8);
     let tagged = call(
         &first,
-        "scratchpad_add_tags",
+        "scratchpad_update",
         json!({
             "scratchpad_id": scratchpad_id,
-            "tags": ["Shared", "MCP"],
-            "expected_revision": 8
+            "add_tags": ["Shared", "MCP"]
         }),
     )
     .await;
     assert_eq!(tagged["revision"], 9);
     let tagged = call(
         &first,
-        "scratchpad_remove_tags",
+        "scratchpad_update",
         json!({
             "scratchpad_id": scratchpad_id,
-            "tags": ["planning"],
-            "expected_revision": 9
+            "remove_tags": ["planning"]
         }),
     )
     .await;
     assert_eq!(tagged["revision"], 10);
-    let tags = call(&first, "scratchpad_tags_list", json!({})).await;
+    let tags = call(&first, "scratchpad_list", json!({ "include_tags": true })).await;
     assert_eq!(tags["tags"], json!(["mcp", "shared"]));
+
+    let rejected_metadata = invoke(
+        &first,
+        "scratchpad_update",
+        json!({
+            "scratchpad_id": scratchpad_id,
+            "name": "This name must roll back",
+            "add_tags": [""],
+            "expected_revision": 10
+        }),
+    )
+    .await;
+    assert_error_code(&rejected_metadata, "invalid_scratchpad_input");
+    let after_rejected_metadata = call(
+        &first,
+        "scratchpad_read",
+        json!({ "scratchpad_id": scratchpad_id }),
+    )
+    .await;
+    assert_eq!(
+        after_rejected_metadata["scratchpad"]["name"],
+        "Delivery Plan"
+    );
+    assert_eq!(after_rejected_metadata["scratchpad"]["revision"], 10);
 
     let missing_strict = invoke(
         &first,
-        "scratchpad_append_section",
+        "scratchpad_append",
         json!({
             "scratchpad_id": scratchpad_id,
             "heading": "Integration Summary",
@@ -734,7 +739,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_error_code(&missing_strict, "scratchpad_heading_not_found");
     let stale_create = invoke(
         &first,
-        "scratchpad_append_section",
+        "scratchpad_append",
         json!({
             "scratchpad_id": scratchpad_id,
             "heading": "Integration Summary",
@@ -747,7 +752,7 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     assert_error_code(&stale_create, "scratchpad_revision_conflict");
     let created_section = call(
         &first,
-        "scratchpad_append_section",
+        "scratchpad_append",
         json!({
             "scratchpad_id": scratchpad_id,
             "heading": "Integration Summary",
@@ -815,8 +820,8 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
 
     let archived = call(
         &first,
-        "scratchpad_archive",
-        json!({ "scratchpad_id": scratchpad_id, "expected_revision": 11 }),
+        "scratchpad_update",
+        json!({ "scratchpad_id": scratchpad_id, "archived": true }),
     )
     .await;
     assert_eq!(archived["revision"], 12);
@@ -824,22 +829,13 @@ async fn rmcp_scratchpads_reject_stale_writes_and_contain_relative_files()
     let listed = call(&first, "scratchpad_list", json!({})).await;
     assert_eq!(listed["total_count"], 1, "archived scratchpad is hidden");
 
-    let transferred = invoke(
-        &first,
-        "scratchpad_transfer",
-        json!({
-            "scratchpad_id": imported_id,
-            "target_project_id": 2,
-            "expected_revision": 1
-        }),
-    )
-    .await;
-    assert_error_code(&transferred, "project_scope_error");
     let cleared = call(
         &first,
-        "scratchpad_clear",
+        "scratchpad_write",
         json!({
             "scratchpad_id": imported_id,
+            "name": "Imported Title",
+            "content": "",
             "expected_revision": 1
         }),
     )

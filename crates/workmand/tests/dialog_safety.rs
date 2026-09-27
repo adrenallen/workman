@@ -287,9 +287,7 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
     )
     .await;
     let process_id = spawned["process_id"].as_i64().unwrap();
-    let preamble = spawned["agent_instructions"].as_str().unwrap();
-    assert!(preamble.contains("shared notes, plans, briefs, and hand-offs"));
-    assert!(preamble.contains("read it back with scratchpad_read or todo_get"));
+    assert!(spawned.get("agent_instructions").is_none());
     let status = call(
         &client,
         "get_process_status",
@@ -489,9 +487,7 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
     )
     .await;
     let process_id = spawned["process_id"].as_i64().unwrap();
-    let preamble = spawned["agent_instructions"].as_str().unwrap();
-    assert!(preamble.contains("shared notes, plans, briefs, and hand-offs"));
-    assert!(preamble.contains("read it back with scratchpad_read or todo_get"));
+    assert!(spawned.get("agent_instructions").is_none());
     let status = call(
         &client,
         "get_process_status",
@@ -549,11 +545,12 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
     );
     let immediate = call(
         &timer_client,
-        "timer_fire_when_idle_all",
+        "timer_fire_when_idle",
         json!({
             "processes": [process_id],
             "max_wait_ms": 30_000,
-            "body": body
+            "body": body,
+            "wait_for": "all"
         }),
     )
     .await;

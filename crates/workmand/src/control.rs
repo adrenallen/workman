@@ -651,6 +651,7 @@ async fn dispatch(
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,
+                false,
             )
             .await
             .map(json_value)
@@ -1435,11 +1436,16 @@ async fn dispatch(
                     .pending_dialog(params.process_id)
                     .map_err(registry_error)?
             {
+                let guidance = if dialog.classification == "question_dialog" {
+                    "answer with raw terminal bytes for a number, arrow key, or Enter; do not use forced text"
+                } else {
+                    "pass force=true to answer it intentionally"
+                };
                 return Err((
                     "dialog_pending",
                     format!(
-                        "{} is awaiting a dialog response; pass force=true to answer it intentionally.\n\n{}",
-                        dialog.classification, dialog.rendered
+                        "{} is awaiting a dialog response; {guidance}.\n\n{}",
+                        dialog.classification, dialog.rendered,
                     ),
                 ));
             }

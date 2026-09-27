@@ -152,25 +152,16 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
         .collect();
     for name in [
         "todo_create",
-        "todo_assign",
         "todo_get",
         "todo_update",
         "todo_delete",
         "todo_list",
-        "todo_tags_list",
-        "todo_add_tag",
-        "todo_remove_tag",
-        "todo_set_blockers",
-        "todo_add_blocker",
-        "todo_remove_blocker",
         "todo_comment_create",
         "todo_comment_update",
         "todo_comment_delete",
-        "todo_comment_list",
         "todo_lock",
         "todo_unlock",
         "todo_complete",
-        "todo_transfer",
     ] {
         assert!(
             tool_names.iter().any(|candidate| candidate == name),
@@ -182,7 +173,7 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
         handoff_help["text"]
             .as_str()
             .unwrap()
-            .contains("todo_assign")
+            .contains("todo_update")
     );
     assert!(handoff_help["text"].as_str().unwrap().contains("@user"));
 
@@ -194,7 +185,7 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
             "body": "Concurrency acceptance test",
             "priority": "high",
             "tags": ["mcp", "coordination"],
-            "actor": "Garrett"
+            "actor": "forged-user-label"
         }),
     )
     .await;
@@ -206,7 +197,7 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     let todo_id = created["todo_id"].as_i64().unwrap();
     let assigned = call(
         &first,
-        "todo_assign",
+        "todo_update",
         json!({ "todo_id": todo_id, "assignee": "user", "response_mode": "rich" }),
     )
     .await;
@@ -223,6 +214,75 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     .await;
     assert_eq!(rich_update["id"], todo_id);
     assert_eq!(rich_update["body"], "Concurrency acceptance test");
+    let blocker_id = call(
+        &first,
+        "todo_create",
+        json!({ "title": "Merged blocker operations" }),
+    )
+    .await["todo_id"]
+        .as_i64()
+        .unwrap();
+    let merged_update = call(
+        &first,
+        "todo_update",
+        json!({
+            "todo_id": todo_id,
+            "add_tags": ["merged"],
+            "remove_tags": ["mcp"],
+            "blocker_ids": [blocker_id],
+            "response_mode": "rich"
+        }),
+    )
+    .await;
+    assert!(
+        merged_update["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("merged"))
+    );
+    assert!(
+        !merged_update["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp"))
+    );
+    assert_eq!(merged_update["blocker_ids"], json!([blocker_id]));
+    let merged_update = call(
+        &first,
+        "todo_update",
+        json!({
+            "todo_id": todo_id,
+            "remove_blocker_ids": [blocker_id],
+            "response_mode": "rich"
+        }),
+    )
+    .await;
+    assert_eq!(merged_update["blocker_ids"], json!([]));
+
+    let failed_update = invoke(
+        &first,
+        "todo_update",
+        json!({
+            "todo_id": todo_id,
+            "title": "This title must roll back",
+            "add_tags": ["must-roll-back"],
+            "add_blocker_ids": [999_999]
+        }),
+    )
+    .await;
+    assert_eq!(failed_update.is_error, Some(true));
+    let after_failed_update = call(&first, "todo_get", json!({ "todo_id": todo_id })).await;
+    assert_eq!(
+        after_failed_update["todo"]["title"],
+        "Claim exactly once through MCP"
+    );
+    assert!(
+        !after_failed_update["todo"]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("must-roll-back")),
+        "a rejected merged mutation must not persist earlier subfields"
+    );
 
     let first_lock = invoke(
         &first,
@@ -286,7 +346,7 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
         json!({
             "todo_id": todo_id,
             "body": "@user, lease verified",
-            "actor": "Garrett"
+            "actor": "forged-user-label"
         }),
     )
     .await;
@@ -299,11 +359,11 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     .await;
     let comments = call(
         &first,
-        "todo_comment_list",
-        json!({ "todo_id": todo_id, "offset": 0, "limit": 10 }),
+        "todo_get",
+        json!({ "todo_id": todo_id, "include_comments": true, "comments_offset": 0, "comments_limit": 10 }),
     )
     .await;
-    assert_eq!(comments["total_count"], 1);
+    assert_eq!(comments["comments_total_count"], 1);
     {
         let registry = registry_handle.lock().await;
         let notifications = registry.store().list_notifications(None, 20)?;
@@ -395,17 +455,12 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     .await;
     assert_eq!(listed["total_count"], 1);
     assert_eq!(listed["has_more"], false);
-
-    let transfer = invoke(
-        &first,
-        "todo_transfer",
-        json!({ "todo_id": todo_id, "target_project_id": 2 }),
-    )
-    .await;
-    assert_eq!(transfer.is_error, Some(true));
-    assert_eq!(
-        transfer.structured_content.unwrap()["code"],
-        "project_scope_error"
+    let tag_catalog = call(&first, "todo_list", json!({ "include_tags": true })).await;
+    assert!(
+        tag_catalog["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("merged"))
     );
 
     call(
@@ -415,6 +470,7 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
     )
     .await;
     call(&first, "todo_delete", json!({ "todo_id": todo_id })).await;
+    call(&first, "todo_delete", json!({ "todo_id": blocker_id })).await;
 
     let _ = first.cancel().await;
     let _ = second.cancel().await;

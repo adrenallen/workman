@@ -23,6 +23,7 @@ use workman_core::shell::{AgentShellMode, ProfileTerminalSettings};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
 const ARCHIVE_VERSION: u32 = 4;
+const MAX_READABLE_ARCHIVE_VERSION: u32 = 5;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -88,6 +89,8 @@ struct ArchiveAgentTool {
     enabled: bool,
     resume_args: Option<String>,
     continue_args: Option<String>,
+    #[serde(default, skip_serializing, rename = "mcp_tools_profile")]
+    _legacy_mcp_tools_profile: Option<String>,
     icon_png_base64: Option<String>,
 }
 
@@ -366,6 +369,7 @@ pub(crate) fn export(
             enabled: tool.enabled,
             resume_args: tool.resume_args,
             continue_args: tool.continue_args,
+            _legacy_mcp_tools_profile: None,
             icon_png_base64,
         });
     }
@@ -409,7 +413,9 @@ pub(crate) fn import(
     let bytes = fs::read(path).map_err(|error| ("profile_import_error", error.to_string()))?;
     let archive: ProfileArchive = serde_json::from_slice(&bytes)
         .map_err(|error| ("profile_import_invalid", error.to_string()))?;
-    if archive.format != ARCHIVE_FORMAT || !(1..=ARCHIVE_VERSION).contains(&archive.version) {
+    if archive.format != ARCHIVE_FORMAT
+        || !(1..=MAX_READABLE_ARCHIVE_VERSION).contains(&archive.version)
+    {
         return Err((
             "profile_import_invalid",
             format!(
@@ -836,6 +842,31 @@ mod tests {
             serde_json::from_slice(&fs::read(&archive_path).unwrap()).unwrap();
         assert_eq!(archive["agent_shell_mode"], "interactive");
         assert_eq!(archive["version"], 4);
+        assert!(
+            archive["agent_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.get("mcp_tools_profile").is_none())
+        );
+        let legacy_v5_path = temp.path().join("profile-v5.json");
+        let mut legacy_v5 = archive.clone();
+        legacy_v5["version"] = json!(5);
+        legacy_v5["agent_tools"][0]["mcp_tools_profile"] = json!("extended");
+        fs::write(&legacy_v5_path, serde_json::to_vec(&legacy_v5).unwrap()).unwrap();
+        let legacy_import =
+            import(&registry, temp.path(), &legacy_v5_path, Some("Imported v5")).unwrap();
+        let legacy_import_id = legacy_import["profile"]["id"].as_i64().unwrap();
+        export(&registry, temp.path(), legacy_import_id, &legacy_v5_path).unwrap();
+        let rewritten: Value = serde_json::from_slice(&fs::read(&legacy_v5_path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], 4);
+        assert!(
+            rewritten["agent_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.get("mcp_tools_profile").is_none())
+        );
         let imported = import(&registry, temp.path(), &archive_path, Some("Imported")).unwrap();
         let imported_id = imported["profile"]["id"].as_i64().unwrap();
         assert_eq!(

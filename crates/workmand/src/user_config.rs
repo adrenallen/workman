@@ -687,6 +687,7 @@ fn set_agent_tool_entry(
     let entry = entry.as_mapping_mut().ok_or_else(|| {
         UserConfigError::Invalid("each agent_tools entry must be a mapping".to_owned())
     })?;
+    entry.remove(serde_yaml::Value::String("mcp_tools_profile".to_owned()));
     for (key, value) in [
         ("name", serde_yaml::Value::String(name.to_owned())),
         ("command", serde_yaml::Value::String(command.to_owned())),
@@ -1089,6 +1090,30 @@ mod tests {
         );
         assert_eq!(config.agent_tools[0].resume_args, None);
         assert_eq!(config.agent_tools[0].continue_args, None);
+    }
+
+    #[test]
+    fn legacy_mcp_tools_profile_is_ignored_and_removed_when_rewritten() {
+        let parsed = parse_user_config(
+            "agent_tools:\n  - name: Legacy\n    command: codex\n    tool_type: codex\n    mcp_tools_profile: extended\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.agent_tools.len(), 1);
+        assert_eq!(parsed.agent_tools[0].name, "Legacy");
+
+        let mut entry: serde_yaml::Value = serde_yaml::from_str(
+            "name: Legacy\ncommand: codex\ntool_type: codex\nmcp_tools_profile: extended\n",
+        )
+        .unwrap();
+        super::set_agent_tool_entry(&mut entry, "Legacy", "codex", "codex", true, None, None)
+            .unwrap();
+        assert!(
+            entry
+                .as_mapping()
+                .unwrap()
+                .get(serde_yaml::Value::String("mcp_tools_profile".to_owned()))
+                .is_none()
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,7 +18,7 @@ use workman_core::{
     ProcessStatus, ProjectId, Store, StoreError, TimerKind,
     attention::{
         AgentState, AgentWaitingProcess, AgentWaitingReason, AttentionState, AttentionTracker,
-        PendingDialog, PendingPrompt, pending_dialog,
+        PendingDialog, PendingPrompt, RECENT_INPUT_GRACE, pending_dialog,
     },
     pty::{
         DEFAULT_OUTPUT_SPILL_CAPACITY, DEFAULT_PTY_SIZE, ExitStatus, PtyInputHandle, PtyProcess,
@@ -40,8 +40,69 @@ const SUBMIT_MAX_ATTEMPTS: usize = 3;
 const KIMI_INITIAL_PROMPT_KEY_DELAY: Duration = Duration::from_millis(150);
 const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
+const OPENCODE_MISSING_BUSY_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn missing_opencode_busy_input(state: &AgentState) -> Option<i64> {
+    if state.state != AttentionState::Idle || state.work_evidence_at().is_some() {
+        return None;
+    }
+    let normalized_tool_type = state
+        .tool_type
+        .as_deref()?
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_");
+    if !matches!(normalized_tool_type.as_str(), "opencode" | "open_code") {
+        return None;
+    }
+    let input_at = state.last_input_at?;
+    let output_at = state.last_output_at?;
+    let grace_ms = RECENT_INPUT_GRACE
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX);
+    (output_at >= input_at.saturating_add(grace_ms)).then_some(input_at)
+}
+
+fn should_log_opencode_missing_busy(
+    logged: &mut HashMap<ProcessId, (i64, i64)>,
+    process_id: ProcessId,
+    input_at: i64,
+    now_ms: i64,
+) -> bool {
+    if let Some((last_log_at, last_input_at)) = logged.get(&process_id)
+        && (*last_input_at == input_at
+            || now_ms.saturating_sub(*last_log_at)
+                < i64::try_from(OPENCODE_MISSING_BUSY_LOG_INTERVAL.as_millis()).unwrap_or(i64::MAX))
+    {
+        return false;
+    }
+    logged.insert(process_id, (now_ms, input_at));
+    true
+}
+
+fn maybe_log_opencode_missing_busy(process: &Process, state: &AgentState, now_ms: i64) {
+    let Some(input_at) = missing_opencode_busy_input(state) else {
+        return;
+    };
+    static LOGGED: OnceLock<Mutex<HashMap<ProcessId, (i64, i64)>>> = OnceLock::new();
+    let mut logged = LOGGED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !should_log_opencode_missing_busy(&mut logged, process.id, input_at, now_ms) {
+        return;
+    }
+    eprintln!(
+        "workman attention warning: process {} ({}) tool_type={} reached idle after post-grace PTY output without an OpenCode busy footer (`esc interrupt` or `esc again to interrupt`); the OpenCode UI markers may have changed",
+        process.id,
+        process.name,
+        state.tool_type.as_deref().unwrap_or("opencode"),
+    );
+}
 
 use crate::agent_sessions::SessionCapture;
+use crate::completion_ledger::{CompletionLedger, CompletionLedgerError};
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -70,6 +131,7 @@ pub const WORKMAN_OUTPUT_CAPACITY_ENV: &str = "WORKMAN_OUTPUT_CAPACITY_BYTES";
 #[derive(Debug)]
 pub enum RegistryError {
     Store(StoreError),
+    CompletionLedger(CompletionLedgerError),
     NotFound(ProcessId),
     AlreadyExists(ProcessId),
     AlreadyRunning(ProcessId),
@@ -94,12 +156,18 @@ pub enum RegistryError {
     AttachmentStorage {
         message: String,
     },
+    NotProcessSpawner {
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+    },
+    SpawnerNotificationRequiresAgent(ProcessId),
+    SpawnerNotificationRequesterRequiresAgent(ProcessId),
 }
 
 impl RegistryError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Store(_) => "store_error",
+            Self::Store(_) | Self::CompletionLedger(_) => "store_error",
             Self::NotFound(_) => "process_not_found",
             Self::AlreadyExists(_) => "process_already_exists",
             Self::AlreadyRunning(_) => "process_already_running",
@@ -113,6 +181,11 @@ impl RegistryError {
             Self::Pty { .. } => "pty_error",
             Self::OutputPersistence { .. } => "output_persistence_error",
             Self::AttachmentStorage { .. } => "attachment_storage_error",
+            Self::NotProcessSpawner { .. } => "not_process_spawner",
+            Self::SpawnerNotificationRequiresAgent(_) => "spawner_notification_requires_agent",
+            Self::SpawnerNotificationRequesterRequiresAgent(_) => {
+                "spawner_notification_requires_agent"
+            }
         }
     }
 }
@@ -121,6 +194,7 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
+            Self::CompletionLedger(error) => error.fmt(formatter),
             Self::NotFound(id) => write!(formatter, "process {id} was not found"),
             Self::AlreadyExists(id) => write!(formatter, "process {id} already exists"),
             Self::AlreadyRunning(id) => write!(formatter, "process {id} is already running"),
@@ -162,6 +236,21 @@ impl fmt::Display for RegistryError {
             Self::AttachmentStorage { message } => {
                 write!(formatter, "agent attachment storage failed: {message}")
             }
+            Self::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            } => write!(
+                formatter,
+                "process {requester_process_id} did not spawn process {child_process_id}"
+            ),
+            Self::SpawnerNotificationRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only spawned agents support notify_spawner_on_idle"
+            ),
+            Self::SpawnerNotificationRequesterRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only an agent spawner may enable notify_spawner_on_idle"
+            ),
         }
     }
 }
@@ -170,6 +259,7 @@ impl Error for RegistryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::CompletionLedger(error) => Some(error),
             _ => None,
         }
     }
@@ -178,6 +268,12 @@ impl Error for RegistryError {
 impl From<StoreError> for RegistryError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+impl From<CompletionLedgerError> for RegistryError {
+    fn from(error: CompletionLedgerError) -> Self {
+        Self::CompletionLedger(error)
     }
 }
 
@@ -235,7 +331,18 @@ impl ProcessInputRouter {
         if !*active {
             return Err(RegistryError::NotRunning(process_id));
         }
-        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        let submits_prompt = if user_initiated {
+            target.input.write_user_input(data)
+        } else {
+            target
+                .input
+                .write_all(data)
+                .map(|()| data.iter().any(|byte| matches!(byte, b'\r' | b'\n')))
+        }
+        .map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
         if !submits_prompt
             && matches!(
                 target.attention.snapshot().state,
@@ -244,15 +351,6 @@ impl ProcessInputRouter {
         {
             target.attention.suppress_ui_activity();
         }
-        (if user_initiated {
-            target.input.write_user_input(data)
-        } else {
-            target.input.write_all(data)
-        })
-        .map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
         if submits_prompt {
             target.attention.observe_input();
         }
@@ -375,6 +473,45 @@ impl ProcessInputRouter {
             .typing_pause
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn automatic_submission_held(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.automatic_submission_held())
+    }
+
+    /// Hold unsolicited automation while a human has unsubmitted composer text.
+    pub(crate) fn has_unsent_human_draft(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.has_unsent_human_draft())
+    }
+
+    pub(crate) fn set_notification_held_by_draft(
+        &self,
+        process_id: ProcessId,
+        held: bool,
+    ) -> RegistryResult<bool> {
+        Ok(self
+            .target(process_id)?
+            .input
+            .set_notification_held_by_draft(held))
+    }
+
+    pub(crate) fn notification_held_by_draft(&self, process_id: ProcessId) -> bool {
+        self.targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+            .is_some_and(|target| target.input.notification_held_by_draft())
+    }
+
+    pub(crate) fn clear_human_draft_activity(&self, process_id: ProcessId) {
+        if let Some(target) = self
+            .targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+        {
+            target.input.clear_human_draft_activity();
+        }
     }
 
     pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
@@ -513,6 +650,12 @@ pub struct ProcessStatusView {
     pub agent_state: AgentState,
     #[serde(default)]
     pub notify_on_idle: bool,
+    /// Opt-in child-to-spawner turn delivery. Separate from the desktop one-shot idle alert.
+    #[serde(default)]
+    pub notify_spawner_on_idle: bool,
+    /// A child-notification turn is currently held behind this process's human draft.
+    #[serde(default)]
+    pub notification_held_by_draft: bool,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
     /// Conversation ID passively discovered from the agent CLI's own session store.
@@ -529,6 +672,13 @@ pub struct ProcessEvent {
     pub at: i64,
     pub kind: String,
     pub message: String,
+}
+
+/// Read-only pending-timer relationships used by child notification delivery.
+#[derive(Default)]
+pub(crate) struct NotificationTimerContext {
+    pub(crate) owned_idle_watches: HashSet<(ProcessId, ProcessId)>,
+    pub(crate) waiting_processes: HashSet<ProcessId>,
 }
 
 /// Owns persisted process records and live PTY handles.
@@ -891,12 +1041,14 @@ impl ProcessRegistry {
 
     /// Attach attention state to an already-loaded process record.
     pub fn status_view(&self, process: Process) -> RegistryResult<ProcessStatusView> {
+        let observed_at = now_millis();
         let tool_type = self.tool_type_for(&process)?;
         let mut agent_state = self
             .outputs
             .get(&process.id)
             .map(|output| output.attention.snapshot())
             .unwrap_or_else(|| AgentState::exited(tool_type, process.exited_at));
+        maybe_log_opencode_missing_busy(&process, &agent_state, observed_at);
         let idle_watch = self.store.process_idle_watch_enabled(process.id)?;
         let idle_alert_fired = idle_watch
             && self.store.observe_process_idle_watch(
@@ -905,6 +1057,15 @@ impl ProcessRegistry {
                 now_millis(),
             )?;
         if process.kind == ProcessKind::Agent {
+            let has_pending_prompts = self.has_pending_prompts(process.id);
+            CompletionLedger::new(&self.store).observe_process(
+                process.id,
+                agent_state.state,
+                agent_state.last_input_at,
+                agent_state.work_evidence_at(),
+                has_pending_prompts,
+                observed_at,
+            )?;
             let waiting_on = self.waiting_reasons(process.id)?;
             let watched = self.process_is_watched(process.id)?;
             agent_state.refine_waiting(waiting_on);
@@ -915,7 +1076,7 @@ impl ProcessRegistry {
                 watched || idle_watch,
                 agent_state.last_input_at.is_some(),
                 last_agent_activity_at,
-                now_millis(),
+                observed_at,
             )?;
             agent_state.refine_notifications(watched, notification.unread);
         }
@@ -934,6 +1095,8 @@ impl ProcessRegistry {
             .claimed_todos_for_process(process.id, now_millis())?;
         Ok(ProcessStatusView {
             notify_on_idle: idle_watch && !idle_alert_fired,
+            notify_spawner_on_idle: self.store.spawner_idle_notification_enabled(process.id)?,
+            notification_held_by_draft: self.input_router.notification_held_by_draft(process.id),
             process,
             agent_state,
             events,
@@ -958,6 +1121,74 @@ impl ProcessRegistry {
         self.status_invalidations.invalidate();
         self.arm_attention_deadline();
         self.status_view(process)
+    }
+
+    /// Toggle durable child-to-spawner notifications after proving direct lineage.
+    pub fn set_notify_spawner_on_idle(
+        &mut self,
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        self.update_process_for_spawner(requester_process_id, child_process_id, None, enabled)
+    }
+
+    /// Atomically rename a direct child and toggle its spawner notification setting.
+    pub fn update_process_for_spawner(
+        &mut self,
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+        new_name: Option<String>,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        if let Some(new_name) = &new_name {
+            validate_name(new_name)?;
+        }
+        let mut child = self.get(child_process_id)?;
+        let requester = self.get(requester_process_id)?;
+        if child.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequiresAgent(
+                child_process_id,
+            ));
+        }
+        if requester.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequesterRequiresAgent(
+                requester_process_id,
+            ));
+        }
+        if child.spawned_by_process_id != Some(requester_process_id)
+            || child.project_id != requester.project_id
+        {
+            return Err(RegistryError::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            });
+        }
+        let mut baseline_completion_id = 0;
+        if enabled
+            && !self
+                .store
+                .spawner_idle_notification_enabled(child_process_id)?
+        {
+            // Establish a ledger baseline before the prospective arm boundary. An existing idle
+            // child must not report work that finished while this option was disabled.
+            let _ = self.status_view(child.clone())?;
+            baseline_completion_id = CompletionLedger::new(&self.store)
+                .latest_completion(child_process_id)?
+                .map_or(0, |completion| completion.id);
+        }
+        self.store.update_process_and_spawner_notification(
+            child_process_id,
+            new_name.as_deref(),
+            enabled,
+            now_millis(),
+            baseline_completion_id,
+        )?;
+        if let Some(new_name) = new_name {
+            child.name = new_name;
+        }
+        self.status_invalidations.invalidate();
+        self.status_view(child)
     }
 
     fn process_ready_for_idle_alert(
@@ -1083,6 +1314,59 @@ impl ProcessRegistry {
             });
         }
         Ok(reasons)
+    }
+
+    /// Read the pending-timer relationships needed by child-to-spawner notification delivery.
+    ///
+    /// The first set contains `(owner process, watched process)` pairs for active, unpaused idle
+    /// timers. The second contains owner processes parked on their own active, unpaused timer;
+    /// being somebody else's delivery target is not parking. This is read-only.
+    pub(crate) fn notification_timer_context(&self) -> RegistryResult<NotificationTimerContext> {
+        let mut statement = self
+            .store
+            .connection()
+            .prepare(
+                "SELECT timer.kind,
+                        timer.watch_list,
+                        actor.process_id
+                 FROM timers AS timer
+                 LEFT JOIN actors AS actor ON actor.id = timer.owner_actor
+                 WHERE timer.fired = 0 AND timer.paused = 0",
+            )
+            .map_err(StoreError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, TimerKind>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<ProcessId>>(2)?,
+                ))
+            })
+            .map_err(StoreError::from)?;
+        let mut owned_idle_watches = HashSet::new();
+        let mut waiting_processes = HashSet::new();
+        for row in rows {
+            let (kind, watch_list, owner_process_id) = row.map_err(StoreError::from)?;
+            if let Some(owner_process_id) = owner_process_id {
+                waiting_processes.insert(owner_process_id);
+            }
+            if matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll)
+                && let Some(owner_process_id) = owner_process_id
+            {
+                waiting_processes.insert(owner_process_id);
+                let watched: Vec<ProcessId> =
+                    serde_json::from_str(&watch_list).map_err(StoreError::from)?;
+                owned_idle_watches.extend(
+                    watched
+                        .into_iter()
+                        .map(|watched_process_id| (owner_process_id, watched_process_id)),
+                );
+            }
+        }
+        Ok(NotificationTimerContext {
+            owned_idle_watches,
+            waiting_processes,
+        })
     }
 
     fn process_is_watched(&self, process_id: ProcessId) -> RegistryResult<bool> {
@@ -1858,6 +2142,29 @@ impl ProcessRegistry {
         Ok(pending_dialog(&rendered, status.classification.as_deref()))
     }
 
+    /// Return a recognized dialog reduced to its visible question/choice region.
+    ///
+    /// This intentionally excludes retained scrollback and unrelated viewport rows so callers
+    /// can build stable episode identities without copying or hashing the full terminal buffer.
+    pub(crate) fn pending_dialog_viewport(
+        &mut self,
+        process_id: ProcessId,
+    ) -> RegistryResult<Option<PendingDialog>> {
+        self.refresh_exits()?;
+        self.require(process_id)?;
+        let Some(output) = self.outputs.get(&process_id) else {
+            return Ok(None);
+        };
+        let rendered = output.terminal.read_viewport().text();
+        let status = output.attention.snapshot();
+        Ok(
+            pending_dialog(&rendered, status.classification.as_deref()).map(|mut dialog| {
+                dialog.rendered = normalized_dialog_region(&rendered);
+                dialog
+            }),
+        )
+    }
+
     /// Acknowledge a narrowly known first-run trust dialog with Enter.
     pub fn acknowledge_known_dialog(
         &mut self,
@@ -2192,7 +2499,7 @@ impl ProcessRegistry {
         result
     }
 
-    fn refresh_exits(&mut self) -> RegistryResult<()> {
+    pub(crate) fn refresh_exits(&mut self) -> RegistryResult<()> {
         self.drain_submission_events();
         self.refresh_agent_session_ids(false)?;
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();
@@ -2580,6 +2887,100 @@ impl ProcessRegistry {
             Ok(Some(process.kind.as_str().into()))
         }
     }
+}
+
+fn normalized_dialog_region(rendered: &str) -> String {
+    let lines = rendered
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    let nonempty = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .collect::<Vec<_>>();
+    let choices = nonempty
+        .iter()
+        .filter(|(_, line)| is_dialog_choice_row(line))
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    if nonempty.is_empty() {
+        return String::new();
+    }
+
+    let (start, end) = if let (Some(first_choice), Some(last_choice)) =
+        (choices.first().copied(), choices.last().copied())
+    {
+        let start = nonempty
+            .iter()
+            .rev()
+            .find(|(index, line)| {
+                *index < first_choice
+                    && first_choice.saturating_sub(*index) <= 10
+                    && is_dialog_question_row(line)
+            })
+            .map_or(first_choice, |(index, _)| *index);
+        (start, last_choice)
+    } else if let Some((anchor, _)) = nonempty
+        .iter()
+        .rev()
+        .find(|(_, line)| is_dialog_question_row(line))
+    {
+        (*anchor, *anchor)
+    } else {
+        let start = nonempty
+            .get(nonempty.len().saturating_sub(8))
+            .map_or(0, |(index, _)| *index);
+        let end = nonempty.last().map_or(start, |(index, _)| *index);
+        (start, end)
+    };
+
+    lines[start..=end]
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_dialog_question_row(line: &str) -> bool {
+    let lowercase = line.to_lowercase();
+    line.ends_with('?')
+        || [
+            "permission required",
+            "authentication required",
+            "type your own answer",
+            "do you want to proceed",
+            "allow this command",
+            "allow this tool",
+            "approve this action",
+            "would you like to run",
+            "do you trust",
+            "press enter to continue",
+        ]
+        .iter()
+        .any(|pattern| lowercase.contains(pattern))
+}
+
+fn is_dialog_choice_row(line: &str) -> bool {
+    let line = line
+        .trim_start_matches(['┃', '›', '❯', '>', '*', '•', '○', '●', '◉', '◯', '☐', '☑'])
+        .trim_start();
+    if line.starts_with("[ ]") || line.starts_with("[x]") || line.starts_with("[X]") {
+        return true;
+    }
+    let lowercase = line.to_lowercase();
+    if lowercase.contains("allow once")
+        && (lowercase.contains("allow always") || lowercase.contains("reject"))
+    {
+        return true;
+    }
+    let Some((number, choice)) = line.split_once('.').or_else(|| line.split_once(')')) else {
+        return false;
+    };
+    !number.is_empty()
+        && number.chars().all(|character| character.is_ascii_digit())
+        && !choice.trim().is_empty()
 }
 
 pub(crate) struct StagedAgentAttachments {
@@ -3176,6 +3577,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn dialog_region_ignores_unrelated_viewport_rows_and_normalizes_whitespace() {
+        let first = normalized_dialog_region(
+            "status: 1\nlog output\nDo you want to proceed?\n❯ 1.   Yes, allow\n  2. No",
+        );
+        let repainted = normalized_dialog_region(
+            "status: 2\ndifferent background output\nDo you want to proceed?\n❯ 1. Yes, allow\n  2. No",
+        );
+        assert_eq!(first, repainted);
+        assert_eq!(first, "Do you want to proceed?\n❯ 1. Yes, allow\n2. No");
+    }
+
     fn output_test_process(project_path: &str) -> Process {
         Process {
             id: 31,
@@ -3203,6 +3616,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn opencode_missing_busy_canary_is_per_input_and_rate_limited() {
+        let tracker = AttentionTracker::new_at(
+            Some("opencode".into()),
+            workman_core::attention::AttentionConfig::default(),
+            0,
+        );
+        tracker.observe_input_at(1_000);
+        tracker.observe_output_at(
+            b"completed frame",
+            "answer\n┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀",
+            true,
+            3_000,
+        );
+        let missing_busy = tracker.snapshot_at(8_000);
+        assert_eq!(missing_busy.state, AttentionState::Idle);
+        assert_eq!(missing_busy.work_evidence_at(), None);
+        assert_eq!(missing_opencode_busy_input(&missing_busy), Some(1_000));
+
+        let mut logged = HashMap::new();
+        assert!(should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            1_000,
+            8_000
+        ));
+        assert!(!should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            1_000,
+            80_000
+        ));
+        assert!(!should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            2_000,
+            9_000
+        ));
+        assert!(should_log_opencode_missing_busy(
+            &mut logged,
+            7,
+            2_000,
+            68_000
+        ));
+
+        let busy_tracker = AttentionTracker::new_at(
+            Some("open_code".into()),
+            workman_core::attention::AttentionConfig::default(),
+            0,
+        );
+        busy_tracker.observe_input_at(1_000);
+        busy_tracker.observe_output_at(
+            b"working frame",
+            "┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀\nesc again to interrupt",
+            true,
+            1_100,
+        );
+        busy_tracker.observe_output_at(
+            b"completed frame",
+            "answer\n┃ Build auto · fixture\n╹▀▀▀▀▀▀▀▀",
+            true,
+            1_200,
+        );
+        let observed_busy = busy_tracker.snapshot_at(6_200);
+        assert_eq!(observed_busy.state, AttentionState::Idle);
+        assert!(observed_busy.work_evidence_at().is_some());
+        assert_eq!(missing_opencode_busy_input(&observed_busy), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn stopping_native_interactive_agents_reaps_separate_job_groups() {
@@ -3218,7 +3700,8 @@ mod tests {
                 }
                 let executable = fixture.home.path().join("long-agent");
                 std::fs::write(&executable, "#!/bin/sh\ntrap '' HUP TERM\nprintf '%s' $$ > \"$HOME/child-pid\"\nexec /bin/sleep 300\n").unwrap();
-                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
                 let store = Store::open_in_memory().unwrap();
                 store
                     .put_project(&Project {
@@ -3247,7 +3730,8 @@ mod tests {
                 registry.start(31).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let child_pid = loop {
-                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid")) {
+                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid"))
+                    {
                         if let Ok(pid) = pid.parse::<i32>() {
                             break pid;
                         }
@@ -3437,6 +3921,25 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn opencode_dialog_regions_exclude_transcript_and_control_hints() {
+        let question = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_question_dialog.txt"
+        ));
+        assert!(question.starts_with("┃ Which color do you prefer: red or blue?"));
+        assert!(question.ends_with("┃ 3. Type your own answer"));
+        assert!(!question.contains("Asked 1 question"));
+        assert!(!question.contains("esc dismiss"));
+
+        let permission = normalized_dialog_region(include_str!(
+            "../../workman-core/tests/fixtures/attention/opencode_permission_dialog.txt"
+        ));
+        assert!(permission.starts_with("┃ △ Permission required"));
+        assert!(permission.contains("printf ok > permission-dialog.txt"));
+        assert!(permission.ends_with("enter confirm"));
+        assert!(!permission.contains("Thought:"));
     }
 
     #[test]

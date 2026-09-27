@@ -35,8 +35,7 @@ use uuid::Uuid;
 
 mod agent_sessions;
 mod command_line;
-#[cfg(all(test, unix))]
-mod shell_test_support;
+mod completion_ledger;
 pub mod config;
 mod context_actions;
 mod control;
@@ -58,6 +57,9 @@ pub mod readiness;
 mod recorded_feedback;
 pub mod runtime_doctor;
 mod settings;
+#[cfg(all(test, unix))]
+mod shell_test_support;
+mod spawner_notifications;
 mod status_invalidation;
 mod subprocesses;
 mod timer_events;
@@ -251,7 +253,10 @@ impl DaemonServer {
         Self::bind_with_config_path(config, user_config_path()).await
     }
 
-    async fn bind_with_config_path(config: DaemonConfig, user_config_path: PathBuf) -> io::Result<Self> {
+    async fn bind_with_config_path(
+        config: DaemonConfig,
+        user_config_path: PathBuf,
+    ) -> io::Result<Self> {
         let started_at = Instant::now();
         migration::migrate_default_paths_if_needed(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
@@ -278,10 +283,12 @@ impl DaemonServer {
                 Err(error) => return Err(error),
             };
             store
-                .set_active_profile_terminal_settings(&workman_core::shell::ProfileTerminalSettings {
-                    agent_shell_mode: legacy_terminal.resolved_agent_shell_mode().0,
-                    shell: legacy_terminal.shell,
-                })
+                .set_active_profile_terminal_settings(
+                    &workman_core::shell::ProfileTerminalSettings {
+                        agent_shell_mode: legacy_terminal.resolved_agent_shell_mode().0,
+                        shell: legacy_terminal.shell,
+                    },
+                )
                 .map_err(registry_io_error)?;
             store
                 .mark_active_profile_legacy_config_imported()
@@ -436,6 +443,11 @@ impl DaemonServer {
             timer_events.clone(),
             shutdown_rx.clone(),
         );
+        let spawner_notification_task = spawner_notifications::spawn_spawner_notification_scheduler(
+            self.registry.clone(),
+            status_invalidations.clone(),
+            shutdown_rx.clone(),
+        );
         let maintenance_task = maintenance::spawn_storage_maintenance(
             self.registry.clone(),
             self.data_dir.clone(),
@@ -488,6 +500,7 @@ impl DaemonServer {
         let _ = lifecycle_shutdown.send(true);
         let _ = lifecycle_task.await;
         let _ = timer_task.await;
+        let _ = spawner_notification_task.await;
         let _ = maintenance_task.await;
         let _ = live_stats_task.await;
         result
@@ -1990,7 +2003,13 @@ async fn clean_failed_spawn(child: &mut tokio::process::Child, pid: Option<u32>,
 #[cfg(test)]
 mod tests {
     async fn bind_test_daemon(config: DaemonConfig) -> io::Result<DaemonServer> {
-        DaemonServer::bind_with_config_path(config, crate::user_environment::test_user_environment().config_path().to_path_buf()).await
+        DaemonServer::bind_with_config_path(
+            config,
+            crate::user_environment::test_user_environment()
+                .config_path()
+                .to_path_buf(),
+        )
+        .await
     }
 
     #[cfg(unix)]
@@ -2298,16 +2317,24 @@ mod tests {
 
     impl TestServer {
         async fn start() -> Self {
-            Self::start_with_config(crate::user_environment::test_user_environment().config_path().to_path_buf()).await
+            Self::start_with_config(
+                crate::user_environment::test_user_environment()
+                    .config_path()
+                    .to_path_buf(),
+            )
+            .await
         }
 
         async fn start_with_config(config_path: PathBuf) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let data_dir = temp.path().to_path_buf();
-            let server = DaemonServer::bind_with_config_path(DaemonConfig {
-                data_dir: data_dir.clone(),
-                port: 0,
-            }, config_path)
+            let server = DaemonServer::bind_with_config_path(
+                DaemonConfig {
+                    data_dir: data_dir.clone(),
+                    port: 0,
+                },
+                config_path,
+            )
             .await
             .unwrap();
             let discovery = server.discovery().clone();

@@ -381,10 +381,11 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
 
         let deep = call(
             &parent,
-            "agent_tool_deep_check",
+            "agent_tool_check",
             json!({
                 "project_id": 77,
                 "agent_tool_id": tool_id,
+                "deep": true,
                 "timeout_ms": 10_000,
             }),
         )
@@ -506,10 +507,11 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
 
         let deep = call(
             &parent,
-            "agent_tool_deep_check",
+            "agent_tool_check",
             json!({
                 "project_id": 424,
                 "agent_tool_id": tool_id,
+                "deep": true,
                 "timeout_ms": 60_000,
             }),
         )
@@ -598,10 +600,11 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
 
     let deep = call(
         &parent,
-        "agent_tool_deep_check",
+        "agent_tool_check",
         json!({
             "project_id": 96,
             "agent_tool_id": grok_id,
+            "deep": true,
             "timeout_ms": 60_000,
         }),
     )
@@ -705,10 +708,11 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
 
     let deep = call(
         &parent,
-        "agent_tool_deep_check",
+        "agent_tool_check",
         json!({
             "project_id": 98,
             "agent_tool_id": kimi_id,
+            "deep": true,
             "timeout_ms": 60_000,
         }),
     )

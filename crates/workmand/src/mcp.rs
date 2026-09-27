@@ -1,7 +1,6 @@
 //! Core MCP service: identity, scoping, setup tools, and project tools.
 
 use std::{
-    collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,10 +12,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rmcp::{
-    ServerHandler,
+    RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::Extension, wrapper::Parameters},
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    model::{
+        CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, ServerCapabilities,
+        ServerInfo, Tool,
+    },
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
         session::{local::LocalSessionManager, never::NeverSessionManager},
@@ -25,7 +29,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use workman_core::{Actor, Process, ProcessId, ProcessStatus, Project, ProjectId};
+use workman_core::{Actor, Process, ProcessId, Project, ProjectId};
 
 use crate::{
     ProcessRegistry, SharedProcessRegistry, project_titles::normalized_project_title,
@@ -42,12 +46,12 @@ mod tools_todo;
 mod tools_worktree;
 
 pub const WORKMAN_MCP_TOKEN_HEADER: &str = "x-workman-mcp-token";
-pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review unresolved feedback with scratchpad_read(include_comments=true) or scratchpad_comment_list, and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the desktop user may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
-pub(crate) const WORKTREE_AGENT_GUIDANCE: &str = "Use worktree_list to inspect repository worktrees and cached PR status, worktree_create for a branch/ref, and worktree_fork to branch from a selected worktree's exact HEAD; each managed worktree becomes a separate Workman project.";
-pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then assign it with todo_assign(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_assign with assignee omitted/null, or assignee=\"none\", to unassign.";
-pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, agent_tool_id swaps the agent while retaining the template prompt and skipping its launch args. Prefer model for a per-launch override: it replaces existing long and short model flags in the registered command, template args, and caller args for supported tool_type values; reserve extra_args for other raw flags. attachments accepts up to 8 absolute paths to raster images of at most 32 MiB each; Workman copies them into daemon-owned storage and appends those saved paths to the initial prompt.";
-pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "To wait for subagents without polling, call timer_fire_when_idle_any or timer_fire_when_idle_all once. Choose the condition deliberately: timer_fire_when_idle_any ignores processes already idle at arm time and requires a fresh non-idle-to-idle transition, while timer_fire_when_idle_all counts already-idle processes and waits until each watched process has reached idle. When already_satisfied=false and the timer delivers back to you (the default), immediately finish your response and end the current turn; no additional wait call is needed. Do not loop on timer_list or process status while waiting. Workman keeps the timer in the daemon and submits its body to the delivery agent as a fresh user turn when the idle condition or max_wait_ms is reached. When that turn arrives, inspect the watched processes before assuming they finished because the deadline may have fired or an agent may only be waiting on its own timer. If already_satisfied=true, the body was delivered immediately; do not create another timer, and end your current turn if it was delivered to you so the queued turn can be processed.";
-pub(crate) const IDLE_TIMER_LAUNCH_GUIDANCE: &str = "When a Workman idle timer delivers back to you, finish your response and end the turn after arming it instead of polling; Workman wakes you with the timer body as a fresh user turn. Use help(topic=\"timers\") for timer selection and wake verification.";
+pub(crate) const SCRATCHPAD_HANDOFF_GUIDANCE: &str = "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with scratchpad_write so they are visible in the app and verifiable; do not create ad-hoc repo files for them. Review feedback with scratchpad_read(include_comments=true), and use scratchpad_comment_create for anchored or whole-document discussion. Agents may update, resolve, reopen, or delete only comments they authored; the human may resolve any project comment. After creating a scratchpad or todo, read it back with scratchpad_read or todo_get and reference its ID in every hand-off message.";
+pub(crate) const HUMAN_HANDOFF_GUIDANCE: &str = "Found something out of scope or need human feedback? File a todo or add a comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment. A fresh user assignment and each new @user comment notify the human; unrelated edits and comment edits do not. Use todo_update(assignee=\"none\") to unassign.";
+pub(crate) const SPAWN_AGENT_GUIDANCE: &str = "spawn_agent launches a plain agent by default: pick agent_tool_id from list_agent_tools and omit agent_template_id. Use a template only when the user names a template or explicitly asks for one. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. An override keeps the template's model only for the same agent type; compatible Claude/Codex effort may carry, and command defaults never carry. A selected model supersedes the registered command model; an explicit caller model also replaces template and caller model flags. resolved reports effective settings, skipped template args, and whether Workman MCP is wired. Set notify_spawner_on_idle=true for a coalesced completion turn; update_process can toggle an existing direct child. Delivery never merges into the human's unsent draft.";
+pub(crate) const IDLE_TIMER_WAIT_GUIDANCE: &str = "For a child spawned with notify_spawner_on_idle=true, no timer is needed for ordinary completion wake-up. The opt-in is prospective and survives child exit, crash, and restart. Keep a delay timer when a hung-child deadline matters. For other waits, call timer_fire_when_idle once with wait_for=\"any\" or wait_for=\"all\". any may deliver immediately for a newly reported completion; all counts processes already idle at arm time. Arm results expose already_idle and satisfied_by diagnostics. deadline means the timeout fired without reporting completion. When already_satisfied=false and the timer delivers to this agent, finish the response and end the turn; do not poll timer_list or process status. When the fresh turn arrives, inspect watched processes because the deadline may have fired or an agent may be waiting on its own timer.";
+const SERVER_INSTRUCTIONS: &str = "Need human input or found out-of-scope work? Create a todo or comment, then use todo_update(assignee=\"user\") or mention @user in a new todo comment; either notifies the human. Call whoami first. Process credentials jail agents to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions have discovery and help only. Use help for todos, scratchpads, worktrees, timers, tools, and spawning.";
+const USER_ONLY_TOOL_NAMES: &[&str] = &["agent_tool_configure"];
 
 #[derive(Clone)]
 pub struct WorkmanMcp {
@@ -173,12 +177,6 @@ pub async fn require_known_session(
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct IdentifySessionArgs {
-    /// Expected Workman process ID. The authenticated process credential already establishes it.
-    process_id: ProcessId,
-}
-
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 struct HelpArgs {
     /// Optional topic: setup, identity, scoping, projects, todos, scratchpads, worktrees, timers, tools, or spawning.
@@ -186,34 +184,8 @@ struct HelpArgs {
     topic: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ProjectScopeArgs {
-    /// Optional project ID; an identified agent may name only its owning project.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ProjectSelectArgs {
-    project_id: ProjectId,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ProjectCreateArgs {
-    /// Existing directory to register. It is canonicalized before persistence.
-    path: String,
-    /// Stored name. Defaults to the directory basename.
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    icon: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ProjectRenameArgs {
+struct ProjectUpdateArgs {
     #[serde(default)]
     project_id: Option<ProjectId>,
     name: String,
@@ -225,24 +197,6 @@ fn apply_explicit_project_name(project: &mut Project, name: &str) -> Result<(), 
     Ok(())
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-struct ProjectDeleteArgs {
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-    /// Must be true before any project is deleted.
-    #[serde(default)]
-    confirm_delete: bool,
-    /// Also required when the project has running processes.
-    #[serde(default)]
-    confirm_stop_running: bool,
-    /// Also permanently delete the exact local project directory. No remote Git operation is ever performed.
-    #[serde(default)]
-    delete_from_disk: bool,
-    /// Permit guarded loss of dirty/unpublished state or dependent linked worktrees.
-    #[serde(default)]
-    force_dirty: bool,
-}
-
 #[derive(Debug, Serialize)]
 struct IdentityResult {
     actor_id: String,
@@ -251,18 +205,32 @@ struct IdentityResult {
     process_name: Option<String>,
     effective_project_id: Option<ProjectId>,
     selected_project_id: Option<ProjectId>,
+    project: Option<Value>,
 }
 
 #[tool_router]
 impl WorkmanMcp {
     #[tool(
-        description = "Report this MCP session's actor, process, and effective project identity"
+        description = "Report this MCP session's actor, process, and effective project envelope"
     )]
     async fn whoami(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
         let mut registry = self.registry.lock().await;
         match ensure_actor(&mut registry, &parts) {
             Ok((actor, process)) => {
                 let effective_project_id = resolve_project_id(&registry, &actor, None).ok();
+                let project = match effective_project_id {
+                    Some(project_id) => match registry.store().get_project(project_id) {
+                        Ok(Some(project)) => {
+                            match crate::worktrees::project_envelope(registry.store(), project) {
+                                Ok(project) => Some(json!(project)),
+                                Err(error) => return failure(error.code(), error.to_string()),
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(error) => return failure("store_error", error.to_string()),
+                    },
+                    None => None,
+                };
                 success(IdentityResult {
                     actor_id: actor.id,
                     session_id: actor.session_id,
@@ -270,83 +238,63 @@ impl WorkmanMcp {
                     process_name: process.map(|process| process.name),
                     effective_project_id,
                     selected_project_id: actor.selected_project_id,
+                    project,
                 })
             }
             Err(error) => failure("identity_error", error),
         }
     }
 
-    #[tool(
-        description = "Confirm this authenticated MCP connection is bound to the expected process; this cannot claim or change identity"
-    )]
-    async fn identify_session(
+    #[tool(description = "Show concise Workman MCP help, optionally for one topic")]
+    async fn help(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<IdentifySessionArgs>,
+        Parameters(args): Parameters<HelpArgs>,
     ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (actor, existing_process) = match ensure_actor(&mut registry, &parts) {
-            Ok(identity) => identity,
-            Err(error) => return failure("identity_error", error),
-        };
-        if let Some(process) = existing_process {
-            if args.process_id != process.id {
-                let target_detail = match registry.store().get_process(args.process_id) {
-                    Ok(Some(target)) => format!(
-                        "target process {} belongs to project {}",
-                        target.id, target.project_id
-                    ),
-                    Ok(None) => format!("target process {} was not found", args.process_id),
-                    Err(error) => return failure("store_error", error.to_string()),
-                };
-                return failure(
-                    "identity_scope_error",
-                    format!(
-                        "agent identities are scoped to project {} and bound to process {}; {target_detail}; this MCP identity cannot be retargeted",
-                        process.project_id, process.id
-                    ),
-                );
-            }
-            let effective_project_id = resolve_project_id(&registry, &actor, None).ok();
-            return success(IdentityResult {
-                actor_id: actor.id,
-                session_id: actor.session_id,
-                process_id: actor.process_id,
-                process_name: Some(process.name),
-                effective_project_id,
-                selected_project_id: actor.selected_project_id,
-            });
-        }
-        failure(
-            "identity_authentication_required",
-            format!(
-                "this MCP connection has no authenticated process identity and cannot claim process {}; reconnect using that process's WORKMAN_MCP_TOKEN credential, then call whoami",
-                args.process_id
-            ),
-        )
-    }
-
-    #[tool(description = "Show concise Workman MCP help, optionally for one topic")]
-    async fn help(&self, Parameters(args): Parameters<HelpArgs>) -> CallToolResult {
         let topic = args.topic.as_deref().unwrap_or("setup");
+        if topic == "tools" {
+            let process_identity = self.parts_have_process_identity(&parts).await;
+            let all_tools = self.tool_router.list_all();
+            let mut tools = all_tools
+                .iter()
+                .filter(|tool| process_tool_allowed(tool.name.as_ref()))
+                .map(tool_help_line)
+                .collect::<Vec<_>>();
+            tools.sort();
+            if !process_identity {
+                let mut user_only = all_tools
+                    .iter()
+                    .filter(|tool| !process_tool_allowed(tool.name.as_ref()))
+                    .map(tool_help_line)
+                    .collect::<Vec<_>>();
+                user_only.sort();
+                if !user_only.is_empty() {
+                    tools.push(String::new());
+                    tools.push("User-only:".to_owned());
+                    tools.extend(user_only);
+                }
+            }
+            return success(json!({ "topic": topic, "text": tools.join("\n") }));
+        }
         let text = match topic {
             "setup" => {
                 "Connect to /mcp with Streamable HTTP. Daemon-spawned agents authenticate with their process credential and are automatically jailed to their owning project. A daemon bearer authenticates user-level discovery only and cannot claim a process identity."
             }
             "identity" => {
-                "whoami resolves the process credential supplied by the launcher. identify_session only confirms that authenticated identity; it cannot claim or retarget a process. If whoami is unidentified or names the wrong process, stop and report a launch-wiring error."
+                "whoami resolves the process credential supplied by the launcher. Identity cannot be claimed or retargeted. If whoami is unidentified or names the wrong process, stop and report a launch-wiring error."
             }
             "scoping" => {
-                "Agent identities are jailed by the daemon to their owning project: list_projects returns only that project, cross-project project_id overrides and indirect process/timer/transfer targets are rejected, select_project cannot escape the jail, and project-creating/global-config tools are unavailable. Unidentified bearer sessions may use discovery/help but cannot claim a process or perform project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
+                "Agent identities are jailed by the daemon to their owning project. Cross-project project_id overrides and indirect process or timer targets are rejected; project creation and global configuration are unavailable. Unidentified bearer sessions may use discovery and help but cannot claim a process or perform project-scoped actions. The authenticated UI/CLI control channel remains user-scoped and can manage every project."
             }
             "projects" => {
-                "list_projects/select_project/get_project/get_project_status/get_project_stats/create_project/rename_project/delete_project manage registered workspaces. Agent identities see and target only their owning project and cannot register a new project. Delete always requires confirm_delete; active processes require confirm_stop_running; delete_from_disk performs guarded local-only deletion and never changes a remote."
+                "Project-scoped MCP tools operate only on the calling agent's owning project. whoami includes project metadata; list_processes includes process status and counts. Project creation and removal stay in the authenticated UI/CLI control channel."
             }
             "todos" => HUMAN_HANDOFF_GUIDANCE,
             "scratchpads" => SCRATCHPAD_HANDOFF_GUIDANCE,
-            "worktrees" => WORKTREE_AGENT_GUIDANCE,
+            "worktrees" => {
+                "Use worktree_list to inspect repository worktrees and cached pull-request status. Creation, adoption, and removal stay in the authenticated UI/CLI control channel."
+            }
             "timers" => IDLE_TIMER_WAIT_GUIDANCE,
-            "tools" => "Use mcp_tools_summary for the complete core tool list.",
             "spawning" => SPAWN_AGENT_GUIDANCE,
             other => {
                 return failure(
@@ -358,193 +306,11 @@ impl WorkmanMcp {
         success(json!({ "topic": topic, "text": text }))
     }
 
-    #[tool(description = "List the core MCP tools exposed by this daemon")]
-    async fn mcp_tools_summary(&self) -> CallToolResult {
-        let tools = self
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.into_owned())
-            .collect::<Vec<_>>();
-        success(json!({
-            "enabled": true,
-            "count": tools.len(),
-            "tools": tools,
-            "spawn_agent_guidance": SPAWN_AGENT_GUIDANCE,
-            "idle_timer_wait_guidance": IDLE_TIMER_WAIT_GUIDANCE,
-        }))
-    }
-
-    #[tool(description = "Run a disposable SQLite write-read-cleanup self-test")]
-    async fn mcp_smoke_test(&self) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        match registry.store_mut().smoke_test() {
-            Ok(true) => success(json!({ "ok": true, "checks": ["sqlite_write_read_cleanup"] })),
-            Ok(false) => failure("smoke_test_failed", "SQLite readback did not match"),
-            Err(error) => failure("smoke_test_failed", error.to_string()),
-        }
-    }
-
-    #[tool(
-        description = "List registered projects visible to this identity (agents see only their owning project)"
-    )]
-    async fn list_projects(&self, Extension(parts): Extension<Parts>) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (_actor, process) = match ensure_actor(&mut registry, &parts) {
-            Ok(identity) => identity,
-            Err(error) => return failure("identity_error", error),
-        };
-        let projects = match process {
-            Some(process) => registry
-                .store()
-                .get_project(process.project_id)
-                .map(|project| project.into_iter().collect()),
-            None => registry.store().list_projects(),
-        };
-        match projects {
-            Ok(projects) => match crate::worktrees::project_envelopes(registry.store(), projects) {
-                Ok(projects) => success(json!({ "projects": projects })),
-                Err(error) => failure(error.code(), error.to_string()),
-            },
-            Err(error) => failure("store_error", error.to_string()),
-        }
-    }
-
-    #[tool(
-        description = "Select the effective project (agent identities cannot select outside their owning project)"
-    )]
-    async fn select_project(
+    #[tool(description = "Update the effective or explicitly requested project")]
+    async fn project_update(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectSelectArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (mut actor, _) = match ensure_actor(&mut registry, &parts) {
-            Ok(identity) => identity,
-            Err(error) => return failure("identity_error", error),
-        };
-        if let Err(error) = enforce_project_access(&registry, &actor, args.project_id) {
-            return failure("project_scope_error", error);
-        }
-        let project = match registry.store().get_project(args.project_id) {
-            Ok(Some(project)) => project,
-            Ok(None) => {
-                return failure(
-                    "project_not_found",
-                    format!("project {} was not found", args.project_id),
-                );
-            }
-            Err(error) => return failure("store_error", error.to_string()),
-        };
-        actor.selected_project_id = Some(project.id);
-        actor.last_seen_at = now_millis();
-        if let Err(error) = registry.store().put_actor(&actor) {
-            return failure("store_error", error.to_string());
-        }
-        match crate::worktrees::project_envelope(registry.store(), project) {
-            Ok(project) => success(json!({ "project": project, "actor_id": actor.id })),
-            Err(error) => failure(error.code(), error.to_string()),
-        }
-    }
-
-    #[tool(description = "Get the effective or explicitly requested project")]
-    async fn get_project(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok((project, _)) => match crate::worktrees::project_envelope(registry.store(), project)
-            {
-                Ok(project) => success(project),
-                Err(error) => failure(error.code(), error.to_string()),
-            },
-            Err(error) => failure("project_scope_error", error),
-        }
-    }
-
-    #[tool(description = "Get project metadata plus persisted process status")]
-    async fn get_project_status(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let project = match crate::worktrees::project_envelope(registry.store(), project) {
-            Ok(project) => project,
-            Err(error) => return failure(error.code(), error.to_string()),
-        };
-        match registry.list_statuses(Some(project.project.id)) {
-            Ok(processes) => success(json!({ "project": project, "processes": processes })),
-            Err(error) => failure(error.code(), error.to_string()),
-        }
-    }
-
-    #[tool(description = "Get lightweight process counts for a project")]
-    async fn get_project_stats(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectScopeArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (project, _) = match scoped_project(&mut registry, &parts, args.project_id) {
-            Ok(scoped) => scoped,
-            Err(error) => return failure("project_scope_error", error),
-        };
-        let processes = match registry.list(Some(project.id)) {
-            Ok(processes) => processes,
-            Err(error) => return failure(error.code(), error.to_string()),
-        };
-        let mut by_status = BTreeMap::<String, usize>::new();
-        for process in &processes {
-            *by_status.entry(process.status.as_str().into()).or_default() += 1;
-        }
-        success(json!({
-            "project_id": project.id,
-            "process_count": processes.len(),
-            "running_count": processes.iter().filter(|process| process.status == ProcessStatus::Running).count(),
-            "by_status": by_status,
-        }))
-    }
-
-    #[tool(
-        description = "Register an existing directory as a project (user control only; agent identities cannot create project scope)"
-    )]
-    async fn create_project(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(_args): Parameters<ProjectCreateArgs>,
-    ) -> CallToolResult {
-        let mut registry = self.registry.lock().await;
-        let (actor, _) = match ensure_actor(&mut registry, &parts) {
-            Ok(identity) => identity,
-            Err(error) => return failure("identity_error", error),
-        };
-        match process_project_id(&registry, &actor) {
-            Ok(Some(project_id)) => failure(
-                "project_scope_error",
-                format!(
-                    "agent identities are scoped to project {project_id}; creating another project is outside that scope"
-                ),
-            ),
-            Ok(None) => failure(
-                "identity_required",
-                "MCP session has no authenticated process identity; use the authenticated UI/CLI control channel for project registration",
-            ),
-            Err(error) => failure("project_scope_error", error),
-        }
-    }
-
-    #[tool(description = "Rename the effective or explicitly requested project")]
-    async fn rename_project(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectRenameArgs>,
+        Parameters(args): Parameters<ProjectUpdateArgs>,
     ) -> CallToolResult {
         if args.name.trim().is_empty() {
             return failure("invalid_project_name", "project name must not be empty");
@@ -562,40 +328,7 @@ impl WorkmanMcp {
                 Ok(project) => success(project),
                 Err(error) => failure(error.code(), error.to_string()),
             },
-            Err(error) => failure("project_rename_failed", error.to_string()),
-        }
-    }
-
-    #[tool(
-        description = "Remove a project from Workman after explicit confirmation; set delete_from_disk=true to permanently delete its exact local folder with guarded force confirmation. This never pushes, fetches, or deletes a remote branch"
-    )]
-    async fn delete_project(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<ProjectDeleteArgs>,
-    ) -> CallToolResult {
-        let project_id = {
-            let mut registry = self.registry.lock().await;
-            match scoped_project(&mut registry, &parts, args.project_id) {
-                Ok((project, _)) => project.id,
-                Err(error) => return failure("project_scope_error", error),
-            }
-        };
-        match crate::worktrees::remove(
-            &self.registry,
-            crate::worktrees::RemoveWorktree {
-                project_id,
-                confirm_remove: args.confirm_delete,
-                confirm_stop_running: args.confirm_stop_running,
-                delete_from_disk: args.delete_from_disk,
-                force_dirty: args.force_dirty,
-                confirm_branch: None,
-            },
-        )
-        .await
-        {
-            Ok(removed) => success(removed),
-            Err(error) => failure(error.code(), error.to_string()),
+            Err(error) => failure("project_update_failed", error.to_string()),
         }
     }
 }
@@ -629,9 +362,156 @@ impl ServerHandler for WorkmanMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("workman", env!("CARGO_PKG_VERSION")))
-            .with_instructions(format!(
-                "Workman workspace control. Call whoami first. Agent identities are authenticated by their launch credential and daemon-jailed to their owning project; cross-project IDs and indirect targets are rejected. Unidentified bearer sessions cannot claim a process identity or perform project-scoped work. {IDLE_TIMER_WAIT_GUIDANCE} {HUMAN_HANDOFF_GUIDANCE}"
-            ))
+            .with_instructions(SERVER_INSTRUCTIONS)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let process_identity = self.request_has_process_identity(&context).await;
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| !process_identity || process_tool_allowed(tool.name.as_ref()))
+            .map(sanitize_tool_schema)
+            .collect();
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !process_tool_allowed(request.name.as_ref())
+            && self.request_has_process_identity(&context).await
+        {
+            return Ok(failure(
+                "user_session_required",
+                format!(
+                    "{} requires a user bearer session and is unavailable to process identities",
+                    request.name
+                ),
+            ));
+        }
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(context).await
+    }
+}
+
+impl WorkmanMcp {
+    async fn parts_have_process_identity(&self, parts: &Parts) -> bool {
+        let token = parts
+            .headers
+            .get(WORKMAN_MCP_TOKEN_HEADER)
+            .or_else(|| parts.headers.get(header::AUTHORIZATION))
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.strip_prefix("Bearer ").unwrap_or(value));
+        let Some(token) = token else {
+            return false;
+        };
+        self.registry
+            .lock()
+            .await
+            .store()
+            .get_process_by_mcp_token(token)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    async fn request_has_process_identity(&self, context: &RequestContext<RoleServer>) -> bool {
+        let Some(parts) = context.extensions.get::<Parts>() else {
+            return false;
+        };
+        self.parts_have_process_identity(parts).await
+    }
+}
+
+fn process_tool_allowed(name: &str) -> bool {
+    !USER_ONLY_TOOL_NAMES.contains(&name)
+}
+
+fn tool_help_line(tool: &Tool) -> String {
+    format!(
+        "{} — {}",
+        tool.name,
+        tool.description.as_deref().unwrap_or("No description")
+    )
+}
+
+fn sanitize_tool_schema(mut tool: Tool) -> Tool {
+    let mut input_schema = Value::Object((*tool.input_schema).clone());
+    sanitize_schema_value(&mut input_schema);
+    if let Value::Object(schema) = input_schema {
+        tool.input_schema = Arc::new(schema);
+    }
+    if let Some(output_schema) = tool.output_schema.take() {
+        let mut output_schema = Value::Object((*output_schema).clone());
+        sanitize_schema_value(&mut output_schema);
+        if let Value::Object(schema) = output_schema {
+            tool.output_schema = Some(Arc::new(schema));
+        }
+    }
+    tool
+}
+
+fn sanitize_schema_value(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                sanitize_schema_value(value);
+            }
+        }
+        Value::Object(schema) => {
+            schema.remove("$schema");
+            if schema.get("default").is_some_and(Value::is_null) {
+                schema.remove("default");
+            }
+
+            if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+                properties.remove("project_id");
+            }
+            if let Some(Value::Array(required)) = schema.get_mut("required") {
+                required.retain(|name| name.as_str() != Some("project_id"));
+                if required.is_empty() {
+                    schema.remove("required");
+                }
+            }
+
+            if let Some(Value::Array(types)) = schema.get_mut("type") {
+                types.retain(|schema_type| schema_type.as_str() != Some("null"));
+                if types.len() == 1 {
+                    let schema_type = types.pop().expect("one schema type remains");
+                    schema.insert("type".into(), schema_type);
+                }
+            }
+
+            for child in schema.values_mut() {
+                sanitize_schema_value(child);
+            }
+
+            let is_integer = match schema.get("type") {
+                Some(Value::String(schema_type)) => schema_type == "integer",
+                Some(Value::Array(types)) => types
+                    .iter()
+                    .any(|schema_type| schema_type.as_str() == Some("integer")),
+                _ => false,
+            };
+            if is_integer {
+                schema.remove("format");
+                if schema.get("minimum").and_then(Value::as_i64) == Some(0) {
+                    schema.remove("minimum");
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -779,23 +659,6 @@ fn process_project_id(
         ));
     }
     Ok(Some(project_id))
-}
-
-fn enforce_project_access(
-    registry: &ProcessRegistry,
-    actor: &Actor,
-    requested_project_id: ProjectId,
-) -> Result<(), String> {
-    match process_project_id(registry, actor)? {
-        Some(owning_project_id) if owning_project_id != requested_project_id => Err(
-            agent_project_scope_error(owning_project_id, requested_project_id),
-        ),
-        Some(_) => Ok(()),
-        None => Err(
-            "MCP session has no authenticated process identity; reconnect with this process's WORKMAN_MCP_TOKEN credential before project-scoped actions"
-                .to_owned(),
-        ),
-    }
 }
 
 fn agent_project_scope_error(

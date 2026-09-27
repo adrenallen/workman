@@ -186,6 +186,59 @@ fn reanchor_uses_utf16_offsets_context_and_orphans_missing_quotes() -> Result<()
 }
 
 #[test]
+fn table_formatting_reanchors_only_a_unique_tolerant_context() {
+    let before = "| Item      | Count |\n| --- | --- |\n| target | 1 |";
+    let start = before.find("target").unwrap();
+    let prefix = &before[..start];
+    let suffix = &before[start + "target".len()..];
+    let after = "| Item   | Count |\n| ------ | ----- |\n| target | 1     |";
+    let resolved = resolve_scratchpad_anchor(
+        after,
+        Some("target"),
+        Some(start),
+        Some(start + "target".len()),
+        Some(prefix),
+        Some(suffix),
+    );
+    assert_eq!(resolved.anchor_state, ScratchpadAnchorState::Anchored);
+    assert_eq!(resolved.current_start, after.find("target"));
+
+    let ambiguous = resolve_scratchpad_anchor(
+        "| ----- |\n| target   |\n\n| -------- |\n| target |\n",
+        Some("target"),
+        None,
+        None,
+        Some("| --- |\n| "),
+        Some(" |\n"),
+    );
+    assert_eq!(ambiguous.anchor_state, ScratchpadAnchorState::Orphaned);
+
+    let boundary_before = "| A | B |\n| - | - |\n| target   | 1 |";
+    let boundary_start = boundary_before.find("target").unwrap();
+    let boundary = resolve_scratchpad_anchor(
+        "| A      | B   |\n| ------ | --- |\n| target | 1   |",
+        Some("target "),
+        Some(boundary_start),
+        Some(boundary_start + "target ".len()),
+        Some(&boundary_before[..boundary_start]),
+        Some(&boundary_before[boundary_start + "target ".len()..]),
+    );
+    assert_eq!(boundary.anchor_state, ScratchpadAnchorState::Anchored);
+    assert_eq!(boundary.current_start, Some(36));
+    assert_eq!(boundary.current_end, Some(42));
+
+    for whitespace in ['\u{feff}', '\u{0085}'] {
+        let quote = format!("A{whitespace}target");
+        let resolution =
+            resolve_scratchpad_anchor("A target", Some(&quote), None, None, None, None);
+        assert_eq!(resolution.anchor_state, ScratchpadAnchorState::Orphaned);
+    }
+    let nbsp =
+        resolve_scratchpad_anchor("A target", Some("A\u{00a0}target"), None, None, None, None);
+    assert_eq!(nbsp.anchor_state, ScratchpadAnchorState::Anchored);
+}
+
+#[test]
 fn comment_permissions_revision_guards_and_mutation_signal_are_enforced()
 -> Result<(), Box<dyn Error>> {
     let store = seeded_store()?;

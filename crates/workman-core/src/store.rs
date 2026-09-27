@@ -211,10 +211,30 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile_agent_shell_mode",
         include_str!("../migrations/0039_profile_agent_shell_mode.sql"),
     ),
+    (
+        40,
+        "completion_ledger",
+        include_str!("../migrations/0040_completion_ledger.sql"),
+    ),
+    (
+        41,
+        "spawner_idle_notifications",
+        include_str!("../migrations/0041_spawner_idle_notifications.sql"),
+    ),
+    (
+        42,
+        "mcp_tools_profiles",
+        include_str!("../migrations/0042_mcp_tools_profiles.sql"),
+    ),
+    (
+        43,
+        "drop_mcp_tools_profiles",
+        include_str!("../migrations/0043_drop_mcp_tools_profiles.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 39;
+pub const LATEST_SCHEMA_VERSION: i64 = 43;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -2862,6 +2882,110 @@ fn project_ready_migration_preserves_notification_ids_and_read_history() {
     let violations: i64 = store
         .connection()
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[cfg(test)]
+#[test]
+fn drop_mcp_tools_profiles_migration_preserves_schema_42_rows() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 42) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version,name) VALUES(?1,?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO projects(id,path,name) VALUES(99,'/tmp/profile-migration','Profile');
+             UPDATE agent_tools SET mcp_tools_profile = 'extended';
+             INSERT INTO agent_templates(profile_id,name,agent_tool_id,mcp_tools_profile)
+             SELECT profile_id,'Existing template',id,'extended'
+             FROM agent_tools ORDER BY id LIMIT 1;
+             INSERT INTO processes(
+                 id,project_id,kind,name,working_dir,source,status,mcp_tools_profile
+             ) VALUES(
+                 99,99,'agent','Existing agent','/tmp/profile-migration','local','stopped','extended'
+             );",
+        )
+        .unwrap();
+    let counts_before = ["agent_tools", "agent_templates", "processes"].map(|table| {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    for table in ["agent_tools", "agent_templates", "processes"] {
+        let extended: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE mcp_tools_profile = 'extended'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            extended > 0,
+            "schema-42 fixture omitted Extended {table} rows"
+        );
+    }
+
+    let store = Store::from_connection(connection).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 43);
+    let counts_after = ["agent_tools", "agent_templates", "processes"].map(|table| {
+        store
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    assert_eq!(counts_after, counts_before);
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT name FROM agent_templates", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "Existing template"
+    );
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT name FROM processes WHERE id = 99", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "Existing agent"
+    );
+    for table in ["agent_tools", "agent_templates", "processes"] {
+        let profile_columns: i64 = store
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'mcp_tools_profile'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_columns, 0, "{table} retained the profile column");
+    }
+    let violations: i64 = store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
             row.get(0)
         })
         .unwrap();

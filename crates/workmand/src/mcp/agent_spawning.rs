@@ -25,13 +25,12 @@ use workman_core::{
     pty::{is_kimi_tool_type, kimi_session_started},
 };
 
-use super::{
-    IDLE_TIMER_LAUNCH_GUIDANCE, SCRATCHPAD_HANDOFF_GUIDANCE, WORKTREE_AGENT_GUIDANCE, WorkmanMcp,
-    ensure_actor, failure, process_project_id, scoped_project, success,
-};
+use super::{WorkmanMcp, ensure_actor, failure, process_project_id, scoped_project, success};
 use crate::{
     ProcessRegistry,
+    completion_ledger::CompletionLedger,
     process_registry::{StagedAgentAttachments, stage_agent_attachments},
+    timers::now_millis,
 };
 
 const WORKMAN_ATTACHMENT_SOURCE_DIRECTORIES: &[&str] = &[
@@ -86,33 +85,14 @@ const AGENT_TEMPLATE_EXTRA_ARGS_MAX_BYTES: usize = 4 * 1024;
 const INITIAL_PROMPT_MAX_BYTES: usize = 64 * 1024;
 const MODEL_MAX_BYTES: usize = 512;
 
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum SpawnKind {
-    Terminal,
-    Agent,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SpawnProcessArgs {
+struct SpawnTerminalArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Only interactive terminals and managed agents may be launched through this tool.
-    kind: SpawnKind,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Agent-tool registry ID. Required for kind=agent and rejected for kind=terminal.
-    #[serde(default)]
-    agent_tool_id: Option<AgentToolId>,
-    /// Safely shell-quoted arguments appended to the registered agent command.
-    #[serde(default)]
-    extra_args: Vec<String>,
-    /// Automatically accept narrowly recognized first-run trust dialogs. For Kimi, this also
-    /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
-    #[serde(default = "default_true")]
-    auto_acknowledge_dialogs: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -120,22 +100,20 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Required for the default plain-agent path. With a template, this
-    /// swaps its default agent: the template prompt stays, but template launch args are skipped.
+    /// Agent-tool registry ID. Required unless agent_template_id is set. A template tool override
+    /// carries model only within the same agent type; compatible effort may carry.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
-    /// Numeric template ID from list_agent_templates. Use a template only when the user names one
-    /// or explicitly asks for one.
+    /// Numeric template ID from list_agent_tools.agent_templates. Use a template only when the
+    /// user names one or explicitly asks for one.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Optional model override. Prefer this to putting --model in extra_args. Supported tool_type
-    /// values and aliases are codex, claude/claude_code, kimi/kimi_code, gemini/gemini_cli,
-    /// grok/grok_cli/grok_build, and opencode/open_code. Workman replaces long and short model
-    /// flags in the registered command, template args, and caller args; other tool types return an
-    /// error with recovery guidance.
+    /// Optional per-launch model override. Omit it to use the template or agent default. Built-in
+    /// tool_type values replace model flags in the registered command, template args, and caller
+    /// args; other types return recovery guidance.
     #[serde(default)]
     model: Option<String>,
     /// Raw, safely shell-quoted flags appended to the registered agent command. Avoid using this
@@ -154,28 +132,34 @@ struct SpawnAgentArgs {
     /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
+    /// Deliver one coalesced Workman turn when this direct child finishes, needs input, exits, or
+    /// crashes; defaults to false and requires a process identity.
+    #[serde(default)]
+    notify_spawner_on_idle: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolConfigArgs {
-    agent_tool_id: AgentToolId,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolConfigWriteArgs {
+struct AgentToolConfigureArgs {
     agent_tool_id: AgentToolId,
     /// Must be true after the complete resulting config has been shown to the user.
-    confirm_write: bool,
-    /// SHA-256 returned by agent_tool_configure_preview; prevents stale writes.
-    expected_preview_sha256: String,
+    #[serde(default)]
+    confirm_write: Option<bool>,
+    /// SHA-256 returned by the preview call; prevents stale writes.
+    #[serde(default)]
+    expected_preview_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AgentToolDeepCheckArgs {
+struct AgentToolCheckArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    agent_tool_id: AgentToolId,
+    /// Run the ephemeral whoami roundtrip instead of the cheap health checks.
+    #[serde(default)]
+    deep: bool,
+    /// Required when deep=true.
+    #[serde(default)]
+    agent_tool_id: Option<AgentToolId>,
     /// Hard deadline for the ephemeral whoami roundtrip (default 30s, maximum 60s).
     #[serde(default)]
     timeout_ms: Option<u64>,
@@ -191,10 +175,11 @@ pub(crate) struct SpawnResult {
     project_id: ProjectId,
     name: String,
     kind: ProcessKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_instructions: Option<String>,
     deferred_initial_prompt: Option<String>,
     deferred_attachments: Vec<String>,
+    notify_spawner_on_idle: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedAgentLaunch>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,8 +207,26 @@ struct ResolvedAgentSpawn {
     agent_tool_id: AgentToolId,
     agent_tool_type: String,
     extra_args: Vec<String>,
-    model: Option<String>,
+    has_model_arg: bool,
     initial_prompt: Option<String>,
+    launch: ResolvedAgentLaunch,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedAgentLaunch {
+    agent_tool_id: AgentToolId,
+    agent_tool_name: String,
+    model: String,
+    effort: String,
+    mcp_wired: bool,
+    template_args_skipped: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentToolSummary<'tool> {
+    #[serde(flatten)]
+    tool: &'tool AgentTool,
+    mcp_wired: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -239,9 +242,17 @@ struct AgentTemplateSummary {
     id: AgentTemplateId,
     name: String,
     default_agent: AgentTemplateDefaultAgent,
-    model: Option<String>,
+    launch: AgentTemplateLaunch,
     prompt_preview: String,
     extra_args: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTemplateLaunch {
+    agent_tool_id: AgentToolId,
+    agent_tool_name: String,
+    model: String,
+    effort: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,10 +278,24 @@ struct ModelFlag {
     short: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EffortDialect {
+    Flag,
+    CodexConfig,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct SplitLaunchArgs {
+    model: Option<String>,
+    effort: Option<String>,
+    classified: Vec<ClassifiedLaunchArg>,
+}
+
 #[derive(Debug, Eq, PartialEq)]
-enum DetectedModel {
-    Absent,
-    Present(Option<String>),
+enum ClassifiedLaunchArg {
+    Model(Vec<String>),
+    Effort(Vec<String>),
+    Extra(String),
 }
 
 #[derive(Debug)]
@@ -336,96 +361,51 @@ impl McpLaunchAdapter {
             Self::Unsupported => None,
         }
     }
+
+    const fn effort_dialect(self) -> Option<EffortDialect> {
+        match self {
+            Self::Claude => Some(EffortDialect::Flag),
+            Self::Codex => Some(EffortDialect::CodexConfig),
+            Self::Gemini | Self::OpenCode | Self::Grok | Self::Kimi | Self::Unsupported => None,
+        }
+    }
 }
 
 #[tool_router(router = agent_spawning_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
-        description = "List enabled and disabled built-in or custom agent command presets. Returns { agent_tools: [...] }"
+        description = "List agent tools and optional templates; templates include launch settings"
     )]
     async fn list_agent_tools(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
-        match load_agent_tools(&registry) {
-            Ok(tools) => success(json!({ "agent_tools": tools })),
-            Err(error) => failure("store_error", error),
+        match (
+            load_agent_tools(&registry),
+            load_agent_template_summaries(&registry),
+        ) {
+            (Ok(tools), Ok(templates)) => {
+                let tools = tools
+                    .iter()
+                    .map(|tool| AgentToolSummary {
+                        tool,
+                        mcp_wired: mcp_launch_capability(&tool.tool_type).supported,
+                    })
+                    .collect::<Vec<_>>();
+                success(json!({
+                    "agent_tools": tools,
+                    "agent_templates": templates,
+                }))
+            }
+            (Err(error), _) | (_, Err(error)) => failure("store_error", error),
         }
     }
 
     #[tool(
-        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent { agent_tool_id, name, tool_type, enabled }, model, prompt_preview, extra_args }] } without full prompts; a trailing … marks a truncated preview."
-    )]
-    async fn list_agent_templates(&self) -> CallToolResult {
-        let registry = self.registry.lock().await;
-        match load_agent_template_summaries(&registry) {
-            Ok(templates) => success(json!({ "agent_templates": templates })),
-            Err(error) => failure("store_error", error),
-        }
-    }
-
-    #[tool(
-        description = "Run cheap PATH, version, and config-presence checks for every agent runtime"
-    )]
-    async fn agent_tools_health(&self) -> CallToolResult {
-        let (tools, user_environment) = {
-            let registry = self.registry.lock().await;
-            match load_agent_tools(&registry) {
-                Ok(tools) => (tools, registry.resolved_user_environment()),
-                Err(error) => return failure("store_error", error),
-            }
-        };
-        success(
-            crate::runtime_doctor::check_agent_tools_with_user_environment(
-                tools,
-                &user_environment,
-            )
-            .await,
-        )
-    }
-
-    #[tool(
-        description = "Preview the complete consent-gated workman MCP config for one agent runtime (global configuration is unavailable to agent identities)"
-    )]
-    async fn agent_tool_configure_preview(
-        &self,
-        Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolConfigArgs>,
-    ) -> CallToolResult {
-        let tool = {
-            let mut registry = self.registry.lock().await;
-            let (actor, _) = match ensure_actor(&mut registry, &parts) {
-                Ok(identity) => identity,
-                Err(error) => return failure("identity_error", error),
-            };
-            match process_project_id(&registry, &actor) {
-                Ok(Some(project_id)) => {
-                    return failure(
-                        "project_scope_error",
-                        format!(
-                            "agent identities are scoped to project {project_id}; inspecting global agent configuration is outside that scope"
-                        ),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => return failure("project_scope_error", error),
-            }
-            match load_agent_tool(&registry, args.agent_tool_id) {
-                Ok(tool) => tool,
-                Err(error) => return failure("agent_tool_error", error),
-            }
-        };
-        match crate::runtime_doctor::config_preview(&tool, &self.mcp_url) {
-            Ok(preview) => success(preview),
-            Err(error) => failure("agent_config_error", error),
-        }
-    }
-
-    #[tool(
-        description = "Write a previously previewed agent MCP config after explicit confirmation (global configuration is unavailable to agent identities)"
+        description = "Preview or confirm a consent-gated agent MCP config; unavailable to agent identities"
     )]
     async fn agent_tool_configure(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolConfigWriteArgs>,
+        Parameters(args): Parameters<AgentToolConfigureArgs>,
     ) -> CallToolResult {
         let tool = {
             let mut registry = self.registry.lock().await;
@@ -450,25 +430,54 @@ impl WorkmanMcp {
                 Err(error) => return failure("agent_tool_error", error),
             }
         };
+        if !args.confirm_write.unwrap_or(false) {
+            return match crate::runtime_doctor::config_preview(&tool, &self.mcp_url) {
+                Ok(preview) => success(preview),
+                Err(error) => failure("agent_config_error", error),
+            };
+        }
+        let Some(expected_preview_sha256) = args.expected_preview_sha256.as_deref() else {
+            return failure(
+                "invalid_params",
+                "expected_preview_sha256 is required when confirm_write=true",
+            );
+        };
         match crate::runtime_doctor::apply_config(
             &tool,
             &self.mcp_url,
-            args.confirm_write,
-            &args.expected_preview_sha256,
+            true,
+            expected_preview_sha256,
         ) {
             Ok(result) => success(result),
             Err(error) => failure("agent_config_error", error),
         }
     }
 
-    #[tool(
-        description = "Optionally spawn one ephemeral agent and verify its workman whoami roundtrip"
-    )]
-    async fn agent_tool_deep_check(
+    #[tool(description = "Check agent runtimes; deep=true verifies one ephemeral whoami roundtrip")]
+    async fn agent_tool_check(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<AgentToolDeepCheckArgs>,
+        Parameters(args): Parameters<AgentToolCheckArgs>,
     ) -> CallToolResult {
+        if !args.deep {
+            let (tools, user_environment) = {
+                let registry = self.registry.lock().await;
+                match load_agent_tools(&registry) {
+                    Ok(tools) => (tools, registry.resolved_user_environment()),
+                    Err(error) => return failure("store_error", error),
+                }
+            };
+            return success(
+                crate::runtime_doctor::check_agent_tools_with_user_environment(
+                    tools,
+                    &user_environment,
+                )
+                .await,
+            );
+        }
+        let Some(agent_tool_id) = args.agent_tool_id else {
+            return failure("invalid_params", "agent_tool_id is required when deep=true");
+        };
         let (project_id, spawned_by_process_id) = {
             let mut registry = self.registry.lock().await;
             match scoped_project(&mut registry, &parts, args.project_id) {
@@ -479,7 +488,7 @@ impl WorkmanMcp {
         match deep_check_registered_agent(
             self.registry.clone(),
             project_id,
-            args.agent_tool_id,
+            agent_tool_id,
             &self.mcp_url,
             args.timeout_ms,
             spawned_by_process_id,
@@ -491,11 +500,11 @@ impl WorkmanMcp {
         }
     }
 
-    #[tool(description = "Spawn a managed interactive terminal or registered agent process")]
-    async fn spawn_process(
+    #[tool(description = "Spawn a managed interactive terminal")]
+    async fn spawn_terminal(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(args): Parameters<SpawnProcessArgs>,
+        Parameters(args): Parameters<SpawnTerminalArgs>,
     ) -> CallToolResult {
         let (project, spawned_by_process_id) = {
             let mut registry = self.registry.lock().await;
@@ -505,66 +514,25 @@ impl WorkmanMcp {
             }
         };
 
-        let result = match args.kind {
-            SpawnKind::Terminal => {
-                if args.agent_tool_id.is_some() {
-                    return failure(
-                        "invalid_arguments",
-                        "agent_tool_id is only valid when kind=agent",
-                    );
-                }
-                if !args.extra_args.is_empty() {
-                    return failure(
-                        "invalid_arguments",
-                        "extra_args is only valid when kind=agent",
-                    );
-                }
-                let mut registry = self.registry.lock().await;
-                process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
-                    let shell = registry
-                        .resolved_user_environment()
-                        .active_shell()
-                        .to_string_lossy()
-                        .into_owned();
-                    spawn(
-                        &mut registry,
-                        &project,
-                        ProcessKind::Terminal,
-                        name,
-                        shell,
-                        None,
-                        None,
-                        BTreeMap::new(),
-                        spawned_by_process_id,
-                    )
-                })
-            }
-            SpawnKind::Agent => {
-                let Some(agent_tool_id) = args.agent_tool_id else {
-                    return failure(
-                        "agent_tool_required",
-                        "agent_tool_id is required when kind=agent",
-                    );
-                };
-                spawn_registered_agent(
-                    self.registry.clone(),
-                    project,
-                    Some(agent_tool_id),
-                    None,
-                    args.name,
-                    args.extra_args,
-                    None,
-                    None,
-                    Vec::new(),
-                    false,
-                    AttachmentSourceScope::McpProject,
-                    &self.mcp_url,
-                    args.auto_acknowledge_dialogs,
-                    spawned_by_process_id,
-                )
-                .await
-            }
-        };
+        let mut registry = self.registry.lock().await;
+        let result = process_name(&registry, project.id, args.name, "terminal").and_then(|name| {
+            let shell = registry
+                .resolved_user_environment()
+                .active_shell()
+                .to_string_lossy()
+                .into_owned();
+            spawn(
+                &mut registry,
+                &project,
+                ProcessKind::Terminal,
+                name,
+                shell,
+                None,
+                BTreeMap::new(),
+                spawned_by_process_id,
+                false,
+            )
+        });
         match result {
             Ok(result) => success(result),
             Err(error) => failure("spawn_failed", error),
@@ -572,7 +540,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn an agent from list_agent_tools. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. An override keeps the template's model only for the same agent type. resolved includes effective settings and mcp_wired. notify_spawner_on_idle avoids an idle timer unless a deadline matters."
     )]
     async fn spawn_agent(
         &self,
@@ -592,6 +560,12 @@ impl WorkmanMcp {
                 Err(error) => return failure("project_scope_error", error),
             }
         };
+        if args.notify_spawner_on_idle && spawned_by_process_id.is_none() {
+            return failure(
+                "process_identity_required",
+                "notify_spawner_on_idle requires an authenticated process identity",
+            );
+        }
         match spawn_registered_agent(
             self.registry.clone(),
             project,
@@ -607,6 +581,7 @@ impl WorkmanMcp {
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
             spawned_by_process_id,
+            args.notify_spawner_on_idle,
         )
         .await
         {
@@ -643,18 +618,7 @@ fn load_agent_template_summaries(
         .into_iter()
         .filter_map(|template| {
             let tool = tools.get(&template.agent_tool_id)?;
-            let model = mcp_launch_adapter(&tool.tool_type)
-                .model_flag()
-                .and_then(|flag| {
-                    let detected = match detected_model(&template.extra_args, flag) {
-                        DetectedModel::Absent => detected_model_from_command(&tool.command, flag),
-                        detected => detected,
-                    };
-                    match detected {
-                        DetectedModel::Absent => None,
-                        DetectedModel::Present(model) => model,
-                    }
-                });
+            let launch_options = configured_launch_options(tool, &template.extra_args);
             Some(AgentTemplateSummary {
                 id: template.id,
                 name: template.name,
@@ -664,7 +628,12 @@ fn load_agent_template_summaries(
                     tool_type: tool.tool_type.clone(),
                     enabled: tool.enabled,
                 },
-                model,
+                launch: AgentTemplateLaunch {
+                    agent_tool_id: tool.id,
+                    agent_tool_name: tool.name.clone(),
+                    model: launch_value_label(launch_options.model),
+                    effort: launch_value_label(launch_options.effort),
+                },
                 prompt_preview: prompt_preview(&template.prompt),
                 extra_args: template.extra_args,
             })
@@ -1053,6 +1022,7 @@ pub(crate) async fn spawn_registered_agent(
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
 ) -> Result<SpawnResult, String> {
     validate_initial_prompt(initial_prompt.as_deref())?;
     let resolved = {
@@ -1106,10 +1076,11 @@ pub(crate) async fn spawn_registered_agent(
         resolved.agent_tool_id,
         name,
         resolved.extra_args,
-        resolved.model,
+        resolved.has_model_arg,
         mcp_url,
         auto_acknowledge_dialogs,
         spawned_by_process_id,
+        notify_spawner_on_idle,
         AgentLaunchPurpose::Normal,
         prompt_pending,
     )
@@ -1186,9 +1157,11 @@ pub(crate) async fn spawn_registered_agent(
                 prompt,
                 is_kimi_tool_type(&resolved.agent_tool_type),
                 pending_prompt.expect("scheduled initial prompt was reserved during spawn"),
+                spawned_by_process_id,
             );
         }
     }
+    result.resolved = Some(resolved.launch);
     Ok(result)
 }
 
@@ -1273,12 +1246,27 @@ fn resolve_agent_spawn(
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
         let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
+        let extra_args =
+            apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?;
+        let has_model_arg = split_launch_args(&extra_args, &tool.tool_type)
+            .model
+            .is_some();
+        let launch_options = configured_launch_options(&tool, &extra_args);
+        let mcp_wired = mcp_launch_capability(&tool.tool_type).supported;
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
             agent_tool_type: tool.tool_type.clone(),
-            extra_args: apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?,
-            model: requested_model,
+            extra_args,
+            has_model_arg,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
+            launch: ResolvedAgentLaunch {
+                agent_tool_id,
+                agent_tool_name: tool.name,
+                model: launch_value_label(launch_options.model),
+                effort: launch_value_label(launch_options.effort),
+                mcp_wired,
+                template_args_skipped: Vec::new(),
+            },
         });
     };
     let template = registry
@@ -1291,19 +1279,247 @@ fn resolve_agent_spawn(
     let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
     let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
     let uses_template_launch_settings = agent_tool_id == template.agent_tool_id;
-    let mut extra_args = if uses_template_launch_settings {
-        template.extra_args
+    let (mut extra_args, template_args_skipped) = if uses_template_launch_settings {
+        (template.extra_args, Vec::new())
     } else {
-        Vec::new()
+        let template_tool = load_agent_tool(registry, template.agent_tool_id)?;
+        portable_template_args(&template.extra_args, &template_tool, &tool)
     };
     extra_args.extend(caller_extra_args);
+    let extra_args = apply_model_override(&tool, extra_args, requested_model.as_deref())?;
+    let has_model_arg = split_launch_args(&extra_args, &tool.tool_type)
+        .model
+        .is_some();
+    let launch_options = configured_launch_options(&tool, &extra_args);
+    let mcp_wired = mcp_launch_capability(&tool.tool_type).supported;
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
         agent_tool_type: tool.tool_type.clone(),
-        extra_args: apply_model_override(&tool, extra_args, requested_model.as_deref())?,
-        model: requested_model,
+        extra_args,
+        has_model_arg,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
+        launch: ResolvedAgentLaunch {
+            agent_tool_id,
+            agent_tool_name: tool.name,
+            model: launch_value_label(launch_options.model),
+            effort: launch_value_label(launch_options.effort),
+            mcp_wired,
+            template_args_skipped,
+        },
     })
+}
+
+fn portable_template_args(
+    template_args: &[String],
+    template_tool: &AgentTool,
+    target_tool: &AgentTool,
+) -> (Vec<String>, Vec<String>) {
+    let parsed = split_launch_args(template_args, &template_tool.tool_type);
+    let template_adapter = mcp_launch_adapter(&template_tool.tool_type);
+    let target_adapter = mcp_launch_adapter(&target_tool.tool_type);
+    let carries_model = template_adapter != McpLaunchAdapter::Unsupported
+        && template_adapter == target_adapter
+        && target_adapter.model_flag().is_some();
+    let mut carried = Vec::new();
+    let mut skipped = Vec::new();
+
+    for argument in parsed.classified {
+        match argument {
+            ClassifiedLaunchArg::Model(arguments) => {
+                if !carries_model {
+                    skipped.extend(arguments);
+                }
+            }
+            ClassifiedLaunchArg::Effort(arguments) => {
+                if target_adapter.effort_dialect().is_none() {
+                    skipped.extend(arguments);
+                }
+            }
+            ClassifiedLaunchArg::Extra(argument) => skipped.push(argument),
+        }
+    }
+    if carries_model && let (Some(flag), Some(model)) = (target_adapter.model_flag(), parsed.model)
+    {
+        carried.push(flag.long.to_owned());
+        carried.push(model);
+    }
+    if let (Some(dialect), Some(effort)) = (target_adapter.effort_dialect(), parsed.effort) {
+        // Keep registered-command effort flags intact so shell-composed commands remain
+        // launchable. Supported Claude and Codex CLIs apply the appended setting last.
+        append_effort(&mut carried, dialect, effort);
+    }
+    (carried, skipped)
+}
+
+fn configured_launch_options(tool: &AgentTool, extra_args: &[String]) -> SplitLaunchArgs {
+    let configured = split_launch_args(extra_args, &tool.tool_type);
+    let command = shell_word_spans(&tool.command)
+        .ok()
+        .filter(|words| !words.iter().any(|word| word.shell_operator))
+        .map(|words| {
+            split_launch_args(
+                &words.into_iter().map(|word| word.value).collect::<Vec<_>>(),
+                &tool.tool_type,
+            )
+        })
+        .unwrap_or_default();
+    SplitLaunchArgs {
+        model: configured.model.or(command.model),
+        effort: configured.effort.or(command.effort),
+        classified: configured.classified,
+    }
+}
+
+fn split_launch_args(arguments: &[String], tool_type: &str) -> SplitLaunchArgs {
+    let adapter = mcp_launch_adapter(tool_type);
+    let model_flag = adapter.model_flag();
+    let effort_dialect = adapter.effort_dialect();
+    let mut split = SplitLaunchArgs::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--" {
+            split.classified.extend(
+                arguments[index..]
+                    .iter()
+                    .cloned()
+                    .map(ClassifiedLaunchArg::Extra),
+            );
+            break;
+        }
+        if let Some(flag) = model_flag {
+            if is_separate_model_flag(argument, flag)
+                && let Some(model) = arguments.get(index + 1).and_then(|value| nonempty(value))
+            {
+                split.model = Some(model);
+                split.classified.push(ClassifiedLaunchArg::Model(vec![
+                    argument.clone(),
+                    arguments[index + 1].clone(),
+                ]));
+                index += 2;
+                continue;
+            }
+            if is_attached_model_flag(argument, flag)
+                && let Some(model) = attached_model_value(argument, flag).and_then(nonempty)
+            {
+                split.model = Some(model);
+                split
+                    .classified
+                    .push(ClassifiedLaunchArg::Model(vec![argument.clone()]));
+                index += 1;
+                continue;
+            }
+        }
+        match effort_dialect {
+            Some(EffortDialect::Flag) if argument == "--effort" => {
+                if let Some(effort) = arguments
+                    .get(index + 1)
+                    .and_then(|value| effort_value(value))
+                {
+                    split.effort = Some(effort);
+                    split.classified.push(ClassifiedLaunchArg::Effort(vec![
+                        argument.clone(),
+                        arguments[index + 1].clone(),
+                    ]));
+                    index += 2;
+                    continue;
+                }
+            }
+            Some(EffortDialect::Flag) if argument.starts_with("--effort=") => {
+                if let Some(effort) = argument.strip_prefix("--effort=").and_then(effort_value) {
+                    split.effort = Some(effort);
+                    split
+                        .classified
+                        .push(ClassifiedLaunchArg::Effort(vec![argument.clone()]));
+                    index += 1;
+                    continue;
+                }
+            }
+            Some(EffortDialect::CodexConfig) if argument == "-c" || argument == "--config" => {
+                if let Some(effort) = arguments
+                    .get(index + 1)
+                    .and_then(|value| codex_configured_effort(value))
+                {
+                    split.effort = Some(effort);
+                    split.classified.push(ClassifiedLaunchArg::Effort(vec![
+                        argument.clone(),
+                        arguments[index + 1].clone(),
+                    ]));
+                    index += 2;
+                    continue;
+                }
+            }
+            Some(EffortDialect::CodexConfig) if argument.starts_with("--config=") => {
+                if let Some(effort) = argument
+                    .strip_prefix("--config=")
+                    .and_then(codex_configured_effort)
+                {
+                    split.effort = Some(effort);
+                    split
+                        .classified
+                        .push(ClassifiedLaunchArg::Effort(vec![argument.clone()]));
+                    index += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        split
+            .classified
+            .push(ClassifiedLaunchArg::Extra(argument.clone()));
+        index += 1;
+    }
+    split
+}
+
+fn attached_model_value(argument: &str, flag: ModelFlag) -> Option<&str> {
+    argument
+        .strip_prefix(flag.long)
+        .and_then(|suffix| suffix.strip_prefix('='))
+        .or_else(|| {
+            flag.short
+                .and_then(|short| argument.strip_prefix(short))
+                .filter(|suffix| !suffix.is_empty())
+                .map(|suffix| suffix.strip_prefix('=').unwrap_or(suffix))
+        })
+}
+
+fn codex_configured_effort(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (key, effort) = value.split_once('=')?;
+    if key.trim() != "model_reasoning_effort" {
+        return None;
+    }
+    effort_value(effort.trim().trim_matches(['\'', '"']))
+}
+
+fn effort_value(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    ["low", "medium", "high", "xhigh", "max"]
+        .contains(&value.as_str())
+        .then_some(value)
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn append_effort(arguments: &mut Vec<String>, dialect: EffortDialect, effort: String) {
+    match dialect {
+        EffortDialect::Flag => {
+            arguments.push("--effort".to_owned());
+            arguments.push(effort);
+        }
+        EffortDialect::CodexConfig => {
+            arguments.push("-c".to_owned());
+            arguments.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
+    }
+}
+
+fn launch_value_label(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "agent default".to_owned())
 }
 
 fn validate_model(model: Option<&str>) -> Result<(), String> {
@@ -1392,42 +1608,6 @@ fn is_attached_model_flag(argument: &str, flag: ModelFlag) -> bool {
         })
 }
 
-fn detected_model(arguments: &[String], flag: ModelFlag) -> DetectedModel {
-    let mut detected = DetectedModel::Absent;
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if argument == "--" {
-            break;
-        }
-        if is_separate_model_flag(argument, flag) {
-            detected = DetectedModel::Present(
-                arguments
-                    .get(index + 1)
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned),
-            );
-            index += 2;
-            continue;
-        }
-        let attached = argument
-            .strip_prefix(flag.long)
-            .and_then(|suffix| suffix.strip_prefix('='))
-            .or_else(|| {
-                flag.short
-                    .and_then(|short| argument.strip_prefix(short))
-                    .filter(|suffix| !suffix.is_empty())
-                    .map(|suffix| suffix.strip_prefix('=').unwrap_or(suffix))
-            });
-        if let Some(value) = attached {
-            detected = DetectedModel::Present((!value.trim().is_empty()).then(|| value.to_owned()));
-        }
-        index += 1;
-    }
-    detected
-}
-
 pub(crate) fn compose_initial_prompt(
     template_prompt: Option<&str>,
     caller_prompt: Option<&str>,
@@ -1452,6 +1632,7 @@ fn schedule_initial_prompt(
     prompt: String,
     verify_kimi_submission: bool,
     pending_prompt: PendingPrompt,
+    owner_process_id: Option<ProcessId>,
 ) {
     tokio::spawn(async move {
         // Hold the reservation through readiness polling and verification. The
@@ -1532,6 +1713,18 @@ fn schedule_initial_prompt(
                             registry.submit_input(process_id, prompt.as_bytes())
                         }
                         .map_err(|error| error.to_string());
+                        if result.is_ok()
+                            && let Some(owner_process_id) = owner_process_id
+                            && let Err(error) = CompletionLedger::new(registry.store())
+                                .record_input(owner_process_id, process_id, now_millis())
+                        {
+                            // The initial prompt is already queued. Keep the successful
+                            // delivery result (and Kimi confirmation path) even if durable
+                            // owner attribution is temporarily unavailable.
+                            eprintln!(
+                                "process {process_id}: initial prompt ledger attribution failed: {error}"
+                            );
+                        }
                         match &result {
                             Ok(_) if verify_kimi_submission => {
                                 let _ = registry.record_process_event(
@@ -1692,10 +1885,11 @@ async fn spawn_registered_agent_for(
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
-    model: Option<String>,
+    has_model_arg: bool,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
     purpose: AgentLaunchPurpose,
     prompt_pending: bool,
 ) -> Result<(SpawnResult, Option<PendingPrompt>), String> {
@@ -1717,10 +1911,10 @@ async fn spawn_registered_agent_for(
     let prepared = tokio::task::spawn_blocking(move || {
         let resolved_environment = user_environment.resolve();
         let source_home = agent_source_home(&resolved_environment, &tool.tool_type);
-        let command = if model.is_some() {
+        let command = if has_model_arg {
             let flag = mcp_launch_adapter(&tool.tool_type)
                 .model_flag()
-                .expect("model support was checked while resolving the spawn");
+                .expect("model argument support was checked while resolving the spawn");
             strip_model_flags_from_command(&tool.command, flag)?
         } else {
             tool.command.clone()
@@ -1773,9 +1967,9 @@ async fn spawn_registered_agent_for(
             name,
             prepared.launch.command,
             Some(prepared.tool.id),
-            Some(tool_type.clone()),
             prepared.launch.env,
             spawned_by_process_id,
+            notify_spawner_on_idle,
         )
         .and_then(|result| {
             // Reserve under the lifecycle lock, before another task can observe
@@ -1938,10 +2132,11 @@ pub(crate) async fn deep_check_registered_agent(
         agent_tool_id,
         None,
         extra_args,
-        None,
+        false,
         mcp_url,
         true,
         spawned_by_process_id,
+        false,
         AgentLaunchPurpose::DeepCheck,
         submit_prompt,
     )
@@ -2108,9 +2303,9 @@ fn spawn(
     name: String,
     command: String,
     agent_tool_id: Option<AgentToolId>,
-    agent_tool_type: Option<String>,
     env: BTreeMap<String, String>,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
 ) -> Result<SpawnResult, String> {
     let created = registry
         .create(Process {
@@ -2136,6 +2331,16 @@ fn spawn(
             sort_order: 0,
         })
         .map_err(|error| error.to_string())?;
+    if notify_spawner_on_idle {
+        let Some(spawner_id) = spawned_by_process_id else {
+            let _ = registry.close(created.id);
+            return Err("notify_spawner_on_idle requires an authenticated spawner process".into());
+        };
+        if let Err(error) = registry.set_notify_spawner_on_idle(spawner_id, created.id, true) {
+            let _ = registry.close(created.id);
+            return Err(error.to_string());
+        }
+    }
     let running = match registry.start(created.id) {
         Ok(process) => process,
         Err(error) => {
@@ -2143,25 +2348,15 @@ fn spawn(
             return Err(error.to_string());
         }
     };
-    let agent_instructions = (kind == ProcessKind::Agent).then(|| {
-        agent_instructions(
-            &running,
-            project,
-            running
-                .env
-                .get(WORKMAN_MCP_URL_ENV)
-                .expect("agent spawn always records its MCP URL"),
-            agent_tool_type.as_deref().unwrap_or("unknown"),
-        )
-    });
     Ok(SpawnResult {
         process_id: running.id,
         project_id: running.project_id,
         name: running.name,
         kind: running.kind,
-        agent_instructions,
         deferred_initial_prompt: None,
         deferred_attachments: Vec::new(),
+        notify_spawner_on_idle,
+        resolved: None,
     })
 }
 
@@ -2318,10 +2513,7 @@ fn shell_word_spans(command: &str) -> Result<Vec<ShellWordSpan>, String> {
 fn strip_model_flags_from_command(command: &str, flag: ModelFlag) -> Result<String, String> {
     let words = shell_word_spans(command)?;
     if words.iter().any(|word| word.shell_operator) {
-        return Err(
-            "model overrides require a direct registered agent command without shell control operators"
-                .to_owned(),
-        );
+        return Ok(command.to_owned());
     }
     let mut removed = vec![false; words.len()];
     let mut index = 0;
@@ -2361,19 +2553,6 @@ fn strip_model_flags_from_command(command: &str, flag: ModelFlag) -> Result<Stri
         return Err("registered agent command is empty after replacing its model flag".to_owned());
     }
     Ok(filtered)
-}
-
-fn detected_model_from_command(command: &str, flag: ModelFlag) -> DetectedModel {
-    let Ok(words) = shell_word_spans(command) else {
-        return DetectedModel::Absent;
-    };
-    if words.iter().any(|word| word.shell_operator) {
-        return DetectedModel::Absent;
-    }
-    detected_model(
-        &words.into_iter().map(|word| word.value).collect::<Vec<_>>(),
-        flag,
-    )
 }
 
 fn command_with_args(command: &str, extra_args: &[String]) -> Result<String, String> {
@@ -3020,58 +3199,6 @@ fn shell_quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\"'\"'"))
 }
 
-fn agent_instructions(
-    process: &Process,
-    project: &Project,
-    mcp_url: &str,
-    tool_type: &str,
-) -> String {
-    let capability = mcp_launch_capability(tool_type);
-    let client_wiring = if capability.supported {
-        format!(
-            "This launch already has the server named workman wired through {}.",
-            capability.mechanism
-        )
-    } else {
-        format!(
-            "This runtime is not auto-wired: {} Do not claim Workman MCP access unless the client exposes it.",
-            capability.note
-        )
-    };
-    let identity_guidance = if capability.supported {
-        format!(
-            "Call whoami() through workman first. It must identify you as process {}. Never call identify_session to claim or change identity; if whoami is unidentified or names any other process, stop and report a launch-wiring error.",
-            process.id
-        )
-    } else {
-        "The Workman MCP identity check is unavailable for this launch.".to_owned()
-    };
-    format!(
-        "[workman context] You are Workman process ID {process_id} ({process_name}), in project \
-         {project_id} ({project_name}, repo {project_path}). Workman set \
-         WORKMAN_PROCESS_ID={process_id}, WORKMAN_MCP_URL={mcp_url}, and the secret \
-         WORKMAN_MCP_TOKEN environment variable. {client_wiring} The connector must use the exact \
-         URL in ${{WORKMAN_MCP_URL}} ({mcp_url}) and send the x-workman-mcp-token header from \
-         ${{WORKMAN_MCP_TOKEN}}. Use the MCP server named workman, never a globally configured Solo \
-         or unrelated workman server. {identity_guidance} \
-         {worktree_agent_guidance} \
-         {idle_timer_wait_guidance} \
-         {scratchpad_handoff_guidance} \
-         [END WORKMAN CONTEXT]",
-        process_id = process.id,
-        process_name = process.name,
-        project_id = project.id,
-        project_name = project.name,
-        project_path = project.path,
-        client_wiring = client_wiring,
-        identity_guidance = identity_guidance,
-        idle_timer_wait_guidance = IDLE_TIMER_LAUNCH_GUIDANCE,
-        mcp_url = mcp_url,
-        scratchpad_handoff_guidance = SCRATCHPAD_HANDOFF_GUIDANCE,
-        worktree_agent_guidance = WORKTREE_AGENT_GUIDANCE,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3123,6 +3250,7 @@ mod tests {
             "http://127.0.0.1:1/mcp",
             false,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3268,6 +3396,7 @@ mod tests {
             "http://127.0.0.1:1/mcp",
             false,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3442,6 +3571,9 @@ mod tests {
         .unwrap();
         assert_eq!(default.agent_tool_id, 91);
         assert_eq!(default.extra_args, ["--template", "model-a", "--caller"]);
+        assert_eq!(default.launch.model, "agent default");
+        assert_eq!(default.launch.effort, "agent default");
+        assert!(default.launch.template_args_skipped.is_empty());
         assert_eq!(
             default.initial_prompt.as_deref(),
             Some("Review carefully.\n\nCheck this.")
@@ -3459,6 +3591,10 @@ mod tests {
         assert_eq!(overridden.agent_tool_id, 92);
         assert_eq!(overridden.extra_args, ["--caller"]);
         assert_eq!(
+            overridden.launch.template_args_skipped,
+            ["--template", "model-a"]
+        );
+        assert_eq!(
             overridden.initial_prompt.as_deref(),
             Some("Review carefully.\n\nCheck this.")
         );
@@ -3471,6 +3607,199 @@ mod tests {
             resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 93 (Disabled agent) is disabled"
         );
+    }
+
+    #[test]
+    fn template_agent_override_carries_model_only_within_the_same_agent_type() {
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
+        for (id, name, command, tool_type) in [
+            (
+                91,
+                "Claude template agent",
+                "claude --model sonnet",
+                "claude",
+            ),
+            (92, "Codex override", "codex --model codex-default", "codex"),
+            (
+                93,
+                "Claude alias override",
+                "claude --model opus",
+                "claude_code",
+            ),
+            (94, "Custom override", "custom", "custom"),
+        ] {
+            registry
+                .store()
+                .put_agent_tool(&AgentTool {
+                    id,
+                    name: name.into(),
+                    command: command.into(),
+                    tool_type: tool_type.into(),
+                    enabled: true,
+                    source: AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 44,
+                profile_id: 1,
+                name: "Reviewer".into(),
+                agent_tool_id: 91,
+                extra_args: vec![
+                    "--review".into(),
+                    "--model=fable".into(),
+                    "--effort".into(),
+                    "high".into(),
+                ],
+                prompt: "Review carefully.".into(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+
+        let claude =
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap();
+        assert_eq!(claude.extra_args, ["--model", "fable", "--effort", "high"]);
+        assert_eq!(claude.launch.agent_tool_name, "Claude alias override");
+        assert_eq!(claude.launch.model, "fable");
+        assert_eq!(claude.launch.effort, "high");
+        assert_eq!(claude.launch.template_args_skipped, ["--review"]);
+
+        let codex = resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
+        assert_eq!(codex.extra_args, ["-c", "model_reasoning_effort=\"high\""]);
+        assert_eq!(codex.launch.agent_tool_name, "Codex override");
+        assert_eq!(codex.launch.model, "codex-default");
+        assert_eq!(codex.launch.effort, "high");
+        assert_eq!(
+            codex.launch.template_args_skipped,
+            ["--review", "--model=fable"]
+        );
+
+        let custom =
+            resolve_agent_spawn(&registry, Some(94), Some(44), vec![], None, None).unwrap();
+        assert!(custom.extra_args.is_empty());
+        assert_eq!(custom.launch.model, "agent default");
+        assert_eq!(custom.launch.effort, "agent default");
+        assert_eq!(
+            custom.launch.template_args_skipped,
+            ["--review", "--model=fable", "--effort", "high"]
+        );
+    }
+
+    #[test]
+    fn template_agent_override_carries_effort_from_codex_to_claude() {
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
+        for (id, name, tool_type) in [
+            (91, "Codex template agent", "codex"),
+            (92, "Claude override", "claude"),
+        ] {
+            registry
+                .store()
+                .put_agent_tool(&AgentTool {
+                    id,
+                    name: name.into(),
+                    command: tool_type.into(),
+                    tool_type: tool_type.into(),
+                    enabled: true,
+                    source: AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 44,
+                profile_id: 1,
+                name: "Reviewer".into(),
+                agent_tool_id: 91,
+                extra_args: vec![
+                    "--model".into(),
+                    "codex-model".into(),
+                    "-c".into(),
+                    "model_reasoning_effort=\"xhigh\"".into(),
+                    "--review".into(),
+                ],
+                prompt: "Review carefully.".into(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+
+        let claude =
+            resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
+        assert_eq!(claude.extra_args, ["--effort", "xhigh"]);
+        assert_eq!(claude.launch.model, "agent default");
+        assert_eq!(claude.launch.effort, "xhigh");
+        assert_eq!(
+            claude.launch.template_args_skipped,
+            ["--model", "codex-model", "--review"]
+        );
+    }
+
+    #[test]
+    fn template_agent_override_never_carries_registered_command_defaults() {
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
+        for (id, name, command, tool_type) in [
+            (91, "Claude Sonnet", "claude --model sonnet", "claude"),
+            (92, "Claude Opus", "claude --model opus", "claude_code"),
+            (
+                93,
+                "OpenCode DeepSeek",
+                "opencode --model deepseek/deepseek-flash",
+                "opencode",
+            ),
+            (94, "Plain Claude", "claude", "claude"),
+        ] {
+            registry
+                .store()
+                .put_agent_tool(&AgentTool {
+                    id,
+                    name: name.into(),
+                    command: command.into(),
+                    tool_type: tool_type.into(),
+                    enabled: true,
+                    source: AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        for (id, agent_tool_id) in [(44, 91), (45, 93)] {
+            registry
+                .store()
+                .put_agent_template(&AgentTemplate {
+                    id,
+                    profile_id: 1,
+                    name: format!("Template {id}"),
+                    agent_tool_id,
+                    extra_args: Vec::new(),
+                    prompt: String::new(),
+                    sort_order: id,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .unwrap();
+        }
+
+        let same_type =
+            resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
+        assert!(same_type.extra_args.is_empty());
+        assert_eq!(same_type.launch.model, "opus");
+        assert!(same_type.launch.template_args_skipped.is_empty());
+
+        let cross_type =
+            resolve_agent_spawn(&registry, Some(94), Some(45), vec![], None, None).unwrap();
+        assert!(cross_type.extra_args.is_empty());
+        assert_eq!(cross_type.launch.model, "agent default");
+        assert!(cross_type.launch.template_args_skipped.is_empty());
     }
 
     #[test]
@@ -3507,8 +3836,8 @@ mod tests {
             .unwrap();
             assert_eq!(args, ["--keep", "value", "--model", model]);
             assert_eq!(
-                detected_model(&args, mcp_launch_adapter(tool_type).model_flag().unwrap()),
-                DetectedModel::Present(Some(model.to_owned()))
+                split_launch_args(&args, tool_type).model.as_deref(),
+                Some(model)
             );
         }
 
@@ -3575,17 +3904,25 @@ mod tests {
             strip_model_flags_from_command("opencode -mdeepseek/model --auto", flag).unwrap(),
             "opencode  --auto"
         );
+        let configured_tool = AgentTool {
+            id: 6,
+            name: "Configured OpenCode".into(),
+            command: "opencode --auto --model 'provider/model with space'".into(),
+            tool_type: "opencode".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        };
         assert_eq!(
-            detected_model_from_command(
-                "opencode --auto --model 'provider/model with space'",
-                flag,
-            ),
-            DetectedModel::Present(Some("provider/model with space".into()))
+            configured_launch_options(&configured_tool, &[])
+                .model
+                .as_deref(),
+            Some("provider/model with space")
         );
-        assert!(
-            strip_model_flags_from_command("opencode --model old && echo done", flag)
-                .unwrap_err()
-                .contains("direct registered agent command")
+        assert_eq!(
+            strip_model_flags_from_command("opencode --model old && echo done", flag).unwrap(),
+            "opencode --model old && echo done"
         );
 
         let tool = AgentTool {
@@ -3681,7 +4018,8 @@ mod tests {
             ["--review", "--model", "launch-override"]
         );
         let summary = load_agent_template_summaries(&registry).unwrap().remove(0);
-        assert_eq!(summary.model.as_deref(), Some("legacy-model"));
+        assert_eq!(summary.launch.model, "legacy-model");
+        assert_eq!(summary.launch.effort, "agent default");
 
         registry
             .store()
@@ -3697,8 +4035,30 @@ mod tests {
                 updated_at: 0,
             })
             .unwrap();
+        registry
+            .store()
+            .put_agent_tool(&AgentTool {
+                id: 999,
+                name: "OpenCode override".into(),
+                command: "opencode".into(),
+                tool_type: "opencode".into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
+        let command_default_override =
+            resolve_agent_spawn(&registry, Some(999), Some(45), vec![], None, None).unwrap();
+        assert!(command_default_override.extra_args.is_empty());
+        assert_eq!(command_default_override.launch.model, "agent default");
+        assert_eq!(
+            command_default_override.launch.template_args_skipped,
+            ["--review"]
+        );
         let summaries = load_agent_template_summaries(&registry).unwrap();
-        assert_eq!(summaries[1].model.as_deref(), Some("command-default"));
+        assert_eq!(summaries[1].launch.model, "command-default");
+        assert_eq!(summaries[1].launch.effort, "agent default");
         assert!(summaries[1].default_agent.enabled);
         assert_eq!(summaries[1].prompt_preview.chars().count(), 120);
         assert!(summaries[1].prompt_preview.ends_with('…'));
@@ -4331,69 +4691,5 @@ mod tests {
             "private per-launch KIMI_CODE_HOME config"
         );
         fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn preamble_carries_identity_project_and_mcp_hints_without_the_secret() {
-        let project = Project {
-            id: 7,
-            path: "/tmp/workspace".into(),
-            name: "demo".into(),
-            display_name: None,
-            icon: None,
-            selected: false,
-            sort_order: 0,
-        };
-        let process = Process {
-            id: 41,
-            project_id: project.id,
-            kind: ProcessKind::Agent,
-            name: "worker".into(),
-            command: Some("claude".into()),
-            working_dir: project.path.clone(),
-            env: BTreeMap::new(),
-            auto_start: false,
-            auto_restart: false,
-            restart_when_changed: Vec::new(),
-            source: ProcessSource::Local,
-            trust_hash: None,
-            status: ProcessStatus::Running,
-            pid: Some(123),
-            exit_code: None,
-            exit_signal: None,
-            exited_at: None,
-            agent_tool_id: Some(1),
-            spawned_by_process_id: None,
-            sort_order: 0,
-        };
-        let preamble = agent_instructions(
-            &process,
-            &project,
-            "http://127.0.0.1:43126/mcp",
-            "claude_code",
-        );
-        assert!(preamble.contains("process ID 41 (worker)"));
-        assert!(preamble.contains("project 7 (demo, repo /tmp/workspace)"));
-        assert!(preamble.contains("WORKMAN_PROCESS_ID=41"));
-        assert!(preamble.contains("WORKMAN_MCP_URL=http://127.0.0.1:43126/mcp"));
-        assert!(preamble.contains("${WORKMAN_MCP_TOKEN}"));
-        assert!(preamble.contains("server named workman"));
-        assert!(preamble.contains("never a globally configured Solo"));
-        assert!(preamble.contains("Call whoami() through workman first"));
-        assert!(preamble.contains("Never call identify_session to claim or change identity"));
-        assert!(preamble.contains(WORKTREE_AGENT_GUIDANCE));
-        assert!(preamble.contains(IDLE_TIMER_LAUNCH_GUIDANCE));
-        assert!(preamble.contains("finish your response and end the turn after arming it"));
-        assert!(preamble.contains("help(topic=\"timers\")"));
-        assert!(preamble.contains(
-            "Put shared notes, plans, briefs, and hand-offs in Workman scratchpads with \
-             scratchpad_write so they are visible in the app and verifiable; do not create \
-             ad-hoc repo files for them."
-        ));
-        assert!(preamble.contains(
-            "After creating a scratchpad or todo, read it back with scratchpad_read or todo_get \
-             and reference its ID in every hand-off message."
-        ));
-        assert!(!preamble.contains("secret-token"));
     }
 }

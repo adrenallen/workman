@@ -490,21 +490,7 @@ async fn websocket_manages_tools_spawns_agents_and_submits_prompts() -> Result<(
     assert!(spawned["ok"].as_bool().unwrap());
     assert_eq!(spawned["result"]["name"], "ui-worker");
     assert_eq!(spawned["result"]["kind"], "agent");
-    assert!(
-        spawned["result"]["agent_instructions"]
-            .as_str()
-            .unwrap()
-            .contains("Workman MCP identity check is unavailable")
-    );
-    assert!(
-        spawned["result"]["agent_instructions"]
-            .as_str()
-            .unwrap()
-            .contains(&format!(
-                "WORKMAN_MCP_URL=http://127.0.0.1:{}/mcp",
-                discovery.port
-            ))
-    );
+    assert!(spawned["result"].get("agent_instructions").is_none());
     let process_id = spawned["result"]["process_id"].as_i64().unwrap();
     let process_token = registry.lock().await.store().connection().query_row(
         "SELECT token FROM process_mcp_tokens WHERE process_id = ?1",

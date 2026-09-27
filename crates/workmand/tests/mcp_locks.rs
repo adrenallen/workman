@@ -141,14 +141,12 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    for name in ["lock_acquire", "lock_release", "lock_status"] {
-        assert!(tool_names.iter().any(|candidate| candidate == name));
-    }
+    assert!(tool_names.iter().any(|candidate| candidate == "lock"));
 
     let acquired = call(
         &first,
-        "lock_acquire",
-        json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(acquired["acquired"], true);
@@ -158,8 +156,8 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
     assert!(!acquired.to_string().contains(&first_actor));
     let renewed_after_reconnect = call(
         &second,
-        "lock_acquire",
-        json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(renewed_after_reconnect["acquired"], true);
@@ -167,8 +165,8 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
 
     let denied = invoke(
         &other,
-        "lock_acquire",
-        json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(denied.is_error, Some(true));
@@ -176,8 +174,8 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
 
     let wrong_release = invoke(
         &other,
-        "lock_release",
-        json!({ "lock_key": "shared.schema" }),
+        "lock",
+        json!({ "action": "release", "lock_key": "shared.schema" }),
     )
     .await;
     assert_eq!(wrong_release.is_error, Some(true));
@@ -187,15 +185,15 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
     );
     let released = call(
         &second,
-        "lock_release",
-        json!({ "lock_key": "shared.schema" }),
+        "lock",
+        json!({ "action": "release", "lock_key": "shared.schema" }),
     )
     .await;
     assert_eq!(released["released"], true);
     let acquired = call(
         &other,
-        "lock_acquire",
-        json!({ "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "shared.schema", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(acquired["lease"]["owner_actor"], "other-lock-agent");
@@ -203,15 +201,15 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
     assert!(!acquired.to_string().contains(&second_actor));
     call(
         &other,
-        "lock_release",
-        json!({ "lock_key": "shared.schema" }),
+        "lock",
+        json!({ "action": "release", "lock_key": "shared.schema" }),
     )
     .await;
     assert_eq!(
         call(
             &first,
-            "lock_status",
-            json!({ "lock_key": "shared.schema" }),
+            "lock",
+            json!({ "action": "status", "lock_key": "shared.schema" }),
         )
         .await["lease"],
         Value::Null
@@ -219,15 +217,15 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
 
     call(
         &first,
-        "lock_acquire",
-        json!({ "lock_key": "short.lease", "lease_ttl_seconds": 1 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "short.lease", "lease_ttl_seconds": 1 }),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     let acquired_after_expiry = call(
         &other,
-        "lock_acquire",
-        json!({ "lock_key": "short.lease", "lease_ttl_seconds": 60 }),
+        "lock",
+        json!({ "action": "acquire", "lock_key": "short.lease", "lease_ttl_seconds": 60 }),
     )
     .await;
     assert_eq!(

@@ -261,16 +261,16 @@ test('a new feedback agent receives its startup instructions before the recordin
 });
 
 test('scratchpads recognize recorded-feedback images as local embeds', () => {
-  const line = 'Before ![Menu open](</Users/g/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png>) after';
+  const line = 'Before ![Menu open](</Users/example/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png>) after';
   assert.deepEqual(scratchpadMarkdownImages(line), [{
     from: 7,
-    to: 114,
+      to: 120,
     alt: 'Menu open',
-    source: '/Users/g/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
+    source: '/Users/example/Library/Application%20Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
   }]);
   assert.equal(
     scratchpadLocalImagePath(scratchpadMarkdownImages(line)[0].source),
-    '/Users/g/Library/Application Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
+    '/Users/example/Library/Application Support/Workman/feedback-packets/1/r1/images/snapshot-01.png'
   );
   assert.equal(scratchpadLocalImagePath('https://example.com/tracker.png'), null);
 });

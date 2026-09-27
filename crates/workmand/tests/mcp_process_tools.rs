@@ -213,19 +213,12 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     for required in [
         "list_processes",
         "get_process_status",
-        "start_process",
-        "stop_process",
-        "restart_process",
+        "process_control",
         "close_process",
-        "rename_process",
-        "select_process",
-        "start_all_commands",
-        "stop_all_commands",
-        "restart_all_commands",
+        "update_process",
+        "commands_control",
         "get_process_output",
-        "get_process_raw_output",
         "search_output",
-        "search_raw_output",
         "clear_output",
         "send_input",
     ] {
@@ -267,7 +260,12 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     let released_status = call(&client, "get_process_status", json!({})).await;
     assert_eq!(released_status["claimed_todos"], json!([]));
 
-    call(&client, "start_process", json!({ "process_id": 5 })).await;
+    call(
+        &client,
+        "process_control",
+        json!({ "process_id": 5, "action": "start" }),
+    )
+    .await;
     wait_for_state(&registry, 5, AttentionState::Idle).await?;
     let short_prompt = "Reply with exactly PONG.";
     assert!(short_prompt.len() < 100);
@@ -300,8 +298,8 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
 
     let started = call(
         &client,
-        "start_process",
-        json!({ "process_name": "interactive" }),
+        "process_control",
+        json!({ "process_name": "interactive", "action": "start" }),
     )
     .await;
     assert_eq!(started["status"], "running");
@@ -376,8 +374,8 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
 
     let raw = call(
         &client,
-        "get_process_raw_output",
-        json!({ "process_id": 2, "lines": 20 }),
+        "get_process_output",
+        json!({ "process_id": 2, "lines": 20, "raw": true }),
     )
     .await;
     assert!(!raw["data_base64"].as_str().unwrap().is_empty());
@@ -392,17 +390,15 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     assert!(!rendered_matches["matches"].as_array().unwrap().is_empty());
     let raw_matches = call(
         &client,
-        "search_raw_output",
-        json!({ "process_id": 2, "pattern": "REPLY:RAW" }),
+        "search_output",
+        json!({ "process_id": 2, "pattern": "REPLY:RAW", "raw": true }),
     )
     .await;
     assert!(!raw_matches["matches"].as_array().unwrap().is_empty());
 
-    let selected = call(&client, "select_process", json!({ "process_id": 2 })).await;
-    assert_eq!(selected["selected_process_id"], 2);
     let renamed = call(
         &client,
-        "rename_process",
+        "update_process",
         json!({ "process_id": 2, "new_name": "shell" }),
     )
     .await;
@@ -419,35 +415,46 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
     assert!(cleared_search["matches"].as_array().unwrap().is_empty());
     let cleared_raw_search = call(
         &client,
-        "search_raw_output",
-        json!({ "process_id": 2, "pattern": "reply:raw" }),
+        "search_output",
+        json!({ "process_id": 2, "pattern": "reply:raw", "raw": true }),
     )
     .await;
     assert!(cleared_raw_search["matches"].as_array().unwrap().is_empty());
     let cleared_raw = call(
         &client,
-        "get_process_raw_output",
-        json!({ "process_id": 2 }),
+        "get_process_output",
+        json!({ "process_id": 2, "raw": true }),
     )
     .await;
     assert!(cleared_raw["data_base64"].as_str().unwrap().is_empty());
 
     assert_eq!(
-        call(&client, "stop_process", json!({ "process_name": "shell" })).await["status"],
+        call(
+            &client,
+            "process_control",
+            json!({ "process_name": "shell", "action": "stop" }),
+        )
+        .await["status"],
         "stopped"
     );
     assert_eq!(
-        call(&client, "restart_process", json!({ "process_id": 2 })).await["status"],
+        call(
+            &client,
+            "process_control",
+            json!({ "process_id": 2, "action": "restart" }),
+        )
+        .await["status"],
         "running"
     );
-    call(&client, "stop_process", json!({ "process_id": 2 })).await;
+    call(
+        &client,
+        "process_control",
+        json!({ "process_id": 2, "action": "stop" }),
+    )
+    .await;
 
-    for tool in [
-        "start_all_commands",
-        "restart_all_commands",
-        "stop_all_commands",
-    ] {
-        let result = call(&client, tool, json!({})).await;
+    for action in ["start", "restart", "stop"] {
+        let result = call(&client, "commands_control", json!({ "action": action })).await;
         assert_eq!(result["processes"].as_array().unwrap().len(), 2);
         assert!(result["failures"].as_array().unwrap().is_empty());
     }

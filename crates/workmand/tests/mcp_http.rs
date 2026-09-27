@@ -87,6 +87,35 @@ fn arguments(value: Value) -> Map<String, Value> {
         .clone()
 }
 
+fn assert_schema_hygiene(value: &Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                assert_schema_hygiene(value);
+            }
+        }
+        Value::Object(object) => {
+            assert!(!object.contains_key("$schema"));
+            assert_ne!(object.get("default"), Some(&Value::Null));
+            if let Some(Value::Object(properties)) = object.get("properties") {
+                assert!(!properties.contains_key("project_id"));
+            }
+            if let Some(Value::Array(types)) = object.get("type") {
+                assert!(!types.iter().any(Value::is_null));
+                assert!(!types.iter().any(|value| value == "null"));
+            }
+            if object.get("type") == Some(&Value::String("integer".into())) {
+                assert!(!object.contains_key("format"));
+                assert_ne!(object.get("minimum").and_then(Value::as_i64), Some(0));
+            }
+            for value in object.values() {
+                assert_schema_hygiene(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn call(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
     name: &'static str,
@@ -108,10 +137,8 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let temp = tempfile::tempdir()?;
     let project_one_dir = temp.path().join("one");
     let project_two_dir = temp.path().join("two");
-    let project_three_dir = temp.path().join("three");
     std::fs::create_dir_all(&project_one_dir)?;
     std::fs::create_dir_all(&project_two_dir)?;
-    std::fs::create_dir_all(&project_three_dir)?;
 
     let server = DaemonServer::bind(DaemonConfig {
         data_dir: temp.path().join("state"),
@@ -263,59 +290,121 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         .peer_info()
         .and_then(|info| info.instructions.clone())
         .expect("Workman advertises MCP server instructions");
-    assert!(server_instructions.contains("timer delivers back to you"));
-    assert!(
-        server_instructions.contains("timer_fire_when_idle_any ignores processes already idle")
-    );
-    assert!(server_instructions.contains("timer_fire_when_idle_all counts already-idle processes"));
-    assert!(
-        server_instructions.contains("Do not loop on timer_list or process status while waiting")
-    );
-    assert!(
-        server_instructions.contains("inspect the watched processes before assuming they finished")
-    );
-    assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
+    assert!(server_instructions.len() <= 800);
+    assert!(server_instructions.starts_with("Need human input"));
+    assert!(server_instructions.contains("todo_update(assignee=\"user\")"));
+    assert!(server_instructions.contains("mention @user"));
+    assert!(server_instructions.contains("Call whoami first"));
+    assert!(server_instructions.contains("Use help for todos"));
 
-    let tool_names: Vec<_> = process_client
-        .list_all_tools()
-        .await?
+    let tools = process_client.list_all_tools().await?;
+    for tool in &tools {
+        assert_schema_hygiene(&Value::Object((*tool.input_schema).clone()));
+    }
+    let whoami_tool = tools.iter().find(|tool| tool.name == "whoami").unwrap();
+    assert!(
+        whoami_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("project envelope"))
+    );
+    let scratchpad_write_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_write")
+        .unwrap();
+    assert!(
+        scratchpad_write_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("a leading H1 becomes the name"))
+    );
+    let scratchpad_update_tool = tools
+        .iter()
+        .find(|tool| tool.name == "scratchpad_update")
+        .unwrap();
+    assert!(
+        scratchpad_update_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("required only for rename"))
+    );
+    assert!(
+        !scratchpad_update_tool.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("expected_revision"))
+    );
+    let mut tool_names: Vec<_> = tools
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    for required in [
-        "whoami",
+    tool_names.sort();
+    let mut expected = vec![
+        "agent_tool_check",
+        "clear_output",
+        "close_process",
+        "commands_control",
+        "get_process_output",
+        "get_process_status",
         "help",
-        "mcp_tools_summary",
-        "mcp_smoke_test",
-        "list_projects",
-        "select_project",
-        "get_project",
-        "get_project_status",
-        "get_project_stats",
-        "create_project",
-        "rename_project",
-        "delete_project",
-    ] {
+        "list_agent_tools",
+        "list_processes",
+        "lock",
+        "process_control",
+        "project_update",
+        "scratchpad_append",
+        "scratchpad_comment_create",
+        "scratchpad_comment_delete",
+        "scratchpad_comment_update",
+        "scratchpad_delete",
+        "scratchpad_edit",
+        "scratchpad_find",
+        "scratchpad_list",
+        "scratchpad_load_from_file",
+        "scratchpad_read",
+        "scratchpad_save_to_file",
+        "scratchpad_update",
+        "scratchpad_write",
+        "search_output",
+        "send_input",
+        "services_list",
+        "spawn_agent",
+        "spawn_terminal",
+        "timer_cancel",
+        "timer_fire_when_idle",
+        "timer_list",
+        "timer_pause",
+        "timer_set",
+        "todo_comment_create",
+        "todo_comment_delete",
+        "todo_comment_update",
+        "todo_complete",
+        "todo_create",
+        "todo_delete",
+        "todo_get",
+        "todo_list",
+        "todo_lock",
+        "todo_unlock",
+        "todo_update",
+        "update_process",
+        "wait_for_bound_port",
+        "whoami",
+        "worktree_env_forget",
+        "worktree_health",
+        "worktree_list",
+    ];
+    expected.sort();
+    assert_eq!(tool_names, expected);
+    for required in ["whoami", "help", "project_update"] {
         assert!(
             tool_names.iter().any(|name| name == required),
             "missing {required}"
         );
     }
-
     let identity = call(&process_client, "whoami", json!({})).await;
     assert_eq!(identity["process_id"], 42);
     assert_eq!(identity["effective_project_id"], 1);
-    let identity_cannot_be_retargeted = process_client
-        .call_tool(
-            CallToolRequestParams::new("identify_session")
-                .with_arguments(arguments(json!({ "process_id": 999 }))),
-        )
-        .await?;
-    assert_eq!(identity_cannot_be_retargeted.is_error, Some(true));
-    assert_eq!(
-        identity_cannot_be_retargeted.structured_content.unwrap()["code"],
-        "identity_scope_error"
-    );
+    assert_eq!(identity["project"]["id"], 1);
     assert_eq!(
         call(&process_client, "help", json!({ "topic": "scoping" })).await["topic"],
         "scoping"
@@ -334,12 +423,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .contains("read it back with scratchpad_read or todo_get and reference its ID")
     );
     let tools_help = call(&process_client, "help", json!({ "topic": "tools" })).await;
-    assert!(
-        tools_help["text"]
-            .as_str()
-            .unwrap()
-            .contains("complete core tool list")
-    );
+    let tools_help_text = tools_help["text"].as_str().unwrap();
+    assert!(tools_help_text.contains("whoami —"));
+    assert!(tools_help_text.contains("spawn_agent —"));
+    assert!(tools_help_text.contains("timer_fire_when_idle —"));
+    assert!(!tools_help_text.contains("tools/list request"));
+    assert!(!tools_help_text.contains("agent_tool_configure —"));
     let spawning_help = call(&process_client, "help", json!({ "topic": "spawning" })).await;
     assert!(
         spawning_help["text"]
@@ -353,93 +442,71 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("pick agent_tool_id from list_agent_tools")
     );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("Template: set agent_template_id only")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("supplies its agent tool, model, effort, launch args and prompt")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("Pass model or agent_tool_id only to override")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("A selected model supersedes the registered command model")
+    );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("update_process can toggle an existing direct child")
+    );
     let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
     assert!(
         timer_help["text"]
             .as_str()
             .unwrap()
-            .contains("immediately finish your response and end the current turn")
+            .contains("finish the response and end the turn")
     );
+    assert!(timer_help["text"].as_str().unwrap().contains("do not poll"));
     assert!(
         timer_help["text"]
             .as_str()
             .unwrap()
-            .contains("no additional wait call is needed")
+            .contains("no timer is needed")
     );
-    let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
-    assert!(tools_summary["count"].as_u64().unwrap() >= 13);
-    assert!(
-        tools_summary["spawn_agent_guidance"]
-            .as_str()
-            .unwrap()
-            .contains("Prefer model for a per-launch override")
-    );
-    assert!(
-        tools_summary["idle_timer_wait_guidance"]
-            .as_str()
-            .unwrap()
-            .contains("Do not loop on timer_list or process status")
-    );
-    assert_eq!(
-        call(&process_client, "list_projects", json!({})).await["projects"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let own_project = call(&process_client, "get_project", json!({})).await;
-    assert_eq!(own_project["id"], 1);
-    let cross_select = process_client
-        .call_tool(
-            CallToolRequestParams::new("select_project")
-                .with_arguments(arguments(json!({ "project_id": 2 }))),
-        )
-        .await?;
-    assert_eq!(cross_select.is_error, Some(true));
-    assert_eq!(
-        cross_select.structured_content.unwrap()["code"],
-        "project_scope_error"
-    );
-    let selected_project = call(&process_client, "get_project", json!({})).await;
-    assert_eq!(selected_project["id"], 1);
-    let explicit_project = call(&process_client, "get_project", json!({ "project_id": 1 })).await;
-    assert_eq!(explicit_project["id"], 1);
-
-    let status = call(&process_client, "get_project_status", json!({})).await;
-    assert_eq!(status["project"]["id"], 1);
-    let stats = call(
-        &process_client,
-        "get_project_stats",
-        json!({ "project_id": 1 }),
-    )
-    .await;
+    for guidance in [
+        "opt-in is prospective",
+        "delay timer when a hung-child deadline matters",
+        "wait_for=\"any\" or wait_for=\"all\"",
+    ] {
+        assert!(
+            timer_help["text"].as_str().unwrap().contains(guidance),
+            "timer help omitted {guidance:?}"
+        );
+    }
+    let stats = call(&process_client, "list_processes", json!({})).await;
     assert_eq!(stats["process_count"], 1);
 
-    let create_denied = process_client
-        .call_tool(
-            CallToolRequestParams::new("create_project").with_arguments(arguments(json!({
-                "path": project_three_dir,
-                "name": "three"
-            }))),
-        )
-        .await?;
-    assert_eq!(create_denied.is_error, Some(true));
-    assert_eq!(
-        create_denied.structured_content.unwrap()["code"],
-        "project_scope_error"
-    );
     let renamed = call(
         &process_client,
-        "rename_project",
+        "project_update",
         json!({ "project_id": 1, "name": "renamed" }),
     )
     .await;
     assert_eq!(renamed["name"], "one");
     assert_eq!(renamed["display_name"], "renamed");
-
-    let smoke = call(&process_client, "mcp_smoke_test", json!({})).await;
-    assert_eq!(smoke["ok"], true);
 
     let created_todo = call(
         &process_client,
@@ -450,8 +517,8 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     assert!(created_todo["todo_id"].as_i64().unwrap() > 0);
     let spawned = call(
         &process_client,
-        "spawn_process",
-        json!({ "kind": "terminal", "name": "transport-regression" }),
+        "spawn_terminal",
+        json!({ "name": "transport-regression" }),
     )
     .await;
     let spawned_id = spawned["process_id"].as_i64().unwrap();
@@ -491,17 +558,21 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     };
     let unidentified = call(&fallback_client, "whoami", json!({})).await;
     assert_eq!(unidentified["process_id"], Value::Null);
-    assert_eq!(
-        call(&fallback_client, "list_projects", json!({})).await["projects"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+    let fallback_tool_names = fallback_client
+        .list_all_tools()
+        .await?
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        fallback_tool_names
+            .iter()
+            .any(|name| name == "agent_tool_configure")
     );
     let unidentified_scope = fallback_client
         .call_tool(
-            CallToolRequestParams::new("get_project")
-                .with_arguments(arguments(json!({ "project_id": 2 }))),
+            CallToolRequestParams::new("project_update")
+                .with_arguments(arguments(json!({ "project_id": 2, "name": "foreign" }))),
         )
         .await?;
     assert_eq!(unidentified_scope.is_error, Some(true));
@@ -511,27 +582,9 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("authenticated process identity")
     );
-    let claim_denied = fallback_client
-        .call_tool(
-            CallToolRequestParams::new("identify_session")
-                .with_arguments(arguments(json!({ "process_id": 42 }))),
-        )
-        .await?;
-    assert_eq!(claim_denied.is_error, Some(true));
-    assert_eq!(
-        claim_denied.structured_content.unwrap()["code"],
-        "identity_authentication_required"
-    );
     assert_eq!(
         call(&fallback_client, "whoami", json!({})).await["process_id"],
         Value::Null
-    );
-    assert_eq!(
-        call(&fallback_client, "list_projects", json!({})).await["projects"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
     );
     let _ = fallback_client.cancel().await;
 

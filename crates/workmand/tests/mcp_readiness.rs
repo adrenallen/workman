@@ -170,19 +170,14 @@ async fn rmcp_readiness_tools_drive_restart_wait_and_report_url() -> Result<(), 
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect::<Vec<_>>();
-    for required in ["services_list", "get_process_ports", "wait_for_bound_port"] {
+    for required in ["services_list", "get_process_status", "wait_for_bound_port"] {
         assert!(
             tool_names.iter().any(|name| name == required),
             "missing {required}"
         );
     }
 
-    let spawned = call(
-        &client,
-        "spawn_process",
-        json!({ "kind": "terminal", "name": "dev-server" }),
-    )
-    .await;
+    let spawned = call(&client, "spawn_terminal", json!({ "name": "dev-server" })).await;
     let dev_process_id = spawned["process_id"].as_i64().unwrap();
 
     let empty_wait = call(
@@ -216,18 +211,18 @@ async fn rmcp_readiness_tools_drive_restart_wait_and_report_url() -> Result<(), 
 
     let restarted = call(
         &client,
-        "restart_process",
-        json!({ "process_id": dev_process_id }),
+        "process_control",
+        json!({ "process_id": dev_process_id, "action": "restart" }),
     )
     .await;
     assert_eq!(restarted["status"], "running");
     let waiting = call(
         &client,
-        "get_process_ports",
-        json!({ "process_name": "dev-server" }),
+        "get_process_status",
+        json!({ "process_name": "dev-server", "include_ports": true }),
     )
     .await;
-    assert_eq!(waiting["readiness"], "waiting");
+    assert_eq!(waiting["ports"]["readiness"], "waiting");
 
     call(
         &client,
@@ -251,14 +246,14 @@ async fn rmcp_readiness_tools_drive_restart_wait_and_report_url() -> Result<(), 
 
     let ports = call(
         &client,
-        "get_process_ports",
-        json!({ "process_id": dev_process_id }),
+        "get_process_status",
+        json!({ "process_id": dev_process_id, "include_ports": true }),
     )
     .await;
-    assert_eq!(ports["readiness"], "ready");
-    assert!(ports["ports"][0].as_u64().is_some());
+    assert_eq!(ports["ports"]["readiness"], "ready");
+    assert!(ports["ports"]["ports"][0].as_u64().is_some());
     assert!(
-        ports["urls"]
+        ports["ports"]["urls"]
             .as_array()
             .unwrap()
             .iter()
