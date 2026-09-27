@@ -9,7 +9,7 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 async fn raw_mcp_post(
@@ -189,9 +189,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(42, McpToolsProfile::Extended)?;
         registry.start(42)?;
         registry.store().connection().query_row(
             "SELECT token FROM process_mcp_tokens WHERE process_id = 42",
@@ -303,7 +300,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     let tools = process_client.list_all_tools().await?;
     let tools_list_bytes = serde_json::to_vec(&json!({ "tools": &tools }))?.len();
     eprintln!("tools/list compact JSON bytes: {tools_list_bytes}");
-    // 27,238 bytes after profile and wiring metadata, retaining the original cap.
+    // 26,480 bytes at introduction, with roughly ten percent growth headroom.
     const TOOLS_LIST_BUDGET_BYTES: usize = 29_200;
     assert!(
         tools_list_bytes <= TOOLS_LIST_BUDGET_BYTES,
@@ -435,10 +432,6 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
     );
     let tools_help = call(&process_client, "help", json!({ "topic": "tools" })).await;
     let tools_help_text = tools_help["text"].as_str().unwrap();
-    assert!(tools_help_text.contains("fixed when an agent launches"));
-    assert!(tools_help_text.contains("This agent: Extended"));
-    assert!(tools_help_text.contains("Core:"));
-    assert!(tools_help_text.contains("Extended (requires the Extended profile):"));
     assert!(tools_help_text.contains("whoami —"));
     assert!(tools_help_text.contains("spawn_agent —"));
     assert!(tools_help_text.contains("timer_fire_when_idle —"));
@@ -485,7 +478,7 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         spawning_help["text"]
             .as_str()
             .unwrap()
-            .contains("update_process (Extended profile) can toggle an existing direct child")
+            .contains("update_process can toggle an existing direct child")
     );
     let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
     assert!(

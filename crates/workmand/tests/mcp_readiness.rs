@@ -16,7 +16,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 const HELPER_ENV: &str = "WORKMAN_MCP_READINESS_HELPER";
@@ -139,9 +139,6 @@ async fn rmcp_readiness_tools_drive_restart_wait_and_report_url() -> Result<(), 
         let mut registry = registry.lock().await;
         registry.store().put_project(&project)?;
         registry.create(self_process(&project))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry.start(1)?;
         registry.store().connection().query_row(
             "SELECT token FROM process_mcp_tokens WHERE process_id = 1",

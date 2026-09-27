@@ -14,7 +14,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
-use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -149,9 +149,6 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
         registry
             .store()
             .put_process(&process(20, &two, "foreign-agent"))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(10, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(10, process_token, 1_700_000_000_000)?;

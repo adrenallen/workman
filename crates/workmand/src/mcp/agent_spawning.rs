@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use uuid::Uuid;
 use workman_core::{
-    AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, McpToolsProfile,
-    Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
+    AgentTemplate, AgentTemplateId, AgentTool, AgentToolId, AgentToolSource, Process, ProcessId,
+    ProcessKind, ProcessSource, ProcessStatus, Project, ProjectId,
     attention::{AttentionState, DEFAULT_IDLE_AFTER, PendingPrompt},
     pty::{is_kimi_tool_type, kimi_session_started},
 };
@@ -95,22 +95,6 @@ struct SpawnTerminalArgs {
     name: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum McpToolsProfileArg {
-    Core,
-    Extended,
-}
-
-impl From<McpToolsProfileArg> for McpToolsProfile {
-    fn from(profile: McpToolsProfileArg) -> Self {
-        match profile {
-            McpToolsProfileArg::Core => Self::Core,
-            McpToolsProfileArg::Extended => Self::Extended,
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
@@ -124,11 +108,6 @@ struct SpawnAgentArgs {
     /// user names one or explicitly asks for one.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
-    /// Optional launch-only override. Otherwise a template uses its profile, a plain launch uses
-    /// the agent tool's profile, and the fallback is core. The result is fixed for the new
-    /// agent's lifetime.
-    #[serde(default)]
-    mcp_tools_profile: Option<McpToolsProfileArg>,
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
@@ -230,7 +209,6 @@ struct ResolvedAgentSpawn {
     extra_args: Vec<String>,
     has_model_arg: bool,
     initial_prompt: Option<String>,
-    mcp_tools_profile: McpToolsProfile,
     launch: ResolvedAgentLaunch,
 }
 
@@ -242,7 +220,6 @@ struct ResolvedAgentLaunch {
     effort: String,
     mcp_wired: bool,
     template_args_skipped: Vec<String>,
-    mcp_tools_profile: McpToolsProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,7 +245,6 @@ struct AgentTemplateSummary {
     launch: AgentTemplateLaunch,
     prompt_preview: String,
     extra_args: Vec<String>,
-    mcp_tools_profile: McpToolsProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -552,7 +528,6 @@ impl WorkmanMcp {
                 name,
                 shell,
                 None,
-                McpToolsProfile::Core,
                 BTreeMap::new(),
                 spawned_by_process_id,
                 false,
@@ -596,7 +571,6 @@ impl WorkmanMcp {
             project,
             args.agent_tool_id,
             args.agent_template_id,
-            args.mcp_tools_profile.map(Into::into),
             args.name,
             args.extra_args,
             args.model,
@@ -662,7 +636,6 @@ fn load_agent_template_summaries(
                 },
                 prompt_preview: prompt_preview(&template.prompt),
                 extra_args: template.extra_args,
-                mcp_tools_profile: template.mcp_tools_profile,
             })
         })
         .collect())
@@ -685,7 +658,6 @@ pub(crate) fn save_agent_template_from_settings(
     agent_tool_id: AgentToolId,
     extra_args: Vec<String>,
     prompt: String,
-    mcp_tools_profile: McpToolsProfile,
 ) -> Result<AgentTemplate, String> {
     let name = name.trim().to_owned();
     validate_agent_template_fields(&name, &prompt, &extra_args)?;
@@ -722,7 +694,6 @@ pub(crate) fn save_agent_template_from_settings(
         agent_tool_id,
         extra_args,
         prompt: prompt.trim().to_owned(),
-        mcp_tools_profile,
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
@@ -821,7 +792,6 @@ pub(crate) fn save_agent_tool(
     command: String,
     tool_type: String,
     enabled: bool,
-    mcp_tools_profile: McpToolsProfile,
 ) -> Result<AgentTool, String> {
     let name = name.trim();
     let command = command.trim();
@@ -870,7 +840,6 @@ pub(crate) fn save_agent_tool(
         source: AgentToolSource::Local,
         resume_args: None,
         continue_args: None,
-        mcp_tools_profile,
     };
     registry
         .store()
@@ -886,7 +855,6 @@ pub(crate) fn save_agent_tool_from_settings(
     command: String,
     tool_type: String,
     enabled: bool,
-    mcp_tools_profile: McpToolsProfile,
 ) -> Result<AgentTool, String> {
     let name = name.trim().to_owned();
     let command = command.trim().to_owned();
@@ -937,7 +905,6 @@ pub(crate) fn save_agent_tool_from_settings(
         continue_args: existing
             .as_ref()
             .and_then(|tool| tool.continue_args.clone()),
-        mcp_tools_profile,
     };
     registry
         .store()
@@ -1045,7 +1012,6 @@ pub(crate) async fn spawn_registered_agent(
     project: Project,
     agent_tool_id: Option<AgentToolId>,
     agent_template_id: Option<AgentTemplateId>,
-    mcp_tools_profile: Option<McpToolsProfile>,
     name: Option<String>,
     extra_args: Vec<String>,
     model: Option<String>,
@@ -1065,7 +1031,6 @@ pub(crate) async fn spawn_registered_agent(
             &registry,
             agent_tool_id,
             agent_template_id,
-            mcp_tools_profile,
             extra_args,
             model,
             initial_prompt,
@@ -1109,7 +1074,6 @@ pub(crate) async fn spawn_registered_agent(
         registry.clone(),
         project,
         resolved.agent_tool_id,
-        resolved.mcp_tools_profile,
         name,
         resolved.extra_args,
         resolved.has_model_arg,
@@ -1272,7 +1236,6 @@ fn resolve_agent_spawn(
     registry: &ProcessRegistry,
     requested_agent_tool_id: Option<AgentToolId>,
     agent_template_id: Option<AgentTemplateId>,
-    requested_mcp_tools_profile: Option<McpToolsProfile>,
     caller_extra_args: Vec<String>,
     requested_model: Option<String>,
     caller_prompt: Option<String>,
@@ -1296,7 +1259,6 @@ fn resolve_agent_spawn(
             extra_args,
             has_model_arg,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
-            mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(tool.mcp_tools_profile),
             launch: ResolvedAgentLaunch {
                 agent_tool_id,
                 agent_tool_name: tool.name,
@@ -1304,7 +1266,6 @@ fn resolve_agent_spawn(
                 effort: launch_value_label(launch_options.effort),
                 mcp_wired,
                 template_args_skipped: Vec::new(),
-                mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(tool.mcp_tools_profile),
             },
         });
     };
@@ -1337,7 +1298,6 @@ fn resolve_agent_spawn(
         extra_args,
         has_model_arg,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
-        mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(template.mcp_tools_profile),
         launch: ResolvedAgentLaunch {
             agent_tool_id,
             agent_tool_name: tool.name,
@@ -1345,7 +1305,6 @@ fn resolve_agent_spawn(
             effort: launch_value_label(launch_options.effort),
             mcp_wired,
             template_args_skipped,
-            mcp_tools_profile: requested_mcp_tools_profile.unwrap_or(template.mcp_tools_profile),
         },
     })
 }
@@ -1924,7 +1883,6 @@ async fn spawn_registered_agent_for(
     registry: crate::SharedProcessRegistry,
     project: Project,
     agent_tool_id: AgentToolId,
-    mcp_tools_profile: McpToolsProfile,
     name: Option<String>,
     extra_args: Vec<String>,
     has_model_arg: bool,
@@ -2009,7 +1967,6 @@ async fn spawn_registered_agent_for(
             name,
             prepared.launch.command,
             Some(prepared.tool.id),
-            mcp_tools_profile,
             prepared.launch.env,
             spawned_by_process_id,
             notify_spawner_on_idle,
@@ -2173,7 +2130,6 @@ pub(crate) async fn deep_check_registered_agent(
         registry.clone(),
         project,
         agent_tool_id,
-        tool.mcp_tools_profile,
         None,
         extra_args,
         false,
@@ -2347,7 +2303,6 @@ fn spawn(
     name: String,
     command: String,
     agent_tool_id: Option<AgentToolId>,
-    mcp_tools_profile: McpToolsProfile,
     env: BTreeMap<String, String>,
     spawned_by_process_id: Option<ProcessId>,
     notify_spawner_on_idle: bool,
@@ -2376,17 +2331,6 @@ fn spawn(
             sort_order: 0,
         })
         .map_err(|error| error.to_string())?;
-    if !registry
-        .store()
-        .set_process_mcp_tools_profile(created.id, mcp_tools_profile)
-        .map_err(|error| error.to_string())?
-    {
-        let _ = registry.close(created.id);
-        return Err(format!(
-            "created process {} disappeared before its MCP tools profile was saved",
-            created.id
-        ));
-    }
     if notify_spawner_on_idle {
         let Some(spawner_id) = spawned_by_process_id else {
             let _ = registry.close(created.id);
@@ -3287,7 +3231,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         }).unwrap();
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(
             ProcessRegistry::new_for_test(store).unwrap(),
@@ -3296,7 +3239,6 @@ mod tests {
             registry.clone(),
             project,
             Some(91),
-            None,
             None,
             None,
             Vec::new(),
@@ -3422,7 +3364,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         }).unwrap();
         store
             .put_agent_template(&AgentTemplate {
@@ -3435,7 +3376,6 @@ mod tests {
                 sort_order: 0,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         let registry = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -3446,7 +3386,6 @@ mod tests {
             project,
             None,
             Some(92),
-            None,
             None,
             Vec::new(),
             None,
@@ -3603,7 +3542,6 @@ mod tests {
                     source: AgentToolSource::Local,
                     resume_args: None,
                     continue_args: None,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
         }
@@ -3619,7 +3557,6 @@ mod tests {
                 sort_order: 0,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 
@@ -3627,7 +3564,6 @@ mod tests {
             &registry,
             Some(91),
             Some(44),
-            None,
             vec!["--caller".into()],
             None,
             Some("Check this.".into()),
@@ -3647,7 +3583,6 @@ mod tests {
             &registry,
             Some(92),
             Some(44),
-            None,
             vec!["--caller".into()],
             None,
             Some("Check this.".into()),
@@ -3665,72 +3600,12 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(999), Some(44), None, vec![], None, None)
-                .unwrap_err(),
+            resolve_agent_spawn(&registry, Some(999), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 999 was not found"
         );
         assert_eq!(
-            resolve_agent_spawn(&registry, Some(93), Some(44), None, vec![], None, None)
-                .unwrap_err(),
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 93 (Disabled agent) is disabled"
-        );
-    }
-
-    #[test]
-    fn mcp_tools_profile_resolves_from_template_tool_or_spawn_override() {
-        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
-        registry
-            .store()
-            .put_agent_tool(&AgentTool {
-                id: 91,
-                name: "Extended tool".into(),
-                command: "agent-command".into(),
-                tool_type: "custom".into(),
-                enabled: true,
-                source: AgentToolSource::Local,
-                resume_args: None,
-                continue_args: None,
-                mcp_tools_profile: McpToolsProfile::Extended,
-            })
-            .unwrap();
-        registry
-            .store()
-            .put_agent_template(&AgentTemplate {
-                id: 44,
-                profile_id: 1,
-                name: "Core template".into(),
-                agent_tool_id: 91,
-                extra_args: Vec::new(),
-                prompt: String::new(),
-                sort_order: 0,
-                created_at: 0,
-                updated_at: 0,
-                mcp_tools_profile: McpToolsProfile::Core,
-            })
-            .unwrap();
-
-        let plain =
-            resolve_agent_spawn(&registry, Some(91), None, None, vec![], None, None).unwrap();
-        assert_eq!(plain.mcp_tools_profile, McpToolsProfile::Extended);
-
-        let templated =
-            resolve_agent_spawn(&registry, None, Some(44), None, vec![], None, None).unwrap();
-        assert_eq!(templated.mcp_tools_profile, McpToolsProfile::Core);
-
-        let overridden = resolve_agent_spawn(
-            &registry,
-            None,
-            Some(44),
-            Some(McpToolsProfile::Extended),
-            vec![],
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(overridden.mcp_tools_profile, McpToolsProfile::Extended);
-        assert_eq!(
-            overridden.launch.mcp_tools_profile,
-            McpToolsProfile::Extended
         );
     }
 
@@ -3764,7 +3639,6 @@ mod tests {
                     source: AgentToolSource::Local,
                     resume_args: None,
                     continue_args: None,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
         }
@@ -3785,20 +3659,18 @@ mod tests {
                 sort_order: 0,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 
         let claude =
-            resolve_agent_spawn(&registry, Some(93), Some(44), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap();
         assert_eq!(claude.extra_args, ["--model", "fable", "--effort", "high"]);
         assert_eq!(claude.launch.agent_tool_name, "Claude alias override");
         assert_eq!(claude.launch.model, "fable");
         assert_eq!(claude.launch.effort, "high");
         assert_eq!(claude.launch.template_args_skipped, ["--review"]);
 
-        let codex =
-            resolve_agent_spawn(&registry, Some(92), Some(44), None, vec![], None, None).unwrap();
+        let codex = resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
         assert_eq!(codex.extra_args, ["-c", "model_reasoning_effort=\"high\""]);
         assert_eq!(codex.launch.agent_tool_name, "Codex override");
         assert_eq!(codex.launch.model, "codex-default");
@@ -3809,7 +3681,7 @@ mod tests {
         );
 
         let custom =
-            resolve_agent_spawn(&registry, Some(94), Some(44), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(94), Some(44), vec![], None, None).unwrap();
         assert!(custom.extra_args.is_empty());
         assert_eq!(custom.launch.model, "agent default");
         assert_eq!(custom.launch.effort, "agent default");
@@ -3837,7 +3709,6 @@ mod tests {
                     source: AgentToolSource::Local,
                     resume_args: None,
                     continue_args: None,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
         }
@@ -3859,12 +3730,11 @@ mod tests {
                 sort_order: 0,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 
         let claude =
-            resolve_agent_spawn(&registry, Some(92), Some(44), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
         assert_eq!(claude.extra_args, ["--effort", "xhigh"]);
         assert_eq!(claude.launch.model, "agent default");
         assert_eq!(claude.launch.effort, "xhigh");
@@ -3899,7 +3769,6 @@ mod tests {
                     source: AgentToolSource::Local,
                     resume_args: None,
                     continue_args: None,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
         }
@@ -3916,19 +3785,18 @@ mod tests {
                     sort_order: id,
                     created_at: 0,
                     updated_at: 0,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
         }
 
         let same_type =
-            resolve_agent_spawn(&registry, Some(92), Some(44), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
         assert!(same_type.extra_args.is_empty());
         assert_eq!(same_type.launch.model, "opus");
         assert!(same_type.launch.template_args_skipped.is_empty());
 
         let cross_type =
-            resolve_agent_spawn(&registry, Some(94), Some(45), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(94), Some(45), vec![], None, None).unwrap();
         assert!(cross_type.extra_args.is_empty());
         assert_eq!(cross_type.launch.model, "agent default");
         assert!(cross_type.launch.template_args_skipped.is_empty());
@@ -3953,7 +3821,6 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             };
             let args = apply_model_override(
                 &tool,
@@ -3983,7 +3850,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         };
         assert_eq!(
             apply_model_override(&codex, vec!["--model".into(), "unchanged".into()], None).unwrap(),
@@ -3999,7 +3865,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         };
         assert_eq!(
             apply_model_override(&custom, Vec::new(), Some("model-x")).unwrap_err(),
@@ -4048,7 +3913,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         };
         assert_eq!(
             configured_launch_options(&configured_tool, &[])
@@ -4070,7 +3934,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         };
         let model = "provider/model with spaces and 'quotes'";
         let args = apply_model_override(&tool, Vec::new(), Some(model)).unwrap();
@@ -4124,7 +3987,6 @@ mod tests {
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
-            mcp_tools_profile: Default::default(),
         };
         registry.store().put_agent_template(&template).unwrap();
 
@@ -4132,7 +3994,6 @@ mod tests {
             &registry,
             None,
             Some(44),
-            None,
             vec!["--caller".into()],
             None,
             None,
@@ -4147,7 +4008,6 @@ mod tests {
             &registry,
             None,
             Some(44),
-            None,
             vec!["--model=caller-legacy".into()],
             Some("launch-override".into()),
             None,
@@ -4173,7 +4033,6 @@ mod tests {
                 sort_order: 1,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         registry
@@ -4187,11 +4046,10 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         let command_default_override =
-            resolve_agent_spawn(&registry, Some(999), Some(45), None, vec![], None, None).unwrap();
+            resolve_agent_spawn(&registry, Some(999), Some(45), vec![], None, None).unwrap();
         assert!(command_default_override.extra_args.is_empty());
         assert_eq!(command_default_override.launch.model, "agent default");
         assert_eq!(
@@ -4222,7 +4080,6 @@ mod tests {
                 sort_order: 0,
                 created_at: 0,
                 updated_at: 0,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         registry
@@ -4322,7 +4179,6 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         let tools = load_agent_tools(&registry).unwrap();
@@ -4354,7 +4210,6 @@ mod tests {
                 source: AgentToolSource::Config,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 
@@ -4366,7 +4221,6 @@ mod tests {
                 "changed".into(),
                 "future".into(),
                 false,
-                McpToolsProfile::Core,
             )
             .unwrap_err()
             .contains("managed by the per-user config file")

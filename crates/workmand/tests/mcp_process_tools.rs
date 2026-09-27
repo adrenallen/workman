@@ -18,7 +18,7 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::attention::AttentionState;
-use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -179,9 +179,6 @@ async fn rmcp_process_tools_cover_lifecycle_output_and_input() -> Result<(), Box
             "paste-sensitive-agent",
             paste_sensitive_tui(),
         ))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry.start(1)?;
         registry.store().connection().query_row(
             "SELECT token FROM process_mcp_tokens WHERE process_id = 1",

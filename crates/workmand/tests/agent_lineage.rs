@@ -20,8 +20,8 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    Actor, AgentTool, AgentToolSource, McpToolsProfile, Process, ProcessKind, ProcessSource,
-    ProcessStatus, Project, Timer, TimerKind,
+    Actor, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
+    Timer, TimerKind,
 };
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
@@ -121,7 +121,6 @@ async fn agent_parent_lifecycle_always_cascades_every_registry_descendant()
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: McpToolsProfile::Extended,
         })?;
         registry.store().put_process(&Process {
             id: 1,

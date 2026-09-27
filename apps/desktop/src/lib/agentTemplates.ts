@@ -1,4 +1,4 @@
-import type { AgentTool, McpToolsProfile } from './agentTools';
+import type { AgentTool } from './agentTools';
 
 export interface AgentTemplate {
   id: number;
@@ -7,7 +7,6 @@ export interface AgentTemplate {
   agent_tool_id: number;
   extra_args: string[];
   prompt: string;
-  mcp_tools_profile: McpToolsProfile;
   sort_order: number;
   created_at: number;
   updated_at: number;
@@ -19,7 +18,6 @@ export interface AgentTemplateInput {
   agent_tool_id: number;
   extra_args: string[];
   prompt: string;
-  mcp_tools_profile: McpToolsProfile;
 }
 
 export interface DeleteAgentTemplateResult {

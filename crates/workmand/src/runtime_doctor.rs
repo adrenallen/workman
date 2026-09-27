@@ -935,7 +935,6 @@ mod tests {
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         }
     }
 

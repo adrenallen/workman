@@ -46,13 +46,7 @@
   });
 
   function emptyDraft(): AgentToolInput {
-    return {
-      name: '',
-      command: '',
-      tool_type: 'custom',
-      enabled: true,
-      mcp_tools_profile: 'core'
-    };
+    return { name: '', command: '', tool_type: 'custom', enabled: true };
   }
 
   function beginNew(): void {
@@ -66,8 +60,7 @@
       name: tool.name,
       command: tool.command,
       tool_type: tool.tool_type,
-      enabled: tool.enabled,
-      mcp_tools_profile: tool.mcp_tools_profile
+      enabled: tool.enabled
     };
     editing = tool.id;
   }
@@ -265,7 +258,6 @@
         <label><span>Name</span><input type="text" bind:value={draft.name} placeholder="Claude" /></label>
         <label><span>Tool type</span><input type="text" bind:value={draft.tool_type} list="agent-tool-types" placeholder="claude_code" autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
         <label class="command"><span>Command and arguments</span><input type="text" bind:value={draft.command} placeholder="claude --dangerously-skip-permissions" autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
-        <label class="mcp-tools-profile"><span>MCP tools</span><select bind:value={draft.mcp_tools_profile}><option value="core">Core</option><option value="extended">Extended</option></select><small>Fixed for each agent's lifetime.</small></label>
         <datalist id="agent-tool-types"><option value="claude"></option><option value="claude_code"></option><option value="codex"></option><option value="gemini"></option><option value="opencode"></option><option value="kimi"></option><option value="grok"></option><option value="custom"></option></datalist>
         <label class="enabled-check"><input type="checkbox" bind:checked={draft.enabled} /><span>Available for new agents</span></label>
         <div class="icon-override">
@@ -352,9 +344,8 @@
   .close { border: 0; background: transparent; color: var(--text-soft); font-size: 20px; cursor: pointer; }
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; padding: 15px; }
   .editor label > span { display: block; margin-bottom: 5px; color: var(--text-soft); font-size: var(--font-size-xs); text-transform: uppercase; }
-  .editor input[type='text'], .editor select { width: 100%; border: 1px solid var(--border-strong); border-radius: 2px; outline: 0; padding: 9px; background: var(--background); color: var(--text-soft); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); }
-  .editor input:focus, .editor select:focus { border-color: var(--signal); }
-  .mcp-tools-profile small { display: block; margin-top: 5px; color: var(--muted-foreground); font: var(--font-size-xs) 'JetBrains Mono Variable', monospace; }
+  .editor input[type='text'] { width: 100%; border: 1px solid var(--border-strong); border-radius: 2px; outline: 0; padding: 9px; background: var(--background); color: var(--text-soft); font-family: 'JetBrains Mono Variable', monospace; font-size: var(--font-size-sm); }
+  .editor input:focus { border-color: var(--signal); }
   .command { grid-column: 1 / -1; }
   .enabled-check { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; }
   .enabled-check input { accent-color: var(--signal); }

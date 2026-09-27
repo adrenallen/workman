@@ -2,8 +2,6 @@ import type { ProcessView } from './daemon';
 export { formatExtraArgs, parseExtraArgs } from './extraArgs';
 export { normalizeAgentToolType } from './agentToolType.ts';
 
-export type McpToolsProfile = 'core' | 'extended';
-
 export interface AgentTool {
   id: number;
   name: string;
@@ -13,7 +11,6 @@ export interface AgentTool {
   source: 'local' | 'config';
   resume_args: string | null;
   continue_args: string | null;
-  mcp_tools_profile: McpToolsProfile;
   icon_data_url: string | null;
 }
 
@@ -23,7 +20,6 @@ export interface AgentToolInput {
   command: string;
   tool_type: string;
   enabled: boolean;
-  mcp_tools_profile: McpToolsProfile;
 }
 
 export interface AgentToolHealth extends AgentTool {
@@ -99,7 +95,6 @@ export interface SpawnAgentInput {
   prompt?: string;
   attachments?: string[];
   defer_initial_prompt?: boolean;
-  mcp_tools_profile?: McpToolsProfile;
 }
 
 export interface SpawnAgentResult {

@@ -4155,7 +4155,6 @@ mod tests {
             source: workman_core::AgentToolSource::Config,
             resume_args: Some("resume {session_id}".into()),
             continue_args: Some("resume --last".into()),
-            mcp_tools_profile: Default::default(),
         };
         let session = AgentSession {
             process_id: process.id,
@@ -4214,7 +4213,6 @@ mod tests {
             source: workman_core::AgentToolSource::Config,
             resume_args: Some("--resume {session_id}".into()),
             continue_args: Some("--continue".into()),
-            mcp_tools_profile: Default::default(),
         };
         let launch = agent_start_command(&process, &tool.command, Some(&tool), None, Some(true));
         assert_eq!(launch.mode, AgentLaunchMode::Fresh);
@@ -4235,7 +4233,6 @@ mod tests {
             source: workman_core::AgentToolSource::Config,
             resume_args: Some("--resume {session_id}".into()),
             continue_args: Some("--continue".into()),
-            mcp_tools_profile: Default::default(),
         };
         let launch = agent_start_command(&process, &tool.command, Some(&tool), None, Some(false));
         assert_eq!(launch.mode, AgentLaunchMode::Fresh);
@@ -4256,7 +4253,6 @@ mod tests {
             source: workman_core::AgentToolSource::Local,
             resume_args: Some("--resume {session_id}".into()),
             continue_args: Some("--continue".into()),
-            mcp_tools_profile: Default::default(),
         };
         let session = AgentSession {
             process_id: process.id,
@@ -4927,7 +4923,6 @@ mod tests {
                 source: workman_core::AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         let mut registry =
@@ -5027,7 +5022,6 @@ mod tests {
                 source: workman_core::AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 

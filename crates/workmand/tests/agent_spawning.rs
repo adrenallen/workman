@@ -15,8 +15,8 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    AgentTemplate, AgentTool, AgentToolSource, McpToolsProfile, Process, ProcessKind,
-    ProcessSource, ProcessStatus, Project,
+    AgentTemplate, AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus,
+    Project,
 };
 use workmand::{DaemonConfig, DaemonServer};
 
@@ -123,7 +123,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 100,
@@ -134,7 +133,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 101,
@@ -145,7 +143,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 102,
@@ -156,7 +153,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 103,
@@ -167,7 +163,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 104,
@@ -178,7 +173,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 105,
@@ -189,7 +183,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: 106,
@@ -200,7 +193,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 300,
@@ -212,7 +204,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 301,
@@ -225,7 +216,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             sort_order: 1,
             created_at: 0,
             updated_at: 0,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 302,
@@ -243,7 +233,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             sort_order: 2,
             created_at: 0,
             updated_at: 0,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 303,
@@ -255,7 +244,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             sort_order: 3,
             created_at: 0,
             updated_at: 0,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().connection().execute_batch(
             "INSERT INTO profiles (id, name, active) VALUES (2, 'Other profile', 0);
@@ -288,9 +276,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "parent-process-token", 1_700_000_000_000)?;
@@ -498,7 +483,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Model capture agent",
             "model": "command-default",
             "effort": "agent default",
-            "mcp_tools_profile": "core",
             "mcp_wired": true,
             "template_args_skipped": []
         })
@@ -607,7 +591,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Swap model agent",
             "model": "swapped/provider-model",
             "effort": "agent default",
-            "mcp_tools_profile": "core",
             "mcp_wired": true,
             "template_args_skipped": ["--review"]
         })
@@ -649,7 +632,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Portable Codex agent",
             "model": "template-model",
             "effort": "high",
-            "mcp_tools_profile": "core",
             "mcp_wired": true,
             "template_args_skipped": ["--review"]
         })
@@ -690,7 +672,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Model capture agent",
             "model": "template-model",
             "effort": "high",
-            "mcp_tools_profile": "core",
             "mcp_wired": true,
             "template_args_skipped": []
         })
@@ -731,7 +712,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Custom agent",
             "model": "agent default",
             "effort": "agent default",
-            "mcp_tools_profile": "core",
             "mcp_wired": false,
             "template_args_skipped": [
                 "--model",
@@ -767,7 +747,6 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "agent_tool_name": "Shell-composed Claude",
             "model": "fable",
             "effort": "agent default",
-            "mcp_tools_profile": "core",
             "mcp_wired": true,
             "template_args_skipped": []
         })

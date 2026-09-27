@@ -15,14 +15,15 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use workman_core::{
     AgentTool, AgentToolSource, ImportedProjectFolder, ImportedProjectFolderMembership,
-    McpToolsProfile, ProcessStatus, ProfileId,
+    ProcessStatus, ProfileId,
 };
 
 use crate::{ProcessRegistry, control::agent_icons};
 use workman_core::shell::{AgentShellMode, ProfileTerminalSettings};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
-const ARCHIVE_VERSION: u32 = 5;
+const ARCHIVE_VERSION: u32 = 4;
+const MAX_READABLE_ARCHIVE_VERSION: u32 = 5;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -88,13 +89,9 @@ struct ArchiveAgentTool {
     enabled: bool,
     resume_args: Option<String>,
     continue_args: Option<String>,
-    #[serde(default, skip_serializing_if = "is_core_mcp_tools_profile")]
-    mcp_tools_profile: McpToolsProfile,
+    #[serde(default, skip_serializing, rename = "mcp_tools_profile")]
+    _legacy_mcp_tools_profile: Option<String>,
     icon_png_base64: Option<String>,
-}
-
-fn is_core_mcp_tools_profile(profile: &McpToolsProfile) -> bool {
-    *profile == McpToolsProfile::Core
 }
 
 pub(crate) fn list(registry: &ProcessRegistry) -> ControlResult {
@@ -372,7 +369,7 @@ pub(crate) fn export(
             enabled: tool.enabled,
             resume_args: tool.resume_args,
             continue_args: tool.continue_args,
-            mcp_tools_profile: tool.mcp_tools_profile,
+            _legacy_mcp_tools_profile: None,
             icon_png_base64,
         });
     }
@@ -382,19 +379,10 @@ pub(crate) fn export(
         .map_err(store_error)?;
     let mode =
         (terminal.agent_shell_mode != AgentShellMode::Auto).then_some(terminal.agent_shell_mode);
-    let has_extended_mcp_tools = agent_tools
-        .iter()
-        .any(|tool| tool.mcp_tools_profile == McpToolsProfile::Extended);
     let archive = ProfileArchive {
         format: ARCHIVE_FORMAT.into(),
         // Auto archives retain the previous schema so older Workman releases can read them.
-        version: if has_extended_mcp_tools {
-            ARCHIVE_VERSION
-        } else if mode.is_some() {
-            4
-        } else {
-            3
-        },
+        version: if mode.is_some() { ARCHIVE_VERSION } else { 3 },
         name: profile.name,
         terminal_shell: terminal.shell,
         agent_shell_mode: mode,
@@ -425,7 +413,9 @@ pub(crate) fn import(
     let bytes = fs::read(path).map_err(|error| ("profile_import_error", error.to_string()))?;
     let archive: ProfileArchive = serde_json::from_slice(&bytes)
         .map_err(|error| ("profile_import_invalid", error.to_string()))?;
-    if archive.format != ARCHIVE_FORMAT || !(1..=ARCHIVE_VERSION).contains(&archive.version) {
+    if archive.format != ARCHIVE_FORMAT
+        || !(1..=MAX_READABLE_ARCHIVE_VERSION).contains(&archive.version)
+    {
         return Err((
             "profile_import_invalid",
             format!(
@@ -576,7 +566,6 @@ pub(crate) fn import(
             source: AgentToolSource::Config,
             resume_args: tool.resume_args,
             continue_args: tool.continue_args,
-            mcp_tools_profile: tool.mcp_tools_profile,
         });
         icons.push(icon);
     }
@@ -853,6 +842,31 @@ mod tests {
             serde_json::from_slice(&fs::read(&archive_path).unwrap()).unwrap();
         assert_eq!(archive["agent_shell_mode"], "interactive");
         assert_eq!(archive["version"], 4);
+        assert!(
+            archive["agent_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.get("mcp_tools_profile").is_none())
+        );
+        let legacy_v5_path = temp.path().join("profile-v5.json");
+        let mut legacy_v5 = archive.clone();
+        legacy_v5["version"] = json!(5);
+        legacy_v5["agent_tools"][0]["mcp_tools_profile"] = json!("extended");
+        fs::write(&legacy_v5_path, serde_json::to_vec(&legacy_v5).unwrap()).unwrap();
+        let legacy_import =
+            import(&registry, temp.path(), &legacy_v5_path, Some("Imported v5")).unwrap();
+        let legacy_import_id = legacy_import["profile"]["id"].as_i64().unwrap();
+        export(&registry, temp.path(), legacy_import_id, &legacy_v5_path).unwrap();
+        let rewritten: Value = serde_json::from_slice(&fs::read(&legacy_v5_path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], 4);
+        assert!(
+            rewritten["agent_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool.get("mcp_tools_profile").is_none())
+        );
         let imported = import(&registry, temp.path(), &archive_path, Some("Imported")).unwrap();
         let imported_id = imported["profile"]["id"].as_i64().unwrap();
         assert_eq!(

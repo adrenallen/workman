@@ -12,10 +12,10 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::domain::{
-    ActiveWorktreeRemoval, Actor, AgentLaunchMode, AgentSession, AgentTemplate, AgentTool,
-    McpToolsProfile, Process, ProcessId, ProcessKind, Profile, ProfileId, Project, ProjectId,
-    ProjectLock, ProjectWorktree, QuickPrompt, Scratchpad, Timer, Todo, TodoBlocker, TodoComment,
-    TodoId, WorktreeRepository, WorktreeRepositoryId,
+    ActiveWorktreeRemoval, Actor, AgentLaunchMode, AgentSession, AgentTemplate, AgentTool, Process,
+    ProcessId, ProcessKind, Profile, ProfileId, Project, ProjectId, ProjectLock, ProjectWorktree,
+    QuickPrompt, Scratchpad, Timer, Todo, TodoBlocker, TodoComment, TodoId, WorktreeRepository,
+    WorktreeRepositoryId,
 };
 use crate::shell::{AgentShellMode, ProfileTerminalSettings};
 
@@ -226,10 +226,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "mcp_tools_profiles",
         include_str!("../migrations/0042_mcp_tools_profiles.sql"),
     ),
+    (
+        43,
+        "drop_mcp_tools_profiles",
+        include_str!("../migrations/0043_drop_mcp_tools_profiles.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 42;
+pub const LATEST_SCHEMA_VERSION: i64 = 43;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]
@@ -439,7 +444,7 @@ impl Store {
     pub fn list_profile_agent_tools(&self, profile_id: ProfileId) -> StoreResult<Vec<AgentTool>> {
         let mut statement = self.connection.prepare(
             "SELECT id, COALESCE(display_name, name), command, tool_type, enabled, source,
-                    resume_args, continue_args, mcp_tools_profile
+                    resume_args, continue_args
              FROM agent_tools WHERE profile_id = ?1 ORDER BY sort_order, id",
         )?;
         Ok(statement
@@ -453,7 +458,6 @@ impl Store {
                     source: row.get(5)?,
                     resume_args: row.get(6)?,
                     continue_args: row.get(7)?,
-                    mcp_tools_profile: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -465,7 +469,7 @@ impl Store {
     ) -> StoreResult<Vec<AgentTemplate>> {
         let mut statement = self.connection.prepare(
             "SELECT id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
-                    created_at, updated_at, mcp_tools_profile
+                    created_at, updated_at
              FROM agent_templates WHERE profile_id = ?1 ORDER BY sort_order, id",
         )?;
         Ok(statement
@@ -594,8 +598,8 @@ impl Store {
             transaction.execute(
                 "INSERT INTO agent_tools (
                     id, name, display_name, command, tool_type, enabled, source, sort_order,
-                    resume_args, continue_args, profile_id, mcp_tools_profile
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    resume_args, continue_args, profile_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     profile_agent_storage_name(profile_id, id),
@@ -608,7 +612,6 @@ impl Store {
                     tool.resume_args,
                     tool.continue_args,
                     profile_id,
-                    tool.mcp_tools_profile,
                 ],
             )?;
             tool_ids.push(id);
@@ -731,7 +734,7 @@ impl Store {
             let tools = {
                 let mut statement = transaction.prepare(
                     "SELECT id, COALESCE(display_name, name), command, tool_type, enabled, source,
-                            sort_order, resume_args, continue_args, mcp_tools_profile
+                            sort_order, resume_args, continue_args
                      FROM agent_tools WHERE profile_id = ?1 ORDER BY sort_order, id",
                 )?;
                 statement
@@ -746,7 +749,6 @@ impl Store {
                             row.get::<_, i64>(6)?,
                             row.get::<_, Option<String>>(7)?,
                             row.get::<_, Option<String>>(8)?,
-                            row.get::<_, McpToolsProfile>(9)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -768,7 +770,6 @@ impl Store {
                     sort_order,
                     resume_args,
                     continue_args,
-                    mcp_tools_profile,
                 ),
             ) in tools.into_iter().enumerate()
             {
@@ -777,8 +778,8 @@ impl Store {
                 transaction.execute(
                     "INSERT INTO agent_tools (
                         id, name, display_name, command, tool_type, enabled, source, sort_order,
-                        resume_args, continue_args, profile_id, mcp_tools_profile
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        resume_args, continue_args, profile_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         next_id,
                         storage_name,
@@ -791,7 +792,6 @@ impl Store {
                         resume_args,
                         continue_args,
                         profile_id,
-                        mcp_tools_profile,
                     ],
                 )?;
                 icon_pairs.push((old_id, next_id));
@@ -800,7 +800,7 @@ impl Store {
             let tool_id_map = icon_pairs.iter().copied().collect::<HashMap<_, _>>();
             let templates = {
                 let mut statement = transaction.prepare(
-                    "SELECT name, agent_tool_id, extra_args, prompt, sort_order, mcp_tools_profile
+                    "SELECT name, agent_tool_id, extra_args, prompt, sort_order
                      FROM agent_templates WHERE profile_id = ?1 ORDER BY sort_order, id",
                 )?;
                 statement
@@ -811,7 +811,6 @@ impl Store {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
-                            row.get::<_, McpToolsProfile>(5)?,
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -821,10 +820,8 @@ impl Store {
                 [],
                 |row| row.get(0),
             )?;
-            for (
-                position,
-                (name, source_tool_id, extra_args, prompt, sort_order, mcp_tools_profile),
-            ) in templates.into_iter().enumerate()
+            for (position, (name, source_tool_id, extra_args, prompt, sort_order)) in
+                templates.into_iter().enumerate()
             {
                 let copied_tool_id = tool_id_map.get(&source_tool_id).ok_or_else(|| {
                     StoreError::InvalidProfile(format!(
@@ -834,8 +831,8 @@ impl Store {
                 transaction.execute(
                     "INSERT INTO agent_templates (
                         id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
-                        created_at, updated_at, mcp_tools_profile
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch(), unixepoch(), ?8)",
+                        created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch(), unixepoch())",
                     params![
                         first_template_id + position as i64,
                         profile_id,
@@ -844,7 +841,6 @@ impl Store {
                         extra_args,
                         prompt,
                         sort_order,
-                        mcp_tools_profile,
                     ],
                 )?;
             }
@@ -1537,12 +1533,12 @@ impl Store {
         self.connection.execute(
             "INSERT INTO agent_tools (
                 id, name, display_name, command, tool_type, enabled, source, sort_order,
-                resume_args, continue_args, profile_id, mcp_tools_profile
+                resume_args, continue_args, profile_id
              )
              VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 COALESCE((SELECT MAX(sort_order) + 1 FROM agent_tools WHERE profile_id = ?10), 0),
-                ?8, ?9, ?10, ?11
+                ?8, ?9, ?10
              )
              ON CONFLICT(id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -1551,8 +1547,7 @@ impl Store {
                 enabled = excluded.enabled,
                 source = excluded.source,
                 resume_args = excluded.resume_args,
-                continue_args = excluded.continue_args,
-                mcp_tools_profile = excluded.mcp_tools_profile
+                continue_args = excluded.continue_args
              WHERE agent_tools.profile_id = excluded.profile_id",
             params![
                 tool.id,
@@ -1565,7 +1560,6 @@ impl Store {
                 tool.resume_args,
                 tool.continue_args,
                 profile_id,
-                tool.mcp_tools_profile,
             ],
         )?;
         Ok(())
@@ -1577,7 +1571,7 @@ impl Store {
             .query_row(
                 "SELECT a.id, COALESCE(a.display_name, a.name), a.command, a.tool_type,
                         a.enabled, a.source,
-                        resume_args, continue_args, mcp_tools_profile
+                        resume_args, continue_args
                  FROM agent_tools AS a
                  JOIN profiles AS p ON p.id = a.profile_id AND p.active = 1
                  WHERE a.id = ?1",
@@ -1592,7 +1586,6 @@ impl Store {
                         source: row.get(5)?,
                         resume_args: row.get(6)?,
                         continue_args: row.get(7)?,
-                        mcp_tools_profile: row.get(8)?,
                     })
                 },
             )
@@ -1603,7 +1596,7 @@ impl Store {
     pub fn list_agent_tools(&self) -> StoreResult<Vec<AgentTool>> {
         let mut statement = self.connection.prepare(
             "SELECT a.id, COALESCE(a.display_name, a.name), a.command, a.tool_type,
-                    a.enabled, a.source, a.resume_args, a.continue_args, a.mcp_tools_profile
+                    a.enabled, a.source, a.resume_args, a.continue_args
              FROM agent_tools AS a
              JOIN profiles AS p ON p.id = a.profile_id AND p.active = 1
              ORDER BY a.sort_order, a.id",
@@ -1619,7 +1612,6 @@ impl Store {
                     source: row.get(5)?,
                     resume_args: row.get(6)?,
                     continue_args: row.get(7)?,
-                    mcp_tools_profile: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1708,7 +1700,7 @@ impl Store {
             .connection
             .query_row(
                 "SELECT t.id, t.profile_id, t.name, t.agent_tool_id, t.extra_args, t.prompt,
-                        t.sort_order, t.created_at, t.updated_at, t.mcp_tools_profile
+                        t.sort_order, t.created_at, t.updated_at
                  FROM agent_templates AS t
                  JOIN profiles AS p ON p.id = t.profile_id AND p.active = 1
                 WHERE t.id = ?1",
@@ -1757,18 +1749,17 @@ impl Store {
         self.connection.execute(
             "INSERT INTO agent_templates (
                 id, profile_id, name, agent_tool_id, extra_args, prompt, sort_order,
-                created_at, updated_at, mcp_tools_profile
+                created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 COALESCE((SELECT MAX(sort_order) + 1 FROM agent_templates WHERE profile_id = ?2), 0),
-                unixepoch(), unixepoch(), ?7
+                unixepoch(), unixepoch()
              )
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 agent_tool_id = excluded.agent_tool_id,
                 extra_args = excluded.extra_args,
                 prompt = excluded.prompt,
-                mcp_tools_profile = excluded.mcp_tools_profile,
                 updated_at = unixepoch()
              WHERE agent_templates.profile_id = excluded.profile_id",
             params![
@@ -1778,7 +1769,6 @@ impl Store {
                 template.agent_tool_id,
                 to_json(&template.extra_args)?,
                 template.prompt,
-                template.mcp_tools_profile,
             ],
         )?;
         Ok(())
@@ -2186,36 +2176,6 @@ impl Store {
             )
             .optional()?;
         Ok(process)
-    }
-
-    /// Return the MCP tool profile snapshotted for the process credential.
-    pub fn get_mcp_tools_profile_by_token(
-        &self,
-        token: &str,
-    ) -> StoreResult<Option<McpToolsProfile>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT p.mcp_tools_profile
-                 FROM process_mcp_tokens AS token
-                 JOIN processes AS p ON p.id = token.process_id
-                 WHERE token.token = ?1",
-                [token],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
-
-    /// Snapshot the resolved MCP tool profile before an agent is started.
-    pub fn set_process_mcp_tools_profile(
-        &self,
-        process_id: ProcessId,
-        profile: McpToolsProfile,
-    ) -> StoreResult<bool> {
-        Ok(self.connection.execute(
-            "UPDATE processes SET mcp_tools_profile = ?1 WHERE id = ?2",
-            params![profile, process_id],
-        )? > 0)
     }
 
     pub fn put_todo(&mut self, todo: &Todo) -> StoreResult<()> {
@@ -2719,7 +2679,6 @@ fn agent_template_from_row(row: &Row<'_>) -> rusqlite::Result<AgentTemplate> {
         sort_order: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
-        mcp_tools_profile: row.get(9)?,
     })
 }
 
@@ -2931,6 +2890,110 @@ fn project_ready_migration_preserves_notification_ids_and_read_history() {
 
 #[cfg(test)]
 #[test]
+fn drop_mcp_tools_profiles_migration_preserves_schema_42_rows() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 42) {
+        connection.execute_batch(sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version,name) VALUES(?1,?2)",
+                params![version, name],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "INSERT INTO projects(id,path,name) VALUES(99,'/tmp/profile-migration','Profile');
+             UPDATE agent_tools SET mcp_tools_profile = 'extended';
+             INSERT INTO agent_templates(profile_id,name,agent_tool_id,mcp_tools_profile)
+             SELECT profile_id,'Existing template',id,'extended'
+             FROM agent_tools ORDER BY id LIMIT 1;
+             INSERT INTO processes(
+                 id,project_id,kind,name,working_dir,source,status,mcp_tools_profile
+             ) VALUES(
+                 99,99,'agent','Existing agent','/tmp/profile-migration','local','stopped','extended'
+             );",
+        )
+        .unwrap();
+    let counts_before = ["agent_tools", "agent_templates", "processes"].map(|table| {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    for table in ["agent_tools", "agent_templates", "processes"] {
+        let extended: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE mcp_tools_profile = 'extended'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            extended > 0,
+            "schema-42 fixture omitted Extended {table} rows"
+        );
+    }
+
+    let store = Store::from_connection(connection).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 43);
+    let counts_after = ["agent_tools", "agent_templates", "processes"].map(|table| {
+        store
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    assert_eq!(counts_after, counts_before);
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT name FROM agent_templates", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "Existing template"
+    );
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT name FROM processes WHERE id = 99", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "Existing agent"
+    );
+    for table in ["agent_tools", "agent_templates", "processes"] {
+        let profile_columns: i64 = store
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'mcp_tools_profile'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_columns, 0, "{table} retained the profile column");
+    }
+    let violations: i64 = store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[cfg(test)]
+#[test]
 fn feedback_history_migration_preserves_legacy_attempts_and_scratchpad_receipts() {
     let connection = Connection::open_in_memory().unwrap();
     connection
@@ -3023,46 +3086,4 @@ fn storage_migration_preserves_existing_notifications_and_enables_stable_ids_wit
         })
         .unwrap();
     assert_eq!(violations, 0);
-}
-
-#[cfg(test)]
-#[test]
-fn mcp_tools_profile_migration_defaults_existing_rows_to_core() {
-    let connection = Connection::open_in_memory().unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
-        )
-        .unwrap();
-    for &(version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 41) {
-        connection.execute_batch(sql).unwrap();
-        connection
-            .execute(
-                "INSERT INTO schema_migrations(version,name) VALUES(?1,?2)",
-                params![version, name],
-            )
-            .unwrap();
-    }
-    connection
-        .execute_batch(
-            "INSERT INTO projects(id,path,name) VALUES(99,'/tmp/profile-migration','Profile');
-             INSERT INTO processes(id,project_id,kind,name,working_dir,source,status)
-             VALUES(99,99,'agent','Existing agent','/tmp/profile-migration','local','stopped');
-             INSERT INTO agent_templates(profile_id,name,agent_tool_id)
-             SELECT profile_id,'Existing template',id FROM agent_tools ORDER BY id LIMIT 1;",
-        )
-        .unwrap();
-
-    let store = Store::from_connection(connection).unwrap();
-    for table in ["agent_tools", "agent_templates", "processes"] {
-        let non_core: i64 = store
-            .connection()
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {table} WHERE mcp_tools_profile <> 'core'"),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(non_core, 0, "{table} did not default to Core");
-    }
 }

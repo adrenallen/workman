@@ -8,34 +8,48 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
-const CORE_TOOLS: &[&str] = &[
+const PROCESS_TOOLS: &[&str] = &[
+    "agent_tool_check",
+    "clear_output",
     "close_process",
+    "commands_control",
     "get_process_output",
     "get_process_status",
     "help",
     "list_agent_tools",
     "list_processes",
+    "lock",
     "process_control",
+    "project_update",
     "scratchpad_append",
     "scratchpad_comment_create",
+    "scratchpad_comment_delete",
     "scratchpad_comment_update",
+    "scratchpad_delete",
     "scratchpad_edit",
     "scratchpad_find",
     "scratchpad_list",
+    "scratchpad_load_from_file",
     "scratchpad_read",
+    "scratchpad_save_to_file",
     "scratchpad_update",
     "scratchpad_write",
     "search_output",
     "send_input",
+    "services_list",
     "spawn_agent",
+    "spawn_terminal",
     "timer_cancel",
     "timer_fire_when_idle",
     "timer_list",
+    "timer_pause",
     "timer_set",
     "todo_comment_create",
+    "todo_comment_delete",
+    "todo_comment_update",
     "todo_complete",
     "todo_create",
     "todo_delete",
@@ -44,26 +58,9 @@ const CORE_TOOLS: &[&str] = &[
     "todo_lock",
     "todo_unlock",
     "todo_update",
-    "whoami",
-];
-
-const EXTENDED_TOOLS: &[&str] = &[
-    "agent_tool_check",
-    "clear_output",
-    "commands_control",
-    "lock",
-    "project_update",
-    "scratchpad_comment_delete",
-    "scratchpad_delete",
-    "scratchpad_load_from_file",
-    "scratchpad_save_to_file",
-    "services_list",
-    "spawn_terminal",
-    "timer_pause",
-    "todo_comment_delete",
-    "todo_comment_update",
     "update_process",
     "wait_for_bound_port",
+    "whoami",
     "worktree_env_forget",
     "worktree_health",
     "worktree_list",
@@ -82,12 +79,12 @@ fn client_info(name: &str) -> ClientInfo {
     info
 }
 
-fn process(id: i64, project_path: &str, name: &str) -> Process {
+fn process(project_path: &str) -> Process {
     Process {
-        id,
+        id: 42,
         project_id: 1,
         kind: ProcessKind::Agent,
-        name: name.into(),
+        name: "agent".into(),
         command: Some("sleep 30".into()),
         working_dir: project_path.into(),
         env: BTreeMap::new(),
@@ -121,7 +118,7 @@ async fn tool_names(
 }
 
 #[tokio::test]
-async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
+async fn every_client_gets_one_process_tool_set_and_user_only_calls_are_gated()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let project_dir = temp.path().join("project");
@@ -133,12 +130,12 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
     .await?;
     let discovery = server.discovery().clone();
     let registry = server.registry();
-    let (core_token, extended_token) = {
+    let process_token = {
         let mut registry = registry.lock().await;
         registry.store().put_project(&Project {
             id: 1,
             path: project_dir.to_string_lossy().into_owned(),
-            name: "profile-test".into(),
+            name: "tool-set-test".into(),
             display_name: None,
             icon: None,
             selected: true,
@@ -146,219 +143,127 @@ async fn profiles_filter_every_client_handshake_and_keep_user_surface_full()
         })?;
         registry
             .store()
-            .put_process(&process(41, &project_dir.to_string_lossy(), "core-agent"))?;
-        registry.store().put_process(&process(
-            42,
-            &project_dir.to_string_lossy(),
-            "extended-agent",
-        ))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(42, McpToolsProfile::Extended)?;
-        registry.start(41)?;
+            .put_process(&process(&project_dir.to_string_lossy()))?;
         registry.start(42)?;
-        let token = |process_id| {
-            registry.store().connection().query_row(
-                "SELECT token FROM process_mcp_tokens WHERE process_id = ?1",
-                [process_id],
-                |row| row.get::<_, String>(0),
-            )
-        };
-        (token(41)?, token(42)?)
+        registry.store().connection().query_row(
+            "SELECT token FROM process_mcp_tokens WHERE process_id = 42",
+            [],
+            |row| row.get::<_, String>(0),
+        )?
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server_task = tokio::spawn(server.serve_until(async move {
         let _ = shutdown_rx.await;
     }));
-    let stateful = format!("http://127.0.0.1:{}/mcp", discovery.port);
-    let stateless = format!("http://127.0.0.1:{}/mcp-stateless", discovery.port);
-    let expected_core = CORE_TOOLS
+    let endpoint = format!("http://127.0.0.1:{}/mcp-stateless", discovery.port);
+    let mut expected_process = PROCESS_TOOLS
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
+    expected_process.sort();
+    assert_eq!(expected_process.len(), 52);
 
-    for client_name in [
-        "claude-code",
-        "codex",
-        "gemini-cli",
-        "opencode",
-        "kimi-code",
-    ] {
-        let endpoint = if client_name == "kimi-code" {
-            stateless.clone()
-        } else {
-            stateful.clone()
-        };
+    for client_name in ["Claude Code", "Codex", "Gemini", "OpenCode", "Kimi"] {
         let transport = StreamableHttpClientTransport::from_config(
-            StreamableHttpClientTransportConfig::with_uri(endpoint).auth_header(core_token.clone()),
+            StreamableHttpClientTransportConfig::with_uri(endpoint.clone())
+                .auth_header(process_token.clone()),
         );
         let client = client_info(client_name).serve(transport).await?;
         assert_eq!(
             tool_names(&client).await?,
-            expected_core,
-            "{client_name} saw the wrong Core profile"
+            expected_process,
+            "{client_name} saw the wrong process tool set"
         );
         let _ = client.cancel().await;
     }
 
-    let core_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(stateful.clone())
-            .auth_header(core_token.clone()),
+    let process_transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(endpoint.clone()).auth_header(process_token),
     );
-    let core_client = client_info("core-budget").serve(core_transport).await?;
-    let core_tools = core_client.list_all_tools().await?;
-    let core_bytes = serde_json::to_vec(&json!({ "tools": &core_tools }))?.len();
-    eprintln!("Core tools/list compact JSON bytes: {core_bytes}");
-    // 21,309 bytes after the todo 632 review-fix merge, retaining about 8.9% headroom.
-    const CORE_TOOLS_LIST_BUDGET_BYTES: usize = 23_200;
+    let process_client = client_info("process-budget")
+        .serve(process_transport)
+        .await?;
+    let process_tools = process_client.list_all_tools().await?;
+    assert_eq!(process_tools.len(), 52);
+    let process_bytes = serde_json::to_vec(&json!({ "tools": &process_tools }))?.len();
+    eprintln!("Process tools/list compact JSON bytes: {process_bytes}");
+    const PROCESS_TOOLS_LIST_BUDGET_BYTES: usize = 29_200;
     assert!(
-        core_bytes <= CORE_TOOLS_LIST_BUDGET_BYTES,
-        "Core tools/list grew beyond its size budget: {core_bytes} bytes"
+        process_bytes <= PROCESS_TOOLS_LIST_BUDGET_BYTES,
+        "process tools/list grew beyond its size budget: {process_bytes} bytes"
     );
-    let core_help = core_client
+    let process_help = process_client
         .call_tool(
             CallToolRequestParams::new("help")
                 .with_arguments(arguments(json!({ "topic": "tools" }))),
         )
-        .await?;
-    assert_ne!(core_help.is_error, Some(true));
-    let core_help = core_help.structured_content.expect("structured tools help");
-    let core_help = core_help["text"].as_str().expect("tools help text");
-    assert!(core_help.contains("fixed when an agent launches"));
-    assert!(core_help.contains("This agent: Core"));
-    assert!(core_help.contains("Core:\nwhoami —"));
-    assert!(core_help.contains("Extended (requires the Extended profile):"));
-    assert!(core_help.contains("spawn_terminal —"));
-    assert!(!core_help.contains("User-only:"));
-    assert!(!core_help.contains("agent_tool_configure —"));
-    let denied = core_client
-        .call_tool(
-            CallToolRequestParams::new("spawn_terminal").with_arguments(arguments(json!({}))),
-        )
+        .await?
+        .structured_content
+        .expect("structured process tools help");
+    let process_help = process_help["text"].as_str().expect("tools help text");
+    assert!(process_help.contains("whoami —"));
+    assert!(process_help.contains("spawn_terminal —"));
+    assert!(!process_help.contains("Core"));
+    assert!(!process_help.contains("Extended"));
+    assert!(!process_help.contains("User-only:"));
+    assert!(!process_help.contains("agent_tool_configure —"));
+    let mut sorted_help_lines = process_help.lines().collect::<Vec<_>>();
+    let process_help_lines = sorted_help_lines.clone();
+    sorted_help_lines.sort();
+    assert_eq!(process_help_lines, sorted_help_lines);
+
+    let denied = process_client
+        .call_tool(CallToolRequestParams::new("agent_tool_configure"))
         .await?;
     assert_eq!(denied.is_error, Some(true));
-    let denied = denied.structured_content.expect("structured profile error");
-    assert_eq!(denied["code"], "mcp_tools_profile_required");
-    assert!(
-        denied["message"]
-            .as_str()
-            .unwrap()
-            .contains("requires the Extended")
-    );
-    assert!(
-        denied["message"]
-            .as_str()
-            .unwrap()
-            .contains("fixed for its lifetime")
-    );
-    assert!(
-        denied["message"]
-            .as_str()
-            .unwrap()
-            .contains("Ask the user to launch this agent from an Extended template or agent tool")
-    );
-    assert!(
-        denied["message"]
-            .as_str()
-            .unwrap()
-            .contains("mcp_tools_profile=\"extended\"")
-    );
-    let unclassified = core_client
-        .call_tool(CallToolRequestParams::new("future_unclassified_tool"))
-        .await?;
-    assert_eq!(unclassified.is_error, Some(true));
-    let unclassified = unclassified
+    let denied = denied
         .structured_content
-        .expect("structured unclassified-tool error");
-    assert_eq!(unclassified["code"], "mcp_tool_unavailable");
+        .expect("structured user-only gate error");
+    assert_eq!(denied["code"], "user_session_required");
     assert!(
-        unclassified["message"]
+        denied["message"]
             .as_str()
             .unwrap()
-            .contains("unavailable to this agent's Core MCP tools profile")
+            .contains("unavailable to process identities")
     );
-    for (topic, expected) in [
-        ("spawning", "update_process (Extended profile)"),
-        ("worktrees", "worktree_list (Extended profile)"),
-        (
-            "scratchpads",
-            "with the Extended profile, they may also delete",
-        ),
-    ] {
-        let help = core_client
-            .call_tool(
-                CallToolRequestParams::new("help")
-                    .with_arguments(arguments(json!({ "topic": topic }))),
-            )
-            .await?;
-        let help = help.structured_content.expect("structured topic help");
-        assert!(
-            help["text"].as_str().unwrap().contains(expected),
-            "{topic} help did not qualify its Extended-only guidance"
-        );
-    }
-    let _ = core_client.cancel().await;
-
-    let extended_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(stateful.clone()).auth_header(extended_token),
-    );
-    let extended_client = client_info("extended").serve(extended_transport).await?;
-    let mut expected_extended = CORE_TOOLS
-        .iter()
-        .chain(EXTENDED_TOOLS.iter())
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    expected_extended.sort();
-    assert_eq!(tool_names(&extended_client).await?, expected_extended);
-    let extended_help = extended_client
-        .call_tool(
-            CallToolRequestParams::new("help")
-                .with_arguments(arguments(json!({ "topic": "tools" }))),
-        )
-        .await?;
-    let extended_help = extended_help
-        .structured_content
-        .expect("structured Extended tools help");
-    assert!(
-        extended_help["text"]
-            .as_str()
-            .unwrap()
-            .contains("This agent: Extended")
-    );
-    let _ = extended_client.cancel().await;
+    let _ = process_client.cancel().await;
 
     let user_transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(stateful)
+        StreamableHttpClientTransportConfig::with_uri(endpoint)
             .auth_header(discovery.token.clone()),
     );
-    let user_client = client_info("desktop-user").serve(user_transport).await?;
-    let user_tools = tool_names(&user_client).await?;
-    assert_eq!(
-        user_tools.len(),
-        CORE_TOOLS.len() + EXTENDED_TOOLS.len() + 1
-    );
+    let user_client = client_info("user-bearer").serve(user_transport).await?;
+    let user_tool_list = user_client.list_all_tools().await?;
+    let user_bytes = serde_json::to_vec(&json!({ "tools": &user_tool_list }))?.len();
+    eprintln!("Bearer tools/list compact JSON bytes: {user_bytes}");
+    let mut user_tools = user_tool_list
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<Vec<_>>();
+    user_tools.sort();
+    assert_eq!(user_tools.len(), 53);
     assert!(user_tools.iter().any(|name| name == "agent_tool_configure"));
+    assert!(
+        PROCESS_TOOLS
+            .iter()
+            .all(|name| user_tools.iter().any(|tool| tool == name))
+    );
     let user_help = user_client
         .call_tool(
             CallToolRequestParams::new("help")
                 .with_arguments(arguments(json!({ "topic": "tools" }))),
         )
-        .await?;
-    assert_ne!(user_help.is_error, Some(true));
-    let user_help = user_help.structured_content.expect("structured tools help");
+        .await?
+        .structured_content
+        .expect("structured user tools help");
     let user_help = user_help["text"].as_str().expect("tools help text");
-    assert!(user_help.contains("Core:\nwhoami —"));
-    assert!(user_help.contains("Extended (requires the Extended profile):"));
-    assert!(user_help.contains("User-only:\nagent_tool_configure —"));
-    assert!(!user_help.contains("This agent:"));
+    assert!(user_help.contains("\n\nUser-only:\nagent_tool_configure —"));
+    assert!(!user_help.contains("Core"));
+    assert!(!user_help.contains("Extended"));
     let _ = user_client.cancel().await;
 
-    {
-        let mut registry = registry.lock().await;
-        registry.stop(41)?;
-        registry.stop(42)?;
-    }
+    registry.lock().await.stop(42)?;
     let _ = shutdown_tx.send(());
     server_task.await??;
     Ok(())

@@ -254,7 +254,6 @@ async fn spawn_auto_acknowledges_trust_before_immediate_mission_and_guard_blocks
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry
             .store()
@@ -460,7 +459,6 @@ async fn installed_codex_timer_delivery_submits_short_and_loaded_large_missions(
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry
             .store()

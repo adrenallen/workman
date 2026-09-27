@@ -1269,7 +1269,6 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         store
@@ -1282,7 +1281,6 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
-                mcp_tools_profile: Default::default(),
             })
             .unwrap();
         ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(50)).unwrap()
@@ -1733,7 +1731,6 @@ mod tests {
                     source: AgentToolSource::Local,
                     resume_args: None,
                     continue_args: None,
-                    mcp_tools_profile: Default::default(),
                 })
                 .unwrap();
             let mut registry =

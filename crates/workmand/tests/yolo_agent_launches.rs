@@ -22,8 +22,7 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    AgentTool, AgentToolSource, McpToolsProfile, Process, ProcessKind, ProcessSource,
-    ProcessStatus, Project,
+    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
 };
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_CONFIG_ENV};
 
@@ -318,7 +317,6 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry.store().put_agent_tool(&AgentTool {
             id: codex_id,
@@ -332,14 +330,10 @@ async fn isolated_normal_yolo_launches_and_deep_checks_both_succeed() -> Result<
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
-            mcp_tools_profile: Default::default(),
         })?;
         registry
             .store()
             .put_process(&root_process(77, &project_path))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
@@ -450,9 +444,6 @@ async fn real_claude_and_codex_yolo_launches_and_deep_checks_succeed() -> Result
         registry
             .store()
             .put_process(&root_process(424, &project_path))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
@@ -585,9 +576,6 @@ async fn real_grok_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
             .put_process(&root_process(96, &project_path))?;
         registry
             .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
-        registry
-            .store()
             .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
         registry
             .store()
@@ -694,9 +682,6 @@ async fn real_kimi_auto_wires_mcp_and_whoami_identifies_the_spawn() -> Result<()
         registry
             .store()
             .put_process(&root_process(98, &project_path))?;
-        registry
-            .store()
-            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "root-process-token", 1_700_000_000_000)?;
