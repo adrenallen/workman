@@ -1,4 +1,10 @@
 <script lang="ts">
+  import {
+    parseMarkdownInline,
+    parseMarkdownTables,
+    type MarkdownInlineToken,
+    type MarkdownTable
+  } from './markdownTables';
   import { isBrowserUrl } from './openers';
 
   interface Props {
@@ -11,19 +17,18 @@
     | { kind: 'list'; ordered: boolean; items: string[] }
     | { kind: 'quote'; text: string }
     | { kind: 'code'; language: string; text: string }
+    | { kind: 'table'; table: MarkdownTable }
     | { kind: 'rule' };
 
-  type Inline =
-    | { kind: 'text'; text: string }
-    | { kind: 'strong'; text: string }
-    | { kind: 'code'; text: string }
-    | { kind: 'link'; text: string; href: string };
+  type Inline = MarkdownInlineToken;
 
   let { source }: Props = $props();
   let blocks = $derived(parseMarkdown(source));
 
   function parseMarkdown(markdown: string): Block[] {
-    const lines = markdown.replaceAll('\r\n', '\n').split('\n');
+    const normalized = markdown.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    const lines = normalized.split('\n');
+    const tables = new Map(parseMarkdownTables(normalized).map((table) => [table.startLine, table]));
     const output: Block[] = [];
     let index = 0;
 
@@ -31,6 +36,12 @@
       const line = lines[index];
       if (!line.trim()) {
         index += 1;
+        continue;
+      }
+      const table = tables.get(index);
+      if (table) {
+        output.push({ kind: 'table', table });
+        index = table.endLine + 1;
         continue;
       }
       if (/^\s*```/.test(line)) {
@@ -86,7 +97,8 @@
         lines[index].trim() &&
         !/^(#{1,6})\s+/.test(lines[index]) &&
         !/^\s*(?:```|>|[-+*]\s+|\d+\.\s+)/.test(lines[index]) &&
-        !/^\s*(---+|___+|\*\*\*+)\s*$/.test(lines[index])
+        !/^\s*(---+|___+|\*\*\*+)\s*$/.test(lines[index]) &&
+        !tables.has(index)
       ) {
         paragraph.push(lines[index].trim());
         index += 1;
@@ -97,28 +109,11 @@
   }
 
   function inline(text: string): Inline[] {
-    const tokens: Inline[] = [];
-    const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
-    let offset = 0;
-    for (const match of text.matchAll(pattern)) {
-      if (match.index > offset) tokens.push({ kind: 'text', text: text.slice(offset, match.index) });
-      const token = match[0];
-      if (token.startsWith('`')) {
-        tokens.push({ kind: 'code', text: token.slice(1, -1) });
-      } else if (token.startsWith('**')) {
-        tokens.push({ kind: 'strong', text: token.slice(2, -2) });
-      } else {
-        const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
-        if (link && isBrowserUrl(link[2])) {
-          tokens.push({ kind: 'link', text: link[1], href: link[2] });
-        } else {
-          tokens.push({ kind: 'text', text: token });
-        }
-      }
-      offset = (match.index ?? 0) + token.length;
-    }
-    if (offset < text.length) tokens.push({ kind: 'text', text: text.slice(offset) });
-    return tokens;
+    return parseMarkdownInline(text).map((token) =>
+      token.kind === 'link' && !isBrowserUrl(token.href)
+        ? { kind: 'text', text: token.source }
+        : token
+    );
   }
 </script>
 
@@ -126,6 +121,8 @@
   {#each inline(text) as token}
     {#if token.kind === 'strong'}
       <strong>{token.text}</strong>
+    {:else if token.kind === 'emphasis'}
+      <em>{token.text}</em>
     {:else if token.kind === 'code'}
       <code>{token.text}</code>
     {:else if token.kind === 'link'}
@@ -149,6 +146,27 @@
       <blockquote>{@render inlineContent(block.text)}</blockquote>
     {:else if block.kind === 'code'}
       <pre data-language={block.language || undefined}><code>{block.text}</code></pre>
+    {:else if block.kind === 'table'}
+      <div class="markdown-table-scroll">
+        <table class="markdown-table">
+          <thead>
+            <tr>
+              {#each block.table.header.cells as cell, column}
+                <th style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text)}</th>
+              {/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each block.table.rows as row}
+              <tr>
+                {#each row.cells as cell, column}
+                  <td style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text)}</td>
+                {/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
     {:else if block.kind === 'list'}
       {#if block.ordered}
         <ol>{#each block.items as item}<li>{@render inlineContent(item)}</li>{/each}</ol>

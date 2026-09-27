@@ -164,6 +164,7 @@
     fallbackLine?: number | null;
   } | null>(null);
   let pendingDeleteComment = $state<ScratchpadComment | null>(null);
+  let commentAnchorOverrides = $state(new Map<number, ScratchpadSelectionAnchor>());
 
   let outline = $derived(scratchpadOutline(bodyDraft));
   let activeOutlineId = $derived.by(() => {
@@ -184,12 +185,11 @@
   let metadataDisabled = $derived(
     busy || metadataBusy || dirty || saveState === 'saving' || saveState === 'conflict'
   );
-  let locallyResolvedComments = $derived(
-    (read?.comments ?? []).map((comment) => ({
-      ...comment,
-      ...resolveScratchpadAnchor(bodyDraft, comment)
-    }))
-  );
+  let locallyResolvedComments = $derived((read?.comments ?? []).map((comment) => {
+    const override = commentAnchorOverrides.get(comment.id);
+    const anchor = override ? { ...comment, ...override } : comment;
+    return { ...anchor, ...resolveScratchpadAnchor(bodyDraft, anchor) };
+  }));
   let commentThreads = $derived(groupCommentThreads(locallyResolvedComments));
   let visibleCommentThreads = $derived(
     commentThreads.filter((thread) => showResolvedComments || thread.unresolvedCount > 0)
@@ -476,6 +476,7 @@
 
   function applyMarkdown(markdown: string): void {
     const parts = splitMarkdown(markdown);
+    if (parts.body !== bodyDraft) commentAnchorOverrides = new Map();
     if (composerAnchor) {
       const resolved = resolveScratchpadAnchor(parts.body, composerAnchor);
       if (
@@ -545,6 +546,20 @@
   }
 
   function handleBodyChange(next: string, changes: PositionMapper): void {
+    const mappedComments = new Map(commentAnchorOverrides);
+    for (const comment of locallyResolvedComments) {
+      if (
+        comment.anchor_state !== 'anchored' ||
+        comment.current_start === null ||
+        comment.current_end === null
+      ) continue;
+      mappedComments.set(comment.id, mapScratchpadSelectionAnchor(
+        selectionAnchor(bodyDraft, comment.current_start, comment.current_end),
+        next,
+        changes
+      ));
+    }
+    commentAnchorOverrides = mappedComments;
     if (composerAnchor) {
       composerAnchor = mapScratchpadSelectionAnchor(composerAnchor, next, changes);
     }
@@ -702,6 +717,7 @@
     const nextMarkdown = fullMarkdown(next);
     if (activeId !== nextId) {
       clearSaveTimer();
+      commentAnchorOverrides = new Map();
       activeId = nextId;
       activeKey = `${next.scratchpad.project_id}:${nextId}`;
       editorSession = loadEditorSession(activeKey);
