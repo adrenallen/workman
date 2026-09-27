@@ -9,7 +9,7 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 async fn raw_mcp_post(
@@ -189,6 +189,9 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(42, McpToolsProfile::Extended)?;
         registry.start(42)?;
         registry.store().connection().query_row(
             "SELECT token FROM process_mcp_tokens WHERE process_id = 42",
@@ -402,7 +405,13 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         tools_help["text"]
             .as_str()
             .unwrap()
-            .contains("tools/list request")
+            .contains("fixed when an agent launches")
+    );
+    assert!(
+        tools_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("Extended adds")
     );
     let spawning_help = call(&process_client, "help", json!({ "topic": "spawning" })).await;
     assert!(

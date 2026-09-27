@@ -18,8 +18,8 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
-    attention::AttentionState,
+    AgentTool, AgentToolSource, McpToolsProfile, Process, ProcessKind, ProcessSource,
+    ProcessStatus, Project, attention::AttentionState,
 };
 use workmand::{DaemonConfig, DaemonServer, WORKMAN_MCP_TOKEN_HEADER};
 
@@ -176,6 +176,7 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         })?;
         registry.create(process(
             DELIVERY_ID,
@@ -192,6 +193,12 @@ async fn mcp_timers_deliver_pause_resume_watch_idle_and_scope_to_owner()
         worker.spawned_by_process_id = Some(DELIVERY_ID);
         registry.create(worker)?;
         registry.create(process(STALLED_ID, "stalled", "sleep 30", None))?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(DELIVERY_ID, McpToolsProfile::Extended)?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(STALLED_ID, McpToolsProfile::Extended)?;
         registry.store().set_process_mcp_token(
             STALLED_ID,
             "stalled-process-token",

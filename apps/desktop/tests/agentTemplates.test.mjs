@@ -70,9 +70,10 @@ test('last agent choice is validated and otherwise falls back to the first enabl
 });
 
 test('new-agent draft keeps template and agent roster choices independent and persistent', async () => {
-  const [source, card, daemon] = await Promise.all([
+  const [source, card, agentToolCard, daemon] = await Promise.all([
     readFile(new URL('../src/lib/NewAgentDraftPanel.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/settings/AgentTemplatesCard.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../src/lib/settings/AgentToolsCard.svelte', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/daemon.ts', import.meta.url), 'utf8')
   ]);
   assert.match(source, /<h2[^>]*>Choose a template<\/h2>/);
@@ -127,7 +128,14 @@ test('new-agent draft keeps template and agent roster choices independent and pe
   assert.match(card, /Select a default agent/);
   assert.match(card, /Missing default agent/);
   assert.match(card, /Add or enable an agent before creating an agent template/);
+  assert.match(card, />MCP tools/);
+  assert.match(card, /mcp_tools_profile: draft\.mcpToolsProfile/);
+  assert.match(card, /Fixed for each agent's lifetime\./);
   assert.doesNotMatch(card, /agent tools?/i);
+  assert.match(agentToolCard, /<span>MCP tools<\/span>/);
+  assert.match(agentToolCard, /<option value="core">Core<\/option><option value="extended">Extended<\/option>/);
+  assert.match(agentToolCard, /mcp_tools_profile: tool\.mcp_tools_profile/);
+  assert.match(agentToolCard, /Fixed for each agent's lifetime\./);
   assert.match(daemon, /listAgentTemplates\(\)[\s\S]*requestOptional\('agent_templates\.list', \{\}, \[\]\)/);
 });
 

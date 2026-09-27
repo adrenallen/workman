@@ -21,7 +21,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
-use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 fn arguments(value: Value) -> Map<String, Value> {
@@ -109,6 +109,9 @@ async fn mcp_agent_sees_only_its_worktree_and_ws_exposes_the_full_repository()
             spawned_by_process_id: None,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "worktree-process-token", 1_700_000_000_000)?;

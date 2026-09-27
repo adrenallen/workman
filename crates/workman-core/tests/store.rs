@@ -7,8 +7,8 @@ use std::{
 
 use workman_core::{
     ActiveWorktreeRemoval, Actor, AgentLaunchMode, AgentTemplate, AgentTool, AgentToolSource,
-    LATEST_SCHEMA_VERSION, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
-    ProjectLock, ProjectWorktree, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker,
+    LATEST_SCHEMA_VERSION, McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus,
+    Project, ProjectLock, ProjectWorktree, Scratchpad, Store, Timer, TimerKind, Todo, TodoBlocker,
     TodoComment, TodoPriority, TodoStatus, WorktreeRepository,
 };
 
@@ -149,6 +149,7 @@ fn agent_templates_are_profile_scoped_reorderable_and_cascade_with_their_tool() 
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
+        mcp_tools_profile: McpToolsProfile::Extended,
     };
     store.put_agent_template(&first).unwrap();
     let second = AgentTemplate {
@@ -161,6 +162,7 @@ fn agent_templates_are_profile_scoped_reorderable_and_cascade_with_their_tool() 
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
+        mcp_tools_profile: McpToolsProfile::Extended,
     };
     store.put_agent_template(&second).unwrap();
 
@@ -218,6 +220,7 @@ fn copied_profiles_remap_agent_templates_and_keep_each_side_independent() {
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
+            mcp_tools_profile: Default::default(),
         },
         AgentTemplate {
             id: store.next_agent_template_id().unwrap() + 1,
@@ -229,6 +232,7 @@ fn copied_profiles_remap_agent_templates_and_keep_each_side_independent() {
             sort_order: 1,
             created_at: 0,
             updated_at: 0,
+            mcp_tools_profile: Default::default(),
         },
     ];
     for template in &source_templates {
@@ -244,6 +248,7 @@ fn copied_profiles_remap_agent_templates_and_keep_each_side_independent() {
         assert_ne!(copied.id, source.id);
         assert_eq!(copied.profile_id, copy.id);
         assert_eq!(copied.agent_tool_id, tool_id_map[&source.agent_tool_id]);
+        assert_eq!(copied.mcp_tools_profile, source.mcp_tools_profile);
         assert_eq!(copied.name, source.name);
         assert_eq!(copied.extra_args, source.extra_args);
         assert_eq!(copied.prompt, source.prompt);
@@ -713,6 +718,7 @@ fn domain_records_round_trip_through_store() {
         source: AgentToolSource::Local,
         resume_args: None,
         continue_args: None,
+        mcp_tools_profile: McpToolsProfile::Extended,
     };
     store.put_agent_tool(&agent_tool).expect("put agent tool");
     assert_eq!(

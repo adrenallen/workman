@@ -131,6 +131,7 @@ fn standard_start_captures_and_resumes_exact_session_while_custom_stays_fresh()
         source: AgentToolSource::Local,
         resume_args: Some("--resume {session_id}".into()),
         continue_args: Some("--continue".into()),
+        mcp_tools_profile: Default::default(),
     })?;
     store.put_agent_tool(&AgentTool {
         id: 42,
@@ -141,6 +142,7 @@ fn standard_start_captures_and_resumes_exact_session_while_custom_stays_fresh()
         source: AgentToolSource::Local,
         resume_args: None,
         continue_args: None,
+        mcp_tools_profile: Default::default(),
     })?;
     let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(100))?;
 
@@ -279,6 +281,7 @@ fn concurrent_codex_agents_in_one_cwd_capture_their_own_sessions() -> Result<(),
         source: AgentToolSource::Local,
         resume_args: Some("resume {session_id}".into()),
         continue_args: Some("resume --last".into()),
+        mcp_tools_profile: Default::default(),
     })?;
     let mut registry = ProcessRegistry::with_stop_grace(store, Duration::from_millis(100))?;
     let home = temp.path().join("home");

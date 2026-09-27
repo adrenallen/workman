@@ -46,6 +46,7 @@
     effort: string;
     extraArgs: string;
     prompt: string;
+    mcpToolsProfile: 'core' | 'extended';
   }
 
   let { client, connected, onError }: Props = $props();
@@ -93,7 +94,15 @@
       return;
     }
     editorSession += 1;
-    draft = { name: '', agentToolId: tool.id, model: '', effort: '', extraArgs: '', prompt: '' };
+    draft = {
+      name: '',
+      agentToolId: tool.id,
+      model: '',
+      effort: '',
+      extraArgs: '',
+      prompt: '',
+      mcpToolsProfile: 'core'
+    };
   }
 
   function beginEdit(template: AgentTemplate): void {
@@ -107,7 +116,8 @@
       model: launch.model ?? '',
       effort: launch.effort ?? '',
       extraArgs: formatExtraArgs(launch.extraArgs),
-      prompt: template.prompt
+      prompt: template.prompt,
+      mcpToolsProfile: template.mcp_tools_profile
     };
   }
 
@@ -133,7 +143,8 @@
         name: draft.name.trim(),
         agent_tool_id: draft.agentToolId,
         extra_args: extraArgs,
-        prompt: draft.prompt
+        prompt: draft.prompt,
+        mcp_tools_profile: draft.mcpToolsProfile
       });
       draft = null;
     } catch (cause) {
@@ -335,6 +346,16 @@
           </div>
         </section>
       {/if}
+      <label class="grid gap-1.5 text-sm font-medium" for="template-mcp-tools">MCP tools
+        <Select.Root type="single" value={draft.mcpToolsProfile} disabled={saving} onValueChange={(value) => { if (draft && (value === 'core' || value === 'extended')) draft.mcpToolsProfile = value; }}>
+          <Select.Trigger id="template-mcp-tools" class="w-full">{draft.mcpToolsProfile === 'extended' ? 'Extended' : 'Core'}</Select.Trigger>
+          <Select.Content>
+            <Select.Item value="core" label="Core" />
+            <Select.Item value="extended" label="Extended" />
+          </Select.Content>
+        </Select.Root>
+        <span class="text-xs font-normal text-muted-foreground">Fixed for each agent's lifetime.</span>
+      </label>
       <label class="grid gap-1.5 text-sm font-medium" for="template-args">Other launch args <span class="font-normal text-muted-foreground">(optional)</span>
         <Input id="template-args" bind:value={draft.extraArgs} placeholder="--permission-mode plan" disabled={saving} autocapitalize="off" autocorrect="off" spellcheck={false} />
         <span class="text-xs font-normal text-muted-foreground">Quotes group one literal argument. These run before any per-launch overrides.</span>

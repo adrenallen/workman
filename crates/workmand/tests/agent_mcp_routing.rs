@@ -59,6 +59,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
         AgentTool {
             id: 102,
@@ -69,6 +70,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
         AgentTool {
             id: 103,
@@ -79,6 +81,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
         AgentTool {
             id: 104,
@@ -89,6 +92,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
         AgentTool {
             id: 105,
@@ -99,6 +103,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
         AgentTool {
             id: 106,
@@ -109,6 +114,7 @@ async fn put_real_agent_tools(server: &DaemonServer) -> Result<(), Box<dyn Error
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         },
     ] {
         registry.store().put_agent_tool(&tool)?;

@@ -15,14 +15,14 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use workman_core::{
     AgentTool, AgentToolSource, ImportedProjectFolder, ImportedProjectFolderMembership,
-    ProcessStatus, ProfileId,
+    McpToolsProfile, ProcessStatus, ProfileId,
 };
 
 use crate::{ProcessRegistry, control::agent_icons};
 use workman_core::shell::{AgentShellMode, ProfileTerminalSettings};
 
 const ARCHIVE_FORMAT: &str = "workman-profile";
-const ARCHIVE_VERSION: u32 = 4;
+const ARCHIVE_VERSION: u32 = 5;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 type ControlResult = Result<Value, (&'static str, String)>;
@@ -88,7 +88,13 @@ struct ArchiveAgentTool {
     enabled: bool,
     resume_args: Option<String>,
     continue_args: Option<String>,
+    #[serde(default, skip_serializing_if = "is_core_mcp_tools_profile")]
+    mcp_tools_profile: McpToolsProfile,
     icon_png_base64: Option<String>,
+}
+
+fn is_core_mcp_tools_profile(profile: &McpToolsProfile) -> bool {
+    *profile == McpToolsProfile::Core
 }
 
 pub(crate) fn list(registry: &ProcessRegistry) -> ControlResult {
@@ -366,6 +372,7 @@ pub(crate) fn export(
             enabled: tool.enabled,
             resume_args: tool.resume_args,
             continue_args: tool.continue_args,
+            mcp_tools_profile: tool.mcp_tools_profile,
             icon_png_base64,
         });
     }
@@ -375,10 +382,19 @@ pub(crate) fn export(
         .map_err(store_error)?;
     let mode =
         (terminal.agent_shell_mode != AgentShellMode::Auto).then_some(terminal.agent_shell_mode);
+    let has_extended_mcp_tools = agent_tools
+        .iter()
+        .any(|tool| tool.mcp_tools_profile == McpToolsProfile::Extended);
     let archive = ProfileArchive {
         format: ARCHIVE_FORMAT.into(),
         // Auto archives retain the previous schema so older Workman releases can read them.
-        version: if mode.is_some() { ARCHIVE_VERSION } else { 3 },
+        version: if has_extended_mcp_tools {
+            ARCHIVE_VERSION
+        } else if mode.is_some() {
+            4
+        } else {
+            3
+        },
         name: profile.name,
         terminal_shell: terminal.shell,
         agent_shell_mode: mode,
@@ -560,6 +576,7 @@ pub(crate) fn import(
             source: AgentToolSource::Config,
             resume_args: tool.resume_args,
             continue_args: tool.continue_args,
+            mcp_tools_profile: tool.mcp_tools_profile,
         });
         icons.push(icon);
     }

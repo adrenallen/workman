@@ -24,8 +24,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
 use workman_core::{
-    AgentTool, AgentToolSource, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
-    attention::AttentionState,
+    AgentTool, AgentToolSource, McpToolsProfile, Process, ProcessKind, ProcessSource,
+    ProcessStatus, Project, attention::AttentionState,
 };
 use workmand::{
     DaemonConfig, DaemonServer, Discovery, SharedProcessRegistry, WORKMAN_MCP_TOKEN_HEADER,
@@ -81,6 +81,7 @@ impl TestServer {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
+                mcp_tools_profile: Default::default(),
             })?;
             registry.create(process(
                 DELIVERY_ID,
@@ -97,6 +98,9 @@ impl TestServer {
             worker.spawned_by_process_id = Some(DELIVERY_ID);
             registry.create(worker)?;
             registry.create(process(STALLED_ID, "stalled", "sleep 30", None))?;
+            registry
+                .store()
+                .set_process_mcp_tools_profile(DELIVERY_ID, McpToolsProfile::Extended)?;
             registry.start(DELIVERY_ID)?;
             registry.start(WORKER_ID)?;
             registry.store().connection().query_row(

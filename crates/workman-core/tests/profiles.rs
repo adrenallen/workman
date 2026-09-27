@@ -115,6 +115,7 @@ fn profile_switches_isolate_membership_and_agent_tools_while_projects_remain_can
             source: AgentToolSource::Config,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         })
         .unwrap();
 

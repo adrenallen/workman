@@ -190,6 +190,7 @@ async fn isolated_doctor_reports_refreshes_and_configures_without_real_user_file
             source: AgentToolSource::Local,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         })?;
     }
 

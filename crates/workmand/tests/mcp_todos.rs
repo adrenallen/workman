@@ -9,8 +9,8 @@ use rmcp::{
 };
 use serde_json::{Map, Value, json};
 use workman_core::{
-    Actor, NotificationType, Process, ProcessKind, ProcessSource, ProcessStatus, Project,
-    TodoService,
+    Actor, McpToolsProfile, NotificationType, Process, ProcessKind, ProcessSource, ProcessStatus,
+    Project, TodoService,
 };
 use workmand::{DaemonConfig, DaemonServer};
 
@@ -122,6 +122,12 @@ async fn todo_lock_ownership_survives_session_reconnect_and_rejects_other_proces
             selected: false,
             sort_order: 0,
         })?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(2, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "first-process-token", 1_700_000_000_000)?;

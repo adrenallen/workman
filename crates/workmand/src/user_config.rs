@@ -10,7 +10,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use workman_core::{AgentTool, AgentToolSource, Store, StoreError, WORKMAN_UPDATE_KEY_ENV};
+use workman_core::{
+    AgentTool, AgentToolSource, McpToolsProfile, Store, StoreError, WORKMAN_UPDATE_KEY_ENV,
+};
 
 use crate::RuntimeIdentity;
 
@@ -162,6 +164,12 @@ pub struct UserAgentTool {
     pub resume_args: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_args: Option<String>,
+    #[serde(default, skip_serializing_if = "is_core_mcp_tools_profile")]
+    pub mcp_tools_profile: McpToolsProfile,
+}
+
+fn is_core_mcp_tools_profile(profile: &McpToolsProfile) -> bool {
+    *profile == McpToolsProfile::Core
 }
 
 /// Counts from reconciling config-managed tools into the durable registry.
@@ -433,6 +441,9 @@ fn save_agent_tool_from_settings_at(
         enabled,
         resume_args,
         continue_args,
+        existing
+            .as_ref()
+            .map_or(McpToolsProfile::Core, |tool| tool.mcp_tools_profile),
     )?;
 
     let config = validated_document(&root)?;
@@ -450,6 +461,9 @@ fn save_agent_tool_from_settings_at(
         source: AgentToolSource::Config,
         resume_args: resume_args.map(str::to_owned),
         continue_args: continue_args.map(str::to_owned),
+        mcp_tools_profile: existing
+            .as_ref()
+            .map_or(McpToolsProfile::Core, |tool| tool.mcp_tools_profile),
     })?;
     sync_user_agent_tools(store, &config.agent_tools)?;
     reorder_store_from_config(store, &config.agent_tools)?;
@@ -609,6 +623,7 @@ fn reorder_agent_tools_from_settings_at(
             tool.enabled,
             tool.resume_args.as_deref(),
             tool.continue_args.as_deref(),
+            tool.mcp_tools_profile,
         )?;
         entries.push(entry);
     }
@@ -683,6 +698,7 @@ fn set_agent_tool_entry(
     enabled: bool,
     resume_args: Option<&str>,
     continue_args: Option<&str>,
+    mcp_tools_profile: McpToolsProfile,
 ) -> Result<(), UserConfigError> {
     let entry = entry.as_mapping_mut().ok_or_else(|| {
         UserConfigError::Invalid("each agent_tools entry must be a mapping".to_owned())
@@ -694,6 +710,15 @@ fn set_agent_tool_entry(
         ("enabled", serde_yaml::Value::Bool(enabled)),
     ] {
         entry.insert(serde_yaml::Value::String(key.to_owned()), value);
+    }
+    let profile_key = serde_yaml::Value::String("mcp_tools_profile".to_owned());
+    if mcp_tools_profile == McpToolsProfile::Extended {
+        entry.insert(
+            profile_key,
+            serde_yaml::Value::String(mcp_tools_profile.as_str().to_owned()),
+        );
+    } else {
+        entry.remove(&profile_key);
     }
     for (key, value) in [
         ("resume_args", resume_args),
@@ -907,6 +932,7 @@ pub fn sync_user_agent_tools(
             entry.enabled,
             resume_args,
             continue_args,
+            entry.mcp_tools_profile,
         ));
     }
 
@@ -918,7 +944,9 @@ pub fn sync_user_agent_tools(
         .collect::<HashMap<_, _>>();
     let mut next_id = store.next_agent_tool_id()?;
 
-    for (name, command, tool_type, enabled, resume_args, continue_args) in normalized {
+    for (name, command, tool_type, enabled, resume_args, continue_args, mcp_tools_profile) in
+        normalized
+    {
         let (id, is_new) = existing_by_name
             .remove(&name)
             .map_or_else(|| (next_id, true), |tool| (tool.id, false));
@@ -934,6 +962,7 @@ pub fn sync_user_agent_tools(
             source: AgentToolSource::Config,
             resume_args,
             continue_args,
+            mcp_tools_profile,
         };
         let changed = existing.iter().find(|old| old.id == id) != Some(&tool);
         if changed {
@@ -1017,6 +1046,7 @@ mod tests {
             enabled: true,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         }
     }
 
@@ -1033,6 +1063,7 @@ mod tests {
                 source: AgentToolSource::Local,
                 resume_args: None,
                 continue_args: None,
+                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 
@@ -1163,6 +1194,7 @@ mod tests {
                 source: AgentToolSource::Config,
                 resume_args: None,
                 continue_args: None,
+                mcp_tools_profile: Default::default(),
             })
             .unwrap();
 

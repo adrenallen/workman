@@ -87,6 +87,7 @@ async fn run_migration_case(
         source: AgentToolSource::Local,
         resume_args: None,
         continue_args: None,
+        mcp_tools_profile: Default::default(),
     })?;
     let legacy_tool_count = store.list_agent_tools()?.len();
     drop(store);

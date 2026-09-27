@@ -310,6 +310,7 @@ mod tests {
             source: AgentToolSource::Config,
             resume_args: None,
             continue_args: None,
+            mcp_tools_profile: Default::default(),
         }
     }
 

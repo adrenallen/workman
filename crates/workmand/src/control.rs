@@ -10,8 +10,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workman_core::{
-    AgentTemplateId, AgentToolId, Process, ProcessId, ProcessKind, ProcessSource, ProcessStatus,
-    Project, ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store, TimerId,
+    AgentTemplateId, AgentToolId, McpToolsProfile, Process, ProcessId, ProcessKind, ProcessSource,
+    ProcessStatus, Project, ProjectFolder, ProjectId, ProjectLayoutEntry, QuickPrompt, Store,
+    TimerId,
 };
 
 use crate::{
@@ -434,6 +435,8 @@ struct AgentToolInput {
     command: String,
     tool_type: String,
     enabled: bool,
+    #[serde(default)]
+    mcp_tools_profile: McpToolsProfile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,6 +493,8 @@ struct AgentTemplateInput {
     extra_args: Vec<String>,
     #[serde(default)]
     prompt: String,
+    #[serde(default)]
+    mcp_tools_profile: McpToolsProfile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -538,6 +543,8 @@ struct SpawnAgentParams {
     /// effective agent is the template default.
     #[serde(default)]
     agent_template_id: Option<AgentTemplateId>,
+    #[serde(default)]
+    mcp_tools_profile: Option<McpToolsProfile>,
     #[serde(default)]
     name: Option<String>,
     /// Optional tool-aware model override. Prefer this to --model in extra_args.
@@ -641,6 +648,7 @@ async fn dispatch(
                 project,
                 params.agent_tool_id,
                 params.agent_template_id,
+                params.mcp_tools_profile,
                 params.name,
                 params.extra_args,
                 params.model,
@@ -1494,6 +1502,7 @@ async fn dispatch(
                 params.tool.command,
                 params.tool.tool_type,
                 params.tool.enabled,
+                params.tool.mcp_tools_profile,
             )
             .map(|tool| json_value(agent_icons::view(tool, data_dir)))
             .map_err(|error| ("agent_tool_error", error));
@@ -1638,6 +1647,7 @@ async fn dispatch(
                 params.template.agent_tool_id,
                 params.template.extra_args,
                 params.template.prompt,
+                params.template.mcp_tools_profile,
             )
             .map(json_value)
             .map_err(|error| ("agent_template_error", error));

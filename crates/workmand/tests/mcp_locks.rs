@@ -8,7 +8,7 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value, json};
-use workman_core::{Process, ProcessKind, ProcessSource, ProcessStatus, Project};
+use workman_core::{McpToolsProfile, Process, ProcessKind, ProcessSource, ProcessStatus, Project};
 use workmand::{DaemonConfig, DaemonServer};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>;
@@ -106,6 +106,12 @@ async fn lock_ownership_survives_session_reconnect_and_rejects_other_processes()
             spawned_by_process_id: None,
             sort_order: 1,
         })?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(1, McpToolsProfile::Extended)?;
+        registry
+            .store()
+            .set_process_mcp_tools_profile(2, McpToolsProfile::Extended)?;
         registry
             .store()
             .set_process_mcp_token(1, "first-process-token", 1_700_000_000_000)?;

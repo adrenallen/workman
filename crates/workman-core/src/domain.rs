@@ -109,6 +109,21 @@ macro_rules! string_enum {
 string_enum! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
+    pub enum McpToolsProfile {
+        Core => "core",
+        Extended => "extended",
+    }
+}
+
+impl Default for McpToolsProfile {
+    fn default() -> Self {
+        Self::Core
+    }
+}
+
+string_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
     pub enum ProcessKind {
         Command => "command",
         Terminal => "terminal",
@@ -272,6 +287,8 @@ pub struct AgentTool {
     pub resume_args: Option<String>,
     /// Shell arguments appended to continue the cwd-scoped latest session.
     pub continue_args: Option<String>,
+    #[serde(default)]
+    pub mcp_tools_profile: McpToolsProfile,
 }
 
 /// A reusable agent launch choice scoped to one workspace profile.
@@ -283,6 +300,8 @@ pub struct AgentTemplate {
     pub agent_tool_id: AgentToolId,
     pub extra_args: Vec<String>,
     pub prompt: String,
+    #[serde(default)]
+    pub mcp_tools_profile: McpToolsProfile,
     pub sort_order: i64,
     pub created_at: i64,
     pub updated_at: i64,
