@@ -1775,7 +1775,8 @@ mod tests {
                 })
                 .unwrap();
             let mut registry =
-                ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100)).unwrap();
+                ProcessRegistry::with_stop_grace_for_test(store, Duration::from_millis(100))
+                    .unwrap();
             registry
                 .create(process(
                     DELIVERY_ID,

@@ -113,6 +113,7 @@ mod tests {
         agent_state.exited = state == AttentionState::Exited;
         ProcessStatusView {
             notify_on_idle: false,
+            notify_spawner_on_idle: false,
             process: Process {
                 id,
                 project_id,

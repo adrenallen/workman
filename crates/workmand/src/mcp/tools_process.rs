@@ -160,6 +160,21 @@ struct SendInputArgs {
     wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SetNotifySpawnerOnIdleArgs {
+    /// Child process ID. Omit with process_name.
+    #[serde(default)]
+    process_id: Option<ProcessId>,
+    /// Exact child process name. Omit with process_id.
+    #[serde(default)]
+    process_name: Option<String>,
+    /// Optional project ID; an identified agent may name only its owning project.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    /// Whether the child should deliver coalesced idle/attention turns to its spawner.
+    enabled: bool,
+}
+
 #[tool_router(router = process_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
@@ -193,6 +208,36 @@ impl WorkmanMcp {
             Err(error) => return target_failure(error),
         };
         match registry.get_status(process.id) {
+            Ok(status) => success(status),
+            Err(error) => registry_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "Enable or disable coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner. Only the process that spawned this child may change the setting; project jail rules still apply."
+    )]
+    async fn set_notify_spawner_on_idle(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<SetNotifySpawnerOnIdleArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let target = ProcessTarget {
+            process_id: args.process_id,
+            process_name: args.process_name.as_deref(),
+            project_id: args.project_id,
+        };
+        let (child, actor) = match resolve_process(&mut registry, &parts, target) {
+            Ok(resolved) => resolved,
+            Err(error) => return target_failure(error),
+        };
+        let Some(spawner_process_id) = actor.process_id else {
+            return failure(
+                "process_identity_required",
+                "set_notify_spawner_on_idle requires an authenticated process identity",
+            );
+        };
+        match registry.set_notify_spawner_on_idle(spawner_process_id, child.id, args.enabled) {
             Ok(status) => success(status),
             Err(error) => registry_failure(error),
         }

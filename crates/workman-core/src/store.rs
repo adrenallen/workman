@@ -211,10 +211,15 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile_agent_shell_mode",
         include_str!("../migrations/0039_profile_agent_shell_mode.sql"),
     ),
+    (
+        41,
+        "spawner_idle_notifications",
+        include_str!("../migrations/0041_spawner_idle_notifications.sql"),
+    ),
 ];
 
 /// Version of the newest migration compiled into this crate.
-pub const LATEST_SCHEMA_VERSION: i64 = 39;
+pub const LATEST_SCHEMA_VERSION: i64 = 41;
 
 /// Errors produced while opening, migrating, or using the SQLite store.
 #[derive(Debug)]

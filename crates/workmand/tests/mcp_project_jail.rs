@@ -232,6 +232,10 @@ async fn agent_identity_is_jailed_to_its_own_project_while_user_control_stays_gl
             json!({ "agent_tool_id": 999 }),
         ),
         ("send_input", json!({ "process_id": 20, "input": "no" })),
+        (
+            "set_notify_spawner_on_idle",
+            json!({ "process_id": 20, "enabled": true }),
+        ),
         ("stop_process", json!({ "process_id": 20 })),
     ] {
         let error = rejected(&client, name, args).await;

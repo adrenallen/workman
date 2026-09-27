@@ -651,6 +651,7 @@ async fn dispatch(
                 mcp_url,
                 params.auto_acknowledge_dialogs,
                 None,
+                false,
             )
             .await
             .map(json_value)

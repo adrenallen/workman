@@ -94,6 +94,10 @@ pub enum RegistryError {
     AttachmentStorage {
         message: String,
     },
+    NotProcessSpawner {
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+    },
 }
 
 impl RegistryError {
@@ -113,6 +117,7 @@ impl RegistryError {
             Self::Pty { .. } => "pty_error",
             Self::OutputPersistence { .. } => "output_persistence_error",
             Self::AttachmentStorage { .. } => "attachment_storage_error",
+            Self::NotProcessSpawner { .. } => "not_process_spawner",
         }
     }
 }
@@ -162,6 +167,13 @@ impl fmt::Display for RegistryError {
             Self::AttachmentStorage { message } => {
                 write!(formatter, "agent attachment storage failed: {message}")
             }
+            Self::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            } => write!(
+                formatter,
+                "process {requester_process_id} did not spawn process {child_process_id}"
+            ),
         }
     }
 }
@@ -513,6 +525,9 @@ pub struct ProcessStatusView {
     pub agent_state: AgentState,
     #[serde(default)]
     pub notify_on_idle: bool,
+    /// Opt-in child-to-spawner turn delivery. Separate from the desktop one-shot idle alert.
+    #[serde(default)]
+    pub notify_spawner_on_idle: bool,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
     /// Conversation ID passively discovered from the agent CLI's own session store.
@@ -934,6 +949,7 @@ impl ProcessRegistry {
             .claimed_todos_for_process(process.id, now_millis())?;
         Ok(ProcessStatusView {
             notify_on_idle: idle_watch && !idle_alert_fired,
+            notify_spawner_on_idle: self.store.spawner_idle_notification_enabled(process.id)?,
             process,
             agent_state,
             events,
@@ -958,6 +974,29 @@ impl ProcessRegistry {
         self.status_invalidations.invalidate();
         self.arm_attention_deadline();
         self.status_view(process)
+    }
+
+    /// Toggle durable child-to-spawner notifications after proving direct lineage.
+    pub fn set_notify_spawner_on_idle(
+        &mut self,
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        let child = self.get(child_process_id)?;
+        let requester = self.get(requester_process_id)?;
+        if child.spawned_by_process_id != Some(requester_process_id)
+            || child.project_id != requester.project_id
+        {
+            return Err(RegistryError::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            });
+        }
+        self.store
+            .set_spawner_idle_notification(child_process_id, enabled, now_millis())?;
+        self.status_invalidations.invalidate();
+        self.status_view(child)
     }
 
     fn process_ready_for_idle_alert(
@@ -3218,7 +3257,8 @@ mod tests {
                 }
                 let executable = fixture.home.path().join("long-agent");
                 std::fs::write(&executable, "#!/bin/sh\ntrap '' HUP TERM\nprintf '%s' $$ > \"$HOME/child-pid\"\nexec /bin/sleep 300\n").unwrap();
-                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
                 let store = Store::open_in_memory().unwrap();
                 store
                     .put_project(&Project {
@@ -3247,7 +3287,8 @@ mod tests {
                 registry.start(31).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let child_pid = loop {
-                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid")) {
+                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid"))
+                    {
                         if let Ok(pid) = pid.parse::<i32>() {
                             break pid;
                         }

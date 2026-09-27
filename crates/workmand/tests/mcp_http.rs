@@ -275,6 +275,8 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         server_instructions.contains("inspect the watched processes before assuming they finished")
     );
     assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
+    assert!(server_instructions.contains("notify_spawner_on_idle=true"));
+    assert!(server_instructions.contains("coalescing children"));
 
     let tool_names: Vec<_> = process_client
         .list_all_tools()
@@ -353,6 +355,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("pick agent_tool_id from list_agent_tools")
     );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("set_notify_spawner_on_idle can toggle an existing direct child")
+    );
     let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
     assert!(
         timer_help["text"]
@@ -365,6 +373,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .as_str()
             .unwrap()
             .contains("no additional wait call is needed")
+    );
+    assert!(
+        timer_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("no timer is necessary")
     );
     let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
     assert!(tools_summary["count"].as_u64().unwrap() >= 13);
