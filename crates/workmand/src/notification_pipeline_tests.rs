@@ -30,6 +30,12 @@ const CODEX_WORKING: &str =
     include_str!("../../workman-core/tests/fixtures/attention/codex_working.txt");
 const CODEX_RESTING: &str =
     include_str!("../../workman-core/tests/fixtures/attention/codex_resting.txt");
+const OPENCODE_WORKING: &str =
+    include_str!("../../workman-core/tests/fixtures/attention/opencode_working.txt");
+const OPENCODE_RESTING: &str =
+    include_str!("../../workman-core/tests/fixtures/attention/opencode_completed.txt");
+const OPENCODE_IDLE_30S: &str =
+    include_str!("../../workman-core/tests/fixtures/attention/opencode_idle_30s.txt");
 const PLAIN_WORKING: &str =
     include_str!("../../workman-core/tests/fixtures/attention/plain_terminal_working.txt");
 const PLAIN_RESTING: &str =
@@ -356,6 +362,12 @@ fn recorded_tool_completions_emit_exactly_one_persisted_event_and_os_candidate()
             CLAUDE_RESTING,
         ),
         ("codex", Some("codex"), CODEX_WORKING, CODEX_RESTING),
+        (
+            "opencode",
+            Some("opencode"),
+            OPENCODE_WORKING,
+            OPENCODE_RESTING,
+        ),
         ("plain terminal", None, PLAIN_WORKING, PLAIN_RESTING),
     ] {
         let mut pipeline = ScriptedPipeline::new(tool_type);
@@ -374,6 +386,30 @@ fn recorded_tool_completions_emit_exactly_one_persisted_event_and_os_candidate()
         assert_eq!(pipeline.observe_at(20_000).state, AttentionState::Idle);
         assert_eq!(pipeline.notifications().len(), 1, "{name}");
         assert_eq!(pipeline.native_emissions.len(), 1, "{name}");
+    }
+}
+
+#[test]
+fn opencode_completion_and_thirty_second_idle_repaints_emit_once() {
+    let mut pipeline = ScriptedPipeline::new(Some("opencode"));
+    start_recorded_turn(&mut pipeline, OPENCODE_WORKING);
+    let done = finish_recorded_turn(&mut pipeline, OPENCODE_RESTING);
+    assert_eq!(done.state, AttentionState::Idle);
+    assert_eq!(pipeline.notifications().len(), 1);
+    assert_eq!(pipeline.native_emissions.len(), 1);
+
+    for (index, at) in (8_000..=39_000).step_by(1_000).enumerate() {
+        pipeline.frame_at(
+            at,
+            if index % 2 == 0 {
+                OPENCODE_RESTING
+            } else {
+                OPENCODE_IDLE_30S
+            },
+        );
+        assert_eq!(pipeline.observe_at(at).state, AttentionState::Idle);
+        assert_eq!(pipeline.notifications().len(), 1, "at {at}");
+        assert_eq!(pipeline.native_emissions.len(), 1, "at {at}");
     }
 }
 

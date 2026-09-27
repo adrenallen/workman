@@ -1,0 +1,30 @@
+
+  ┃
+  ┃  Use the question tool to ask whether I prefer red or blue. Do not answer it yourself.
+  ┃
+
+     I'll ask you directly.
+
+     → Asked 1 question
+
+     ▣  Build · DeepSeek V4.1 Flash
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  Which color do you prefer: red or blue?
+  ┃
+  ┃  1. Red
+  ┃     Prefer red
+  ┃  2. Blue
+  ┃     Prefer blue
+  ┃  3. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss
+  ┃
