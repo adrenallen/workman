@@ -792,7 +792,7 @@ impl SpawnerNotificationService {
                 self.reported_attention
                     .insert(child.child_process_id, state);
                 if state == SpawnerReportedState::NeedsInput {
-                    if let Some(identity) = child.dialog_identity.clone() {
+                    if let Some(identity) = child.dialog_identity {
                         self.reported_dialog_identity
                             .insert(child.child_process_id, identity);
                     }
