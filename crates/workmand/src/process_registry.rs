@@ -42,6 +42,7 @@ const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
 
 use crate::agent_sessions::SessionCapture;
+use crate::completion_ledger::{CompletionLedger, CompletionLedgerError};
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -70,6 +71,7 @@ pub const WORKMAN_OUTPUT_CAPACITY_ENV: &str = "WORKMAN_OUTPUT_CAPACITY_BYTES";
 #[derive(Debug)]
 pub enum RegistryError {
     Store(StoreError),
+    CompletionLedger(CompletionLedgerError),
     NotFound(ProcessId),
     AlreadyExists(ProcessId),
     AlreadyRunning(ProcessId),
@@ -103,7 +105,7 @@ pub enum RegistryError {
 impl RegistryError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Store(_) => "store_error",
+            Self::Store(_) | Self::CompletionLedger(_) => "store_error",
             Self::NotFound(_) => "process_not_found",
             Self::AlreadyExists(_) => "process_already_exists",
             Self::AlreadyRunning(_) => "process_already_running",
@@ -126,6 +128,7 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
+            Self::CompletionLedger(error) => error.fmt(formatter),
             Self::NotFound(id) => write!(formatter, "process {id} was not found"),
             Self::AlreadyExists(id) => write!(formatter, "process {id} already exists"),
             Self::AlreadyRunning(id) => write!(formatter, "process {id} is already running"),
@@ -182,6 +185,7 @@ impl Error for RegistryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::CompletionLedger(error) => Some(error),
             _ => None,
         }
     }
@@ -190,6 +194,12 @@ impl Error for RegistryError {
 impl From<StoreError> for RegistryError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+impl From<CompletionLedgerError> for RegistryError {
+    fn from(error: CompletionLedgerError) -> Self {
+        Self::CompletionLedger(error)
     }
 }
 
@@ -906,6 +916,7 @@ impl ProcessRegistry {
 
     /// Attach attention state to an already-loaded process record.
     pub fn status_view(&self, process: Process) -> RegistryResult<ProcessStatusView> {
+        let observed_at = now_millis();
         let tool_type = self.tool_type_for(&process)?;
         let mut agent_state = self
             .outputs
@@ -920,6 +931,13 @@ impl ProcessRegistry {
                 now_millis(),
             )?;
         if process.kind == ProcessKind::Agent {
+            CompletionLedger::new(&self.store).observe_process(
+                process.id,
+                agent_state.state,
+                agent_state.last_input_at,
+                agent_state.last_output_at,
+                observed_at,
+            )?;
             let waiting_on = self.waiting_reasons(process.id)?;
             let watched = self.process_is_watched(process.id)?;
             agent_state.refine_waiting(waiting_on);
@@ -930,7 +948,7 @@ impl ProcessRegistry {
                 watched || idle_watch,
                 agent_state.last_input_at.is_some(),
                 last_agent_activity_at,
-                now_millis(),
+                observed_at,
             )?;
             agent_state.refine_notifications(watched, notification.unread);
         }
@@ -992,6 +1010,15 @@ impl ProcessRegistry {
                 requester_process_id,
                 child_process_id,
             });
+        }
+        if enabled
+            && !self
+                .store
+                .spawner_idle_notification_enabled(child_process_id)?
+        {
+            // Establish a ledger baseline before the prospective arm boundary. An existing idle
+            // child must not report work that finished while this option was disabled.
+            let _ = self.status_view(child.clone())?;
         }
         self.store
             .set_spawner_idle_notification(child_process_id, enabled, now_millis())?;

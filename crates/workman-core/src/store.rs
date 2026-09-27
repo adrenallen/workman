@@ -212,6 +212,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../migrations/0039_profile_agent_shell_mode.sql"),
     ),
     (
+        40,
+        "completion_ledger",
+        include_str!("../migrations/0040_completion_ledger.sql"),
+    ),
+    (
         41,
         "spawner_idle_notifications",
         include_str!("../migrations/0041_spawner_idle_notifications.sql"),

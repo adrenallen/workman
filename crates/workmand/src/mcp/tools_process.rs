@@ -564,14 +564,14 @@ impl WorkmanMcp {
             Err(error) => return failure("invalid_input", error),
         };
         let bytes_sent = input.data.len() + usize::from(input.submit);
-        let (process_id, process_name, cursor) = {
+        let (process_id, process_name, cursor, owner_process_id) = {
             let mut registry = self.registry.lock().await;
             let target = ProcessTarget {
                 process_id: args.process_id,
                 process_name: args.process_name.as_deref(),
                 project_id: args.project_id,
             };
-            let (process, _) = match resolve_process(&mut registry, &parts, target) {
+            let (process, actor) = match resolve_process(&mut registry, &parts, target) {
                 Ok(resolved) => resolved,
                 Err(error) => return target_failure(error),
             };
@@ -594,7 +594,7 @@ impl WorkmanMcp {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),
             };
-            (process.id, process.name, cursor)
+            (process.id, process.name, cursor, actor.process_id)
         };
         let sent = if input.submit {
             let mut registry = self.registry.lock().await;
@@ -608,6 +608,22 @@ impl WorkmanMcp {
         };
         if let Err(error) = sent {
             return registry_failure(error);
+        }
+
+        if let Some(owner_process_id) = owner_process_id {
+            let registry = self.registry.lock().await;
+            let input_at = match registry.agent_attention_snapshot(process_id) {
+                Ok(state) => state.last_input_at,
+                Err(error) => return registry_failure(error),
+            };
+            if let Some(input_at) = input_at
+                && let Err(error) = crate::completion_ledger::CompletionLedger::new(
+                    registry.store(),
+                )
+                .record_input(owner_process_id, process_id, input_at)
+            {
+                return failure("store_error", error.to_string());
+            }
         }
 
         let waited_ms = args.wait_ms.map(|wait| wait.clamp(250, 10_000));

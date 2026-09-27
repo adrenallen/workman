@@ -1201,6 +1201,7 @@ pub(crate) async fn spawn_registered_agent(
                 result.process_id,
                 prompt,
                 is_kimi_tool_type(&resolved.agent_tool_type),
+                spawned_by_process_id,
                 pending_prompt.expect("scheduled initial prompt was reserved during spawn"),
             );
         }
@@ -1467,6 +1468,7 @@ fn schedule_initial_prompt(
     process_id: ProcessId,
     prompt: String,
     verify_kimi_submission: bool,
+    owner_process_id: Option<ProcessId>,
     pending_prompt: PendingPrompt,
 ) {
     tokio::spawn(async move {
@@ -1547,6 +1549,16 @@ fn schedule_initial_prompt(
                         } else {
                             registry.submit_input(process_id, prompt.as_bytes())
                         }
+                        .and_then(|process| {
+                            if let Some(owner_process_id) = owner_process_id
+                                && let Some(input_at) =
+                                    registry.agent_attention_snapshot(process_id)?.last_input_at
+                            {
+                                crate::completion_ledger::CompletionLedger::new(registry.store())
+                                    .record_input(owner_process_id, process_id, input_at)?;
+                            }
+                            Ok(process)
+                        })
                         .map_err(|error| error.to_string());
                         match &result {
                             Ok(_) if verify_kimi_submission => {

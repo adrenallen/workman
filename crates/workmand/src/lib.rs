@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 mod agent_sessions;
 mod command_line;
+mod completion_ledger;
 pub mod config;
 mod context_actions;
 mod control;

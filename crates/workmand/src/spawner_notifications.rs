@@ -18,9 +18,12 @@ use workman_core::{
     Process, ProcessId, ProcessStatus, SpawnerReportedState, attention::AttentionState,
 };
 
-use crate::{ProcessRegistry, RegistryError, RegistryResult, SharedProcessRegistry};
+use crate::{
+    ProcessRegistry, RegistryError, RegistryResult, SharedProcessRegistry,
+    completion_ledger::{Completion, CompletionLedger},
+};
 
-const NOTIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const NOTIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChildNotificationReason {
@@ -56,6 +59,7 @@ struct PendingChildNotification {
     child_name: String,
     child_project_id: i64,
     reason: ChildNotificationReason,
+    completion: Option<Completion>,
 }
 
 #[derive(Default)]
@@ -74,6 +78,8 @@ impl SpawnerNotificationService {
             children.retain(|child_id, _| enabled.contains(child_id));
             !children.is_empty()
         });
+        let mut eligible_children =
+            BTreeMap::<ProcessId, BTreeMap<ProcessId, (Process, i64)>>::new();
 
         for setting in settings {
             let child_status = match registry.get_status(setting.process_id) {
@@ -112,6 +118,10 @@ impl SpawnerNotificationService {
                     .set_spawner_idle_notification(child.id, false, 0)?;
                 continue;
             }
+            eligible_children
+                .entry(spawner_id)
+                .or_default()
+                .insert(child.id, (child.clone(), setting.enabled_at));
 
             let reason = child_reason(child.status, child_status.agent_state.state);
             match reason {
@@ -130,25 +140,64 @@ impl SpawnerNotificationService {
             }
         }
 
+        for (spawner_id, children) in eligible_children {
+            let child_ids = children.keys().copied().collect::<Vec<_>>();
+            let completions = CompletionLedger::new(registry.store())
+                .unreported_completions(spawner_id, &child_ids)?;
+            for completion in completions {
+                let Some((child, enabled_at)) = children.get(&completion.process_id) else {
+                    continue;
+                };
+                // Enabling the flag is prospective. Older completions stay unreported for timer
+                // consumers and become eligible here only after this child completes again.
+                if completion.completed_at_ms >= *enabled_at {
+                    self.queue_completion(spawner_id, child, completion);
+                }
+            }
+        }
+
         self.deliver_ready(registry)
     }
 
-    /// Queue a completed child once the completion ledger identifies a real, unreported turn.
-    /// The ledger integration also carries completion IDs so successful delivery can mark them.
-    pub(crate) fn queue_finished(&mut self, spawner_id: ProcessId, child: &Process) {
-        self.queue(spawner_id, child, ChildNotificationReason::Finished);
+    fn queue_completion(&mut self, spawner_id: ProcessId, child: &Process, completion: Completion) {
+        self.pending
+            .entry(spawner_id)
+            .or_default()
+            .entry(child.id)
+            .and_modify(|pending| {
+                if pending
+                    .completion
+                    .is_none_or(|current| completion.id > current.id)
+                {
+                    pending.completion = Some(completion);
+                }
+            })
+            .or_insert_with(|| PendingChildNotification {
+                child_process_id: child.id,
+                child_name: single_line_name(&child.name),
+                child_project_id: child.project_id,
+                reason: ChildNotificationReason::Finished,
+                completion: Some(completion),
+            });
     }
 
     fn queue(&mut self, spawner_id: ProcessId, child: &Process, reason: ChildNotificationReason) {
-        self.pending.entry(spawner_id).or_default().insert(
-            child.id,
-            PendingChildNotification {
+        self.pending
+            .entry(spawner_id)
+            .or_default()
+            .entry(child.id)
+            .and_modify(|pending| {
+                pending.child_name = single_line_name(&child.name);
+                pending.child_project_id = child.project_id;
+                pending.reason = reason;
+            })
+            .or_insert_with(|| PendingChildNotification {
                 child_process_id: child.id,
                 child_name: single_line_name(&child.name),
                 child_project_id: child.project_id,
                 reason,
-            },
-        );
+                completion: None,
+            });
     }
 
     fn remove_pending_reason(
@@ -157,11 +206,14 @@ impl SpawnerNotificationService {
         reason: ChildNotificationReason,
     ) {
         self.pending.retain(|_, children| {
-            if children
-                .get(&child_process_id)
-                .is_some_and(|pending| pending.reason == reason)
+            if let Some(pending) = children.get_mut(&child_process_id)
+                && pending.reason == reason
             {
-                children.remove(&child_process_id);
+                if pending.completion.is_some() {
+                    pending.reason = ChildNotificationReason::Finished;
+                } else {
+                    children.remove(&child_process_id);
+                }
             }
             !children.is_empty()
         });
@@ -217,6 +269,10 @@ impl SpawnerNotificationService {
                 continue;
             }
             let delivered = self.pending.remove(&spawner_id).unwrap_or_default();
+            CompletionLedger::new(registry.store()).mark_completions_reported(
+                spawner_id,
+                delivered.values().filter_map(|pending| pending.completion),
+            )?;
             for pending in delivered.values() {
                 if let Some(state) = pending.reason.reported_state() {
                     registry
@@ -244,6 +300,10 @@ impl SpawnerNotificationService {
                     .set_spawner_reported_state(pending.child_process_id, state)?;
             }
         }
+        CompletionLedger::new(registry.store()).mark_completions_reported(
+            spawner_id,
+            dropped.values().filter_map(|pending| pending.completion),
+        )?;
         eprintln!(
             "process {spawner_id}: dropped {} coalesced child notification(s) because the spawner {detail}",
             dropped.len()
@@ -439,14 +499,57 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn submit_as(
+        registry: &mut ProcessRegistry,
+        owner_process_id: ProcessId,
+        process_id: ProcessId,
+        body: &[u8],
+    ) {
+        registry.submit_input(process_id, body).unwrap();
+        let input_at = registry
+            .agent_attention_snapshot(process_id)
+            .unwrap()
+            .last_input_at
+            .unwrap();
+        CompletionLedger::new(registry.store())
+            .record_input(owner_process_id, process_id, input_at)
+            .unwrap();
+    }
+
     #[test]
     fn body_is_one_line_stable_and_repeated_child_completions_coalesce() {
         let mut service = SpawnerNotificationService::default();
-        service.queue_finished(1, &child(3, "second\nchild"));
-        service.queue_finished(1, &child(2, "first child"));
-        service.queue_finished(1, &child(2, "first child"));
+        service.queue_completion(
+            1,
+            &child(3, "second\nchild"),
+            Completion {
+                id: 3,
+                process_id: 3,
+                completed_at_ms: 30,
+            },
+        );
+        service.queue_completion(
+            1,
+            &child(2, "first child"),
+            Completion {
+                id: 2,
+                process_id: 2,
+                completed_at_ms: 20,
+            },
+        );
+        service.queue_completion(
+            1,
+            &child(2, "first child"),
+            Completion {
+                id: 4,
+                process_id: 2,
+                completed_at_ms: 40,
+            },
+        );
         let children = service.pending.get(&1).unwrap();
         assert_eq!(children.len(), 2);
+        assert_eq!(children[&2].completion.unwrap().id, 4);
         assert_eq!(
             notification_body(children.values()),
             "[workman] child idle: first child (2) finished; second child (3) finished — check their output/todos"
@@ -461,7 +564,7 @@ mod tests {
             .create(process(
                 1,
                 "parent",
-                "printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n' \"$line\"; done",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n' \"$line\"; done",
             ))
             .unwrap();
         registry
@@ -494,10 +597,9 @@ mod tests {
         let mut service = SpawnerNotificationService::default();
         service.tick(&mut registry).unwrap();
         wait_for_output(&mut registry, 1, "[workman] child idle:");
-        let output = String::from_utf8_lossy(
-            &registry.raw_output(1, None, 64 * 1024).unwrap().data,
-        )
-        .into_owned();
+        let output =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
         assert_eq!(output.matches("[workman] child idle:").count(), 1);
         assert!(output.contains("needs-input (2) needs input"));
         assert!(output.contains("clean-exit (3) exited"));
@@ -540,5 +642,121 @@ mod tests {
         assert!(service.pending.is_empty());
 
         registry.stop(2).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opted_in_completion_delivers_once_and_marks_only_that_child_reported() {
+        let mut registry = registry();
+        registry
+            .create(process(
+                1,
+                "parent",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do printf 'received:[%s]\\n❯\\n' \"$line\"; done",
+            ))
+            .unwrap();
+        for (process_id, name) in [(2, "opted"), (3, "not-opted-in")] {
+            registry
+                .create(process(
+                    process_id,
+                    name,
+                    "printf '❯\\n'; while IFS= read -r line; do printf 'thinking...\\nesc to interrupt\\n'; sleep 0.2; printf 'done\\n❯\\n'; done",
+                ))
+                .unwrap();
+        }
+        for process_id in 1..=3 {
+            registry.start(process_id).unwrap();
+        }
+        for process_id in 1..=3 {
+            wait_for_state(&mut registry, process_id, AttentionState::Idle);
+        }
+        registry.set_notify_spawner_on_idle(1, 2, true).unwrap();
+        submit_as(&mut registry, 1, 2, b"go");
+        submit_as(&mut registry, 1, 3, b"go");
+        wait_for_state(&mut registry, 2, AttentionState::Working);
+        wait_for_state(&mut registry, 3, AttentionState::Working);
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        wait_for_state(&mut registry, 3, AttentionState::Idle);
+
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "opted (2) finished");
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        let output =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
+        assert_eq!(output.matches("[workman] child idle:").count(), 1);
+        assert!(!output.contains("not-opted-in (3)"));
+        let unreported = CompletionLedger::new(registry.store())
+            .unreported_completions(1, &[2, 3])
+            .unwrap();
+        assert_eq!(
+            unreported
+                .iter()
+                .map(|completion| completion.process_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        registry.stop(1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_completions_wait_for_busy_spawner_and_arrive_in_one_turn() {
+        let mut registry = registry();
+        registry
+            .create(process(
+                1,
+                "parent",
+                "stty -echo; printf '❯\\n'; while IFS= read -r line; do if [ \"$line\" = hold ]; then printf 'thinking...\\nesc to interrupt\\n'; sleep 1; printf 'parent done\\n❯\\n'; else printf 'received:[%s]\\n❯\\n' \"$line\"; fi; done",
+            ))
+            .unwrap();
+        for (process_id, name) in [(2, "first"), (3, "second")] {
+            registry
+                .create(process(
+                    process_id,
+                    name,
+                    "printf '❯\\n'; while IFS= read -r line; do printf 'thinking...\\nesc to interrupt\\n'; sleep 0.1; printf 'done\\n❯\\n'; done",
+                ))
+                .unwrap();
+        }
+        for process_id in 1..=3 {
+            registry.start(process_id).unwrap();
+        }
+        for process_id in 1..=3 {
+            wait_for_state(&mut registry, process_id, AttentionState::Idle);
+        }
+        for process_id in 2..=3 {
+            registry
+                .set_notify_spawner_on_idle(1, process_id, true)
+                .unwrap();
+        }
+        submit_as(&mut registry, 1, 1, b"hold");
+        wait_for_state(&mut registry, 1, AttentionState::Working);
+        submit_as(&mut registry, 1, 2, b"go");
+        submit_as(&mut registry, 1, 3, b"go");
+        wait_for_state(&mut registry, 2, AttentionState::Idle);
+        wait_for_state(&mut registry, 3, AttentionState::Idle);
+
+        let mut service = SpawnerNotificationService::default();
+        service.tick(&mut registry).unwrap();
+        assert_eq!(service.pending.get(&1).unwrap().len(), 2);
+        let before =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
+        assert!(!before.contains("[workman] child idle:"));
+
+        wait_for_state(&mut registry, 1, AttentionState::Idle);
+        service.tick(&mut registry).unwrap();
+        wait_for_output(&mut registry, 1, "[workman] child idle:");
+        let output =
+            String::from_utf8_lossy(&registry.raw_output(1, None, 64 * 1024).unwrap().data)
+                .into_owned();
+        assert_eq!(output.matches("[workman] child idle:").count(), 1);
+        assert!(output.contains("first (2) finished; second (3) finished"));
+
+        registry.stop(1).unwrap();
     }
 }
