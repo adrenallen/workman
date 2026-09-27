@@ -368,11 +368,18 @@ html.workman-document-hidden *::after {
   background: color-mix(in srgb, var(--notification-unread) 22%, var(--background));
 }
 
+.cm-live-table-block {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.45rem 0;
+}
+
 .cm-live-table-scroll {
   width: 0;
   min-width: 100%;
   box-sizing: border-box;
-  margin: 0.45rem 0;
+  margin: 0;
 }
 
 [data-slot='button'],

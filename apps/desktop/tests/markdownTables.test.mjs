@@ -6,7 +6,9 @@ import { ChangeSet, Text } from '@codemirror/state';
 
 const sourcePath = new URL('../src/lib/markdownTables.ts', import.meta.url);
 const source = await readFile(sourcePath, 'utf8');
-const output = ts.transpileModule(source, {
+const codeBlocks = await readFile(new URL('../src/lib/markdownCodeBlocks.ts', import.meta.url), 'utf8');
+const combined = `${source.replace("import { markdownCodeBlocks } from './markdownCodeBlocks';", '')}\n${codeBlocks}`;
+const output = ts.transpileModule(combined, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
 }).outputText;
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(output).toString('base64')}`;
@@ -17,6 +19,7 @@ const {
   navigableTableCells,
   parseMarkdownInline,
   parseMarkdownTables,
+  safeMarkdownInlineTokens,
   tableAtPosition
 } = await import(moduleUrl);
 
@@ -53,7 +56,7 @@ test('preserves escaped pipes and ignores pipes inside matched code spans', () =
   const [table] = parseMarkdownTables(source);
   assert.deepEqual(table.rows[0].cells.map((cell) => cell.text), ['a\\|b', '`x | y`']);
   assert.deepEqual(table.rows[1].cells.map((cell) => cell.text), ['``a ` b | c``', 'done']);
-  assert.deepEqual(parseMarkdownInline('a\\|b and `x | y`').map((token) => token.text), [
+  assert.deepEqual(parseMarkdownInline('a\\|b and `x | y`', { tableCell: true }).map((token) => token.text), [
     'a|b and ', 'x | y'
   ]);
 });
@@ -115,7 +118,10 @@ test('format changes preserve positions anchored inside cell content', () => {
 });
 
 test('parses bold, italic, inline code, and links for rendered cells', () => {
-  assert.deepEqual(parseMarkdownInline('**bold** *italics* _also_ `code` [link](https://example.com)'), [
+  assert.deepEqual(parseMarkdownInline(
+    '**bold** *italics* _also_ `code` [link](https://example.com)',
+    { tableCell: true }
+  ), [
     { kind: 'strong', text: 'bold' },
     { kind: 'text', text: ' ' },
     { kind: 'emphasis', text: 'italics' },
@@ -131,4 +137,56 @@ test('parses bold, italic, inline code, and links for rendered cells', () => {
 test('rejects pipe-shaped prose without a delimiter row', () => {
   assert.deepEqual(parseMarkdownTables('one | two\nnot a delimiter | still prose'), []);
   assert.deepEqual(parseMarkdownTables('# Heading | text\n--- | ---'), []);
+  assert.deepEqual(parseMarkdownTables('one | two\n---'), []);
+});
+
+test('stops body rows at Markdown blocks while allowing ragged table rows', () => {
+  for (const boundary of [
+    '# Heading | text',
+    '> Quote | text',
+    '- List | text',
+    '1. List | text',
+    '---',
+    '```md\ninside | fence\n--- | ---\n```'
+  ]) {
+    const [table] = parseMarkdownTables(`A | B\n--- | ---\nleft | right\n${boundary}`);
+    assert.equal(table.rows.length, 1, boundary);
+  }
+  const [ragged] = parseMarkdownTables('A | B\n--- | ---\none |\nleft | right | extra');
+  assert.equal(ragged.columnCount, 3);
+});
+
+test('preserves header indentation on every formatted row and shares list-aware fences', () => {
+  const [table] = parseMarkdownTables('  A | B\n  --- | ---\none | two');
+  assert.equal(formatMarkdownTable(table), [
+    '  | A   | B   |',
+    '  | --- | --- |',
+    '  | one | two |'
+  ].join('\n'));
+  const fenced = '- item\n  ```md\n  fake | table\n  --- | ---\n  ```\n\nreal | table\n--- | ---';
+  assert.deepEqual(parseMarkdownTables(fenced).map((candidate) => candidate.header.cells[0].text), ['real']);
+});
+
+test('keeps non-table inline rendering compatible and unescapes only table-cell pipes', () => {
+  for (const source of ['todo_lock then todo_get', 'CARGO_TARGET_DIR', '2 * 3 * 4']) {
+    assert.deepEqual(parseMarkdownInline(source), [{ kind: 'text', text: source }]);
+  }
+  assert.deepEqual(parseMarkdownInline('`C:\\tmp\\work`'), [
+    { kind: 'code', text: 'C:\\tmp\\work' }
+  ]);
+  assert.deepEqual(parseMarkdownInline('a\\|b'), [{ kind: 'text', text: 'a\\|b' }]);
+  assert.deepEqual(parseMarkdownInline('a\\|b', { tableCell: true }), [{ kind: 'text', text: 'a|b' }]);
+  assert.deepEqual(parseMarkdownInline('2 * 3 * 4', { tableCell: true }), [
+    { kind: 'text', text: '2 * 3 * 4' }
+  ]);
+});
+
+test('downgrades unsafe rendered links to their literal Markdown source', () => {
+  const tokens = parseMarkdownInline('[safe](https://example.com) [bad](javascript:alert(1))');
+  assert.deepEqual(safeMarkdownInlineTokens(tokens, (url) => url.startsWith('https://')), [
+    { kind: 'link', text: 'safe', href: 'https://example.com', source: '[safe](https://example.com)' },
+    { kind: 'text', text: ' ' },
+    { kind: 'text', text: '[bad](javascript:alert(1)' },
+    { kind: 'text', text: ')' }
+  ]);
 });

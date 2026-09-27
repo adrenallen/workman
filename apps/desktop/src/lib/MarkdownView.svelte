@@ -2,6 +2,7 @@
   import {
     parseMarkdownInline,
     parseMarkdownTables,
+    safeMarkdownInlineTokens,
     type MarkdownInlineToken,
     type MarkdownTable
   } from './markdownTables';
@@ -108,17 +109,16 @@
     return output;
   }
 
-  function inline(text: string): Inline[] {
-    return parseMarkdownInline(text).map((token) =>
-      token.kind === 'link' && !isBrowserUrl(token.href)
-        ? { kind: 'text', text: token.source }
-        : token
+  function inline(text: string, tableCell = false): Inline[] {
+    return safeMarkdownInlineTokens(
+      parseMarkdownInline(text, { tableCell }),
+      isBrowserUrl
     );
   }
 </script>
 
-{#snippet inlineContent(text: string)}
-  {#each inline(text) as token}
+{#snippet inlineContent(text: string, tableCell = false)}
+  {#each inline(text, tableCell) as token}
     {#if token.kind === 'strong'}
       <strong>{token.text}</strong>
     {:else if token.kind === 'emphasis'}
@@ -152,7 +152,7 @@
           <thead>
             <tr>
               {#each block.table.header.cells as cell, column}
-                <th style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text)}</th>
+                <th style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text, true)}</th>
               {/each}
             </tr>
           </thead>
@@ -160,7 +160,7 @@
             {#each block.table.rows as row}
               <tr>
                 {#each row.cells as cell, column}
-                  <td style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text)}</td>
+                  <td style:text-align={block.table.alignments[column] ?? 'left'}>{@render inlineContent(cell.text, true)}</td>
                 {/each}
               </tr>
             {/each}

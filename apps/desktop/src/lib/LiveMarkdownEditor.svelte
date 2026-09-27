@@ -16,7 +16,6 @@
     type DecorationSet,
     type ViewUpdate
   } from '@codemirror/view';
-  import { GFM } from '@lezer/markdown';
   import { invoke } from '@tauri-apps/api/core';
   import BoldIcon from '@lucide/svelte/icons/bold';
   import CheckSquare2Icon from '@lucide/svelte/icons/square-check-big';
@@ -42,6 +41,7 @@
     markdownLinkAt,
     openExternalUrl
   } from './externalLinks';
+  import { isBrowserUrl } from './openers';
   import { primaryModifier } from './primaryModifier';
   import {
     resolveScratchpadAnchor,
@@ -57,6 +57,7 @@
     navigableTableCells,
     parseMarkdownInline,
     parseMarkdownTables,
+    safeMarkdownInlineTokens,
     tableAtPosition,
     type MarkdownTable,
     type MarkdownTableCell
@@ -114,6 +115,7 @@
   const tableFormatChange = Annotation.define<boolean>();
   const tablePositionMapper = Annotation.define<PositionMapper>();
   const refreshTableDecorations = StateEffect.define<null>();
+  const setTableFocused = StateEffect.define<boolean>();
   const setCommentDecorations = StateEffect.define<DecorationSet>();
   const commentDecorationField = StateField.define<DecorationSet>({
     create: () => Decoration.none,
@@ -132,19 +134,37 @@
   interface MarkdownTableFieldValue {
     tables: MarkdownTable[];
     decorations: DecorationSet;
+    tableComments: RenderedTableComment[];
+    focused: boolean;
   }
 
   const markdownTableField = StateField.define<MarkdownTableFieldValue>({
-    create: (state) => markdownTableDecorations(state),
+    create(state) {
+      const content = state.doc.toString();
+      return markdownTableDecorations(
+        state,
+        false,
+        resolveTableComments(content, state),
+        parseMarkdownTables(content)
+      );
+    },
     update(current, transaction) {
-      if (
-        transaction.docChanged ||
-        transaction.selection !== undefined ||
-        transaction.effects.some((effect) => effect.is(refreshTableDecorations))
-      ) {
-        return markdownTableDecorations(transaction.state);
+      const commentsChanged = transaction.effects.some((effect) => effect.is(refreshTableDecorations));
+      let focused = current.focused;
+      for (const effect of transaction.effects) {
+        if (effect.is(setTableFocused)) focused = effect.value;
       }
-      return current;
+      if (!transaction.docChanged && transaction.selection === undefined && !commentsChanged && focused === current.focused) return current;
+      const content = transaction.docChanged ? transaction.state.doc.toString() : null;
+      const tableComments = content !== null || commentsChanged
+        ? resolveTableComments(content ?? transaction.state.doc.toString(), transaction.state)
+        : current.tableComments;
+      return markdownTableDecorations(
+        transaction.state,
+        focused,
+        tableComments,
+        content === null ? current.tables : parseMarkdownTables(content)
+      );
     },
     provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
   });
@@ -482,22 +502,35 @@
     title: string;
   }
 
-  function renderedTableComments(
-    table: MarkdownTable,
+  function mappedCommentRanges(state: EditorState): Map<number, { from: number; to: number }> {
+    const ranges = new Map<number, { from: number; to: number }>();
+    state.field(commentDecorationField).between(0, state.doc.length, (from, to, decoration) => {
+      if (to <= from) return;
+      for (const id of decoration.spec.attributes?.['data-scratchpad-comment-ids']?.split(',') ?? []) {
+        const commentId = Number(id);
+        if (Number.isInteger(commentId)) ranges.set(commentId, { from, to });
+      }
+    });
+    return ranges;
+  }
+
+  function resolveTableComments(
     content: string,
     state: EditorState
   ): RenderedTableComment[] {
+    const fallbackRanges = mappedCommentRanges(state);
     return comments.flatMap((comment) => {
       if (comment.resolved && !showResolvedComments) return [];
       const resolved = resolveScratchpadAnchor(content, comment);
-      const fallback = mappedCommentRange(state, comment.id);
+      const fallback = fallbackRanges.get(comment.id);
       const from = resolved.anchor_state === 'anchored' ? resolved.current_start : fallback?.from ?? null;
       const to = resolved.anchor_state === 'anchored' ? resolved.current_end : fallback?.to ?? null;
       if (
         from === null ||
         to === null ||
-        from >= table.to ||
-        to <= table.from
+        from < 0 ||
+        to <= from ||
+        to > state.doc.length
       ) return [];
       return [{
         id: comment.id,
@@ -511,7 +544,10 @@
   }
 
   function appendInlineMarkdown(parent: HTMLElement, source: string): void {
-    for (const token of parseMarkdownInline(source)) {
+    for (const token of safeMarkdownInlineTokens(
+      parseMarkdownInline(source, { tableCell: true }),
+      isBrowserUrl
+    )) {
       if (token.kind === 'text') {
         parent.append(document.createTextNode(token.text));
         continue;
@@ -549,8 +585,8 @@
       this.table = table;
       this.source = source;
       this.tableComments = tableComments;
-      this.signature = `${table.from}:${source}:${tableComments
-        .map((comment) => `${comment.id}:${comment.from}:${comment.to}:${comment.resolved}:${comment.focused}`)
+      this.signature = `${source}:${tableComments
+        .map((comment) => `${comment.id}:${comment.from - table.from}:${comment.to - table.from}:${comment.resolved}:${comment.focused}`)
         .join(',')}`;
     }
 
@@ -560,10 +596,19 @@
 
     toDOM(editor: EditorView): HTMLElement {
       const frame = document.createElement('div');
-      frame.className = 'markdown-table-scroll cm-live-table-scroll';
+      frame.className = 'cm-live-table-block';
       frame.contentEditable = 'false';
+      frame.setAttribute('role', 'group');
       frame.setAttribute('aria-label', 'Markdown table. Click a cell to edit its source.');
-      const element = frame.appendChild(document.createElement('table'));
+      frame.addEventListener('mousedown', (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('th, td')) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      const scroll = frame.appendChild(document.createElement('div'));
+      scroll.className = 'markdown-table-scroll cm-live-table-scroll';
+      const element = scroll.appendChild(document.createElement('table'));
       element.className = 'markdown-table';
       const head = element.appendChild(document.createElement('thead'));
       const headRow = head.appendChild(document.createElement('tr'));
@@ -595,6 +640,8 @@
         cellElement: HTMLTableCellElement
       ): void => {
         const cell = row.cells[column];
+        const relativeFrom = cell.from - this.table.from;
+        const relativeTo = cell.to - this.table.from;
         const key = `${row.line}:${column}`;
         cellElement.style.textAlign = this.table.alignments[column] ?? 'left';
         if (commentedCells.has(key)) cellElement.classList.add('cm-table-commented');
@@ -611,7 +658,11 @@
         cellElement.addEventListener('mousedown', (event) => {
           if (event.button !== 0) return;
           const target = event.target instanceof Element ? event.target : null;
-          if (target?.closest('.cm-comment-marker')) return;
+          if (target?.closest('.cm-comment-marker')) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           const link = target?.closest<HTMLAnchorElement>('a[href]');
           if (link && primaryModifier(event)) {
             event.preventDefault();
@@ -625,7 +676,14 @@
           const ratio = bounds.width > 0
             ? Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
             : 0;
-          const anchor = cell.from + Math.round((cell.to - cell.from) * ratio);
+          let tableFrom = this.table.from;
+          try {
+            tableFrom = editor.posAtDOM(frame);
+          } catch {
+            // The widget may be leaving the viewport; its last known position is safe.
+          }
+          const anchor = tableFrom + relativeFrom +
+            Math.round((relativeTo - relativeFrom) * ratio);
           editor.dispatch({ selection: { anchor }, scrollIntoView: true });
           editor.focus();
         });
@@ -647,17 +705,21 @@
       return frame;
     }
 
-    ignoreEvent(): boolean {
-      return false;
+    ignoreEvent(event: Event): boolean {
+      const target = event.target instanceof Element ? event.target : null;
+      return !target?.closest('th, td');
     }
   }
 
-  function markdownTableDecorations(state: EditorState): MarkdownTableFieldValue {
-    const content = state.doc.toString();
-    const tables = parseMarkdownTables(content);
+  function markdownTableDecorations(
+    state: EditorState,
+    focused: boolean,
+    tableComments: RenderedTableComment[],
+    tables: MarkdownTable[]
+  ): MarkdownTableFieldValue {
     const ranges: Range<Decoration>[] = [];
     for (const table of tables) {
-      const revealed = state.selection.ranges.some((range) =>
+      const revealed = focused && state.selection.ranges.some((range) =>
         range.head >= table.from && range.head <= table.to
       );
       if (revealed) {
@@ -668,15 +730,15 @@
         ranges.push(Decoration.replace({
           widget: new MarkdownTableWidget(
             table,
-            content.slice(table.from, table.to),
-            renderedTableComments(table, content, state)
+            state.sliceDoc(table.from, table.to),
+            tableComments.filter((comment) => comment.from < table.to && comment.to > table.from)
           ),
           block: true,
           inclusive: false
         }).range(table.from, table.to));
       }
     }
-    return { tables, decorations: Decoration.set(ranges, true) };
+    return { tables, decorations: Decoration.set(ranges, true), tableComments, focused };
   }
 
   function cursorTouches(view: EditorView, from: number, to: number): boolean {
@@ -935,18 +997,27 @@
     tableVisit = next ? { from: next.from, dirty: false } : null;
   }
 
-  function currentCellIndex(table: MarkdownTable, position: number, backwards: boolean): number {
+  function tableNavigationTarget(
+    table: MarkdownTable,
+    position: number,
+    backwards: boolean
+  ): { index: number; appendRow: boolean } {
     const cells = navigableTableCells(table);
     const containing = cells.findIndex((cell) => position >= cell.from && position <= cell.to);
-    if (containing >= 0) return containing;
+    if (containing >= 0) return {
+      index: backwards ? Math.max(0, containing - 1) : containing + 1,
+      appendRow: !backwards && containing === cells.length - 1
+    };
     if (backwards) {
       for (let index = cells.length - 1; index >= 0; index -= 1) {
-        if (cells[index].from < position) return index;
+        if (cells[index].from < position) return { index, appendRow: false };
       }
-      return 0;
+      return { index: 0, appendRow: false };
     }
     const following = cells.findIndex((cell) => cell.to > position);
-    return following >= 0 ? following : cells.length - 1;
+    return following >= 0
+      ? { index: following, appendRow: false }
+      : { index: cells.length - 1, appendRow: false };
   }
 
   function navigateTable(editor: EditorView, backwards: boolean): boolean {
@@ -955,10 +1026,13 @@
       editor.state.selection.main.head
     );
     if (!table) return false;
-    const cells = navigableTableCells(table);
-    const current = currentCellIndex(table, editor.state.selection.main.head, backwards);
-    const appendRow = !backwards && current === cells.length - 1;
-    let target = backwards ? Math.max(0, current - 1) : current + 1;
+    const navigation = tableNavigationTarget(
+      table,
+      editor.state.selection.main.head,
+      backwards
+    );
+    const appendRow = navigation.appendRow;
+    let target = navigation.index;
     let formatted = formatMarkdownTable(table);
     const changes = markdownTableFormattingChanges(editor.state.doc.toString(), table);
     if (appendRow) {
@@ -1000,6 +1074,30 @@
     const currentRow = [table.header, table.delimiter, ...table.rows]
       .find((row) => position >= row.from && position <= row.to);
     if (!currentRow) return false;
+    const currentColumn = currentRow.cells.findIndex((cell) =>
+      position >= cell.from && position <= cell.to
+    );
+    if (currentRow === table.header && currentColumn === 0) {
+      editor.dispatch({
+        changes: { from: table.from, insert: '\n' },
+        selection: { anchor: table.from },
+        annotations: Transaction.userEvent.of('input.table.exit'),
+        scrollIntoView: true
+      });
+      return true;
+    }
+    if (
+      currentRow === table.rows.at(-1) &&
+      currentRow.cells.every((cell) => cell.text === '')
+    ) {
+      editor.dispatch({
+        changes: { from: currentRow.from, to: currentRow.to, insert: '' },
+        selection: { anchor: currentRow.from },
+        annotations: Transaction.userEvent.of('input.table.exit'),
+        scrollIntoView: true
+      });
+      return true;
+    }
     const after = currentRow === table.header ? table.delimiter : currentRow;
     const row = `|${Array.from({ length: table.columnCount }, () => ' ').join('|')}|`;
     editor.dispatch({
@@ -1106,7 +1204,8 @@
       color: 'var(--foreground)',
       fontFamily: "'JetBrains Mono Variable', monospace",
       fontSize: '12px',
-      whiteSpace: 'pre'
+      whiteSpace: 'pre-wrap',
+      overflowWrap: 'anywhere'
     },
     '.cm-live-table-source.cm-activeLine': {
       backgroundColor: 'color-mix(in srgb, var(--accent) 78%, transparent)'
@@ -1183,7 +1282,7 @@
           dropCursor(),
           highlightActiveLine(),
           highlightSpecialChars(),
-          markdown({ extensions: [GFM] }),
+          markdown(),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           EditorView.lineWrapping,
           editorPlaceholder('Start writing Markdown…'),
@@ -1219,9 +1318,18 @@
               return true;
             },
             blur: () => {
-              window.setTimeout(() => {
-                if (!view?.hasFocus) selectionAction = null;
-              }, 0);
+              queueMicrotask(() => {
+                if (!view?.hasFocus) {
+                  view?.dispatch({ effects: setTableFocused.of(false) });
+                  selectionAction = null;
+                }
+              });
+              return false;
+            },
+            focus: (_event, editor) => {
+              queueMicrotask(() => {
+                if (editor.hasFocus) editor.dispatch({ effects: setTableFocused.of(true) });
+              });
               return false;
             }
           }),

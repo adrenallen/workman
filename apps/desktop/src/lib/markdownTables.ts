@@ -1,3 +1,5 @@
+import { markdownCodeBlocks } from './markdownCodeBlocks';
+
 export type MarkdownTableAlignment = 'left' | 'center' | 'right' | null;
 
 export interface MarkdownTableCell {
@@ -19,6 +21,7 @@ export interface MarkdownTable {
   startLine: number;
   endLine: number;
   columnCount: number;
+  indent: string;
   alignments: MarkdownTableAlignment[];
   header: MarkdownTableRow;
   delimiter: MarkdownTableRow;
@@ -122,25 +125,15 @@ function delimiterAlignment(text: string): MarkdownTableAlignment | undefined {
 function sourceLines(markdown: string): SourceLine[] {
   const lines: SourceLine[] = [];
   let from = 0;
-  let fence: { marker: '`' | '~'; length: number } | null = null;
+  const blocks = markdownCodeBlocks(markdown);
+  let blockIndex = 0;
   const rawLines = markdown.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
   for (let index = 0; index < rawLines.length; index += 1) {
     const text = rawLines[index];
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(text);
-    const fenced = fence !== null || marker !== null;
+    while (blocks[blockIndex] && blocks[blockIndex].to < from) blockIndex += 1;
+    const block = blocks[blockIndex];
+    const fenced = Boolean(block && from >= block.from && from <= block.to);
     lines.push({ from, to: from + text.length, text, number: index, fenced });
-    if (marker) {
-      const candidate = marker[1];
-      if (!fence) {
-        fence = { marker: candidate[0] as '`' | '~', length: candidate.length };
-      } else if (
-        candidate[0] === fence.marker &&
-        candidate.length >= fence.length &&
-        marker[2].trim() === ''
-      ) {
-        fence = null;
-      }
-    }
     from += text.length + (index < rawLines.length - 1 ? 1 : 0);
   }
   return lines;
@@ -166,7 +159,12 @@ function tableRow(line: SourceLine, parsed: SplitRow): MarkdownTableRow {
 }
 
 function canStartTable(line: string): boolean {
-  return !/^\s*(?:#{1,6}\s|>|[-+*]\s+|\d+\.\s+)/.test(line);
+  return !startsMarkdownBlock(line);
+}
+
+function startsMarkdownBlock(line: string): boolean {
+  return /^\s*(?:#{1,6}(?:\s|$)|>|[-+*]\s+|\d+[.)]\s+)/.test(line) ||
+    /^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/.test(line);
 }
 
 export function parseMarkdownTables(markdown: string): MarkdownTable[] {
@@ -188,6 +186,7 @@ export function parseMarkdownTables(markdown: string): MarkdownTable[] {
     if (
       (header.separatorCount === 0 && delimiter.separatorCount === 0) ||
       header.cells.length === 0 || delimiter.cells.length === 0 ||
+      header.cells.length !== delimiter.cells.length ||
       alignments.some((alignment) => alignment === undefined)
     ) {
       index += 1;
@@ -198,7 +197,7 @@ export function parseMarkdownTables(markdown: string): MarkdownTable[] {
     let cursor = index + 2;
     while (cursor < lines.length) {
       const line = lines[cursor];
-      if (line.fenced || !line.text.trim()) break;
+      if (line.fenced || !line.text.trim() || startsMarkdownBlock(line.text)) break;
       const parsed = splitRow(line.text, line.from);
       if (parsed.separatorCount === 0) break;
       body.push(tableRow(line, parsed));
@@ -223,6 +222,7 @@ export function parseMarkdownTables(markdown: string): MarkdownTable[] {
       startLine: index,
       endLine: lastRow.line,
       columnCount,
+      indent: /^\s*/.exec(headerLine.text)?.[0] ?? '',
       alignments: paddedAlignments,
       header: padRow(rawHeader, columnCount),
       delimiter: padRow(rawDelimiter, columnCount),
@@ -254,8 +254,8 @@ function tableWidths(table: MarkdownTable): number[] {
   ));
 }
 
-function formattedRow(row: MarkdownTableRow, widths: number[]): FormattedRow {
-  let text = '| ';
+function formattedRow(row: MarkdownTableRow, widths: number[], indent: string): FormattedRow {
+  let text = `${indent}| `;
   const cells: Array<{ from: number; to: number }> = [];
   widths.forEach((width, column) => {
     const content = row.cells[column]?.text ?? '';
@@ -269,7 +269,7 @@ function formattedRow(row: MarkdownTableRow, widths: number[]): FormattedRow {
 }
 
 function formattedDelimiter(table: MarkdownTable, widths: number[]): string {
-  return `| ${widths
+  return `${table.indent}| ${widths
     .map((width, column) => delimiterCell(table.alignments[column] ?? null, width))
     .join(' | ')} |`;
 }
@@ -277,9 +277,9 @@ function formattedDelimiter(table: MarkdownTable, widths: number[]): string {
 export function formatMarkdownTable(table: MarkdownTable): string {
   const widths = tableWidths(table);
   return [
-    formattedRow(table.header, widths).text,
+    formattedRow(table.header, widths, table.indent).text,
     formattedDelimiter(table, widths),
-    ...table.rows.map((row) => formattedRow(row, widths).text)
+    ...table.rows.map((row) => formattedRow(row, widths, table.indent).text)
   ].join('\n');
 }
 
@@ -358,10 +358,10 @@ export function markdownTableFormattingChanges(
 ): MarkdownTableChange[] {
   const widths = tableWidths(table);
   const changes: MarkdownTableChange[] = [];
-  rowFormattingChanges(markdown, table.header, formattedRow(table.header, widths), changes);
+  rowFormattingChanges(markdown, table.header, formattedRow(table.header, widths, table.indent), changes);
   delimiterFormattingChange(markdown, table.delimiter, formattedDelimiter(table, widths), changes);
   for (const row of table.rows) {
-    rowFormattingChanges(markdown, row, formattedRow(row, widths), changes);
+    rowFormattingChanges(markdown, row, formattedRow(row, widths, table.indent), changes);
   }
   return changes.sort((left, right) => left.from - right.from || left.to - right.to);
 }
@@ -398,33 +398,53 @@ export function mapMarkdownTableCellPosition(
   return null;
 }
 
-function unescapePipes(text: string): string {
-  return text.replaceAll(/\\([|\\])/g, '$1');
+function unescapeTablePipes(text: string): string {
+  return text.replaceAll('\\|', '|');
 }
 
-export function parseMarkdownInline(text: string): MarkdownInlineToken[] {
+export function parseMarkdownInline(
+  text: string,
+  { tableCell = false }: { tableCell?: boolean } = {}
+): MarkdownInlineToken[] {
   const tokens: MarkdownInlineToken[] = [];
-  const pattern = /(`+)([^\n]*?)\1|\*\*([^*\n]+)\*\*|__([^_\n]+)__|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)|\[([^\]\n]+)\]\(([^)\n]+)\)/g;
+  const emphasis = tableCell
+    ? '|(?<![\\w*])\\*(?![\\s*])(?<emStar>[^*\\n]*?\\S)\\*(?!\\*)|(?<![\\w_])_(?![\\s_])(?<emUnderscore>[^_\\n]*?\\S)_(?![\\w_])'
+    : '';
+  const pattern = new RegExp(
+    `(?<ticks>` + '`+' + `)(?<code>[^\\n]*?)\\k<ticks>|\\*\\*(?<strongStar>[^*\\n]+)\\*\\*|__(?<strongUnderscore>[^_\\n]+)__${emphasis}|\\[(?<label>[^\\]\\n]+)\\]\\((?<href>[^)\\n]+)\\)`,
+    'g'
+  );
+  const display = (value: string): string => tableCell ? unescapeTablePipes(value) : value;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
     const start = match.index ?? 0;
-    if (start > offset) tokens.push({ kind: 'text', text: unescapePipes(text.slice(offset, start)) });
-    if (match[1] !== undefined) {
-      tokens.push({ kind: 'code', text: unescapePipes(match[2]) });
-    } else if (match[3] !== undefined || match[4] !== undefined) {
-      tokens.push({ kind: 'strong', text: unescapePipes(match[3] ?? match[4]) });
-    } else if (match[5] !== undefined || match[6] !== undefined) {
-      tokens.push({ kind: 'emphasis', text: unescapePipes(match[5] ?? match[6]) });
+    const groups = match.groups ?? {};
+    if (start > offset) tokens.push({ kind: 'text', text: display(text.slice(offset, start)) });
+    if (groups.code !== undefined) {
+      tokens.push({ kind: 'code', text: groups.code });
+    } else if (groups.strongStar !== undefined || groups.strongUnderscore !== undefined) {
+      tokens.push({ kind: 'strong', text: display(groups.strongStar ?? groups.strongUnderscore) });
+    } else if (groups.emStar !== undefined || groups.emUnderscore !== undefined) {
+      tokens.push({ kind: 'emphasis', text: display(groups.emStar ?? groups.emUnderscore) });
     } else {
       tokens.push({
         kind: 'link',
-        text: unescapePipes(match[7]),
-        href: match[8],
+        text: display(groups.label),
+        href: groups.href,
         source: match[0]
       });
     }
     offset = start + match[0].length;
   }
-  if (offset < text.length) tokens.push({ kind: 'text', text: unescapePipes(text.slice(offset)) });
+  if (offset < text.length) tokens.push({ kind: 'text', text: display(text.slice(offset)) });
   return tokens;
+}
+
+export function safeMarkdownInlineTokens(
+  tokens: readonly MarkdownInlineToken[],
+  isSafeUrl: (url: string) => boolean
+): MarkdownInlineToken[] {
+  return tokens.map((token) => token.kind === 'link' && !isSafeUrl(token.href)
+    ? { kind: 'text', text: token.source }
+    : token);
 }
