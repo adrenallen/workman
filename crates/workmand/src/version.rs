@@ -42,6 +42,7 @@ mod tests {
 
     #[test]
     fn current_version_is_compatible_and_other_builds_are_not() {
+        assert_eq!(BUILD_VERSION, "0.1.18");
         let current = DaemonVersion::current();
         assert!(current.matches_current_build());
 

@@ -4,6 +4,53 @@ All notable changes to Workman are recorded here.
 
 ## Unreleased
 
+## 0.1.18 - 2026-09-27
+
+### Markdown tables
+
+- Render scratchpad Markdown tables as a real grid while revealing the pipe source when the
+  cursor enters a table. Tab and Shift+Tab move between cells, and Enter adds a row.
+- Align tables only after a user edit, so agent and MCP writes remain unchanged and alignment
+  can be undone. Preserve comment anchors across re-alignment.
+- Render tables consistently in todo bodies, comments, scratchpad views, and release notes.
+
+### Agent coordination
+
+- Let `timer_fire_when_idle(wait_for="any")` count an unseen completion that happened before
+  the timer was armed. Arm results report `already_idle`, `satisfied_by`, and the fire reason.
+  Harden timer delivery so one corrupt or transiently failing timer cannot block the others.
+- Add opt-in `notify_spawner_on_idle` delivery to wake a direct spawning agent once when children
+  finish, need input, exit, or crash. Coalesce child updates and preserve the setting on restart.
+- Never merge a child notification into a human's unsent draft. Process status reports
+  `notification_held_by_draft` while a detected draft holds delivery.
+- Detect OpenCode busy, idle, and needs-input states, include its composer in the draft guard,
+  and warn if a future OpenCode UI change stops matching the expected markers.
+
+### MCP tools and agent templates
+
+- Consolidate the MCP surface from 102 tools to 52, with one tool set for every agent. This is a
+  breaking hard cut with no aliases; overlapping operations now use parameters on one tool.
+- Rename the most-used overlapping operations:
+  - `timer_fire_when_idle_any` / `timer_fire_when_idle_all` →
+    `timer_fire_when_idle(wait_for)`
+  - `todo_assign`, todo tag tools, and todo blocker tools → `todo_update`
+  - `scratchpad_append_section` → `scratchpad_append(heading)`; `scratchpad_tail` and
+    `scratchpad_comment_list` → `scratchpad_read`
+  - `get_process_raw_output` → `get_process_output(raw)` and `search_raw_output` →
+    `search_output(raw)`
+  - `start_process`, `stop_process`, and `restart_process` → `process_control(action)`
+  - `list_agent_templates` → `list_agent_tools`; `set_notify_spawner_on_idle` →
+    `update_process`
+- Spawn from an agent template using only its template ID. Templates supply their tool, model,
+  effort, arguments, and prompt, while `resolved` reports the effective launch settings.
+
+### Upgrade notes
+
+- Migrations 0040–0043 run automatically. Older builds refuse the upgraded database, so back up
+  first if a downgrade may be needed.
+- Restart agents that were started before upgrading so they receive the new MCP tool list.
+- Reword saved template prompts and instruction files that use old MCP tool names.
+
 ## 0.1.17 - 2026-09-15
 
 ### Agent input and terminal recovery
