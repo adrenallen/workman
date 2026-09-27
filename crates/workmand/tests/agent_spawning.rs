@@ -164,6 +164,26 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             resume_args: None,
             continue_args: None,
         })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 104,
+            name: "Portable Codex agent".into(),
+            command: "true".into(),
+            tool_type: "codex".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
+        registry.store().put_agent_tool(&AgentTool {
+            id: 105,
+            name: "Custom agent".into(),
+            command: "true".into(),
+            tool_type: "custom".into(),
+            enabled: true,
+            source: AgentToolSource::Local,
+            resume_args: None,
+            continue_args: None,
+        })?;
         registry.store().put_agent_template(&AgentTemplate {
             id: 300,
             profile_id: 1,
@@ -184,6 +204,23 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             prompt: "🧪 Review the implementation carefully and report concrete findings. "
                 .repeat(3),
             sort_order: 1,
+            created_at: 0,
+            updated_at: 0,
+        })?;
+        registry.store().put_agent_template(&AgentTemplate {
+            id: 302,
+            profile_id: 1,
+            name: "Configured reviewer".into(),
+            agent_tool_id: 102,
+            extra_args: vec![
+                "--model".into(),
+                "template-model".into(),
+                "-c".into(),
+                "model_reasoning_effort=\"high\"".into(),
+                "--review".into(),
+            ],
+            prompt: "Review the change.".into(),
+            sort_order: 2,
             created_at: 0,
             updated_at: 0,
         })?;
@@ -257,12 +294,20 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         spawn_tool
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("plain agent by default"))
+            .is_some_and(|description| {
+                description.contains("Template: set agent_template_id only")
+                    && description.contains("supplies its agent tool, model, effort")
+                    && description.contains("Pass model or agent_tool_id only to override")
+                    && !description.contains("preferred")
+            })
     );
     assert!(
         spawn_tool.input_schema["properties"]["agent_tool_id"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("default plain-agent path"))
+            .is_some_and(|description| {
+                description.contains("Required unless agent_template_id is set")
+                    && description.contains("overrides the template's agent")
+            })
     );
     assert!(
         spawn_tool.input_schema["properties"]["agent_template_id"]["description"]
@@ -273,7 +318,10 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         spawn_tool.input_schema["properties"]["model"]["description"]
             .as_str()
             .is_some_and(|description| {
-                description.contains("tool_type") && description.contains("registered command")
+                description.contains("tool_type")
+                    && description.contains("registered command")
+                    && description.contains("Omit it to use the template or agent default")
+                    && !description.contains("Prefer")
             })
     );
     assert!(
@@ -330,9 +378,18 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         tool["id"] == 99 && tool["command"] == fake_agent.to_string_lossy().as_ref()
     }));
     let templates = call(&parent, "list_agent_templates", json!({})).await;
-    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 2);
+    assert_eq!(templates["agent_templates"].as_array().unwrap().len(), 3);
     assert_eq!(templates["agent_templates"][0]["id"], 300);
-    assert_eq!(templates["agent_templates"][0]["model"], Value::Null);
+    assert_eq!(
+        templates["agent_templates"][0]["launch"],
+        json!({
+            "agent_tool_id": 99,
+            "agent_tool_name": "Scripted Claude",
+            "model": "agent default",
+            "effort": "agent default"
+        })
+    );
+    assert!(templates["agent_templates"][0].get("model").is_none());
     assert_eq!(templates["agent_templates"][1]["id"], 301);
     assert_eq!(templates["agent_templates"][1]["name"], "Reviewer");
     assert_eq!(
@@ -344,10 +401,27 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             "enabled": true
         })
     );
-    assert_eq!(templates["agent_templates"][1]["model"], "command-default");
+    assert_eq!(
+        templates["agent_templates"][1]["launch"],
+        json!({
+            "agent_tool_id": 102,
+            "agent_tool_name": "Model capture agent",
+            "model": "command-default",
+            "effort": "agent default"
+        })
+    );
     assert_eq!(
         templates["agent_templates"][1]["extra_args"],
         json!(["--review"])
+    );
+    assert_eq!(
+        templates["agent_templates"][2]["launch"],
+        json!({
+            "agent_tool_id": 102,
+            "agent_tool_name": "Model capture agent",
+            "model": "template-model",
+            "effort": "high"
+        })
     );
     assert!(
         templates["agent_templates"][1]["prompt_preview"]
@@ -381,6 +455,16 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         }),
     )
     .await;
+    assert_eq!(
+        default_model_spawn["resolved"],
+        json!({
+            "agent_tool_id": 102,
+            "agent_tool_name": "Model capture agent",
+            "model": "command-default",
+            "effort": "agent default",
+            "template_args_skipped": []
+        })
+    );
     let default_model_process_id = default_model_spawn["process_id"].as_i64().unwrap();
     let default_model_command = registry
         .lock()
@@ -410,6 +494,11 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         }),
     )
     .await;
+    assert_eq!(
+        override_model_spawn["resolved"]["model"],
+        "override/provider-model"
+    );
+    assert_eq!(override_model_spawn["resolved"]["effort"], "agent default");
     let override_model_process_id = override_model_spawn["process_id"].as_i64().unwrap();
     let override_model_command = registry
         .lock()
@@ -440,6 +529,9 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         }),
     )
     .await;
+    assert_eq!(plain_spawn["resolved"]["agent_tool_id"], 102);
+    assert_eq!(plain_spawn["resolved"]["model"], "plain-model");
+    assert_eq!(plain_spawn["resolved"]["effort"], "agent default");
     let plain_process_id = plain_spawn["process_id"].as_i64().unwrap();
     let plain_command = registry
         .lock()
@@ -470,6 +562,16 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         }),
     )
     .await;
+    assert_eq!(
+        swapped_model_spawn["resolved"],
+        json!({
+            "agent_tool_id": 103,
+            "agent_tool_name": "Swap model agent",
+            "model": "swapped/provider-model",
+            "effort": "agent default",
+            "template_args_skipped": ["--review"]
+        })
+    );
     let swapped_model_process_id = swapped_model_spawn["process_id"].as_i64().unwrap();
     let swapped_model_command = registry
         .lock()
@@ -486,6 +588,79 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         &parent,
         "close_process",
         json!({ "project_id": 7, "process_id": swapped_model_process_id }),
+    )
+    .await;
+
+    let portable_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 302,
+            "agent_tool_id": 104,
+            "name": "portable-template-settings"
+        }),
+    )
+    .await;
+    assert_eq!(
+        portable_spawn["resolved"],
+        json!({
+            "agent_tool_id": 104,
+            "agent_tool_name": "Portable Codex agent",
+            "model": "template-model",
+            "effort": "high",
+            "template_args_skipped": ["--review"]
+        })
+    );
+    let portable_process_id = portable_spawn["process_id"].as_i64().unwrap();
+    let portable_command = registry
+        .lock()
+        .await
+        .get_status(portable_process_id)?
+        .process
+        .command
+        .unwrap();
+    assert!(portable_command.contains("--model template-model"));
+    assert!(portable_command.contains("model_reasoning_effort"));
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": portable_process_id }),
+    )
+    .await;
+
+    let unsupported_spawn = call(
+        &parent,
+        "spawn_agent",
+        json!({
+            "project_id": 7,
+            "agent_template_id": 302,
+            "agent_tool_id": 105,
+            "name": "unsupported-template-settings"
+        }),
+    )
+    .await;
+    assert_eq!(
+        unsupported_spawn["resolved"],
+        json!({
+            "agent_tool_id": 105,
+            "agent_tool_name": "Custom agent",
+            "model": "agent default",
+            "effort": "agent default",
+            "template_args_skipped": [
+                "--model",
+                "template-model",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+                "--review"
+            ]
+        })
+    );
+    let unsupported_process_id = unsupported_spawn["process_id"].as_i64().unwrap();
+    call(
+        &parent,
+        "close_process",
+        json!({ "project_id": 7, "process_id": unsupported_process_id }),
     )
     .await;
 

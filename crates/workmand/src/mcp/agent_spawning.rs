@@ -122,8 +122,8 @@ struct SpawnAgentArgs {
     /// Optional project ID; an identified agent may name only its owning project.
     #[serde(default)]
     project_id: Option<ProjectId>,
-    /// Agent-tool registry ID. Required for the default plain-agent path. With a template, this
-    /// swaps its default agent: the template prompt stays, but template launch args are skipped.
+    /// Agent-tool registry ID. Required unless agent_template_id is set; with a template it
+    /// overrides the template's agent while carrying supported model and effort settings.
     #[serde(default)]
     agent_tool_id: Option<AgentToolId>,
     /// Numeric template ID from list_agent_templates. Use a template only when the user names one
@@ -133,11 +133,11 @@ struct SpawnAgentArgs {
     /// Optional per-launch process name, unique within the project.
     #[serde(default)]
     name: Option<String>,
-    /// Optional model override. Prefer this to putting --model in extra_args. Supported tool_type
-    /// values and aliases are codex, claude/claude_code, kimi/kimi_code, gemini/gemini_cli,
-    /// grok/grok_cli/grok_build, and opencode/open_code. Workman replaces long and short model
-    /// flags in the registered command, template args, and caller args; other tool types return an
-    /// error with recovery guidance.
+    /// Optional per-launch model override. Omit it to use the template or agent default. Supported
+    /// tool_type values and aliases are codex, claude/claude_code, kimi/kimi_code,
+    /// gemini/gemini_cli, grok/grok_cli/grok_build, and opencode/open_code. Workman replaces long
+    /// and short model flags in the registered command, template args, and caller args; other tool
+    /// types return an error with recovery guidance.
     #[serde(default)]
     model: Option<String>,
     /// Raw, safely shell-quoted flags appended to the registered agent command. Avoid using this
@@ -204,6 +204,8 @@ pub(crate) struct SpawnResult {
     deferred_initial_prompt: Option<String>,
     deferred_attachments: Vec<String>,
     notify_spawner_on_idle: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedAgentLaunch>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,6 +235,16 @@ struct ResolvedAgentSpawn {
     extra_args: Vec<String>,
     model: Option<String>,
     initial_prompt: Option<String>,
+    launch: ResolvedAgentLaunch,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedAgentLaunch {
+    agent_tool_id: AgentToolId,
+    agent_tool_name: String,
+    model: String,
+    effort: String,
+    template_args_skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,9 +260,17 @@ struct AgentTemplateSummary {
     id: AgentTemplateId,
     name: String,
     default_agent: AgentTemplateDefaultAgent,
-    model: Option<String>,
+    launch: AgentTemplateLaunch,
     prompt_preview: String,
     extra_args: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTemplateLaunch {
+    agent_tool_id: AgentToolId,
+    agent_tool_name: String,
+    model: String,
+    effort: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,6 +296,27 @@ struct ModelFlag {
     short: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EffortDialect {
+    Flag,
+    CodexConfig,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct SplitLaunchArgs {
+    model: Option<String>,
+    effort: Option<String>,
+    classified: Vec<ClassifiedLaunchArg>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ClassifiedLaunchArg {
+    Model(Vec<String>),
+    Effort(Vec<String>),
+    Extra(String),
+}
+
+#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 enum DetectedModel {
     Absent,
@@ -345,6 +386,14 @@ impl McpLaunchAdapter {
             Self::Unsupported => None,
         }
     }
+
+    const fn effort_dialect(self) -> Option<EffortDialect> {
+        match self {
+            Self::Claude => Some(EffortDialect::Flag),
+            Self::Codex => Some(EffortDialect::CodexConfig),
+            Self::Gemini | Self::OpenCode | Self::Grok | Self::Kimi | Self::Unsupported => None,
+        }
+    }
 }
 
 #[tool_router(router = agent_spawning_tool_router, vis = "pub(crate)")]
@@ -361,7 +410,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent { agent_tool_id, name, tool_type, enabled }, model, prompt_preview, extra_args }] } without full prompts; a trailing … marks a truncated preview."
+        description = "List compact reusable agent-template choices for the active workspace profile. Templates are optional: use one only when the user names one or explicitly asks for one; otherwise spawn a plain agent. Pass the selected id as spawn_agent.agent_template_id. Returns { agent_templates: [{ id, name, default_agent { agent_tool_id, name, tool_type, enabled }, launch { agent_tool_id, agent_tool_name, model, effort }, prompt_preview, extra_args }] } without full prompts; model and effort use \"agent default\" when unset, and a trailing … marks a truncated preview."
     )]
     async fn list_agent_templates(&self) -> CallToolResult {
         let registry = self.registry.lock().await;
@@ -583,7 +632,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names one or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. Set notify_spawner_on_idle=true for prospective, coalesced, paste-safe turns to this direct agent spawner when the child finishes work after this spawner's submitted input, needs input, exits, or crashes; the opt-in survives child restart, generic adapters cap Finished once per child input while busy-detecting adapters may report a later real end after fresh busy evidence, a child parked Waiting on its own active timer is not finished, delivery waits behind human drafts (positive drafts indefinitely, unknown composers for 120 seconds after human input), and no idle timer is needed unless a deadline matters. An explicit pending idle timer wins only for Finished when it is active, unpaused, owned by the spawner, and watches that child, even when it delivers elsewhere. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Template: set agent_template_id only; the template supplies its agent tool, model, effort, launch args and prompt, and initial_prompt is appended. Pass model or agent_tool_id only to override. Use agent_template_id only when the user names a template or explicitly asks for one. A tool override carries supported template model and effort settings, keeps the template prompt, skips tool-specific template args, and reports skipped args in resolved.template_args_skipped. Set notify_spawner_on_idle=true for prospective, coalesced, paste-safe turns to this direct agent spawner when the child finishes work after this spawner's submitted input, needs input, exits, or crashes; the opt-in survives child restart, generic adapters cap Finished once per child input while busy-detecting adapters may report a later real end after fresh busy evidence, a child parked Waiting on its own active timer is not finished, delivery waits behind human drafts (positive drafts indefinitely, unknown composers for 120 seconds after human input), and no idle timer is needed unless a deadline matters. An explicit pending idle timer wins only for Finished when it is active, unpaused, owned by the spawner, and watches that child, even when it delivers elsewhere. model is an optional per-launch override; omit it to use the template or agent default, and reserve extra_args for other raw flags."
     )]
     async fn spawn_agent(
         &self,
@@ -661,18 +710,7 @@ fn load_agent_template_summaries(
         .into_iter()
         .filter_map(|template| {
             let tool = tools.get(&template.agent_tool_id)?;
-            let model = mcp_launch_adapter(&tool.tool_type)
-                .model_flag()
-                .and_then(|flag| {
-                    let detected = match detected_model(&template.extra_args, flag) {
-                        DetectedModel::Absent => detected_model_from_command(&tool.command, flag),
-                        detected => detected,
-                    };
-                    match detected {
-                        DetectedModel::Absent => None,
-                        DetectedModel::Present(model) => model,
-                    }
-                });
+            let launch_options = configured_launch_options(tool, &template.extra_args);
             Some(AgentTemplateSummary {
                 id: template.id,
                 name: template.name,
@@ -682,7 +720,12 @@ fn load_agent_template_summaries(
                     tool_type: tool.tool_type.clone(),
                     enabled: tool.enabled,
                 },
-                model,
+                launch: AgentTemplateLaunch {
+                    agent_tool_id: tool.id,
+                    agent_tool_name: tool.name.clone(),
+                    model: launch_value_label(launch_options.model),
+                    effort: launch_value_label(launch_options.effort),
+                },
                 prompt_preview: prompt_preview(&template.prompt),
                 extra_args: template.extra_args,
             })
@@ -1210,6 +1253,7 @@ pub(crate) async fn spawn_registered_agent(
             );
         }
     }
+    result.resolved = Some(resolved.launch);
     Ok(result)
 }
 
@@ -1294,12 +1338,23 @@ fn resolve_agent_spawn(
             "agent_tool_id is required when no agent_template_id is provided".to_owned()
         })?;
         let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
+        let extra_args =
+            apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?;
+        let command_model_override = split_launch_args(&extra_args, &tool.tool_type).model;
+        let launch_options = configured_launch_options(&tool, &extra_args);
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
             agent_tool_type: tool.tool_type.clone(),
-            extra_args: apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?,
-            model: requested_model,
+            extra_args,
+            model: command_model_override,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
+            launch: ResolvedAgentLaunch {
+                agent_tool_id,
+                agent_tool_name: tool.name,
+                model: launch_value_label(launch_options.model),
+                effort: launch_value_label(launch_options.effort),
+                template_args_skipped: Vec::new(),
+            },
         });
     };
     let template = registry
@@ -1312,19 +1367,237 @@ fn resolve_agent_spawn(
     let agent_tool_id = requested_agent_tool_id.unwrap_or(template.agent_tool_id);
     let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
     let uses_template_launch_settings = agent_tool_id == template.agent_tool_id;
-    let mut extra_args = if uses_template_launch_settings {
-        template.extra_args
+    let (mut extra_args, template_args_skipped) = if uses_template_launch_settings {
+        (template.extra_args, Vec::new())
     } else {
-        Vec::new()
+        let template_tool = load_agent_tool(registry, template.agent_tool_id)?;
+        portable_template_args(&template.extra_args, &template_tool, &tool)
     };
     extra_args.extend(caller_extra_args);
+    let extra_args = apply_model_override(&tool, extra_args, requested_model.as_deref())?;
+    let command_model_override = split_launch_args(&extra_args, &tool.tool_type).model;
+    let launch_options = configured_launch_options(&tool, &extra_args);
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
         agent_tool_type: tool.tool_type.clone(),
-        extra_args: apply_model_override(&tool, extra_args, requested_model.as_deref())?,
-        model: requested_model,
+        extra_args,
+        model: command_model_override,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
+        launch: ResolvedAgentLaunch {
+            agent_tool_id,
+            agent_tool_name: tool.name,
+            model: launch_value_label(launch_options.model),
+            effort: launch_value_label(launch_options.effort),
+            template_args_skipped,
+        },
     })
+}
+
+fn portable_template_args(
+    template_args: &[String],
+    template_tool: &AgentTool,
+    target_tool: &AgentTool,
+) -> (Vec<String>, Vec<String>) {
+    let parsed = split_launch_args(template_args, &template_tool.tool_type);
+    let configured = configured_launch_options(template_tool, template_args);
+    let target_adapter = mcp_launch_adapter(&target_tool.tool_type);
+    let mut carried = Vec::new();
+    let mut skipped = Vec::new();
+
+    for argument in parsed.classified {
+        match argument {
+            ClassifiedLaunchArg::Model(arguments) => {
+                if target_adapter.model_flag().is_none() {
+                    skipped.extend(arguments);
+                }
+            }
+            ClassifiedLaunchArg::Effort(arguments) => {
+                if target_adapter.effort_dialect().is_none() {
+                    skipped.extend(arguments);
+                }
+            }
+            ClassifiedLaunchArg::Extra(argument) => skipped.push(argument),
+        }
+    }
+    if let (Some(flag), Some(model)) = (target_adapter.model_flag(), configured.model) {
+        carried.push(flag.long.to_owned());
+        carried.push(model);
+    }
+    if let (Some(dialect), Some(effort)) = (target_adapter.effort_dialect(), configured.effort) {
+        append_effort(&mut carried, dialect, effort);
+    }
+    (carried, skipped)
+}
+
+fn configured_launch_options(tool: &AgentTool, extra_args: &[String]) -> SplitLaunchArgs {
+    let configured = split_launch_args(extra_args, &tool.tool_type);
+    let command = shell_word_spans(&tool.command)
+        .ok()
+        .filter(|words| !words.iter().any(|word| word.shell_operator))
+        .map(|words| {
+            split_launch_args(
+                &words.into_iter().map(|word| word.value).collect::<Vec<_>>(),
+                &tool.tool_type,
+            )
+        })
+        .unwrap_or_default();
+    SplitLaunchArgs {
+        model: configured.model.or(command.model),
+        effort: configured.effort.or(command.effort),
+        classified: configured.classified,
+    }
+}
+
+fn split_launch_args(arguments: &[String], tool_type: &str) -> SplitLaunchArgs {
+    let adapter = mcp_launch_adapter(tool_type);
+    let model_flag = adapter.model_flag();
+    let effort_dialect = adapter.effort_dialect();
+    let mut split = SplitLaunchArgs::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--" {
+            split.classified.extend(
+                arguments[index..]
+                    .iter()
+                    .cloned()
+                    .map(ClassifiedLaunchArg::Extra),
+            );
+            break;
+        }
+        if let Some(flag) = model_flag {
+            if is_separate_model_flag(argument, flag)
+                && let Some(model) = arguments.get(index + 1).and_then(|value| nonempty(value))
+            {
+                split.model = Some(model);
+                split.classified.push(ClassifiedLaunchArg::Model(vec![
+                    argument.clone(),
+                    arguments[index + 1].clone(),
+                ]));
+                index += 2;
+                continue;
+            }
+            if is_attached_model_flag(argument, flag)
+                && let Some(model) = attached_model_value(argument, flag).and_then(nonempty)
+            {
+                split.model = Some(model);
+                split
+                    .classified
+                    .push(ClassifiedLaunchArg::Model(vec![argument.clone()]));
+                index += 1;
+                continue;
+            }
+        }
+        match effort_dialect {
+            Some(EffortDialect::Flag) if argument == "--effort" => {
+                if let Some(effort) = arguments
+                    .get(index + 1)
+                    .and_then(|value| effort_value(value))
+                {
+                    split.effort = Some(effort);
+                    split.classified.push(ClassifiedLaunchArg::Effort(vec![
+                        argument.clone(),
+                        arguments[index + 1].clone(),
+                    ]));
+                    index += 2;
+                    continue;
+                }
+            }
+            Some(EffortDialect::Flag) if argument.starts_with("--effort=") => {
+                if let Some(effort) = argument.strip_prefix("--effort=").and_then(effort_value) {
+                    split.effort = Some(effort);
+                    split
+                        .classified
+                        .push(ClassifiedLaunchArg::Effort(vec![argument.clone()]));
+                    index += 1;
+                    continue;
+                }
+            }
+            Some(EffortDialect::CodexConfig) if argument == "-c" || argument == "--config" => {
+                if let Some(effort) = arguments
+                    .get(index + 1)
+                    .and_then(|value| codex_configured_effort(value))
+                {
+                    split.effort = Some(effort);
+                    split.classified.push(ClassifiedLaunchArg::Effort(vec![
+                        argument.clone(),
+                        arguments[index + 1].clone(),
+                    ]));
+                    index += 2;
+                    continue;
+                }
+            }
+            Some(EffortDialect::CodexConfig) if argument.starts_with("--config=") => {
+                if let Some(effort) = argument
+                    .strip_prefix("--config=")
+                    .and_then(codex_configured_effort)
+                {
+                    split.effort = Some(effort);
+                    split
+                        .classified
+                        .push(ClassifiedLaunchArg::Effort(vec![argument.clone()]));
+                    index += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        split
+            .classified
+            .push(ClassifiedLaunchArg::Extra(argument.clone()));
+        index += 1;
+    }
+    split
+}
+
+fn attached_model_value(argument: &str, flag: ModelFlag) -> Option<&str> {
+    argument
+        .strip_prefix(flag.long)
+        .and_then(|suffix| suffix.strip_prefix('='))
+        .or_else(|| {
+            flag.short
+                .and_then(|short| argument.strip_prefix(short))
+                .filter(|suffix| !suffix.is_empty())
+                .map(|suffix| suffix.strip_prefix('=').unwrap_or(suffix))
+        })
+}
+
+fn codex_configured_effort(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (key, effort) = value.split_once('=')?;
+    if key.trim() != "model_reasoning_effort" {
+        return None;
+    }
+    effort_value(effort.trim().trim_matches(['\'', '"']))
+}
+
+fn effort_value(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    ["low", "medium", "high", "xhigh", "max"]
+        .contains(&value.as_str())
+        .then_some(value)
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn append_effort(arguments: &mut Vec<String>, dialect: EffortDialect, effort: String) {
+    match dialect {
+        EffortDialect::Flag => {
+            arguments.push("--effort".to_owned());
+            arguments.push(effort);
+        }
+        EffortDialect::CodexConfig => {
+            arguments.push("-c".to_owned());
+            arguments.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
+    }
+}
+
+fn launch_value_label(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "agent default".to_owned())
 }
 
 fn validate_model(model: Option<&str>) -> Result<(), String> {
@@ -1413,6 +1686,7 @@ fn is_attached_model_flag(argument: &str, flag: ModelFlag) -> bool {
         })
 }
 
+#[cfg(test)]
 fn detected_model(arguments: &[String], flag: ModelFlag) -> DetectedModel {
     let mut detected = DetectedModel::Absent;
     let mut index = 0;
@@ -2211,6 +2485,7 @@ fn spawn(
         deferred_initial_prompt: None,
         deferred_attachments: Vec::new(),
         notify_spawner_on_idle,
+        resolved: None,
     })
 }
 
@@ -2412,6 +2687,7 @@ fn strip_model_flags_from_command(command: &str, flag: ModelFlag) -> Result<Stri
     Ok(filtered)
 }
 
+#[cfg(test)]
 fn detected_model_from_command(command: &str, flag: ModelFlag) -> DetectedModel {
     let Ok(words) = shell_word_spans(command) else {
         return DetectedModel::Absent;
@@ -3493,6 +3769,9 @@ mod tests {
         .unwrap();
         assert_eq!(default.agent_tool_id, 91);
         assert_eq!(default.extra_args, ["--template", "model-a", "--caller"]);
+        assert_eq!(default.launch.model, "agent default");
+        assert_eq!(default.launch.effort, "agent default");
+        assert!(default.launch.template_args_skipped.is_empty());
         assert_eq!(
             default.initial_prompt.as_deref(),
             Some("Review carefully.\n\nCheck this.")
@@ -3510,6 +3789,10 @@ mod tests {
         assert_eq!(overridden.agent_tool_id, 92);
         assert_eq!(overridden.extra_args, ["--caller"]);
         assert_eq!(
+            overridden.launch.template_args_skipped,
+            ["--template", "model-a"]
+        );
+        assert_eq!(
             overridden.initial_prompt.as_deref(),
             Some("Review carefully.\n\nCheck this.")
         );
@@ -3521,6 +3804,69 @@ mod tests {
         assert_eq!(
             resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap_err(),
             "agent tool 93 (Disabled agent) is disabled"
+        );
+    }
+
+    #[test]
+    fn template_agent_override_carries_portable_model_and_effort() {
+        let registry = ProcessRegistry::new_for_test(Store::open_in_memory().unwrap()).unwrap();
+        for (id, name, tool_type) in [
+            (91, "Claude template agent", "claude"),
+            (92, "Codex override", "codex"),
+            (93, "Custom override", "custom"),
+        ] {
+            registry
+                .store()
+                .put_agent_tool(&AgentTool {
+                    id,
+                    name: name.into(),
+                    command: tool_type.into(),
+                    tool_type: tool_type.into(),
+                    enabled: true,
+                    source: AgentToolSource::Local,
+                    resume_args: None,
+                    continue_args: None,
+                })
+                .unwrap();
+        }
+        registry
+            .store()
+            .put_agent_template(&AgentTemplate {
+                id: 44,
+                profile_id: 1,
+                name: "Reviewer".into(),
+                agent_tool_id: 91,
+                extra_args: vec![
+                    "--review".into(),
+                    "--model=fable".into(),
+                    "--effort".into(),
+                    "high".into(),
+                ],
+                prompt: "Review carefully.".into(),
+                sort_order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+
+        let codex = resolve_agent_spawn(&registry, Some(92), Some(44), vec![], None, None).unwrap();
+        assert_eq!(
+            codex.extra_args,
+            ["--model", "fable", "-c", "model_reasoning_effort=\"high\""]
+        );
+        assert_eq!(codex.launch.agent_tool_name, "Codex override");
+        assert_eq!(codex.launch.model, "fable");
+        assert_eq!(codex.launch.effort, "high");
+        assert_eq!(codex.launch.template_args_skipped, ["--review"]);
+
+        let custom =
+            resolve_agent_spawn(&registry, Some(93), Some(44), vec![], None, None).unwrap();
+        assert!(custom.extra_args.is_empty());
+        assert_eq!(custom.launch.model, "agent default");
+        assert_eq!(custom.launch.effort, "agent default");
+        assert_eq!(
+            custom.launch.template_args_skipped,
+            ["--review", "--model=fable", "--effort", "high"]
         );
     }
 
@@ -3732,7 +4078,8 @@ mod tests {
             ["--review", "--model", "launch-override"]
         );
         let summary = load_agent_template_summaries(&registry).unwrap().remove(0);
-        assert_eq!(summary.model.as_deref(), Some("legacy-model"));
+        assert_eq!(summary.launch.model, "legacy-model");
+        assert_eq!(summary.launch.effort, "agent default");
 
         registry
             .store()
@@ -3748,8 +4095,32 @@ mod tests {
                 updated_at: 0,
             })
             .unwrap();
+        registry
+            .store()
+            .put_agent_tool(&AgentTool {
+                id: 999,
+                name: "OpenCode override".into(),
+                command: "opencode".into(),
+                tool_type: "opencode".into(),
+                enabled: true,
+                source: AgentToolSource::Local,
+                resume_args: None,
+                continue_args: None,
+            })
+            .unwrap();
+        let command_default_override =
+            resolve_agent_spawn(&registry, Some(999), Some(45), vec![], None, None).unwrap();
+        assert_eq!(
+            command_default_override.extra_args,
+            ["--model", "command-default"]
+        );
+        assert_eq!(
+            command_default_override.launch.template_args_skipped,
+            ["--review"]
+        );
         let summaries = load_agent_template_summaries(&registry).unwrap();
-        assert_eq!(summaries[1].model.as_deref(), Some("command-default"));
+        assert_eq!(summaries[1].launch.model, "command-default");
+        assert_eq!(summaries[1].launch.effort, "agent default");
         assert!(summaries[1].default_agent.enabled);
         assert_eq!(summaries[1].prompt_preview.chars().count(), 120);
         assert!(summaries[1].prompt_preview.ends_with('…'));
