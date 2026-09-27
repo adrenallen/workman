@@ -233,7 +233,7 @@ struct ResolvedAgentSpawn {
     agent_tool_id: AgentToolId,
     agent_tool_type: String,
     extra_args: Vec<String>,
-    model: Option<String>,
+    has_model_arg: bool,
     initial_prompt: Option<String>,
     launch: ResolvedAgentLaunch,
 }
@@ -1161,7 +1161,7 @@ pub(crate) async fn spawn_registered_agent(
         resolved.agent_tool_id,
         name,
         resolved.extra_args,
-        resolved.model,
+        resolved.has_model_arg,
         mcp_url,
         auto_acknowledge_dialogs,
         spawned_by_process_id,
@@ -1333,12 +1333,15 @@ fn resolve_agent_spawn(
         let tool = load_enabled_agent_tool(registry, agent_tool_id)?;
         let extra_args =
             apply_model_override(&tool, caller_extra_args, requested_model.as_deref())?;
+        let has_model_arg = split_launch_args(&extra_args, &tool.tool_type)
+            .model
+            .is_some();
         let launch_options = configured_launch_options(&tool, &extra_args);
         return Ok(ResolvedAgentSpawn {
             agent_tool_id,
             agent_tool_type: tool.tool_type.clone(),
             extra_args,
-            model: requested_model,
+            has_model_arg,
             initial_prompt: compose_initial_prompt(None, caller_prompt.as_deref()),
             launch: ResolvedAgentLaunch {
                 agent_tool_id,
@@ -1367,12 +1370,15 @@ fn resolve_agent_spawn(
     };
     extra_args.extend(caller_extra_args);
     let extra_args = apply_model_override(&tool, extra_args, requested_model.as_deref())?;
+    let has_model_arg = split_launch_args(&extra_args, &tool.tool_type)
+        .model
+        .is_some();
     let launch_options = configured_launch_options(&tool, &extra_args);
     Ok(ResolvedAgentSpawn {
         agent_tool_id,
         agent_tool_type: tool.tool_type.clone(),
         extra_args,
-        model: requested_model,
+        has_model_arg,
         initial_prompt: compose_initial_prompt(Some(&template.prompt), caller_prompt.as_deref()),
         launch: ResolvedAgentLaunch {
             agent_tool_id,
@@ -1960,7 +1966,7 @@ async fn spawn_registered_agent_for(
     agent_tool_id: AgentToolId,
     name: Option<String>,
     extra_args: Vec<String>,
-    model: Option<String>,
+    has_model_arg: bool,
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
@@ -1986,10 +1992,10 @@ async fn spawn_registered_agent_for(
     let prepared = tokio::task::spawn_blocking(move || {
         let resolved_environment = user_environment.resolve();
         let source_home = agent_source_home(&resolved_environment, &tool.tool_type);
-        let command = if model.is_some() {
+        let command = if has_model_arg {
             let flag = mcp_launch_adapter(&tool.tool_type)
                 .model_flag()
-                .expect("model support was checked while resolving the spawn");
+                .expect("model argument support was checked while resolving the spawn");
             strip_model_flags_from_command(&tool.command, flag)?
         } else {
             tool.command.clone()
@@ -2208,7 +2214,7 @@ pub(crate) async fn deep_check_registered_agent(
         agent_tool_id,
         None,
         extra_args,
-        None,
+        false,
         mcp_url,
         true,
         spawned_by_process_id,
@@ -2602,10 +2608,7 @@ fn shell_word_spans(command: &str) -> Result<Vec<ShellWordSpan>, String> {
 fn strip_model_flags_from_command(command: &str, flag: ModelFlag) -> Result<String, String> {
     let words = shell_word_spans(command)?;
     if words.iter().any(|word| word.shell_operator) {
-        return Err(
-            "model overrides require a direct registered agent command without shell control operators"
-                .to_owned(),
-        );
+        return Ok(command.to_owned());
     }
     let mut removed = vec![false; words.len()];
     let mut index = 0;
@@ -4064,10 +4067,9 @@ mod tests {
                 .as_deref(),
             Some("provider/model with space")
         );
-        assert!(
-            strip_model_flags_from_command("opencode --model old && echo done", flag)
-                .unwrap_err()
-                .contains("direct registered agent command")
+        assert_eq!(
+            strip_model_flags_from_command("opencode --model old && echo done", flag).unwrap(),
+            "opencode --model old && echo done"
         );
 
         let tool = AgentTool {
