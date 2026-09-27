@@ -42,6 +42,7 @@ const KIMI_INITIAL_PROMPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const KIMI_INITIAL_PROMPT_MAX_ATTEMPTS: usize = 2;
 
 use crate::agent_sessions::SessionCapture;
+use crate::completion_ledger::{CompletionLedger, CompletionLedgerError};
 use crate::config::{
     TrustFieldChange, TrustFields, TrustReview, is_process_trusted, trust_hash_for_process,
     validate_process_working_dir,
@@ -70,6 +71,7 @@ pub const WORKMAN_OUTPUT_CAPACITY_ENV: &str = "WORKMAN_OUTPUT_CAPACITY_BYTES";
 #[derive(Debug)]
 pub enum RegistryError {
     Store(StoreError),
+    CompletionLedger(CompletionLedgerError),
     NotFound(ProcessId),
     AlreadyExists(ProcessId),
     AlreadyRunning(ProcessId),
@@ -94,12 +96,18 @@ pub enum RegistryError {
     AttachmentStorage {
         message: String,
     },
+    NotProcessSpawner {
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+    },
+    SpawnerNotificationRequiresAgent(ProcessId),
+    SpawnerNotificationRequesterRequiresAgent(ProcessId),
 }
 
 impl RegistryError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Store(_) => "store_error",
+            Self::Store(_) | Self::CompletionLedger(_) => "store_error",
             Self::NotFound(_) => "process_not_found",
             Self::AlreadyExists(_) => "process_already_exists",
             Self::AlreadyRunning(_) => "process_already_running",
@@ -113,6 +121,11 @@ impl RegistryError {
             Self::Pty { .. } => "pty_error",
             Self::OutputPersistence { .. } => "output_persistence_error",
             Self::AttachmentStorage { .. } => "attachment_storage_error",
+            Self::NotProcessSpawner { .. } => "not_process_spawner",
+            Self::SpawnerNotificationRequiresAgent(_) => "spawner_notification_requires_agent",
+            Self::SpawnerNotificationRequesterRequiresAgent(_) => {
+                "spawner_notification_requires_agent"
+            }
         }
     }
 }
@@ -121,6 +134,7 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
+            Self::CompletionLedger(error) => error.fmt(formatter),
             Self::NotFound(id) => write!(formatter, "process {id} was not found"),
             Self::AlreadyExists(id) => write!(formatter, "process {id} already exists"),
             Self::AlreadyRunning(id) => write!(formatter, "process {id} is already running"),
@@ -162,6 +176,21 @@ impl fmt::Display for RegistryError {
             Self::AttachmentStorage { message } => {
                 write!(formatter, "agent attachment storage failed: {message}")
             }
+            Self::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            } => write!(
+                formatter,
+                "process {requester_process_id} did not spawn process {child_process_id}"
+            ),
+            Self::SpawnerNotificationRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only spawned agents support notify_spawner_on_idle"
+            ),
+            Self::SpawnerNotificationRequesterRequiresAgent(process_id) => write!(
+                formatter,
+                "process {process_id} is not an agent; only an agent spawner may enable notify_spawner_on_idle"
+            ),
         }
     }
 }
@@ -170,6 +199,7 @@ impl Error for RegistryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::CompletionLedger(error) => Some(error),
             _ => None,
         }
     }
@@ -178,6 +208,12 @@ impl Error for RegistryError {
 impl From<StoreError> for RegistryError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
+    }
+}
+
+impl From<CompletionLedgerError> for RegistryError {
+    fn from(error: CompletionLedgerError) -> Self {
+        Self::CompletionLedger(error)
     }
 }
 
@@ -235,7 +271,18 @@ impl ProcessInputRouter {
         if !*active {
             return Err(RegistryError::NotRunning(process_id));
         }
-        let submits_prompt = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+        let submits_prompt = if user_initiated {
+            target.input.write_user_input(data)
+        } else {
+            target
+                .input
+                .write_all(data)
+                .map(|()| data.iter().any(|byte| matches!(byte, b'\r' | b'\n')))
+        }
+        .map_err(|error| RegistryError::Pty {
+            process_id,
+            message: error.to_string(),
+        })?;
         if !submits_prompt
             && matches!(
                 target.attention.snapshot().state,
@@ -244,15 +291,6 @@ impl ProcessInputRouter {
         {
             target.attention.suppress_ui_activity();
         }
-        (if user_initiated {
-            target.input.write_user_input(data)
-        } else {
-            target.input.write_all(data)
-        })
-        .map_err(|error| RegistryError::Pty {
-            process_id,
-            message: error.to_string(),
-        })?;
         if submits_prompt {
             target.attention.observe_input();
         }
@@ -375,6 +413,45 @@ impl ProcessInputRouter {
             .typing_pause
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn automatic_submission_held(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.automatic_submission_held())
+    }
+
+    /// Hold unsolicited automation while a human has unsubmitted composer text.
+    pub(crate) fn has_unsent_human_draft(&self, process_id: ProcessId) -> RegistryResult<bool> {
+        Ok(self.target(process_id)?.input.has_unsent_human_draft())
+    }
+
+    pub(crate) fn set_notification_held_by_draft(
+        &self,
+        process_id: ProcessId,
+        held: bool,
+    ) -> RegistryResult<bool> {
+        Ok(self
+            .target(process_id)?
+            .input
+            .set_notification_held_by_draft(held))
+    }
+
+    pub(crate) fn notification_held_by_draft(&self, process_id: ProcessId) -> bool {
+        self.targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+            .is_some_and(|target| target.input.notification_held_by_draft())
+    }
+
+    pub(crate) fn clear_human_draft_activity(&self, process_id: ProcessId) {
+        if let Some(target) = self
+            .targets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&process_id)
+        {
+            target.input.clear_human_draft_activity();
+        }
     }
 
     pub(crate) fn set_typing_pause(&self, settings: crate::settings::TypingPauseSettings) {
@@ -513,6 +590,12 @@ pub struct ProcessStatusView {
     pub agent_state: AgentState,
     #[serde(default)]
     pub notify_on_idle: bool,
+    /// Opt-in child-to-spawner turn delivery. Separate from the desktop one-shot idle alert.
+    #[serde(default)]
+    pub notify_spawner_on_idle: bool,
+    /// A child-notification turn is currently held behind this process's human draft.
+    #[serde(default)]
+    pub notification_held_by_draft: bool,
     /// Ephemeral lifecycle notices, including automatic dialog acknowledgments.
     pub events: Vec<ProcessEvent>,
     /// Conversation ID passively discovered from the agent CLI's own session store.
@@ -529,6 +612,13 @@ pub struct ProcessEvent {
     pub at: i64,
     pub kind: String,
     pub message: String,
+}
+
+/// Read-only pending-timer relationships used by child notification delivery.
+#[derive(Default)]
+pub(crate) struct NotificationTimerContext {
+    pub(crate) owned_idle_watches: HashSet<(ProcessId, ProcessId)>,
+    pub(crate) waiting_processes: HashSet<ProcessId>,
 }
 
 /// Owns persisted process records and live PTY handles.
@@ -891,6 +981,7 @@ impl ProcessRegistry {
 
     /// Attach attention state to an already-loaded process record.
     pub fn status_view(&self, process: Process) -> RegistryResult<ProcessStatusView> {
+        let observed_at = now_millis();
         let tool_type = self.tool_type_for(&process)?;
         let mut agent_state = self
             .outputs
@@ -905,6 +996,15 @@ impl ProcessRegistry {
                 now_millis(),
             )?;
         if process.kind == ProcessKind::Agent {
+            let has_pending_prompts = self.has_pending_prompts(process.id);
+            CompletionLedger::new(&self.store).observe_process(
+                process.id,
+                agent_state.state,
+                agent_state.last_input_at,
+                agent_state.work_evidence_at(),
+                has_pending_prompts,
+                observed_at,
+            )?;
             let waiting_on = self.waiting_reasons(process.id)?;
             let watched = self.process_is_watched(process.id)?;
             agent_state.refine_waiting(waiting_on);
@@ -915,7 +1015,7 @@ impl ProcessRegistry {
                 watched || idle_watch,
                 agent_state.last_input_at.is_some(),
                 last_agent_activity_at,
-                now_millis(),
+                observed_at,
             )?;
             agent_state.refine_notifications(watched, notification.unread);
         }
@@ -934,6 +1034,8 @@ impl ProcessRegistry {
             .claimed_todos_for_process(process.id, now_millis())?;
         Ok(ProcessStatusView {
             notify_on_idle: idle_watch && !idle_alert_fired,
+            notify_spawner_on_idle: self.store.spawner_idle_notification_enabled(process.id)?,
+            notification_held_by_draft: self.input_router.notification_held_by_draft(process.id),
             process,
             agent_state,
             events,
@@ -958,6 +1060,56 @@ impl ProcessRegistry {
         self.status_invalidations.invalidate();
         self.arm_attention_deadline();
         self.status_view(process)
+    }
+
+    /// Toggle durable child-to-spawner notifications after proving direct lineage.
+    pub fn set_notify_spawner_on_idle(
+        &mut self,
+        requester_process_id: ProcessId,
+        child_process_id: ProcessId,
+        enabled: bool,
+    ) -> RegistryResult<ProcessStatusView> {
+        let child = self.get(child_process_id)?;
+        let requester = self.get(requester_process_id)?;
+        if child.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequiresAgent(
+                child_process_id,
+            ));
+        }
+        if requester.kind != ProcessKind::Agent {
+            return Err(RegistryError::SpawnerNotificationRequesterRequiresAgent(
+                requester_process_id,
+            ));
+        }
+        if child.spawned_by_process_id != Some(requester_process_id)
+            || child.project_id != requester.project_id
+        {
+            return Err(RegistryError::NotProcessSpawner {
+                requester_process_id,
+                child_process_id,
+            });
+        }
+        let mut baseline_completion_id = 0;
+        if enabled
+            && !self
+                .store
+                .spawner_idle_notification_enabled(child_process_id)?
+        {
+            // Establish a ledger baseline before the prospective arm boundary. An existing idle
+            // child must not report work that finished while this option was disabled.
+            let _ = self.status_view(child.clone())?;
+            baseline_completion_id = CompletionLedger::new(&self.store)
+                .latest_completion(child_process_id)?
+                .map_or(0, |completion| completion.id);
+        }
+        self.store.set_spawner_idle_notification(
+            child_process_id,
+            enabled,
+            now_millis(),
+            baseline_completion_id,
+        )?;
+        self.status_invalidations.invalidate();
+        self.status_view(child)
     }
 
     fn process_ready_for_idle_alert(
@@ -1083,6 +1235,59 @@ impl ProcessRegistry {
             });
         }
         Ok(reasons)
+    }
+
+    /// Read the pending-timer relationships needed by child-to-spawner notification delivery.
+    ///
+    /// The first set contains `(owner process, watched process)` pairs for active, unpaused idle
+    /// timers. The second contains owner processes parked on their own active, unpaused timer;
+    /// being somebody else's delivery target is not parking. This is read-only.
+    pub(crate) fn notification_timer_context(&self) -> RegistryResult<NotificationTimerContext> {
+        let mut statement = self
+            .store
+            .connection()
+            .prepare(
+                "SELECT timer.kind,
+                        timer.watch_list,
+                        actor.process_id
+                 FROM timers AS timer
+                 LEFT JOIN actors AS actor ON actor.id = timer.owner_actor
+                 WHERE timer.fired = 0 AND timer.paused = 0",
+            )
+            .map_err(StoreError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, TimerKind>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<ProcessId>>(2)?,
+                ))
+            })
+            .map_err(StoreError::from)?;
+        let mut owned_idle_watches = HashSet::new();
+        let mut waiting_processes = HashSet::new();
+        for row in rows {
+            let (kind, watch_list, owner_process_id) = row.map_err(StoreError::from)?;
+            if let Some(owner_process_id) = owner_process_id {
+                waiting_processes.insert(owner_process_id);
+            }
+            if matches!(kind, TimerKind::IdleAny | TimerKind::IdleAll)
+                && let Some(owner_process_id) = owner_process_id
+            {
+                waiting_processes.insert(owner_process_id);
+                let watched: Vec<ProcessId> =
+                    serde_json::from_str(&watch_list).map_err(StoreError::from)?;
+                owned_idle_watches.extend(
+                    watched
+                        .into_iter()
+                        .map(|watched_process_id| (owner_process_id, watched_process_id)),
+                );
+            }
+        }
+        Ok(NotificationTimerContext {
+            owned_idle_watches,
+            waiting_processes,
+        })
     }
 
     fn process_is_watched(&self, process_id: ProcessId) -> RegistryResult<bool> {
@@ -2192,7 +2397,7 @@ impl ProcessRegistry {
         result
     }
 
-    fn refresh_exits(&mut self) -> RegistryResult<()> {
+    pub(crate) fn refresh_exits(&mut self) -> RegistryResult<()> {
         self.drain_submission_events();
         self.refresh_agent_session_ids(false)?;
         let process_ids = self.running.keys().copied().collect::<Vec<_>>();
@@ -3218,7 +3423,8 @@ mod tests {
                 }
                 let executable = fixture.home.path().join("long-agent");
                 std::fs::write(&executable, "#!/bin/sh\ntrap '' HUP TERM\nprintf '%s' $$ > \"$HOME/child-pid\"\nexec /bin/sleep 300\n").unwrap();
-                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
                 let store = Store::open_in_memory().unwrap();
                 store
                     .put_project(&Project {
@@ -3247,7 +3453,8 @@ mod tests {
                 registry.start(31).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let child_pid = loop {
-                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid")) {
+                    if let Ok(pid) = std::fs::read_to_string(fixture.home.path().join("child-pid"))
+                    {
                         if let Ok(pid) = pid.parse::<i32>() {
                             break pid;
                         }

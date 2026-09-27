@@ -31,7 +31,9 @@ use super::{
 };
 use crate::{
     ProcessRegistry,
+    completion_ledger::CompletionLedger,
     process_registry::{StagedAgentAttachments, stage_agent_attachments},
+    timers::now_millis,
 };
 
 const WORKMAN_ATTACHMENT_SOURCE_DIRECTORIES: &[&str] = &[
@@ -154,6 +156,12 @@ struct SpawnAgentArgs {
     /// seeds workspace trust only inside the disposable launch home so MCP is not filtered out.
     #[serde(default = "default_true")]
     auto_acknowledge_dialogs: bool,
+    /// Prospectively deliver one coalesced Workman turn to this direct agent spawner when the
+    /// child finishes work after this spawner's submitted input, needs input, exits, or crashes.
+    /// A child parked Waiting on its own timer is not finished. Delivery waits behind unsent human
+    /// drafts; it defaults to false and requires a process identity.
+    #[serde(default)]
+    notify_spawner_on_idle: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -195,6 +203,7 @@ pub(crate) struct SpawnResult {
     agent_instructions: Option<String>,
     deferred_initial_prompt: Option<String>,
     deferred_attachments: Vec<String>,
+    notify_spawner_on_idle: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -536,6 +545,7 @@ impl WorkmanMcp {
                         None,
                         BTreeMap::new(),
                         spawned_by_process_id,
+                        false,
                     )
                 })
             }
@@ -561,6 +571,7 @@ impl WorkmanMcp {
                     &self.mcp_url,
                     args.auto_acknowledge_dialogs,
                     spawned_by_process_id,
+                    false,
                 )
                 .await
             }
@@ -572,7 +583,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names a template or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. model is the preferred optional model override; extra_args is for other raw flags."
+        description = "Spawn a registered agent and return its identity preamble. Spawn a plain agent by default: set agent_tool_id and omit agent_template_id. Use agent_template_id from list_agent_templates only when the user names one or explicitly asks for one. With a template, its reusable prompt is prepended to initial_prompt in one submission. agent_tool_id swaps the agent while keeping the template prompt and skipping template launch args. Set notify_spawner_on_idle=true for prospective, coalesced, paste-safe turns to this direct agent spawner when the child finishes work after this spawner's submitted input, needs input, exits, or crashes; the opt-in survives child restart, Finished is capped once per child input, a child parked Waiting on its own active timer is not finished, delivery waits behind human drafts (positive drafts indefinitely, unknown composers for 120 seconds after human input), and no idle timer is needed unless a deadline matters. An explicit pending idle timer wins only for Finished when it is active, unpaused, owned by the spawner, and watches that child, even when it delivers elsewhere. model is the preferred optional model override; extra_args is for other raw flags."
     )]
     async fn spawn_agent(
         &self,
@@ -592,6 +603,12 @@ impl WorkmanMcp {
                 Err(error) => return failure("project_scope_error", error),
             }
         };
+        if args.notify_spawner_on_idle && spawned_by_process_id.is_none() {
+            return failure(
+                "process_identity_required",
+                "notify_spawner_on_idle requires an authenticated process identity",
+            );
+        }
         match spawn_registered_agent(
             self.registry.clone(),
             project,
@@ -607,6 +624,7 @@ impl WorkmanMcp {
             &self.mcp_url,
             args.auto_acknowledge_dialogs,
             spawned_by_process_id,
+            args.notify_spawner_on_idle,
         )
         .await
         {
@@ -1053,6 +1071,7 @@ pub(crate) async fn spawn_registered_agent(
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
 ) -> Result<SpawnResult, String> {
     validate_initial_prompt(initial_prompt.as_deref())?;
     let resolved = {
@@ -1110,6 +1129,7 @@ pub(crate) async fn spawn_registered_agent(
         mcp_url,
         auto_acknowledge_dialogs,
         spawned_by_process_id,
+        notify_spawner_on_idle,
         AgentLaunchPurpose::Normal,
         prompt_pending,
     )
@@ -1186,6 +1206,7 @@ pub(crate) async fn spawn_registered_agent(
                 prompt,
                 is_kimi_tool_type(&resolved.agent_tool_type),
                 pending_prompt.expect("scheduled initial prompt was reserved during spawn"),
+                spawned_by_process_id,
             );
         }
     }
@@ -1452,6 +1473,7 @@ fn schedule_initial_prompt(
     prompt: String,
     verify_kimi_submission: bool,
     pending_prompt: PendingPrompt,
+    owner_process_id: Option<ProcessId>,
 ) {
     tokio::spawn(async move {
         // Hold the reservation through readiness polling and verification. The
@@ -1532,6 +1554,18 @@ fn schedule_initial_prompt(
                             registry.submit_input(process_id, prompt.as_bytes())
                         }
                         .map_err(|error| error.to_string());
+                        if result.is_ok()
+                            && let Some(owner_process_id) = owner_process_id
+                            && let Err(error) = CompletionLedger::new(registry.store())
+                                .record_input(owner_process_id, process_id, now_millis())
+                        {
+                            // The initial prompt is already queued. Keep the successful
+                            // delivery result (and Kimi confirmation path) even if durable
+                            // owner attribution is temporarily unavailable.
+                            eprintln!(
+                                "process {process_id}: initial prompt ledger attribution failed: {error}"
+                            );
+                        }
                         match &result {
                             Ok(_) if verify_kimi_submission => {
                                 let _ = registry.record_process_event(
@@ -1696,6 +1730,7 @@ async fn spawn_registered_agent_for(
     mcp_url: &str,
     auto_acknowledge_dialogs: bool,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
     purpose: AgentLaunchPurpose,
     prompt_pending: bool,
 ) -> Result<(SpawnResult, Option<PendingPrompt>), String> {
@@ -1776,6 +1811,7 @@ async fn spawn_registered_agent_for(
             Some(tool_type.clone()),
             prepared.launch.env,
             spawned_by_process_id,
+            notify_spawner_on_idle,
         )
         .and_then(|result| {
             // Reserve under the lifecycle lock, before another task can observe
@@ -1942,6 +1978,7 @@ pub(crate) async fn deep_check_registered_agent(
         mcp_url,
         true,
         spawned_by_process_id,
+        false,
         AgentLaunchPurpose::DeepCheck,
         submit_prompt,
     )
@@ -2111,6 +2148,7 @@ fn spawn(
     agent_tool_type: Option<String>,
     env: BTreeMap<String, String>,
     spawned_by_process_id: Option<ProcessId>,
+    notify_spawner_on_idle: bool,
 ) -> Result<SpawnResult, String> {
     let created = registry
         .create(Process {
@@ -2136,6 +2174,16 @@ fn spawn(
             sort_order: 0,
         })
         .map_err(|error| error.to_string())?;
+    if notify_spawner_on_idle {
+        let Some(spawner_id) = spawned_by_process_id else {
+            let _ = registry.close(created.id);
+            return Err("notify_spawner_on_idle requires an authenticated spawner process".into());
+        };
+        if let Err(error) = registry.set_notify_spawner_on_idle(spawner_id, created.id, true) {
+            let _ = registry.close(created.id);
+            return Err(error.to_string());
+        }
+    }
     let running = match registry.start(created.id) {
         Ok(process) => process,
         Err(error) => {
@@ -2162,6 +2210,7 @@ fn spawn(
         agent_instructions,
         deferred_initial_prompt: None,
         deferred_attachments: Vec::new(),
+        notify_spawner_on_idle,
     })
 }
 
@@ -3123,6 +3172,7 @@ mod tests {
             "http://127.0.0.1:1/mcp",
             false,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3268,6 +3318,7 @@ mod tests {
             "http://127.0.0.1:1/mcp",
             false,
             None,
+            false,
         )
         .await
         .unwrap();

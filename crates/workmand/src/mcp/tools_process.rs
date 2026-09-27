@@ -14,7 +14,9 @@ use serde_json::json;
 use workman_core::{Actor, Process, ProcessId, ProjectId};
 
 use super::{WorkmanMcp, failure, scoped_project, success};
-use crate::{ProcessRegistry, RegistryError};
+use crate::{
+    ProcessRegistry, RegistryError, completion_ledger::CompletionLedger, timers::now_millis,
+};
 
 const DEFAULT_OUTPUT_LINES: usize = 50;
 const MAX_OUTPUT_LINES: usize = 200;
@@ -160,6 +162,21 @@ struct SendInputArgs {
     wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SetNotifySpawnerOnIdleArgs {
+    /// Child process ID. Omit with process_name.
+    #[serde(default)]
+    process_id: Option<ProcessId>,
+    /// Exact child process name. Omit with process_id.
+    #[serde(default)]
+    process_name: Option<String>,
+    /// Optional project ID; an identified agent may name only its owning project.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    /// Prospectively deliver coalesced idle/attention turns to this child's direct agent spawner.
+    enabled: bool,
+}
+
 #[tool_router(router = process_tool_router, vis = "pub(crate)")]
 impl WorkmanMcp {
     #[tool(
@@ -193,6 +210,36 @@ impl WorkmanMcp {
             Err(error) => return target_failure(error),
         };
         match registry.get_status(process.id) {
+            Ok(status) => success(status),
+            Err(error) => registry_failure(error),
+        }
+    }
+
+    #[tool(
+        description = "Prospectively enable or disable durable, coalesced child completion, needs-input, exit, and crash turns to the authenticated direct spawner, which must be an agent. The opt-in survives child exit/crash and restart. Finished is capped once per child input, excludes a child parked Waiting on its own active timer, and yields to an active unpaused idle timer owned by the spawner for the same watched child; other reasons still notify. Positive human drafts hold indefinitely, while unknown composers hold for 120 seconds after human input. Only the process that spawned this child may change the setting; project jail rules still apply."
+    )]
+    async fn set_notify_spawner_on_idle(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(args): Parameters<SetNotifySpawnerOnIdleArgs>,
+    ) -> CallToolResult {
+        let mut registry = self.registry.lock().await;
+        let target = ProcessTarget {
+            process_id: args.process_id,
+            process_name: args.process_name.as_deref(),
+            project_id: args.project_id,
+        };
+        let (child, actor) = match resolve_process(&mut registry, &parts, target) {
+            Ok(resolved) => resolved,
+            Err(error) => return target_failure(error),
+        };
+        let Some(spawner_process_id) = actor.process_id else {
+            return failure(
+                "process_identity_required",
+                "set_notify_spawner_on_idle requires an authenticated process identity",
+            );
+        };
+        match registry.set_notify_spawner_on_idle(spawner_process_id, child.id, args.enabled) {
             Ok(status) => success(status),
             Err(error) => registry_failure(error),
         }
@@ -518,15 +565,16 @@ impl WorkmanMcp {
             Ok(input) => input,
             Err(error) => return failure("invalid_input", error),
         };
+        let submits_prompt = input.submits_prompt();
         let bytes_sent = input.data.len() + usize::from(input.submit);
-        let (process_id, process_name, cursor) = {
+        let (process_id, process_name, cursor, owner_process_id) = {
             let mut registry = self.registry.lock().await;
             let target = ProcessTarget {
                 process_id: args.process_id,
                 process_name: args.process_name.as_deref(),
                 project_id: args.project_id,
             };
-            let (process, _) = match resolve_process(&mut registry, &parts, target) {
+            let (process, actor) = match resolve_process(&mut registry, &parts, target) {
                 Ok(resolved) => resolved,
                 Err(error) => return target_failure(error),
             };
@@ -549,7 +597,7 @@ impl WorkmanMcp {
                 Ok(output) => output.total_bytes,
                 Err(error) => return registry_failure(error),
             };
-            (process.id, process.name, cursor)
+            (process.id, process.name, cursor, actor.process_id)
         };
         let sent = if input.submit {
             let mut registry = self.registry.lock().await;
@@ -563,6 +611,20 @@ impl WorkmanMcp {
         };
         if let Err(error) = sent {
             return registry_failure(error);
+        }
+        if submits_prompt && let Some(owner_process_id) = owner_process_id {
+            let registry = self.registry.lock().await;
+            if let Err(error) = CompletionLedger::new(registry.store()).record_input(
+                owner_process_id,
+                process_id,
+                now_millis(),
+            ) {
+                // The PTY side effect already succeeded. A ledger failure must not make a
+                // retrying MCP client send the same input twice.
+                eprintln!(
+                    "send_input ledger attribution failed for owner {owner_process_id}, process {process_id}: {error}"
+                );
+            }
         }
 
         let waited_ms = args.wait_ms.map(|wait| wait.clamp(250, 10_000));
@@ -842,6 +904,12 @@ struct PreparedInput {
     submit: bool,
 }
 
+impl PreparedInput {
+    fn submits_prompt(&self) -> bool {
+        self.submit || self.data.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+    }
+}
+
 fn prepared_input(args: &SendInputArgs) -> Result<PreparedInput, String> {
     if let Some(bytes) = &args.bytes {
         return Ok(PreparedInput {
@@ -886,7 +954,7 @@ fn tail_lines(text: &str, lines: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendInputArgs, prepared_input};
+    use super::{PreparedInput, SendInputArgs, prepared_input};
 
     #[test]
     fn submitted_text_preserves_multiline_content_and_ends_with_carriage_return() {
@@ -920,5 +988,37 @@ mod tests {
         let text = prepared_input(&text).unwrap();
         assert_eq!(text.data, b"partial\ntext");
         assert!(!text.submit);
+    }
+
+    #[test]
+    fn only_real_line_submissions_advance_the_completion_baseline() {
+        assert!(
+            PreparedInput {
+                data: b"prompt".to_vec(),
+                submit: true,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            PreparedInput {
+                data: b"raw prompt\r".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            !PreparedInput {
+                data: b"partial draft".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
+        assert!(
+            !PreparedInput {
+                data: b"\x1b[A".to_vec(),
+                submit: false,
+            }
+            .submits_prompt()
+        );
     }
 }

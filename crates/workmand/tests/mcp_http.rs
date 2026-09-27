@@ -264,10 +264,13 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         .and_then(|info| info.instructions.clone())
         .expect("Workman advertises MCP server instructions");
     assert!(server_instructions.contains("timer delivers back to you"));
+    assert!(server_instructions.contains("idle process with an unreported completion"));
     assert!(
-        server_instructions.contains("timer_fire_when_idle_any ignores processes already idle")
+        server_instructions
+            .contains("a process you never prompted always requires a fresh transition")
     );
-    assert!(server_instructions.contains("timer_fire_when_idle_all counts already-idle processes"));
+    assert!(server_instructions.contains("timer_fire_when_idle_all counts processes already idle"));
+    assert!(server_instructions.contains("already_idle and satisfied_by diagnostics"));
     assert!(
         server_instructions.contains("Do not loop on timer_list or process status while waiting")
     );
@@ -275,6 +278,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
         server_instructions.contains("inspect the watched processes before assuming they finished")
     );
     assert!(server_instructions.contains("an agent may only be waiting on its own timer"));
+    assert!(server_instructions.contains("notify_spawner_on_idle=true"));
+    assert!(server_instructions.contains("coalescing children"));
+    assert!(server_instructions.contains("human's unsent draft"));
+    assert!(server_instructions.contains("explicit pending idle timer wins"));
+    assert!(server_instructions.contains("delay timer when a hung-child deadline matters"));
+    assert!(server_instructions.contains("parked Waiting on its own timer"));
 
     let tool_names: Vec<_> = process_client
         .list_all_tools()
@@ -353,6 +362,12 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("pick agent_tool_id from list_agent_tools")
     );
+    assert!(
+        spawning_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("set_notify_spawner_on_idle can toggle an existing direct child")
+    );
     let timer_help = call(&process_client, "help", json!({ "topic": "timers" })).await;
     assert!(
         timer_help["text"]
@@ -366,6 +381,25 @@ async fn rmcp_client_reaches_mcp_and_resolves_process_and_project_scope()
             .unwrap()
             .contains("no additional wait call is needed")
     );
+    assert!(
+        timer_help["text"]
+            .as_str()
+            .unwrap()
+            .contains("no timer is necessary")
+    );
+    for guidance in [
+        "opt-in is prospective",
+        "spawner's last submitted input",
+        "explicit pending idle timer wins",
+        "human's unsent draft",
+        "delay timer when a hung-child deadline matters",
+        "parked Waiting on its own timer is not reported finished",
+    ] {
+        assert!(
+            timer_help["text"].as_str().unwrap().contains(guidance),
+            "timer help omitted {guidance:?}"
+        );
+    }
     let tools_summary = call(&process_client, "mcp_tools_summary", json!({})).await;
     assert!(tools_summary["count"].as_u64().unwrap() >= 13);
     assert!(

@@ -142,7 +142,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up when any watched process makes a fresh non-idle-to-idle transition or the hard timeout expires. Pending initial or queued prompts keep a process non-idle until delivery finishes and the process reaches idle. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Create a no-poll wake-up when any watched process has an unreported completion with work evidence since your last submitted input to it, later makes a fresh non-idle-to-idle transition, or reaches the hard deadline. Work evidence is adapter-recognized busy state or, for generic adapters, non-cosmetic output past the recent-input grace; generic adapters record at most one completion per submitted input. A process you never prompted still requires a fresh transition. Queued prompts defer completion recording. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
     )]
     async fn timer_fire_when_idle_any(
         &self,
@@ -153,7 +153,7 @@ impl WorkmanMcp {
     }
 
     #[tool(
-        description = "Create a no-poll wake-up once each watched process is idle at arm time or later reaches idle, or when the hard timeout expires. Pending initial or queued prompts keep a process non-idle and invalidate any earlier idle completion until delivery finishes and the process reaches idle again. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
+        description = "Create a no-poll wake-up once each watched process is idle at arm time or later reaches idle, or when the hard deadline expires. The result reports already_idle and satisfied_by diagnostics; timer_list retains them for non-immediate timers. Pending initial or queued prompts keep a process non-idle and invalidate any earlier idle satisfaction until delivery finishes and the process reaches idle again. Workman submits body as a fresh user turn. After a non-immediate success, finish your response and end the current turn only when this timer delivers back to you; do not poll while waiting."
     )]
     async fn timer_fire_when_idle_all(
         &self,
@@ -273,6 +273,9 @@ impl WorkmanMcp {
             now_millis(),
         ) {
             Ok(IdleTimerOutcome::Created(timer)) => {
+                let timer = *timer;
+                let already_idle = timer.already_idle.clone();
+                let satisfied_by = timer.satisfied_by.clone();
                 self.timer_events.publish(TimerLifecycleEvent::for_timer(
                     TimerLifecycleKind::Created,
                     project.id,
@@ -284,6 +287,8 @@ impl WorkmanMcp {
                     "project_id": project.id,
                     "already_satisfied": false,
                     "delivered_immediately": false,
+                    "already_idle": already_idle,
+                    "satisfied_by": satisfied_by,
                     "next_action": "Timer armed. If this timer delivers back to you (the default), finish your response and end the current turn now. Do not call timer_list, inspect process status, sleep, or poll while waiting; no additional wait call is needed. Workman will submit body as a fresh user turn when the idle condition or max_wait_ms is reached. When that turn arrives, inspect the watched processes before assuming they finished because the deadline may have fired or an agent may only be waiting on its own timer.",
                     "timer": timer,
                 }))
@@ -292,6 +297,8 @@ impl WorkmanMcp {
                 watch_process_ids,
                 delivery_process_id,
                 delivered_at,
+                already_idle,
+                satisfied_by,
             }) => {
                 for kind in [TimerLifecycleKind::Fired, TimerLifecycleKind::Delivered] {
                     self.timer_events.publish(TimerLifecycleEvent::immediate(
@@ -307,6 +314,8 @@ impl WorkmanMcp {
                     "delivered_immediately": true,
                     "delivery_process_id": delivery_process_id,
                     "delivered_at": delivered_at,
+                    "already_idle": already_idle,
+                    "satisfied_by": satisfied_by,
                     "next_action": "The idle condition was already satisfied and body was delivered immediately. Do not create another timer. If it was delivered to you, end your current turn now so the queued user turn can be processed.",
                     "timer": null,
                     "watch_process_ids": watch_process_ids,

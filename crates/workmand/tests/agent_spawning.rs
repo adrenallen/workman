@@ -239,7 +239,7 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
         .iter()
         .find(|tool| tool.name == "spawn_agent")
         .expect("spawn_agent tool is present");
-    for parameter in ["agent_template_id", "model"] {
+    for parameter in ["agent_template_id", "model", "notify_spawner_on_idle"] {
         assert!(
             spawn_tool.input_schema["properties"]
                 .get(parameter)
@@ -274,6 +274,48 @@ async fn fake_agent_auto_identifies_answers_a_prompt_and_cannot_self_close_uncon
             .as_str()
             .is_some_and(|description| {
                 description.contains("tool_type") && description.contains("registered command")
+            })
+    );
+    assert!(
+        spawn_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("no idle timer is needed"))
+    );
+    for guidance in [
+        "prospective",
+        "delivery waits behind human drafts",
+        "explicit pending idle timer wins",
+        "unless a deadline matters",
+        "spawner's submitted input",
+        "parked Waiting",
+    ] {
+        assert!(
+            spawn_tool
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains(guidance)),
+            "spawn_agent description omitted {guidance:?}"
+        );
+    }
+    assert!(
+        spawn_tool.input_schema["properties"]["notify_spawner_on_idle"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("coalesced Workman turn")
+                    && description.contains("defaults to false")
+            })
+    );
+    let toggle_tool = advertised_tools
+        .iter()
+        .find(|tool| tool.name == "set_notify_spawner_on_idle")
+        .expect("set_notify_spawner_on_idle tool is present");
+    assert!(
+        toggle_tool
+            .description
+            .as_deref()
+            .is_some_and(|description| {
+                description.contains("direct spawner") && description.contains("parked Waiting")
             })
     );
 
