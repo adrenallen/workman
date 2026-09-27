@@ -224,7 +224,8 @@ impl AgentState {
         }
     }
 
-    /// Timestamp of the newest eagerly observed work evidence for the current input.
+    /// Timestamp of eagerly observed work evidence for the current input. Busy-detecting
+    /// adapters expose the newest episode; generic adapters retain the first evidence only.
     pub const fn work_evidence_at(&self) -> Option<i64> {
         self.work_evidence_at
     }
@@ -339,13 +340,15 @@ impl AttentionEngine {
                 && !content_changed);
         if let Some(input_at) = self.last_input_at
             && !attention_neutral
+            && (detects_busy || self.work_evidence_at.is_none())
             && (flags.busy
                 || (!detects_busy
                     && now_ms >= input_at.saturating_add(duration_millis(RECENT_INPUT_GRACE))))
         {
-            // This is updated on every qualifying work episode/output chunk.
-            // A later episode for the same input can therefore supersede a
-            // completion recorded during a transient mid-turn idle frame.
+            // Busy-detecting adapters advance evidence for every real work episode, so a
+            // later episode can supersede a transient mid-turn idle completion. Generic
+            // adapters retain their first evidence: without positive busy detection, a
+            // prompt-less idle screen's status repaints are indistinguishable from work.
             self.work_evidence_at = Some(now_ms);
         }
         if !attention_neutral {
